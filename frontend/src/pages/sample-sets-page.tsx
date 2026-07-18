@@ -20,6 +20,7 @@ export function SampleSetsPage() {
   const [mode, setMode] = useState<"included" | "available">("included")
   const [search, setSearch] = useState("")
   const [selectedAssets, setSelectedAssets] = useState<Set<number>>(new Set())
+  const [batchLevel, setBatchLevel] = useState("")
 
   const sets = useQuery({
     queryKey: ["sample-sets"],
@@ -42,6 +43,7 @@ export function SampleSetsPage() {
     setMode("included")
     setSearch("")
     setSelectedAssets(new Set())
+    setBatchLevel("")
   }, [selectedId])
 
   async function refreshSampleSet() {
@@ -70,10 +72,11 @@ export function SampleSetsPage() {
   const addItems = useMutation({
     mutationFn: () => api<{ added: number; skipped: number[] }>(`/api/sample-sets/${selectedId}/items`, {
       method: "POST",
-      ...jsonBody({ asset_ids: Array.from(selectedAssets) }),
+      ...jsonBody({ asset_ids: Array.from(selectedAssets), expected_level: batchLevel || null }),
     }),
     onSuccess: async (data) => {
       setSelectedAssets(new Set())
+      setBatchLevel("")
       setMode("included")
       await refreshSampleSet()
       toast.success(`已收录 ${data.added} 张图片${data.skipped.length ? `，跳过 ${data.skipped.length} 张` : ""}`)
@@ -156,9 +159,11 @@ export function SampleSetsPage() {
                   </section>
                 ) : (
                   <section className="mt-5">
-                    <div className="flex flex-wrap items-end justify-between gap-4 border-y border-[var(--line-strong)] bg-white p-4">
+                    <div className="grid gap-4 border-y border-[var(--line-strong)] bg-white p-4 lg:grid-cols-[minmax(260px,1fr)_190px_auto] lg:items-end">
                       <label className="min-w-64 flex-1"><span className="mb-2 block text-xs font-semibold">搜索已评测素材</span><div className="relative"><MagnifyingGlass className="absolute left-3 top-1/2 -translate-y-1/2 text-[var(--muted)]" /><Input className="pl-10" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="输入文件名或素材编号" /></div></label>
+                      <label><span className="mb-2 block text-xs font-semibold">整批基准等级</span><select className="h-11 w-full rounded-[4px] border border-[var(--line-strong)] bg-white px-3 text-sm" value={batchLevel} onChange={(event) => setBatchLevel(event.target.value)}><option value="">沿用人工最终等级</option>{["L1", "L2", "L3", "L4", "L5"].map((level) => <option key={level}>{level}</option>)}</select></label>
                       <Button disabled={!selectedAssets.size || addItems.isPending} onClick={() => addItems.mutate()}>收录所选素材 {selectedAssets.size ? `(${selectedAssets.size})` : ""}</Button>
+                      <p className="text-xs leading-5 text-[var(--muted)] lg:col-span-3">默认按每张图片已经确认的人工最终等级写入；只有整批图片确定属于同一等级时，才选择统一覆盖。收录后仍可逐张修改。</p>
                     </div>
                     <div className="mt-4 max-h-[62vh] overflow-y-auto border-y border-[var(--line-strong)] bg-white">
                       {availableAssets.length ? availableAssets.map((asset) => {
@@ -168,7 +173,7 @@ export function SampleSetsPage() {
                           {checked ? <CheckSquare size={20} weight="fill" /> : <Square size={20} />}
                           <img src={asset.image_url} alt="" className="size-14 rounded-[4px] border border-[var(--line)] object-cover" loading="lazy" />
                           <div className="min-w-0"><p className="truncate text-sm font-semibold">{asset.name}</p><p className="font-data mt-1 text-xs text-[var(--muted)]">#{String(asset.id).padStart(5, "0")} · {asset.evaluation?.versions.model}</p></div>
-                          <Badge tone="active">{level}</Badge>
+                          <Badge tone="active">{batchLevel ? `整批 ${batchLevel}` : `人工 ${level}`}</Badge>
                         </button>
                       }) : <div className="px-6 py-14 text-center text-sm text-[var(--muted)]">没有符合条件的人工确认素材，请先到“结果审核”确认或修改等级</div>}
                     </div>

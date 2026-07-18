@@ -92,6 +92,18 @@ def test_sample_set_captures_human_final_level() -> None:
         assert detail["summary"]["item_count"] == 1
         assert detail["items"][0]["expected_level"] == "L4"
         assert detail["items"][0]["expected_category"] == "住宅设计"
+
+        overridden = client.post(
+            "/api/sample-sets",
+            json={"name": "L2 专项样本", "description": "批量等级覆盖"},
+        )
+        overridden_id = overridden.json()["id"]
+        client.post(
+            f"/api/sample-sets/{overridden_id}/items",
+            json={"asset_ids": [asset.id], "expected_level": "L2"},
+        )
+        overridden_detail = client.get(f"/api/sample-sets/{overridden_id}").json()
+        assert overridden_detail["items"][0]["expected_level"] == "L2"
     finally:
         app.dependency_overrides.clear()
         db.close()

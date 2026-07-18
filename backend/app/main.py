@@ -116,6 +116,7 @@ class SampleSetCreateRequest(BaseModel):
 
 class SampleSetAddItemsRequest(BaseModel):
     asset_ids: list[int] = Field(min_length=1, max_length=1000)
+    expected_level: str | None = Field(default=None, pattern="^L[1-5]$")
 
 
 class SampleSetItemUpdateRequest(BaseModel):
@@ -776,7 +777,7 @@ def add_sample_set_items(
                 sample_set_id=sample_set.id,
                 asset_id=asset_id,
                 source_result_id=result.id,
-                expected_level=result_payload.get("final_level"),
+                expected_level=payload.expected_level or result_payload.get("final_level"),
                 expected_category=category,
                 added_by=user.username,
             )
