@@ -157,7 +157,7 @@ export function ReviewList({ items, loading, searchParams, setSearchParams }: { 
   }
 
   return <>
-    <PageHeader index="04" title="结果审核" description="先筛选和定位需要介入的结果，再进入大图证据页完成确认或修改。" />
+    <PageHeader index="04" title="评测结果" description="先筛选和定位需要介入的结果，再进入大图证据页完成确认或修改。" />
     <div className="mx-auto max-w-[1720px] px-5 py-7 md:px-8 lg:px-10 lg:py-9">
       <section className="border-y border-[var(--line-strong)] bg-white" aria-label="审核列表筛选">
         <button type="button" className="flex min-h-12 w-full items-center justify-between px-4 text-sm font-semibold md:hidden" onClick={() => setFiltersOpen((value) => !value)} aria-expanded={filtersOpen} aria-controls="review-filters"><span className="flex items-center gap-2"><Funnel />筛选条件{activeFilters ? ` · ${activeFilters}` : ""}</span><span>{filtersOpen ? "收起" : "展开"}</span></button>
@@ -199,7 +199,7 @@ export function ReviewList({ items, loading, searchParams, setSearchParams }: { 
               const quality = normalizedQuality(evaluation?.precheck?.image_quality?.quality_severity)
               const forms = mediaLabels(asset)
               return <tr key={asset.id} className="border-b border-[var(--line)] last:border-0 hover:bg-[#fbfcfa]">
-                <td className="px-4 py-3"><div className="flex min-w-0 items-center gap-3"><img src={asset.image_url} alt="" loading="lazy" className="size-16 rounded-[4px] border border-[var(--line)] object-cover" /><div className="min-w-0"><p className="max-w-[260px] truncate font-semibold">{asset.name}</p><p className="font-data mt-1 text-[0.68rem] text-[var(--muted)]">#{String(asset.id).padStart(5, "0")} · {asset.width} × {asset.height}</p></div></div></td>
+                <td className="px-4 py-3"><div className="flex min-w-0 items-center gap-3"><img src={asset.image_url} alt="" loading="lazy" className="size-16 rounded-[4px] border border-[var(--line)] object-cover" /><div className="min-w-0"><p className="file-name max-w-[260px] truncate">{asset.name}</p><p className="font-data mt-1 text-[0.68rem] text-[var(--muted)]">#{String(asset.id).padStart(5, "0")} · {asset.width} × {asset.height}</p></div></div></td>
                 <td className="px-3 py-3"><Badge tone="active">{category}</Badge><div className="mt-2 flex max-w-52 flex-wrap gap-1">{forms.slice(0, 3).map((label) => <Badge key={label}>{label}</Badge>)}{forms.length > 3 && <Badge>+{forms.length - 3}</Badge>}</div></td>
                 <td className="px-3 py-3"><span className={`text-xs font-semibold ${quality === "severe" || quality === "unusable" ? "text-[#8d2924]" : "text-[var(--muted)]"}`}>{qualityNames[quality] || quality || "—"}</span>{(evaluation?.scoring?.caps?.length ?? 0) > 0 && <p className="mt-2 text-xs text-[#7d4308]">{evaluation?.scoring.caps.length} 项等级限制</p>}</td>
                 <td className="px-3 py-3"><div className="flex items-baseline gap-2"><strong className="font-data text-xl">{level || "—"}</strong><span className="font-data text-xs text-[var(--muted)]">{evaluation?.score?.toFixed(1) ?? "—"}</span></div>{evaluation?.final_level !== evaluation?.level && <p className="mt-1 text-xs text-[var(--muted)]">模型 {evaluation?.level}</p>}</td>

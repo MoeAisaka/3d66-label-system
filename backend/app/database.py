@@ -61,6 +61,17 @@ def init_database() -> None:
             connection.exec_driver_sql(
                 "ALTER TABLE human_reviews ADD COLUMN corrections_json TEXT NOT NULL DEFAULT '[]'"
             )
+        job_columns = {
+            row[1] for row in connection.exec_driver_sql("PRAGMA table_info(evaluation_jobs)")
+        }
+        if "prompt_a_id" not in job_columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE evaluation_jobs ADD COLUMN prompt_a_id INTEGER REFERENCES prompt_versions(id) ON DELETE SET NULL"
+            )
+        if "prompt_b_id" not in job_columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE evaluation_jobs ADD COLUMN prompt_b_id INTEGER REFERENCES prompt_versions(id) ON DELETE SET NULL"
+            )
 
 
 def get_db() -> Generator[Session, None, None]:

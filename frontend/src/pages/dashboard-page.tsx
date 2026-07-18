@@ -77,7 +77,7 @@ export function DashboardPage() {
                     <Link key={asset.id} to={`/review?asset=${asset.id}`} className="group grid grid-cols-[56px_1fr_auto] items-center gap-4 px-3 py-3 transition-colors hover:bg-[#fafbf8]">
                       <img src={asset.image_url} alt="" className="size-14 rounded-[4px] border border-[var(--line)] object-cover" />
                       <div className="min-w-0">
-                        <p className="truncate text-sm font-semibold group-hover:underline">{asset.name}</p>
+                        <p className="file-name truncate text-sm group-hover:underline">{asset.name}</p>
                         <p className="font-data mt-1 text-xs text-[var(--muted)]">{asset.width} × {asset.height}</p>
                       </div>
                       {asset.evaluation?.level ? (

@@ -172,10 +172,10 @@ export function SampleSetsPage() {
                         return <button key={asset.id} className={`grid w-full grid-cols-[36px_56px_1fr_auto] items-center gap-3 border-b border-[var(--line)] px-4 py-3 text-left last:border-0 ${checked ? "bg-[#f5f8ed]" : "hover:bg-[#fafbf8]"}`} onClick={() => { const next = new Set(selectedAssets); checked ? next.delete(asset.id) : next.add(asset.id); setSelectedAssets(next) }}>
                           {checked ? <CheckSquare size={20} weight="fill" /> : <Square size={20} />}
                           <img src={asset.image_url} alt="" className="size-14 rounded-[4px] border border-[var(--line)] object-cover" loading="lazy" />
-                          <div className="min-w-0"><p className="truncate text-sm font-semibold">{asset.name}</p><p className="font-data mt-1 text-xs text-[var(--muted)]">#{String(asset.id).padStart(5, "0")} · {asset.evaluation?.versions.model}</p></div>
+                          <div className="min-w-0"><p className="file-name truncate text-sm">{asset.name}</p><p className="font-data mt-1 text-xs text-[var(--muted)]">#{String(asset.id).padStart(5, "0")} · {asset.evaluation?.versions.model}</p></div>
                           <Badge tone="active">{batchLevel ? `整批 ${batchLevel}` : `人工 ${level}`}</Badge>
                         </button>
-                      }) : <div className="px-6 py-14 text-center text-sm text-[var(--muted)]">没有符合条件的人工确认素材，请先到“结果审核”确认或修改等级</div>}
+                      }) : <div className="px-6 py-14 text-center text-sm text-[var(--muted)]">没有符合条件的人工确认素材，请先到“评测结果”确认或修改等级</div>}
                     </div>
                   </section>
                 )}
@@ -195,7 +195,7 @@ function SampleItemRow({ item, saving, removing, onSave, onRemove }: { item: Sam
   const changed = level !== (item.expected_level || "") || note !== item.note
   return <article className="grid gap-4 border-b border-[var(--line)] p-4 last:border-0 lg:grid-cols-[72px_1fr_120px_minmax(220px,.8fr)_auto] lg:items-center">
     <img src={item.image_url} alt="" className="size-[72px] rounded-[4px] border border-[var(--line)] object-cover" loading="lazy" />
-    <div className="min-w-0"><p className="truncate text-sm font-semibold">{item.asset_name}</p><p className="mt-2 text-xs text-[var(--muted)]">{item.expected_category}</p><p className="font-data mt-1 truncate text-[0.68rem] text-[var(--muted)]">来源 {item.source_model_id} · {item.source_level || "无等级"}</p></div>
+    <div className="min-w-0"><p className="file-name truncate text-sm">{item.asset_name}</p><p className="mt-2 text-xs text-[var(--muted)]">{item.expected_category}</p><p className="font-data mt-1 truncate text-[0.68rem] text-[var(--muted)]">来源 {item.source_model_id} · {item.source_level || "无等级"}</p></div>
     <label><span className="mb-2 block text-xs font-semibold">人工基准</span><select className="h-11 w-full rounded-[4px] border border-[var(--line-strong)] bg-white px-3 text-sm" value={level} onChange={(event) => setLevel(event.target.value)}><option value="">无等级</option>{["L1", "L2", "L3", "L4", "L5"].map((value) => <option key={value}>{value}</option>)}</select></label>
     <label><span className="mb-2 block text-xs font-semibold">基准备注</span><Input value={note} onChange={(event) => setNote(event.target.value)} placeholder="记录难点或判断依据" /></label>
     <div className="flex flex-wrap gap-2 lg:justify-end"><Button size="sm" variant="secondary" disabled={!changed || saving} onClick={() => onSave(level || null, note.trim())}>保存基准</Button><Button size="sm" variant="ghost" disabled={removing} onClick={onRemove}><Trash />移出</Button><Button asChild size="sm" variant="ghost"><Link to={`/review?asset=${item.asset_id}`}>查看<ArrowRight /></Link></Button></div>

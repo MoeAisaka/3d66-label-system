@@ -8,7 +8,7 @@ import { PageHeader } from "@/components/app-shell"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { api, jsonBody } from "@/lib/api"
-import type { Asset } from "@/lib/types"
+import type { Asset, PromptVersion } from "@/lib/types"
 
 function statusTone(status: string) {
   if (status === "evaluated") return "success" as const
@@ -21,11 +21,21 @@ export function AssetsPage() {
   const inputRef = useRef<HTMLInputElement>(null)
   const [dragging, setDragging] = useState(false)
   const [selected, setSelected] = useState<Set<number>>(new Set())
+  const [promptAId, setPromptAId] = useState<number | null>(null)
+  const [promptBId, setPromptBId] = useState<number | null>(null)
   const queryClient = useQueryClient()
   const assets = useQuery({
     queryKey: ["assets"],
     queryFn: () => api<{ items: Asset[]; total: number }>("/api/assets?limit=200"),
   })
+  const prompts = useQuery({
+    queryKey: ["prompts"],
+    queryFn: () => api<{ items: PromptVersion[] }>("/api/prompts"),
+  })
+  const promptAOptions = prompts.data?.items.filter((item) => item.stage === "A") ?? []
+  const promptBOptions = prompts.data?.items.filter((item) => item.stage === "B") ?? []
+  const effectivePromptAId = promptAId ?? promptAOptions.find((item) => item.status === "published")?.id ?? null
+  const effectivePromptBId = promptBId ?? promptBOptions.find((item) => item.status === "published")?.id ?? null
   const upload = useMutation({
     mutationFn: async (files: FileList | File[]) => {
       const form = new FormData()
@@ -44,7 +54,11 @@ export function AssetsPage() {
     mutationFn: () =>
       api<{ job_ids: number[] }>("/api/jobs/enqueue", {
         method: "POST",
-        ...jsonBody({ asset_ids: Array.from(selected) }),
+        ...jsonBody({
+          asset_ids: Array.from(selected),
+          prompt_a_id: effectivePromptAId,
+          prompt_b_id: effectivePromptBId,
+        }),
       }),
     onSuccess: async (data) => {
       setSelected(new Set())
@@ -75,12 +89,7 @@ export function AssetsPage() {
         title="素材"
         description="上传原图，选择需要评测的图片并创建任务。重复文件不会再次占用本地空间。"
         actions={
-          <>
-            <Button variant="secondary" onClick={() => inputRef.current?.click()}><CloudArrowUp />选择图片</Button>
-            <Button disabled={!selected.size || enqueue.isPending} onClick={() => enqueue.mutate()}>
-              开始评测 {selected.size ? `(${selected.size})` : ""}<ArrowRight weight="bold" />
-            </Button>
-          </>
+          <Button variant="secondary" onClick={() => inputRef.current?.click()}><CloudArrowUp />选择图片</Button>
         }
       />
       <div className="mx-auto max-w-[1540px] px-5 py-7 md:px-8 lg:px-10 lg:py-10">
@@ -117,6 +126,37 @@ export function AssetsPage() {
             </div>
             <Button variant="ghost" size="sm" onClick={toggleAll} disabled={!assets.data?.items.length}>
               {allSelected ? <CheckSquare weight="fill" /> : <Square />}{allSelected ? "取消全选" : "全选"}
+            </Button>
+          </div>
+          <div className="mb-5 grid gap-4 border border-[var(--line)] bg-[#fafbf8] p-4 lg:grid-cols-[minmax(220px,1fr)_minmax(220px,1fr)_auto] lg:items-end">
+            <label className="block min-w-0">
+              <span className="mb-2 block text-xs font-semibold">分类与画质提示词（A）</span>
+              <select
+                className="h-11 w-full rounded-[4px] border border-[var(--line-strong)] bg-white px-3 text-sm"
+                value={effectivePromptAId ?? ""}
+                onChange={(event) => setPromptAId(Number(event.target.value))}
+              >
+                {!promptAOptions.length && <option value="">暂无可用版本</option>}
+                {promptAOptions.map((prompt) => <option key={prompt.id} value={prompt.id}>{prompt.version} · {prompt.name} · {prompt.status === "published" ? "已发布" : prompt.status === "draft" ? "草稿" : "已归档"}</option>)}
+              </select>
+            </label>
+            <label className="block min-w-0">
+              <span className="mb-2 block text-xs font-semibold">美感评测提示词（B）</span>
+              <select
+                className="h-11 w-full rounded-[4px] border border-[var(--line-strong)] bg-white px-3 text-sm"
+                value={effectivePromptBId ?? ""}
+                onChange={(event) => setPromptBId(Number(event.target.value))}
+              >
+                {!promptBOptions.length && <option value="">暂无可用版本</option>}
+                {promptBOptions.map((prompt) => <option key={prompt.id} value={prompt.id}>{prompt.version} · {prompt.name} · {prompt.status === "published" ? "已发布" : prompt.status === "draft" ? "草稿" : "已归档"}</option>)}
+              </select>
+            </label>
+            <Button
+              className="lg:min-w-40"
+              disabled={!selected.size || !effectivePromptAId || !effectivePromptBId || enqueue.isPending}
+              onClick={() => enqueue.mutate()}
+            >
+              开始评测 {selected.size ? `(${selected.size})` : ""}<ArrowRight weight="bold" />
             </Button>
           </div>
           <div className="overflow-x-auto border-y border-[var(--line-strong)] bg-white scrollbar-thin">
@@ -156,7 +196,7 @@ export function AssetsPage() {
                         <td className="px-3 py-3">
                           <div className="flex min-w-0 items-center gap-3">
                             <img src={asset.image_url} alt="" className="size-14 rounded-[4px] border border-[var(--line)] object-cover" loading="lazy" />
-                            <div className="min-w-0"><p className="max-w-[320px] truncate font-semibold">{asset.name}</p><p className="font-data mt-1 text-xs text-[var(--muted)]">#{asset.id.toString().padStart(5, "0")}</p></div>
+                            <div className="min-w-0"><p className="file-name max-w-[320px] truncate">{asset.name}</p><p className="font-data mt-1 text-xs text-[var(--muted)]">#{asset.id.toString().padStart(5, "0")}</p></div>
                           </div>
                         </td>
                         <td className="font-data px-3 py-3 text-xs text-[var(--muted)]">{asset.width} × {asset.height}</td>

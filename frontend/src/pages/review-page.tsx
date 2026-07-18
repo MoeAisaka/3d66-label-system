@@ -145,7 +145,7 @@ export function ReviewPage() {
           <section className="min-w-0 border-r border-[var(--line)]">
             <div className="flex min-h-14 flex-wrap items-center justify-between gap-2 border-b border-[var(--line)] px-4 py-2">
               <div className="min-w-0">
-                <p className="max-w-[60vw] truncate text-sm font-semibold">{asset?.name || "正在读取"}</p>
+                <p className="file-name max-w-[60vw] truncate text-sm">{asset?.name || "正在读取"}</p>
                 <p className="font-data mt-1 text-[0.68rem] text-[var(--muted)]">{asset?.width} × {asset?.height} · #{currentId.toString().padStart(5, "0")}</p>
               </div>
               <div className="flex items-center gap-1">

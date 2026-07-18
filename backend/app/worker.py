@@ -13,7 +13,14 @@ from sqlalchemy import select, update
 from .config import get_settings
 from .database import init_database, session_scope
 from .doubao import DoubaoClient
-from .models import Asset, EvaluationJob, EvaluationResult, ModelConfig, PromptVersion
+from .models import (
+    Asset,
+    EvaluationControl,
+    EvaluationJob,
+    EvaluationResult,
+    ModelConfig,
+    PromptVersion,
+)
 from .scoring import ENGINE_VERSION, calculate_score
 from .seed import seed_defaults
 
@@ -31,13 +38,21 @@ logger = logging.getLogger("3d66.worker")
 WORKER_ID = f"{socket.gethostname()}-{id(object())}"
 
 
-def _published_prompt(stage: str) -> PromptVersion:
+class JobInterrupted(RuntimeError):
+    """The operator paused or canceled a job while a model call was in flight."""
+
+
+def _prompt_for_job(stage: str, prompt_id: int | None) -> PromptVersion:
     with session_scope() as db:
-        prompt = db.scalar(
-            select(PromptVersion)
-            .where(PromptVersion.stage == stage, PromptVersion.status == "published")
-            .order_by(PromptVersion.created_at.desc())
-        )
+        prompt = db.get(PromptVersion, prompt_id) if prompt_id else None
+        if prompt is not None and prompt.stage != stage:
+            prompt = None
+        if prompt is None:
+            prompt = db.scalar(
+                select(PromptVersion)
+                .where(PromptVersion.stage == stage, PromptVersion.status == "published")
+                .order_by(PromptVersion.created_at.desc())
+            )
         if not prompt:
             raise RuntimeError(f"没有已发布的调用 {stage} 提示词")
         return prompt
@@ -45,6 +60,9 @@ def _published_prompt(stage: str) -> PromptVersion:
 
 def claim_next_job() -> int | None:
     with session_scope() as db:
+        control = db.get(EvaluationControl, 1)
+        if control is not None and control.paused:
+            return None
         configured_model = db.scalar(
             select(ModelConfig.id)
             .where(
@@ -81,7 +99,18 @@ def claim_next_job() -> int | None:
 
 def _set_job(job_id: int, **values: object) -> None:
     with session_scope() as db:
-        db.execute(update(EvaluationJob).where(EvaluationJob.id == job_id).values(**values))
+        db.execute(
+            update(EvaluationJob)
+            .where(EvaluationJob.id == job_id, EvaluationJob.status == "processing")
+            .values(**values)
+        )
+
+
+def _ensure_job_processing(job_id: int) -> None:
+    with session_scope() as db:
+        status = db.scalar(select(EvaluationJob.status).where(EvaluationJob.id == job_id))
+        if status != "processing":
+            raise JobInterrupted(f"任务已被操作员设为 {status or '不存在'}")
 
 
 async def evaluate_job(job_id: int) -> None:
@@ -95,9 +124,11 @@ async def evaluate_job(job_id: int) -> None:
         )
         if not asset or not model_config:
             raise RuntimeError("图片或模型配置不存在")
+        prompt_a_id = job.prompt_a_id
+        prompt_b_id = job.prompt_b_id
 
-    prompt_a = _published_prompt("A")
-    prompt_b = _published_prompt("B")
+    prompt_a = _prompt_for_job("A", prompt_a_id)
+    prompt_b = _prompt_for_job("B", prompt_b_id)
     image_path = settings.upload_dir / asset.stored_name
     if not image_path.exists():
         raise RuntimeError("原始图片文件不存在")
@@ -115,6 +146,7 @@ async def evaluate_job(job_id: int) -> None:
     response_a = await client.chat_json(
         prompt_a.system_prompt, user_a, image_path=image_path, mime_type=asset.mime_type
     )
+    _ensure_job_processing(job_id)
     precheck = response_a.parsed
     scope_status = (precheck.get("classification") or {}).get("scope_status")
 
@@ -128,12 +160,17 @@ async def evaluate_job(job_id: int) -> None:
         response_b = await client.chat_json(
             prompt_b.system_prompt, user_b, image_path=image_path, mime_type=asset.mime_type
         )
+        _ensure_job_processing(job_id)
         aesthetic = response_b.parsed
 
     _set_job(job_id, stage="scoring", progress=86)
+    _ensure_job_processing(job_id)
     scoring = calculate_score(precheck, aesthetic)
     now = datetime.now(timezone.utc)
     with session_scope() as db:
+        current_job = db.get(EvaluationJob, job_id)
+        if current_job is None or current_job.status != "processing":
+            raise JobInterrupted("任务已暂停或取消，忽略本次模型返回")
         db.add(
             EvaluationResult(
                 asset_id=asset.id,
@@ -174,6 +211,8 @@ async def process_one() -> bool:
     try:
         await evaluate_job(job_id)
         logger.info("完成评测任务 %s", job_id)
+    except JobInterrupted as exc:
+        logger.info("评测任务 %s 已中断：%s", job_id, exc)
     except Exception as exc:
         logger.exception("评测任务 %s 失败", job_id)
         _set_job(

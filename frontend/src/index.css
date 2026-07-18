@@ -107,6 +107,11 @@ select:focus-visible {
   font-variant-numeric: tabular-nums;
 }
 
+.file-name {
+  color: var(--muted);
+  font-weight: 400;
+}
+
 .hairline-grid {
   background-image:
     linear-gradient(to right, rgb(217 222 211 / 28%) 1px, transparent 1px),

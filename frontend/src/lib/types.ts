@@ -65,6 +65,8 @@ export type Job = {
   id: number
   asset_id: number
   asset_name: string
+  prompt_a_version: string | null
+  prompt_b_version: string | null
   status: string
   stage: string
   progress: number
@@ -73,6 +75,15 @@ export type Job = {
   created_at: string
   started_at: string | null
   finished_at: string | null
+}
+
+export type JobControl = {
+  paused: boolean
+  queued_count: number
+  processing_count: number
+  paused_count: number
+  active_count: number
+  updated_at: string
 }
 
 export type ModelConfig = {

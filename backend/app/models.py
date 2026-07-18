@@ -115,6 +115,12 @@ class EvaluationJob(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     asset_id: Mapped[int] = mapped_column(ForeignKey("assets.id", ondelete="CASCADE"), index=True)
+    prompt_a_id: Mapped[int | None] = mapped_column(
+        ForeignKey("prompt_versions.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    prompt_b_id: Mapped[int | None] = mapped_column(
+        ForeignKey("prompt_versions.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     status: Mapped[str] = mapped_column(String(30), default="queued", index=True)
     stage: Mapped[str] = mapped_column(String(30), default="waiting")
     progress: Mapped[int] = mapped_column(Integer, default=0)
@@ -125,6 +131,18 @@ class EvaluationJob(Base):
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     asset: Mapped[Asset] = relationship()
+    prompt_a: Mapped[PromptVersion | None] = relationship(foreign_keys=[prompt_a_id])
+    prompt_b: Mapped[PromptVersion | None] = relationship(foreign_keys=[prompt_b_id])
+
+
+class EvaluationControl(Base):
+    __tablename__ = "evaluation_controls"
+
+    id: Mapped[int] = mapped_column(primary_key=True, default=1)
+    paused: Mapped[bool] = mapped_column(Boolean, default=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
 
 
 class EvaluationResult(Base):

@@ -25,6 +25,7 @@ from .doubao import DoubaoClient
 from .migration import compare_results
 from .models import (
     Asset,
+    EvaluationControl,
     EvaluationJob,
     EvaluationResult,
     HumanReview,
@@ -89,6 +90,8 @@ class OptimizerConfigUpdate(BaseModel):
 
 class EnqueueRequest(BaseModel):
     asset_ids: list[int] = Field(min_length=1, max_length=1000)
+    prompt_a_id: int | None = Field(default=None, ge=1)
+    prompt_b_id: int | None = Field(default=None, ge=1)
 
 
 class PromptCreateRequest(BaseModel):
@@ -474,9 +477,32 @@ def enqueue_jobs(
     assets = db.scalars(select(Asset).where(Asset.id.in_(payload.asset_ids))).all()
     if len(assets) != len(set(payload.asset_ids)):
         raise HTTPException(status_code=404, detail="部分图片不存在")
+
+    def selected_prompt(stage: str, prompt_id: int | None) -> PromptVersion:
+        if prompt_id is not None:
+            prompt = db.get(PromptVersion, prompt_id)
+            if not prompt or prompt.stage != stage:
+                raise HTTPException(status_code=400, detail=f"提示词 {stage} 版本无效")
+            return prompt
+        prompt = db.scalar(
+            select(PromptVersion)
+            .where(PromptVersion.stage == stage, PromptVersion.status == "published")
+            .order_by(PromptVersion.created_at.desc())
+            .limit(1)
+        )
+        if not prompt:
+            raise HTTPException(status_code=400, detail=f"没有可用的提示词 {stage} 发布版本")
+        return prompt
+
+    prompt_a = selected_prompt("A", payload.prompt_a_id)
+    prompt_b = selected_prompt("B", payload.prompt_b_id)
     jobs = []
     for asset in assets:
-        job = EvaluationJob(asset_id=asset.id)
+        job = EvaluationJob(
+            asset_id=asset.id,
+            prompt_a_id=prompt_a.id,
+            prompt_b_id=prompt_b.id,
+        )
         asset.status = "queued"
         db.add(job)
         db.flush()
@@ -494,12 +520,26 @@ def list_jobs(
     jobs = db.scalars(
         select(EvaluationJob).order_by(EvaluationJob.created_at.desc()).limit(min(limit, 200))
     ).all()
+    result_versions = {
+        result.job_id: result
+        for result in db.scalars(
+            select(EvaluationResult).where(EvaluationResult.job_id.in_([job.id for job in jobs]))
+        ).all()
+    } if jobs else {}
     return {
         "items": [
             {
                 "id": job.id,
                 "asset_id": job.asset_id,
                 "asset_name": job.asset.original_name,
+                "prompt_a_version": (
+                    job.prompt_a.version if job.prompt_a else
+                    result_versions[job.id].prompt_a_version if job.id in result_versions else None
+                ),
+                "prompt_b_version": (
+                    job.prompt_b.version if job.prompt_b else
+                    result_versions[job.id].prompt_b_version if job.id in result_versions else None
+                ),
                 "status": job.status,
                 "stage": job.stage,
                 "progress": job.progress,
@@ -512,6 +552,99 @@ def list_jobs(
             for job in jobs
         ]
     }
+
+
+def _evaluation_control(db: Session) -> EvaluationControl:
+    control = db.get(EvaluationControl, 1)
+    if control is None:
+        control = EvaluationControl(id=1)
+        db.add(control)
+        db.flush()
+    return control
+
+
+@app.get("/api/jobs/control")
+def get_job_control(
+    _user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    control = _evaluation_control(db)
+    counts = dict(
+        db.execute(
+            select(EvaluationJob.status, func.count(EvaluationJob.id)).group_by(EvaluationJob.status)
+        ).all()
+    )
+    return {
+        "paused": control.paused,
+        "queued_count": counts.get("queued", 0),
+        "processing_count": counts.get("processing", 0),
+        "paused_count": counts.get("paused", 0),
+        "active_count": sum(counts.get(status, 0) for status in ("queued", "processing", "paused")),
+        "updated_at": control.updated_at,
+    }
+
+
+@app.post("/api/jobs/control/pause")
+def pause_all_jobs(
+    _user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    control = _evaluation_control(db)
+    control.paused = True
+    result = db.execute(
+        update(EvaluationJob)
+        .where(EvaluationJob.status.in_(("queued", "processing")))
+        .values(status="paused", stage="paused", worker_id=None)
+    )
+    db.commit()
+    return {"ok": True, "affected": result.rowcount}
+
+
+@app.post("/api/jobs/control/resume")
+def resume_all_jobs(
+    _user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    control = _evaluation_control(db)
+    control.paused = False
+    paused_jobs = db.scalars(
+        select(EvaluationJob).where(EvaluationJob.status == "paused")
+    ).all()
+    for job in paused_jobs:
+        job.status = "queued"
+        job.stage = "waiting"
+        job.worker_id = None
+        job.asset.status = "queued"
+    db.commit()
+    return {"ok": True, "affected": len(paused_jobs)}
+
+
+@app.post("/api/jobs/control/cancel")
+def cancel_all_jobs(
+    _user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    control = _evaluation_control(db)
+    control.paused = False
+    active_jobs = db.scalars(
+        select(EvaluationJob).where(
+            EvaluationJob.status.in_(("queued", "processing", "paused"))
+        )
+    ).all()
+    now = datetime.now(timezone.utc)
+    for job in active_jobs:
+        has_result = db.scalar(
+            select(EvaluationResult.id)
+            .where(EvaluationResult.asset_id == job.asset_id)
+            .limit(1)
+        )
+        job.status = "canceled"
+        job.stage = "canceled"
+        job.worker_id = None
+        job.finished_at = now
+        job.asset.status = "evaluated" if has_result else "uploaded"
+    db.commit()
+    return {"ok": True, "affected": len(active_jobs)}
 
 
 @app.get("/api/model-config")
