@@ -48,6 +48,7 @@ from .security import (
 )
 from .optimizer import run_prompt_optimization
 from .seed import seed_defaults
+from .schema_adapter import repair_combined_aesthetic_results
 
 
 settings = get_settings()
@@ -186,6 +187,7 @@ async def lifespan(_app: FastAPI):
     db = SessionLocal()
     try:
         seed_defaults(db)
+        repair_combined_aesthetic_results(db)
     finally:
         db.close()
     yield

@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 
-ENGINE_VERSION = "engine-v2.1.0"
+ENGINE_VERSION = "engine-v2.2.0"
 
 GRADE_POINTS = {1: 20.0, 2: 45.0, 3: 65.0, 4: 82.0, 5: 95.0}
 WEIGHTS = {
@@ -14,6 +14,16 @@ WEIGHTS = {
     "visual_hierarchy": 0.10,
     "detail_completion": 0.10,
     "inspiration_reference": 0.08,
+    "presentation_integrity": 0.15,
+}
+COMBINED_WEIGHTS = {
+    "composition_viewpoint": 0.15,
+    "lighting_atmosphere": 0.12,
+    "color_material": 0.12,
+    "spatial_design_furnishing": 0.16,
+    "visual_hierarchy": 0.10,
+    "detail_completion": 0.10,
+    "inspiration_reference": 0.10,
     "presentation_integrity": 0.15,
 }
 
@@ -62,7 +72,12 @@ def calculate_score(precheck: dict[str, Any], aesthetic: dict[str, Any] | None) 
     weighted_score = 0.0
     dimension_points: dict[str, dict[str, float | int]] = {}
     dimensions = aesthetic.get("dimensions") or {}
-    for key, weight in WEIGHTS.items():
+    weights = (
+        COMBINED_WEIGHTS
+        if aesthetic.get("scoring_profile") == "space_aesthetic_v1.3"
+        else WEIGHTS
+    )
+    for key, weight in weights.items():
         item = dimensions.get(key) or {}
         grade = int(item.get("grade") or 0)
         if grade not in GRADE_POINTS:
@@ -121,6 +136,15 @@ def calculate_score(precheck: dict[str, Any], aesthetic: dict[str, Any] | None) 
             grade_fives = sum(1 for grade in applicable_grades if grade == 5)
             if score < 90 or grade_fives < 2:
                 apply_cap(4, "效果图进入 L5 的原始分或 5 级特殊检查数量不足")
+
+    decision_rules = aesthetic.get("decision_rules") or {}
+    if decision_rules.get("hard_gate_triggered") is True:
+        reasons = decision_rules.get("hard_gate_reasons") or []
+        apply_cap(1, "；".join(reasons) or "综合提示词触发 L1 质量硬门槛")
+    declared_cap = str(decision_rules.get("level_cap") or "none")
+    if declared_cap in {"L1", "L2", "L3", "L4"}:
+        reasons = decision_rules.get("level_cap_reasons") or []
+        apply_cap(int(declared_cap[1]), "；".join(reasons) or f"综合提示词声明 {declared_cap} 上限")
 
     if 0.55 <= primary_confidence < 0.75:
         review_reasons.append("业务分类置信度处于运营复核区间")

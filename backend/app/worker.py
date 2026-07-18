@@ -22,6 +22,7 @@ from .models import (
     PromptVersion,
 )
 from .scoring import ENGINE_VERSION, calculate_score
+from .schema_adapter import adapt_combined_aesthetic_response, is_combined_aesthetic_response
 from .seed import seed_defaults
 
 
@@ -128,7 +129,7 @@ async def evaluate_job(job_id: int) -> None:
         prompt_b_id = job.prompt_b_id
 
     prompt_a = _prompt_for_job("A", prompt_a_id)
-    prompt_b = _prompt_for_job("B", prompt_b_id)
+    prompt_b = None
     image_path = settings.upload_dir / asset.stored_name
     if not image_path.exists():
         raise RuntimeError("原始图片文件不存在")
@@ -147,12 +148,17 @@ async def evaluate_job(job_id: int) -> None:
         prompt_a.system_prompt, user_a, image_path=image_path, mime_type=asset.mime_type
     )
     _ensure_job_processing(job_id)
-    precheck = response_a.parsed
+    combined_response = is_combined_aesthetic_response(response_a.parsed)
+    if combined_response:
+        precheck, aesthetic = adapt_combined_aesthetic_response(response_a.parsed)
+    else:
+        precheck = response_a.parsed
+        aesthetic = None
     scope_status = (precheck.get("classification") or {}).get("scope_status")
 
-    aesthetic = None
     response_b = None
-    if scope_status in {"in_scope", "boundary"}:
+    if not combined_response and scope_status in {"in_scope", "boundary"}:
+        prompt_b = _prompt_for_job("B", prompt_b_id)
         _set_job(job_id, stage="aesthetic", progress=48)
         user_b = prompt_b.user_prompt.replace(
             "{{precheck_json}}", json.dumps(precheck, ensure_ascii=False)
@@ -188,8 +194,8 @@ async def evaluate_job(job_id: int) -> None:
                 needs_review=bool(scoring.get("needs_review")),
                 model_id=model_config.model_id,
                 prompt_a_version=prompt_a.version,
-                prompt_b_version=prompt_b.version if response_b else None,
-                rubric_version=prompt_b.rubric_version,
+                prompt_b_version=prompt_b.version if response_b and prompt_b else None,
+                rubric_version=prompt_b.rubric_version if prompt_b else prompt_a.rubric_version,
                 engine_version=ENGINE_VERSION,
             )
         )
