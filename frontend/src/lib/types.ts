@@ -22,8 +22,17 @@ export type Evaluation = {
   scoring: Record<string, any>
   score: number | null
   level: string | null
+  final_level: string | null
   confidence: number | null
   needs_review: boolean
+  human_review: {
+    id: number
+    reviewer_name: string
+    decision: "approved" | "corrected" | "rejected"
+    corrected_level: string | null
+    note: string
+    created_at: string
+  } | null
   versions: Record<string, string | null>
   created_at: string
 }

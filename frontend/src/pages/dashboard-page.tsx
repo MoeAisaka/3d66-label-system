@@ -81,7 +81,12 @@ export function DashboardPage() {
                         <p className="font-data mt-1 text-xs text-[var(--muted)]">{asset.width} × {asset.height}</p>
                       </div>
                       {asset.evaluation?.level ? (
-                        <div className="text-right"><span className="font-data text-lg font-semibold">{asset.evaluation.level}</span><p className="font-data text-xs text-[var(--muted)]">{asset.evaluation.score?.toFixed(1)}</p></div>
+                        <div className="text-right">
+                          <span className="font-data text-lg font-semibold">{asset.evaluation.final_level || asset.evaluation.level}</span>
+                          <p className="font-data text-xs text-[var(--muted)]">
+                            {asset.evaluation.final_level !== asset.evaluation.level ? `模型 ${asset.evaluation.level}` : asset.evaluation.score?.toFixed(1)}
+                          </p>
+                        </div>
                       ) : <Badge>{asset.status}</Badge>}
                     </Link>
                   ))}

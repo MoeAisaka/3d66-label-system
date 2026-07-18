@@ -14,7 +14,7 @@ from typing import Any
 from fastapi import Cookie, Depends, FastAPI, File, HTTPException, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from PIL import Image, UnidentifiedImageError
 from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
@@ -95,6 +95,17 @@ class ReviewRequest(BaseModel):
     corrected_level: str | None = Field(default=None, pattern="^L[1-5]$")
     note: str = Field(default="", max_length=2000)
 
+    @model_validator(mode="after")
+    def validate_correction(self) -> "ReviewRequest":
+        if self.decision == "corrected":
+            if not self.corrected_level:
+                raise ValueError("修改结果时必须选择最终等级")
+            if not self.note.strip():
+                raise ValueError("修改结果时必须填写修改原因")
+        elif self.corrected_level is not None:
+            raise ValueError("只有修改结果时才能填写修正等级")
+        return self
+
 
 class MigrationCreateRequest(BaseModel):
     name: str = Field(min_length=1, max_length=160)
@@ -167,6 +178,12 @@ def _asset_payload(asset: Asset, result: EvaluationResult | None = None) -> dict
 def _result_payload(result: EvaluationResult | None) -> dict[str, Any] | None:
     if not result:
         return None
+    latest_review = result.reviews[-1] if result.reviews else None
+    final_level = (
+        latest_review.corrected_level
+        if latest_review and latest_review.decision == "corrected"
+        else result.level
+    )
     return {
         "id": result.id,
         "asset_id": result.asset_id,
@@ -176,8 +193,21 @@ def _result_payload(result: EvaluationResult | None) -> dict[str, Any] | None:
         "scoring": json.loads(result.scoring_json),
         "score": result.score,
         "level": result.level,
+        "final_level": final_level,
         "confidence": result.confidence,
         "needs_review": result.needs_review,
+        "human_review": (
+            {
+                "id": latest_review.id,
+                "reviewer_name": latest_review.reviewer_name,
+                "decision": latest_review.decision,
+                "corrected_level": latest_review.corrected_level,
+                "note": latest_review.note,
+                "created_at": latest_review.created_at,
+            }
+            if latest_review
+            else None
+        ),
         "versions": {
             "model": result.model_id,
             "prompt_a": result.prompt_a_version,
@@ -244,21 +274,26 @@ def dashboard(_user: User = Depends(current_user), db: Session = Depends(get_db)
     processing = db.scalar(
         select(func.count()).select_from(EvaluationJob).where(EvaluationJob.status == "processing")
     ) or 0
-    review_count = db.scalar(
-        select(func.count()).select_from(EvaluationResult).where(EvaluationResult.needs_review.is_(True))
-    ) or 0
-    level_rows = db.execute(
-        select(EvaluationResult.level, func.count(EvaluationResult.id))
-        .where(EvaluationResult.level.is_not(None))
-        .group_by(EvaluationResult.level)
+    result_rows = db.scalars(
+        select(EvaluationResult).order_by(EvaluationResult.created_at.desc())
     ).all()
+    latest_results: dict[int, EvaluationResult] = {}
+    for result in result_rows:
+        latest_results.setdefault(result.asset_id, result)
+    review_count = sum(1 for result in latest_results.values() if result.needs_review)
+    levels: dict[str, int] = {}
+    for result in latest_results.values():
+        payload = _result_payload(result) or {}
+        final_level = payload.get("final_level")
+        if final_level:
+            levels[final_level] = levels.get(final_level, 0) + 1
     model = db.scalar(select(ModelConfig).where(ModelConfig.active.is_(True)))
     return {
         "asset_count": asset_count,
         "queued": queued,
         "processing": processing,
         "needs_review": review_count,
-        "levels": {level: count for level, count in level_rows},
+        "levels": levels,
         "model": {
             "name": model.name if model else "未配置",
             "model_id": model.model_id if model else "",
@@ -594,9 +629,13 @@ def create_review(
     evaluation = db.get(EvaluationResult, evaluation_id)
     if not evaluation:
         raise HTTPException(status_code=404, detail="评测结果不存在")
+    if payload.decision == "corrected" and payload.corrected_level == evaluation.level:
+        raise HTTPException(status_code=400, detail="修正等级与模型等级相同，请使用“确认结果”")
     review = HumanReview(evaluation_id=evaluation_id, **payload.model_dump())
-    if payload.decision == "approved":
+    if payload.decision in {"approved", "corrected"}:
         evaluation.needs_review = False
+    else:
+        evaluation.needs_review = True
     db.add(review)
     db.commit()
     db.refresh(review)

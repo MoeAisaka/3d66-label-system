@@ -32,3 +32,10 @@ def test_small_agreement_audit_requires_review() -> None:
     assert comparison["requires_review"] is True
     assert "一致样本 5% 抽检" in comparison["reasons"]
 
+
+def test_human_corrected_baseline_level_is_used() -> None:
+    baseline = result("L3", "住宅设计")
+    baseline["final_level"] = "L4"
+    comparison = compare_results(baseline, result("L4", "住宅设计"))
+    assert comparison["requires_review"] is False
+    assert comparison["baseline_level"] == "L4"

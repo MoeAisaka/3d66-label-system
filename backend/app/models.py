@@ -130,6 +130,11 @@ class EvaluationResult(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     asset: Mapped[Asset] = relationship()
     job: Mapped[EvaluationJob] = relationship()
+    reviews: Mapped[list["HumanReview"]] = relationship(
+        back_populates="evaluation",
+        cascade="all, delete-orphan",
+        order_by="HumanReview.created_at",
+    )
 
 
 class HumanReview(Base):
@@ -144,6 +149,7 @@ class HumanReview(Base):
     corrected_level: Mapped[str | None] = mapped_column(String(10), nullable=True)
     note: Mapped[str] = mapped_column(Text, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    evaluation: Mapped[EvaluationResult] = relationship(back_populates="reviews")
 
 
 class MigrationRun(Base):

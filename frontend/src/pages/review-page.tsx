@@ -7,7 +7,9 @@ import {
   ImageSquare,
   MagnifyingGlassMinus,
   MagnifyingGlassPlus,
+  PencilSimple,
   WarningCircle,
+  X,
 } from "@phosphor-icons/react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { Link, useSearchParams } from "react-router-dom"
@@ -17,6 +19,7 @@ import { PageHeader } from "@/components/app-shell"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
+import { Textarea } from "@/components/ui/textarea"
 import { api, jsonBody } from "@/lib/api"
 import type { Asset } from "@/lib/types"
 
@@ -37,6 +40,10 @@ export function ReviewPage() {
   const [zoom, setZoom] = useState(100)
   const [reviewer, setReviewer] = useState(() => localStorage.getItem("3d66-reviewer") || "")
   const [note, setNote] = useState("")
+  const [correctionOpen, setCorrectionOpen] = useState(false)
+  const [correctedLevel, setCorrectedLevel] = useState<string | null>(null)
+  const [correctionNote, setCorrectionNote] = useState("")
+  const [correctionError, setCorrectionError] = useState("")
   const queryClient = useQueryClient()
   const assets = useQuery({
     queryKey: ["assets", "review-list"],
@@ -59,7 +66,16 @@ export function ReviewPage() {
   useEffect(() => {
     setZoom(100)
     setNote("")
+    setCorrectionOpen(false)
+    setCorrectedLevel(null)
+    setCorrectionNote("")
+    setCorrectionError("")
   }, [currentId])
+
+  useEffect(() => {
+    if (!evaluation) return
+    setCorrectedLevel(evaluation.human_review?.corrected_level || evaluation.level)
+  }, [evaluation?.id, evaluation?.human_review?.corrected_level, evaluation?.level])
 
   const mediaLabels = useMemo(() => {
     const media = evaluation?.precheck?.media_form ?? {}
@@ -80,18 +96,47 @@ export function ReviewPage() {
     onError: (error) => toast.error(error.message),
   })
   const review = useMutation({
-    mutationFn: (decision: "approved" | "rejected") =>
+    mutationFn: ({ decision, corrected_level, reviewNote }: { decision: "approved" | "corrected" | "rejected"; corrected_level: string | null; reviewNote: string }) =>
       api(`/api/evaluations/${evaluation?.id}/review`, {
         method: "POST",
-        ...jsonBody({ reviewer_name: reviewer, decision, corrected_level: null, note }),
+        ...jsonBody({ reviewer_name: reviewer, decision, corrected_level, note: reviewNote }),
       }),
-    onSuccess: async () => {
+    onSuccess: async (_data, variables) => {
       localStorage.setItem("3d66-reviewer", reviewer)
-      toast.success("审核结果已保存")
-      await queryClient.invalidateQueries({ queryKey: ["asset", currentId] })
+      setCorrectionOpen(false)
+      setCorrectionError("")
+      setNote("")
+      setCorrectionNote("")
+      toast.success(variables.decision === "corrected" ? "人工最终等级已保存，模型原始结果仍保留" : variables.decision === "approved" ? "已确认模型结果" : "已退回复核")
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["asset", currentId] }),
+        queryClient.invalidateQueries({ queryKey: ["assets"] }),
+        queryClient.invalidateQueries({ queryKey: ["dashboard"] }),
+      ])
     },
     onError: (error) => toast.error(error.message),
   })
+
+  function submitCorrection() {
+    if (!reviewer.trim()) {
+      setCorrectionError("请先填写审核姓名")
+      return
+    }
+    if (!correctedLevel) {
+      setCorrectionError("请选择人工最终等级")
+      return
+    }
+    if (correctedLevel === evaluation?.level) {
+      setCorrectionError("人工等级与模型一致时，请使用“确认结果”")
+      return
+    }
+    if (!correctionNote.trim()) {
+      setCorrectionError("请填写修改原因，说明可见证据或判断依据")
+      return
+    }
+    setCorrectionError("")
+    review.mutate({ decision: "corrected", corrected_level: correctedLevel, reviewNote: correctionNote.trim() })
+  }
 
   function go(offset: number) {
     if (!assets.data?.items.length || currentIndex < 0) return
@@ -164,7 +209,15 @@ export function ReviewPage() {
           <aside className="min-w-0 bg-white">
             <div className="flex min-h-20 items-center justify-between border-b border-[var(--line)] px-5 py-4">
               <div><h2 className="font-editorial text-2xl font-bold">证据</h2><p className="mt-1 text-xs text-[var(--muted)]">八个审美维度</p></div>
-              {evaluation?.level && <div className="text-right"><p className="font-data text-3xl font-semibold">{evaluation.level}</p><p className="font-data mt-1 text-xs text-[var(--muted)]">{evaluation.score?.toFixed(1)} / 100</p></div>}
+              {evaluation?.level && (
+                <div className="text-right">
+                  {evaluation.human_review?.decision === "corrected" && <Badge tone="success" className="mb-2">人工最终</Badge>}
+                  <p className="font-data text-3xl font-semibold">{evaluation.final_level || evaluation.level}</p>
+                  <p className="font-data mt-1 text-xs text-[var(--muted)]">
+                    {evaluation.human_review?.decision === "corrected" ? `模型 ${evaluation.level} · ${evaluation.score?.toFixed(1)}` : `${evaluation.score?.toFixed(1)} / 100`}
+                  </p>
+                </div>
+              )}
             </div>
 
             {!evaluation ? (
@@ -204,15 +257,53 @@ export function ReviewPage() {
                 </div>
 
                 <div className="border-t border-[var(--line-strong)] p-5">
+                  {evaluation.human_review && (
+                    <div className="mb-4 border-y border-[var(--line)] bg-[#fafbf8] px-3 py-3">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <Badge tone={evaluation.human_review.decision === "rejected" ? "warning" : "success"}>
+                          {evaluation.human_review.decision === "corrected" ? `已人工修正为 ${evaluation.human_review.corrected_level}` : evaluation.human_review.decision === "approved" ? "已确认模型结果" : "已退回复核"}
+                        </Badge>
+                        <span className="font-data text-[0.68rem] text-[var(--muted)]">{evaluation.human_review.reviewer_name} · {new Date(evaluation.human_review.created_at).toLocaleString("zh-CN")}</span>
+                      </div>
+                      {evaluation.human_review.note && <p className="mt-2 text-xs leading-5 text-[var(--muted)]">{evaluation.human_review.note}</p>}
+                    </div>
+                  )}
                   <div className="grid grid-cols-2 gap-3">
                     <label><span className="mb-2 block text-xs font-semibold">审核姓名</span><Input value={reviewer} onChange={(event) => setReviewer(event.target.value)} placeholder="例如：小陈" /></label>
                     <label><span className="mb-2 block text-xs font-semibold">模型置信度</span><div className="font-data flex h-11 items-center border border-[var(--line)] bg-[#fafbf8] px-3">{evaluation.confidence != null ? `${Math.round(evaluation.confidence * 100)}%` : "—"}</div></label>
                   </div>
-                  <Input className="mt-3" value={note} onChange={(event) => setNote(event.target.value)} placeholder="审核说明（可选）" />
-                  <div className="mt-3 grid grid-cols-2 gap-2">
-                    <Button variant="secondary" onClick={() => review.mutate("rejected")} disabled={!reviewer || review.isPending}>退回复核</Button>
-                    <Button onClick={() => review.mutate("approved")} disabled={!reviewer || review.isPending}><Check weight="bold" />确认结果</Button>
+                  <label className="mt-3 block"><span className="mb-2 block text-xs font-semibold">审核说明（确认或退回时可选）</span><Input value={note} onChange={(event) => setNote(event.target.value)} placeholder="补充判断依据" /></label>
+                  <div className="mt-3 grid grid-cols-3 gap-2">
+                    <Button variant="secondary" onClick={() => review.mutate({ decision: "rejected", corrected_level: null, reviewNote: note.trim() })} disabled={!reviewer || review.isPending}>退回复核</Button>
+                    <Button variant="secondary" onClick={() => { setCorrectionOpen((value) => !value); setCorrectionError("") }} disabled={review.isPending}><PencilSimple />修改等级</Button>
+                    <Button onClick={() => review.mutate({ decision: "approved", corrected_level: null, reviewNote: note.trim() })} disabled={!reviewer || review.isPending}><Check weight="bold" />确认结果</Button>
                   </div>
+
+                  {correctionOpen && (
+                    <section className="mt-4 border-y border-[var(--line-strong)] bg-[#f8faf4] px-4 py-4" aria-labelledby="correction-title">
+                      <div className="flex items-start justify-between gap-4">
+                        <div><h3 id="correction-title" className="text-sm font-semibold">修改人工最终等级</h3><p className="mt-1 text-xs leading-5 text-[var(--muted)]">模型原始等级 {evaluation.level} 和原始响应不会被覆盖。</p></div>
+                        <Button variant="ghost" size="icon" className="-mr-2 -mt-2" onClick={() => { setCorrectionOpen(false); setCorrectionError("") }} aria-label="关闭修改等级"><X /></Button>
+                      </div>
+                      <div className="mt-4 grid grid-cols-5 gap-2" role="radiogroup" aria-label="人工最终等级">
+                        {["L1", "L2", "L3", "L4", "L5"].map((level) => (
+                          <button
+                            key={level}
+                            type="button"
+                            role="radio"
+                            aria-checked={correctedLevel === level}
+                            onClick={() => { setCorrectedLevel(level); setCorrectionError("") }}
+                            className={`min-h-11 rounded-[4px] border text-sm font-semibold transition-colors ${correctedLevel === level ? "border-[#7f991b] bg-primary text-foreground" : "border-[var(--line-strong)] bg-white hover:bg-[#f3f5f0]"}`}
+                          >
+                            {level}{level === evaluation.level && <span className="ml-1 text-[0.65rem] font-normal">模型</span>}
+                          </button>
+                        ))}
+                      </div>
+                      <label className="mt-4 block"><span className="mb-2 block text-xs font-semibold">修改原因（必填）</span><Textarea value={correctionNote} onChange={(event) => { setCorrectionNote(event.target.value); setCorrectionError("") }} placeholder="例如：主体空间完整，但模型把艺术性浅景深误判为画质缺陷" rows={3} aria-describedby={correctionError ? "correction-error" : undefined} /></label>
+                      {correctionError && <p id="correction-error" role="alert" className="mt-2 flex items-start gap-2 text-xs leading-5 text-[#8d2924]"><WarningCircle className="mt-0.5 shrink-0" />{correctionError}</p>}
+                      <Button className="mt-4 w-full" onClick={submitCorrection} disabled={review.isPending}>{review.isPending ? "正在保存人工结果" : "保存人工最终等级"}</Button>
+                    </section>
+                  )}
                 </div>
               </>
             )}

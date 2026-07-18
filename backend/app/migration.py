@@ -19,8 +19,10 @@ def compare_results(
     audit_sample: bool = False,
 ) -> dict[str, Any]:
     reasons: list[str] = []
-    baseline_level = _level_number(baseline.get("level"))
-    candidate_level = _level_number(candidate.get("level"))
+    baseline_level_value = baseline.get("final_level") or baseline.get("level")
+    candidate_level_value = candidate.get("final_level") or candidate.get("level")
+    baseline_level = _level_number(baseline_level_value)
+    candidate_level = _level_number(candidate_level_value)
     level_delta = (
         candidate_level - baseline_level
         if baseline_level is not None and candidate_level is not None
@@ -29,7 +31,7 @@ def compare_results(
     if level_delta is None:
         reasons.append("至少一侧没有正式等级")
     elif level_delta != 0:
-        reasons.append(f"等级变化 {baseline.get('level')} → {candidate.get('level')}")
+        reasons.append(f"等级变化 {baseline_level_value} → {candidate_level_value}")
 
     baseline_category = ((baseline.get("precheck") or {}).get("classification") or {}).get(
         "primary_category"
@@ -52,11 +54,10 @@ def compare_results(
         "requires_review": bool(reasons),
         "reasons": reasons,
         "level_delta": level_delta,
-        "baseline_level": baseline.get("level"),
-        "candidate_level": candidate.get("level"),
+        "baseline_level": baseline_level_value,
+        "candidate_level": candidate_level_value,
         "baseline_score": baseline.get("score"),
         "candidate_score": candidate.get("score"),
         "baseline_category": baseline_category,
         "candidate_category": candidate_category,
     }
-
