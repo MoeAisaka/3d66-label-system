@@ -1,3 +1,4 @@
+import { lazy, Suspense } from "react"
 import { useQuery } from "@tanstack/react-query"
 import { Navigate, Route, Routes } from "react-router-dom"
 import { Toaster } from "sonner"
@@ -13,6 +14,10 @@ import { ModelPage } from "@/pages/model-page"
 import { MigrationsPage } from "@/pages/migrations-page"
 import { PromptsPage } from "@/pages/prompts-page"
 import { ReviewPage } from "@/pages/review-page"
+
+const SampleSetsPage = lazy(() =>
+  import("@/pages/sample-sets-page").then((module) => ({ default: module.SampleSetsPage })),
+)
 
 export default function App() {
   const me = useQuery({
@@ -44,6 +49,7 @@ export default function App() {
             <Route path="review" element={<ReviewPage />} />
             <Route path="prompts" element={<PromptsPage />} />
             <Route path="model" element={<ModelPage />} />
+            <Route path="sample-sets" element={<Suspense fallback={<RouteLoading />}><SampleSetsPage /></Suspense>} />
             <Route path="migrations" element={<MigrationsPage />} />
           </Route>
         ) : (
@@ -54,4 +60,8 @@ export default function App() {
       <Toaster position="top-right" richColors closeButton />
     </>
   )
+}
+
+function RouteLoading() {
+  return <div className="mx-auto max-w-[1540px] px-5 py-10 md:px-8 lg:px-10"><div className="h-64 animate-pulse border-y border-[var(--line)] bg-white" /></div>
 }

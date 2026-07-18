@@ -46,6 +46,14 @@ def init_database() -> None:
     from . import models  # noqa: F401
 
     Base.metadata.create_all(bind=engine)
+    with engine.begin() as connection:
+        migration_columns = {
+            row[1] for row in connection.exec_driver_sql("PRAGMA table_info(migration_items)")
+        }
+        if "sample_expected_level" not in migration_columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE migration_items ADD COLUMN sample_expected_level VARCHAR(10)"
+            )
 
 
 def get_db() -> Generator[Session, None, None]:

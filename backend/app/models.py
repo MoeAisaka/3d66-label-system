@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .database import Base
@@ -152,6 +152,44 @@ class HumanReview(Base):
     evaluation: Mapped[EvaluationResult] = relationship(back_populates="reviews")
 
 
+class SampleSet(Base):
+    __tablename__ = "sample_sets"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(160), unique=True, index=True)
+    description: Mapped[str] = mapped_column(Text, default="")
+    created_by: Mapped[str] = mapped_column(String(80), default="system")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    items: Mapped[list["SampleSetItem"]] = relationship(
+        back_populates="sample_set",
+        cascade="all, delete-orphan",
+        order_by="SampleSetItem.created_at",
+    )
+
+
+class SampleSetItem(Base):
+    __tablename__ = "sample_set_items"
+    __table_args__ = (UniqueConstraint("sample_set_id", "asset_id", name="uq_sample_set_asset"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    sample_set_id: Mapped[int] = mapped_column(
+        ForeignKey("sample_sets.id", ondelete="CASCADE"), index=True
+    )
+    asset_id: Mapped[int] = mapped_column(ForeignKey("assets.id", ondelete="CASCADE"), index=True)
+    source_result_id: Mapped[int] = mapped_column(
+        ForeignKey("evaluation_results.id", ondelete="CASCADE"), index=True
+    )
+    expected_level: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    expected_category: Mapped[str] = mapped_column(String(120), default="无法判断")
+    note: Mapped[str] = mapped_column(Text, default="")
+    added_by: Mapped[str] = mapped_column(String(80), default="system")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    sample_set: Mapped[SampleSet] = relationship(back_populates="items")
+    asset: Mapped[Asset] = relationship()
+    source_result: Mapped[EvaluationResult] = relationship()
+
+
 class MigrationRun(Base):
     __tablename__ = "migration_runs"
 
@@ -176,6 +214,7 @@ class MigrationItem(Base):
     baseline_result_id: Mapped[int] = mapped_column(
         ForeignKey("evaluation_results.id", ondelete="CASCADE"), index=True
     )
+    sample_expected_level: Mapped[str | None] = mapped_column(String(10), nullable=True)
     candidate_result_id: Mapped[int | None] = mapped_column(
         ForeignKey("evaluation_results.id", ondelete="SET NULL"), nullable=True, index=True
     )

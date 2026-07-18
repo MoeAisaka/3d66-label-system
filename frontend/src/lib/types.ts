@@ -98,9 +98,38 @@ export type PromptVersion = {
   created_at: string
 }
 
+export type SampleSetSummary = {
+  id: number
+  name: string
+  description: string
+  item_count: number
+  created_by: string
+  created_at: string
+}
+
+export type SampleSetItem = {
+  id: number
+  asset_id: number
+  asset_name: string
+  image_url: string
+  expected_level: string | null
+  expected_category: string
+  note: string
+  source_model_id: string
+  source_level: string | null
+  added_by: string
+  created_at: string
+}
+
+export type SampleSetDetail = {
+  summary: SampleSetSummary
+  items: SampleSetItem[]
+}
+
 export type MigrationContext = {
   candidate: { model_id: string; name: string; has_api_key: boolean }
   baselines: Array<{ model_id: string; asset_count: number }>
+  sample_sets: SampleSetSummary[]
 }
 
 export type MigrationSummary = {

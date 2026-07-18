@@ -6,6 +6,7 @@ import {
   Images,
   ListChecks,
   List,
+  Stack,
   SignOut,
   SlidersHorizontal,
   Sparkle,
@@ -26,7 +27,8 @@ const navItems = [
   { to: "/review", index: "04", label: "结果审核", icon: Sparkle },
   { to: "/prompts", index: "05", label: "提示词", icon: Brain },
   { to: "/model", index: "06", label: "模型配置", icon: SlidersHorizontal },
-  { to: "/migrations", index: "07", label: "模型迁移", icon: ArrowsClockwise },
+  { to: "/sample-sets", index: "07", label: "样本集", icon: Stack },
+  { to: "/migrations", index: "08", label: "模型迁移", icon: ArrowsClockwise },
 ]
 
 export function AppShell({ user }: { user: User }) {

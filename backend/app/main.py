@@ -32,6 +32,8 @@ from .models import (
     MigrationRun,
     ModelConfig,
     PromptVersion,
+    SampleSet,
+    SampleSetItem,
     SessionToken,
     User,
 )
@@ -107,10 +109,25 @@ class ReviewRequest(BaseModel):
         return self
 
 
+class SampleSetCreateRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=160)
+    description: str = Field(default="", max_length=2000)
+
+
+class SampleSetAddItemsRequest(BaseModel):
+    asset_ids: list[int] = Field(min_length=1, max_length=1000)
+
+
+class SampleSetItemUpdateRequest(BaseModel):
+    expected_level: str | None = Field(default=None, pattern="^L[1-5]$")
+    note: str = Field(default="", max_length=2000)
+
+
 class MigrationCreateRequest(BaseModel):
     name: str = Field(min_length=1, max_length=160)
     baseline_model_id: str = Field(min_length=1, max_length=200)
     sample_size: int = Field(default=200, ge=1, le=500)
+    sample_set_id: int | None = Field(default=None, ge=1)
 
 
 class MigrationReviewRequest(BaseModel):
@@ -358,7 +375,7 @@ def list_assets(
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     assets = db.scalars(
-        select(Asset).order_by(Asset.created_at.desc()).offset(max(0, offset)).limit(min(200, limit))
+        select(Asset).order_by(Asset.created_at.desc()).offset(max(0, offset)).limit(min(1000, limit))
     ).all()
     items = []
     for asset in assets:
@@ -642,6 +659,177 @@ def create_review(
     return {"id": review.id}
 
 
+def _sample_set_summary(sample_set: SampleSet) -> dict[str, Any]:
+    return {
+        "id": sample_set.id,
+        "name": sample_set.name,
+        "description": sample_set.description,
+        "item_count": len(sample_set.items),
+        "created_by": sample_set.created_by,
+        "created_at": sample_set.created_at,
+    }
+
+
+def _sample_set_item_payload(item: SampleSetItem) -> dict[str, Any]:
+    source = _result_payload(item.source_result)
+    return {
+        "id": item.id,
+        "asset_id": item.asset_id,
+        "asset_name": item.asset.original_name,
+        "image_url": f"/api/assets/{item.asset_id}/file",
+        "expected_level": item.expected_level,
+        "expected_category": item.expected_category,
+        "note": item.note,
+        "source_model_id": item.source_result.model_id,
+        "source_level": source.get("final_level") if source else None,
+        "added_by": item.added_by,
+        "created_at": item.created_at,
+    }
+
+
+@app.get("/api/sample-sets")
+def list_sample_sets(
+    _user: User = Depends(current_user), db: Session = Depends(get_db)
+) -> dict[str, Any]:
+    sample_sets = db.scalars(select(SampleSet).order_by(SampleSet.created_at.desc())).all()
+    return {"items": [_sample_set_summary(sample_set) for sample_set in sample_sets]}
+
+
+@app.post("/api/sample-sets")
+def create_sample_set(
+    payload: SampleSetCreateRequest,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, int]:
+    name = payload.name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="请填写样本集名称")
+    if db.scalar(select(SampleSet).where(SampleSet.name == name)):
+        raise HTTPException(status_code=400, detail="样本集名称已存在")
+    sample_set = SampleSet(
+        name=name,
+        description=payload.description.strip(),
+        created_by=user.username,
+    )
+    db.add(sample_set)
+    db.commit()
+    db.refresh(sample_set)
+    return {"id": sample_set.id}
+
+
+@app.get("/api/sample-sets/{sample_set_id}")
+def sample_set_detail(
+    sample_set_id: int,
+    _user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    sample_set = db.get(SampleSet, sample_set_id)
+    if not sample_set:
+        raise HTTPException(status_code=404, detail="样本集不存在")
+    return {
+        "summary": _sample_set_summary(sample_set),
+        "items": [_sample_set_item_payload(item) for item in sample_set.items],
+    }
+
+
+@app.post("/api/sample-sets/{sample_set_id}/items")
+def add_sample_set_items(
+    sample_set_id: int,
+    payload: SampleSetAddItemsRequest,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    sample_set = db.get(SampleSet, sample_set_id)
+    if not sample_set:
+        raise HTTPException(status_code=404, detail="样本集不存在")
+    requested_ids = list(dict.fromkeys(payload.asset_ids))
+    assets = db.scalars(select(Asset).where(Asset.id.in_(requested_ids))).all()
+    assets_by_id = {asset.id: asset for asset in assets}
+    missing = [asset_id for asset_id in requested_ids if asset_id not in assets_by_id]
+    if missing:
+        raise HTTPException(status_code=400, detail=f"有 {len(missing)} 张素材不存在")
+    existing_ids = {item.asset_id for item in sample_set.items}
+    added = 0
+    skipped: list[int] = []
+    for asset_id in requested_ids:
+        if asset_id in existing_ids:
+            skipped.append(asset_id)
+            continue
+        result = db.scalar(
+            select(EvaluationResult)
+            .where(EvaluationResult.asset_id == asset_id)
+            .order_by(EvaluationResult.created_at.desc())
+            .limit(1)
+        )
+        if not result:
+            skipped.append(asset_id)
+            continue
+        result_payload = _result_payload(result) or {}
+        human_review = result_payload.get("human_review") or {}
+        if human_review.get("decision") not in {"approved", "corrected"}:
+            skipped.append(asset_id)
+            continue
+        precheck = result_payload.get("precheck") or {}
+        category = ((precheck.get("classification") or {}).get("primary_category") or "无法判断")
+        db.add(
+            SampleSetItem(
+                sample_set_id=sample_set.id,
+                asset_id=asset_id,
+                source_result_id=result.id,
+                expected_level=result_payload.get("final_level"),
+                expected_category=category,
+                added_by=user.username,
+            )
+        )
+        added += 1
+    if not added:
+        raise HTTPException(status_code=400, detail="所选素材未评测或已经在样本集中")
+    db.commit()
+    return {"added": added, "skipped": skipped}
+
+
+@app.patch("/api/sample-sets/{sample_set_id}/items/{item_id}")
+def update_sample_set_item(
+    sample_set_id: int,
+    item_id: int,
+    payload: SampleSetItemUpdateRequest,
+    _user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, bool]:
+    item = db.scalar(
+        select(SampleSetItem).where(
+            SampleSetItem.id == item_id,
+            SampleSetItem.sample_set_id == sample_set_id,
+        )
+    )
+    if not item:
+        raise HTTPException(status_code=404, detail="样本不存在")
+    item.expected_level = payload.expected_level
+    item.note = payload.note.strip()
+    db.commit()
+    return {"ok": True}
+
+
+@app.delete("/api/sample-sets/{sample_set_id}/items/{item_id}")
+def remove_sample_set_item(
+    sample_set_id: int,
+    item_id: int,
+    _user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, bool]:
+    item = db.scalar(
+        select(SampleSetItem).where(
+            SampleSetItem.id == item_id,
+            SampleSetItem.sample_set_id == sample_set_id,
+        )
+    )
+    if not item:
+        raise HTTPException(status_code=404, detail="样本不存在")
+    db.delete(item)
+    db.commit()
+    return {"ok": True}
+
+
 def _migration_summary(run: MigrationRun, items: list[MigrationItem]) -> dict[str, Any]:
     completed = sum(1 for item in items if item.candidate_result_id is not None)
     review_required = sum(1 for item in items if item.requires_review)
@@ -694,6 +882,8 @@ def _refresh_migration(db: Session, run: MigrationRun) -> list[MigrationItem]:
         if not candidate:
             continue
         baseline_payload = _result_payload(item.baseline_result) or {}
+        if item.sample_expected_level:
+            baseline_payload["final_level"] = item.sample_expected_level
         candidate_payload = _result_payload(candidate) or {}
         base_comparison = compare_results(baseline_payload, candidate_payload)
         audit_sample = not base_comparison["requires_review"] and item.asset_id % 20 == run.id % 20
@@ -732,6 +922,7 @@ def migration_context(
         .group_by(EvaluationResult.model_id)
         .order_by(func.count(func.distinct(EvaluationResult.asset_id)).desc())
     ).all()
+    sample_sets = db.scalars(select(SampleSet).order_by(SampleSet.created_at.desc())).all()
     return {
         "candidate": {
             "model_id": model.model_id if model else "",
@@ -741,6 +932,7 @@ def migration_context(
         "baselines": [
             {"model_id": model_id, "asset_count": count} for model_id, count in rows
         ],
+        "sample_sets": [_sample_set_summary(sample_set) for sample_set in sample_sets],
     }
 
 
@@ -767,29 +959,50 @@ def create_migration(
     if not latest_by_asset:
         raise HTTPException(status_code=400, detail="没有找到旧模型的历史评测结果")
 
-    buckets: dict[tuple[str, str], list[EvaluationResult]] = {}
-    for result in latest_by_asset.values():
-        try:
-            precheck = json.loads(result.precheck_json)
-        except json.JSONDecodeError:
-            precheck = {}
-        category = ((precheck.get("classification") or {}).get("primary_category") or "无法判断")
-        key = (result.level or "无等级", category)
-        buckets.setdefault(key, []).append(result)
-
     selected: list[EvaluationResult] = []
-    ordered_buckets = [buckets[key] for key in sorted(buckets)]
-    while len(selected) < min(payload.sample_size, len(latest_by_asset)):
-        progressed = False
-        for bucket in ordered_buckets:
-            if bucket and len(selected) < payload.sample_size:
-                selected.append(bucket.pop(0))
-                progressed = True
-        if not progressed:
-            break
+    selected_sample_set: SampleSet | None = None
+    sample_expected_levels: dict[int, str | None] = {}
+    if payload.sample_set_id:
+        selected_sample_set = db.get(SampleSet, payload.sample_set_id)
+        if not selected_sample_set:
+            raise HTTPException(status_code=404, detail="样本集不存在")
+        selected = [
+            latest_by_asset[item.asset_id]
+            for item in selected_sample_set.items
+            if item.asset_id in latest_by_asset
+        ]
+        sample_expected_levels = {
+            item.asset_id: item.expected_level for item in selected_sample_set.items
+        }
+        if not selected:
+            raise HTTPException(status_code=400, detail="该样本集没有对应旧模型历史结果的素材")
+    else:
+        buckets: dict[tuple[str, str], list[EvaluationResult]] = {}
+        for result in latest_by_asset.values():
+            try:
+                precheck = json.loads(result.precheck_json)
+            except json.JSONDecodeError:
+                precheck = {}
+            category = ((precheck.get("classification") or {}).get("primary_category") or "无法判断")
+            key = (result.level or "无等级", category)
+            buckets.setdefault(key, []).append(result)
+
+        ordered_buckets = [buckets[key] for key in sorted(buckets)]
+        while len(selected) < min(payload.sample_size, len(latest_by_asset)):
+            progressed = False
+            for bucket in ordered_buckets:
+                if bucket and len(selected) < payload.sample_size:
+                    selected.append(bucket.pop(0))
+                    progressed = True
+            if not progressed:
+                break
 
     run = MigrationRun(
-        name=payload.name,
+        name=payload.name or (
+            f"{model.model_id} · {selected_sample_set.name}"
+            if selected_sample_set
+            else f"{payload.baseline_model_id} → {model.model_id}"
+        ),
         baseline_model_id=payload.baseline_model_id,
         candidate_model_id=model.model_id,
         sample_size=len(selected),
@@ -803,6 +1016,7 @@ def create_migration(
                 run_id=run.id,
                 asset_id=baseline.asset_id,
                 baseline_result_id=baseline.id,
+                sample_expected_level=sample_expected_levels.get(baseline.asset_id),
             )
         )
         db.add(EvaluationJob(asset_id=baseline.asset_id))

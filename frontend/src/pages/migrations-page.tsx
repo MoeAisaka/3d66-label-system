@@ -32,6 +32,7 @@ export function MigrationsPage() {
   const [selectedId, setSelectedId] = useState<number | null>(null)
   const [baseline, setBaseline] = useState("")
   const [sampleSize, setSampleSize] = useState(200)
+  const [sampleSetId, setSampleSetId] = useState("")
   const [name, setName] = useState("")
   const [reviewer, setReviewer] = useState("")
 
@@ -61,6 +62,7 @@ export function MigrationsPage() {
         name: name || `${baseline} → ${context.data?.candidate.model_id}`,
         baseline_model_id: baseline,
         sample_size: sampleSize,
+        sample_set_id: sampleSetId ? Number(sampleSetId) : null,
       }),
     }),
     onSuccess: async (data) => {
@@ -70,7 +72,7 @@ export function MigrationsPage() {
         queryClient.invalidateQueries({ queryKey: ["migrations"] }),
         queryClient.invalidateQueries({ queryKey: ["migration-context"] }),
       ])
-      toast.success("已创建分层抽样迁移评测")
+      toast.success(sampleSetId ? "已使用固定样本集创建迁移评测" : "已创建分层抽样迁移评测")
     },
     onError: (error) => toast.error(error.message),
   })
@@ -99,7 +101,7 @@ export function MigrationsPage() {
   return (
     <>
       <PageHeader
-        index="07"
+        index="08"
         title="模型迁移"
         description="旧模型停止服务也没关系：使用已保存的历史结果作为基线，让新模型只重跑分层样本，并把差异项交给人工。"
         actions={<Button variant="secondary" onClick={() => Promise.all([context.refetch(), runs.refetch(), detail.refetch()])}><ArrowsClockwise />刷新状态</Button>}
@@ -114,9 +116,10 @@ export function MigrationsPage() {
               {context.data?.candidate.has_api_key ? "API Key 已配置" : "先配置 API Key，任务会保持排队"}
             </Badge>
           </div>
-          <div className="grid gap-5 p-5 md:grid-cols-2 xl:grid-cols-[1.5fr_120px_1fr_auto] xl:items-end">
+          <div className="grid gap-5 p-5 md:grid-cols-2 xl:grid-cols-[1.35fr_1.1fr_120px_1fr_auto] xl:items-end">
             <label className="block"><span className="mb-2 block text-xs font-semibold">旧模型基线</span><select className="h-11 w-full rounded-[4px] border border-[var(--line-strong)] bg-white px-3 text-sm" value={baseline} onChange={(event) => setBaseline(event.target.value)}><option value="">选择已有历史结果</option>{context.data?.baselines.filter((item) => item.model_id !== context.data?.candidate.model_id).map((item) => <option key={item.model_id} value={item.model_id}>{item.model_id} · {item.asset_count} 张</option>)}</select></label>
-            <label className="block"><span className="mb-2 block text-xs font-semibold">样本数</span><Input type="number" min="1" max="500" value={sampleSize} onChange={(event) => setSampleSize(Number(event.target.value))} /></label>
+            <label className="block"><span className="mb-2 block text-xs font-semibold">样本来源</span><select className="h-11 w-full rounded-[4px] border border-[var(--line-strong)] bg-white px-3 text-sm" value={sampleSetId} onChange={(event) => setSampleSetId(event.target.value)}><option value="">自动分层抽样</option>{context.data?.sample_sets.map((item) => <option key={item.id} value={item.id}>{item.name} · {item.item_count} 张</option>)}</select></label>
+            <label className="block"><span className="mb-2 block text-xs font-semibold">{sampleSetId ? "固定数量" : "样本数"}</span><Input type="number" min="1" max="500" value={sampleSetId ? context.data?.sample_sets.find((item) => String(item.id) === sampleSetId)?.item_count ?? 0 : sampleSize} disabled={Boolean(sampleSetId)} onChange={(event) => setSampleSize(Number(event.target.value))} /></label>
             <label className="block"><span className="mb-2 block text-xs font-semibold">评测名称（可选）</span><Input value={name} onChange={(event) => setName(event.target.value)} placeholder="例如：Seed 2.0 迁移验收" /></label>
             <Button onClick={() => createRun.mutate()} disabled={!baseline || createRun.isPending}><Flask />开始抽样</Button>
           </div>
@@ -161,6 +164,13 @@ function MigrationRunDetail({ detail, reviewer, setReviewer, onReview, reviewing
       ["需人工", String(summary.review_required)],
       ["待处理", String(Math.max(0, summary.review_required - summary.reviewed))],
     ].map(([label, value], index) => <div key={label} className={`p-4 ${index < 3 ? "sm:border-r" : ""}`}><p className="text-xs text-[var(--muted)]">{label}</p><p className="font-data mt-3 text-2xl font-semibold">{value}</p></div>)}</div>
+    <div className="mt-3 flex flex-wrap items-center gap-x-6 gap-y-2 border-y border-[var(--line)] bg-[#fafbf8] px-4 py-3 text-xs">
+      <span className="font-semibold">人工对比结论</span>
+      <span>旧模型更好 <strong className="font-data ml-1">{summary.verdicts.baseline_better}</strong></span>
+      <span>效果相当 <strong className="font-data ml-1">{summary.verdicts.same}</strong></span>
+      <span>新模型更好 <strong className="font-data ml-1">{summary.verdicts.candidate_better}</strong></span>
+      <span className="text-[var(--muted)]">出现人工确认的旧模型更好样本时，批次会标记为“发现回退样本”。</span>
+    </div>
     <div className="mt-6 flex flex-wrap items-center justify-between gap-4"><div><h3 className="font-editorial text-xl font-bold">差异与抽检队列</h3><p className="mt-1 text-sm text-[var(--muted)]">只展示等级/分类变化、低置信度和约 5% 的一致样本抽检。</p></div><label className="w-52"><span className="mb-2 block text-xs font-semibold">审核姓名</span><Input value={reviewer} onChange={(event) => setReviewer(event.target.value)} placeholder="填写后可提交" /></label></div>
     <div className="mt-4 border-y border-[var(--line-strong)] bg-white">
       {summary.pending > 0 && <div className="flex items-center gap-3 border-b border-[var(--line)] bg-[#fafbf8] px-4 py-3 text-sm"><CircleNotch className="status-pulse" />候选模型仍在处理 {summary.pending} 张样本</div>}
@@ -177,4 +187,3 @@ function MigrationReviewRow({ item, reviewer, reviewing, onReview }: { item: Mig
     {!item.human_verdict && item.candidate && <div className="flex flex-wrap gap-2 md:max-w-52 md:justify-end"><Button size="sm" variant="secondary" disabled={!reviewer || reviewing} onClick={() => onReview(item.id, "baseline_better")}>旧模型更好</Button><Button size="sm" variant="secondary" disabled={!reviewer || reviewing} onClick={() => onReview(item.id, "same")}>效果相当</Button><Button size="sm" disabled={!reviewer || reviewing} onClick={() => onReview(item.id, "candidate_better")}>新模型更好</Button></div>}
   </div>
 }
-
