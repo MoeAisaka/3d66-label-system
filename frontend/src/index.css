@@ -1,0 +1,136 @@
+@import "tailwindcss";
+
+@custom-variant dark (&:is(.dark *));
+
+:root {
+  --brand: #cced46;
+  --brand-hover: #bfdc3f;
+  --ink: #11130f;
+  --canvas: #ffffff;
+  --workspace: #f3f5f0;
+  --line: #e7eae3;
+  --line-strong: #d9ded3;
+  --muted: #62685f;
+  --muted-soft: #8a9186;
+  --danger: #b7362e;
+  --warning: #a85a0a;
+  --success: #2f6f48;
+  --radius: 0.375rem;
+  --shadow-floating: 0 16px 48px rgb(17 19 15 / 10%);
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  color: var(--ink);
+  background: var(--workspace);
+  font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+}
+
+@theme inline {
+  --color-background: var(--workspace);
+  --color-foreground: var(--ink);
+  --color-card: var(--canvas);
+  --color-card-foreground: var(--ink);
+  --color-primary: var(--brand);
+  --color-primary-foreground: var(--ink);
+  --color-muted: #eef1eb;
+  --color-muted-foreground: var(--muted);
+  --color-border: var(--line);
+  --color-input: var(--line-strong);
+  --color-ring: var(--ink);
+  --color-destructive: var(--danger);
+  --radius-sm: 0.25rem;
+  --radius-md: 0.375rem;
+  --radius-lg: 0.5rem;
+  --font-serif-display: "Noto Serif SC", "Source Han Serif SC", "Songti SC", SimSun, serif;
+  --font-sans: "Segoe UI", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  --font-mono: "Geist Mono", Consolas, "SFMono-Regular", monospace;
+}
+
+* {
+  box-sizing: border-box;
+  border-color: var(--line);
+}
+
+html {
+  min-width: 320px;
+  background: var(--workspace);
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100dvh;
+  background: var(--workspace);
+  color: var(--ink);
+  -webkit-font-smoothing: antialiased;
+  font-kerning: normal;
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+}
+
+button,
+a {
+  -webkit-tap-highlight-color: transparent;
+}
+
+button:focus-visible,
+a:focus-visible,
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible {
+  outline: 2px solid var(--ink);
+  outline-offset: 2px;
+}
+
+::selection {
+  background: var(--brand);
+  color: var(--ink);
+}
+
+.font-editorial {
+  font-family: var(--font-serif-display);
+  font-variation-settings: "wght" 700;
+  letter-spacing: -0.025em;
+}
+
+.font-data {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.hairline-grid {
+  background-image:
+    linear-gradient(to right, rgb(217 222 211 / 28%) 1px, transparent 1px),
+    linear-gradient(to bottom, rgb(217 222 211 / 28%) 1px, transparent 1px);
+  background-size: 24px 24px;
+}
+
+.scrollbar-thin {
+  scrollbar-width: thin;
+  scrollbar-color: var(--line-strong) transparent;
+}
+
+@keyframes pulse-line {
+  0%, 100% { opacity: 0.36; }
+  50% { opacity: 1; }
+}
+
+.status-pulse {
+  animation: pulse-line 1.8s var(--ease-out) infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
