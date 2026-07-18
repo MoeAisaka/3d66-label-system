@@ -20,7 +20,7 @@
   --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
   color: var(--ink);
   background: var(--workspace);
-  font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  font-family: "Noto Serif SC", "Source Han Serif SC", "Songti SC", SimSun, serif;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
 }
@@ -42,8 +42,8 @@
   --radius-md: 0.375rem;
   --radius-lg: 0.5rem;
   --font-serif-display: "Noto Serif SC", "Source Han Serif SC", "Songti SC", SimSun, serif;
-  --font-sans: "Segoe UI", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
-  --font-mono: "Geist Mono", Consolas, "SFMono-Regular", monospace;
+  --font-sans: "Noto Serif SC", "Source Han Serif SC", "Songti SC", SimSun, serif;
+  --font-mono: "Noto Serif SC", "Source Han Serif SC", "Songti SC", SimSun, serif;
 }
 
 * {
@@ -78,6 +78,10 @@ a {
   -webkit-tap-highlight-color: transparent;
 }
 
+button {
+  font-weight: 700;
+}
+
 button:focus-visible,
 a:focus-visible,
 input:focus-visible,
@@ -99,7 +103,7 @@ select:focus-visible {
 }
 
 .font-data {
-  font-family: var(--font-mono);
+  font-family: var(--font-serif-display);
   font-variant-numeric: tabular-nums;
 }
 
