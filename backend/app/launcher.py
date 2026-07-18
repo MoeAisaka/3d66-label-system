@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import json
 import multiprocessing as mp
 import signal
 import socket
 import threading
 import webbrowser
+from urllib.error import URLError
+from urllib.request import urlopen
 
 import uvicorn
 from sqlalchemy import select
@@ -30,9 +33,35 @@ def _local_ip() -> str | None:
         return None
 
 
+def _service_is_running(port: int) -> bool:
+    try:
+        with urlopen(f"http://127.0.0.1:{port}/api/health", timeout=1) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+            return payload.get("service") == "3d66-label-system"
+    except (OSError, URLError, ValueError, json.JSONDecodeError):
+        return False
+
+
+def _port_is_in_use(port: int) -> bool:
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=1):
+            return True
+    except OSError:
+        return False
+
+
 def main() -> None:
     mp.freeze_support()
     settings = get_settings()
+    local_url = f"http://127.0.0.1:{settings.port}"
+    if _service_is_running(settings.port):
+        print("\n3d66 标签系统已经在运行，正在打开现有页面。\n")
+        webbrowser.open(local_url)
+        return
+    if _port_is_in_use(settings.port):
+        print(f"\n启动失败：端口 {settings.port} 已被其他程序占用。")
+        print("请关闭占用该端口的程序，或联系管理员修改 APP_PORT。\n")
+        raise SystemExit(1)
     init_database()
     with session_scope() as db:
         seed_defaults(db)
@@ -49,7 +78,7 @@ def main() -> None:
         process.start()
 
     print("\n3d66 标签系统已启动")
-    print(f"当前电脑：http://127.0.0.1:{settings.port}")
+    print(f"当前电脑：{local_url}")
     lan_ip = _local_ip()
     if lan_ip:
         print(f"同一局域网：http://{lan_ip}:{settings.port}")
@@ -58,7 +87,7 @@ def main() -> None:
     browser_timer = threading.Timer(
         1.2,
         webbrowser.open,
-        args=(f"http://127.0.0.1:{settings.port}",),
+        args=(local_url,),
     )
     browser_timer.daemon = True
     browser_timer.start()

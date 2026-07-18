@@ -14,6 +14,8 @@ if not exist "..\frontend\dist\index.html" (
 )
 title 3d66 Label System
 "..\.venv\Scripts\python.exe" -X utf8 -m app.launcher
-if errorlevel 1 echo The service exited with an error. Please keep this window and send a screenshot.
-pause
+if errorlevel 1 (
+  echo The service exited with an error. Please keep this window and send a screenshot.
+  pause
+)
 endlocal
