@@ -1,4 +1,8 @@
-from app.schema_adapter import adapt_combined_aesthetic_response, is_combined_aesthetic_response
+from app.schema_adapter import (
+    adapt_combined_aesthetic_response,
+    is_combined_aesthetic_response,
+    normalize_precheck_business_rules,
+)
 from app.scoring import calculate_score
 
 
@@ -76,3 +80,52 @@ def test_combined_response_applies_declared_level_cap() -> None:
     assert scoring["raw_level"] == "L5"
     assert scoring["level"] == "L3"
     assert scoring["caps"][-1]["reason"] == "现场记录图最高 L3"
+
+
+def test_partial_space_is_not_normal_or_professional_in_business_rules() -> None:
+    precheck = {
+        "scene_scope": {"type": "partial_space"},
+        "media_form": {
+            "real_photo": {"status": "yes"},
+            "rendering": {"status": "no"},
+            "ai_generated": {"status": "no"},
+            "professional_photography": {"status": "yes"},
+            "documentary_record": {"status": "no"},
+            "casual_snapshot": {"status": "no"},
+        },
+        "image_quality": {
+            "quality_severity": "normal",
+            "capture_quality": "good",
+            "issues": [],
+            "evidence": [],
+        },
+        "display_flags": {"watermark": False, "decorative_border": False},
+    }
+    normalized = normalize_precheck_business_rules(precheck)
+    assert normalized["image_quality"]["quality_severity"] == "slight"
+    assert normalized["image_quality"]["capture_quality"] == "acceptable"
+    assert normalized["media_form"]["professional_photography"]["status"] == "no"
+    assert normalized["media_form"]["documentary_record"]["status"] == "yes"
+
+
+def test_rendering_with_watermark_is_not_professional_or_normal() -> None:
+    precheck = {
+        "scene_scope": {"type": "full_space"},
+        "media_form": {
+            "real_photo": {"status": "no"},
+            "rendering": {"status": "yes"},
+            "ai_generated": {"status": "no"},
+            "professional_photography": {"status": "yes"},
+        },
+        "image_quality": {
+            "quality_severity": "normal",
+            "render_fidelity": "good",
+            "issues": [],
+            "evidence": [],
+        },
+        "display_flags": {"watermark": True, "decorative_border": False},
+    }
+    normalized = normalize_precheck_business_rules(precheck)
+    assert normalized["image_quality"]["quality_severity"] == "slight"
+    assert normalized["image_quality"]["render_fidelity"] == "acceptable"
+    assert normalized["media_form"]["professional_photography"]["status"] == "no"

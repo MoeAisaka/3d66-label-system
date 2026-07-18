@@ -89,6 +89,39 @@ def seed_defaults(db: Session) -> None:
             "calibration_filename": "space-aesthetic-v1.3-split.2-calibration.md",
             "note": "Split.2 以3级为基准，增加4/5级证据门槛和防机械同分校验",
         },
+        {
+            "stage": "A",
+            "name": "空间图片画质与摄影类型严格校准",
+            "version": "space_precheck_v1.3-split.3",
+            "filename": "space-precheck-v1.3-split.1.md",
+            "calibration_filenames": [
+                "space-precheck-v1.3-split.2-calibration.md",
+                "space-precheck-v1.3-split.3-calibration.md",
+            ],
+            "note": "Split.3 收紧画质正常和专业摄影定义，修正效果图、噪点、曝光与呈现问题误判",
+        },
+        {
+            "stage": "B",
+            "name": "空间八维美感差异化校准评价",
+            "version": "space_aesthetic_dimensions_v1.3-split.3",
+            "filename": "space-aesthetic-dimensions-v1.3-split.1.md",
+            "calibration_filenames": [
+                "space-aesthetic-v1.3-split.2-calibration.md",
+                "space-aesthetic-v1.3-split.3-calibration.md",
+            ],
+            "note": "Split.3 独立评价八个维度，禁止3级或4级机械同分并强化缺陷降级映射",
+        },
+        {
+            "stage": "A",
+            "name": "空间图片画质与摄影类型业务硬约束",
+            "version": "space_precheck_v1.3-split.3.1",
+            "filename": "space-precheck-v1.3-split.1.md",
+            "calibration_filenames": [
+                "space-precheck-v1.3-split.2-calibration.md",
+                "space-precheck-v1.3-split.3-calibration.md",
+            ],
+            "note": "Split.3.1 增加局部空间、水印、边框和未完工不得判为画质正常或专业摄影的硬约束",
+        },
     )
     for item in split_prompts:
         exists = db.scalar(
@@ -97,11 +130,13 @@ def seed_defaults(db: Session) -> None:
         if exists is not None:
             continue
         prompt = load_standalone_prompt(settings.project_root / "prompts" / item["filename"])
-        calibration_filename = item.get("calibration_filename")
-        calibration = (
-            (settings.project_root / "prompts" / calibration_filename).read_text(encoding="utf-8")
-            if calibration_filename
-            else ""
+        calibration_filenames = item.get("calibration_filenames") or [
+            item.get("calibration_filename")
+        ]
+        calibration = "\n\n".join(
+            (settings.project_root / "prompts" / filename).read_text(encoding="utf-8")
+            for filename in calibration_filenames
+            if filename
         )
         db.add(
             PromptVersion(

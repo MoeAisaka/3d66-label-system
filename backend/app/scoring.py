@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+from collections import Counter
 from typing import Any
 
 
-ENGINE_VERSION = "engine-v2.3.0"
+ENGINE_VERSION = "engine-v2.4.0"
 
 GRADE_POINTS = {1: 20.0, 2: 45.0, 3: 65.0, 4: 82.0, 5: 95.0}
 WEIGHTS = {
@@ -149,6 +150,8 @@ def calculate_score(precheck: dict[str, Any], aesthetic: dict[str, Any] | None) 
         grade_values = list(dimension_grades.values())
         if len(set(grade_values)) == 1 and grade_values[0] >= 4:
             review_reasons.append("八维高分完全一致，疑似出现评分坍缩")
+        if max(Counter(grade_values).values(), default=0) >= 6:
+            review_reasons.append("六个以上维度等级相同，疑似出现中间分坍缩")
 
         unsupported_high = [
             key

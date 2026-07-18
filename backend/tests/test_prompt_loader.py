@@ -46,3 +46,16 @@ def test_v13_split2_calibration_has_strict_high_grade_gates() -> None:
     assert "以3级为默认基准" in prompt_b_calibration
     assert "每个4级维度必须" in prompt_b_calibration
     assert "至少五个维度为5级" in prompt_b_calibration
+
+
+def test_v13_split3_calibration_catches_quality_and_grade_collapse() -> None:
+    prompt_a_calibration = (
+        PROJECT_ROOT / "prompts" / "space-precheck-v1.3-split.3-calibration.md"
+    ).read_text(encoding="utf-8")
+    prompt_b_calibration = (
+        PROJECT_ROOT / "prompts" / "space-aesthetic-v1.3-split.3-calibration.md"
+    ).read_text(encoding="utf-8")
+    assert "效果图、AI图和商品合成图" in prompt_a_calibration
+    assert "画质正常”必须全部通过" in prompt_a_calibration
+    assert "八个维度全部相同视为无效初稿" in prompt_b_calibration
+    assert "至少形成两个有证据支持的等级档位" in prompt_b_calibration

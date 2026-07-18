@@ -47,6 +47,7 @@ const qualityNames: Record<string, string> = {
   moderate: "中度问题",
   severe: "严重问题",
   unusable: "不可用",
+  uncertain: "待确认",
 }
 
 function reviewStatus(asset: Asset) {
@@ -65,7 +66,9 @@ function mediaLabels(asset: Asset) {
 }
 
 function normalizedQuality(value: string | undefined) {
-  return value === "normal" ? "good" : value || ""
+  if (value === "normal") return "good"
+  if (value === "slight" || value === "mild") return "minor"
+  return value || ""
 }
 
 export function filterReviewAssets(items: Asset[], params: URLSearchParams) {

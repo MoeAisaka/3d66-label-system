@@ -5,6 +5,7 @@ import json
 import logging
 import socket
 import time
+from collections import Counter
 from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
@@ -23,7 +24,11 @@ from .models import (
     PromptVersion,
 )
 from .scoring import ENGINE_VERSION, calculate_score
-from .schema_adapter import adapt_combined_aesthetic_response, is_combined_aesthetic_response
+from .schema_adapter import (
+    adapt_combined_aesthetic_response,
+    is_combined_aesthetic_response,
+    normalize_precheck_business_rules,
+)
 from .seed import seed_defaults
 
 
@@ -42,6 +47,21 @@ WORKER_ID = f"{socket.gethostname()}-{id(object())}"
 
 class JobInterrupted(RuntimeError):
     """The operator paused or canceled a job while a model call was in flight."""
+
+
+def aesthetic_grade_collapse(aesthetic: dict[str, object] | None) -> bool:
+    """Return true when six or more of the eight aesthetic dimensions share one grade."""
+    if not aesthetic:
+        return False
+    dimensions = aesthetic.get("dimensions")
+    if not isinstance(dimensions, dict) or len(dimensions) != 8:
+        return False
+    grades = []
+    for item in dimensions.values():
+        if not isinstance(item, dict) or not isinstance(item.get("grade"), int):
+            return False
+        grades.append(item["grade"])
+    return max(Counter(grades).values(), default=0) >= 6
 
 
 def _prompt_for_job(stage: str, prompt_id: int | None) -> PromptVersion:
@@ -155,9 +175,11 @@ async def evaluate_job(job_id: int) -> None:
     else:
         precheck = response_a.parsed
         aesthetic = None
+    precheck = normalize_precheck_business_rules(precheck)
     scope_status = (precheck.get("classification") or {}).get("scope_status")
 
     response_b = None
+    response_b_attempts: list[object] = []
     if not combined_response and scope_status in {"in_scope", "boundary"}:
         prompt_b = _prompt_for_job("B", prompt_b_id)
         _set_job(job_id, stage="aesthetic", progress=48)
@@ -167,8 +189,28 @@ async def evaluate_job(job_id: int) -> None:
         response_b = await client.chat_json(
             prompt_b.system_prompt, user_b, image_path=image_path, mime_type=asset.mime_type
         )
+        response_b_attempts.append(response_b.raw_payload)
         _ensure_job_processing(job_id)
         aesthetic = response_b.parsed
+        if prompt_b.version.endswith("split.3") and aesthetic_grade_collapse(aesthetic):
+            _set_job(job_id, stage="aesthetic_repair", progress=68)
+            repair_user = (
+                user_b
+                + "\n\n上一次输出未通过系统校验：八个维度中至少六个等级相同，出现评分坍缩。"
+                + "请重新查看图片，逐维对照优势与缺陷，至少形成两个有独立证据支持的等级档位。"
+                + "不得为了制造差异而随意改分；每次升降都必须对应图片中的具体证据。"
+                + "\n\n上一次输出：\n"
+                + json.dumps(aesthetic, ensure_ascii=False)
+            )
+            response_b = await client.chat_json(
+                prompt_b.system_prompt,
+                repair_user,
+                image_path=image_path,
+                mime_type=asset.mime_type,
+            )
+            response_b_attempts.append(response_b.raw_payload)
+            _ensure_job_processing(job_id)
+            aesthetic = response_b.parsed
 
     _set_job(job_id, stage="scoring", progress=86)
     _ensure_job_processing(job_id)
@@ -187,7 +229,14 @@ async def evaluate_job(job_id: int) -> None:
                 scoring_json=json.dumps(scoring, ensure_ascii=False),
                 raw_response_a=json.dumps(response_a.raw_payload, ensure_ascii=False),
                 raw_response_b=(
-                    json.dumps(response_b.raw_payload, ensure_ascii=False) if response_b else None
+                    json.dumps(
+                        response_b_attempts[0]
+                        if len(response_b_attempts) == 1
+                        else {"attempts": response_b_attempts},
+                        ensure_ascii=False,
+                    )
+                    if response_b
+                    else None
                 ),
                 score=scoring.get("score"),
                 level=scoring.get("level"),

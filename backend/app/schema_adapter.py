@@ -10,6 +10,102 @@ from .models import EvaluationResult
 from .scoring import ENGINE_VERSION, calculate_score
 
 
+QUALITY_RANK = {
+    "normal": 0,
+    "slight": 1,
+    "moderate": 2,
+    "severe": 3,
+    "unusable": 4,
+    "uncertain": 1,
+}
+
+
+def normalize_precheck_business_rules(precheck: dict[str, Any]) -> dict[str, Any]:
+    """Enforce stable 3D66 media and presentation-quality invariants on model output."""
+    media = precheck.get("media_form")
+    if not isinstance(media, dict):
+        return precheck
+    quality = precheck.get("image_quality")
+    if not isinstance(quality, dict):
+        quality = {}
+        precheck["image_quality"] = quality
+
+    def is_yes(key: str) -> bool:
+        item = media.get(key)
+        return isinstance(item, dict) and item.get("status") == "yes"
+
+    def force_not_professional(reason: str) -> None:
+        professional = media.get("professional_photography")
+        if not isinstance(professional, dict):
+            professional = {}
+            media["professional_photography"] = professional
+        professional.update({"status": "no", "confidence": 1.0, "evidence": [reason]})
+
+    def ensure_quality_issue(issue: str, reason: str) -> None:
+        severity = str(quality.get("quality_severity") or "uncertain")
+        if QUALITY_RANK.get(severity, 1) < QUALITY_RANK["slight"]:
+            quality["quality_severity"] = "slight"
+        issues = quality.get("issues")
+        if not isinstance(issues, list):
+            issues = []
+            quality["issues"] = issues
+        if issue not in issues:
+            issues.append(issue)
+        evidence = quality.get("evidence")
+        if not isinstance(evidence, list):
+            evidence = []
+            quality["evidence"] = evidence
+        if reason not in evidence:
+            evidence.append(reason)
+        if is_yes("real_photo") and quality.get("capture_quality") == "good":
+            quality["capture_quality"] = "acceptable"
+        if is_yes("rendering") and quality.get("render_fidelity") == "good":
+            quality["render_fidelity"] = "acceptable"
+
+    if is_yes("rendering") or is_yes("ai_generated"):
+        force_not_professional("系统规则：效果图或AI图不属于专业摄影")
+
+    scene_scope = precheck.get("scene_scope")
+    if isinstance(scene_scope, dict) and scene_scope.get("type") == "partial_space":
+        ensure_quality_issue(
+            "presentation_incomplete",
+            "系统规则：当前仅呈现局部空间，素材呈现完整性未达到画质正常标准",
+        )
+        force_not_professional("系统规则：局部空间记录不标记为专业摄影")
+        if is_yes("real_photo") and not is_yes("casual_snapshot"):
+            documentary = media.get("documentary_record")
+            if not isinstance(documentary, dict):
+                documentary = {}
+                media["documentary_record"] = documentary
+            documentary.update(
+                {
+                    "status": "yes",
+                    "confidence": 1.0,
+                    "evidence": ["系统规则：局部空间实景按现场记录处理"],
+                }
+            )
+
+    display_flags = precheck.get("display_flags")
+    if isinstance(display_flags, dict) and (
+        display_flags.get("watermark") is True or display_flags.get("decorative_border") is True
+    ):
+        ensure_quality_issue(
+            "watermark_or_border",
+            "系统规则：水印或大面积装饰边框降低当前素材的可用画质",
+        )
+
+    if is_yes("unfinished_scene"):
+        ensure_quality_issue(
+            "unfinished_presentation",
+            "系统规则：可见未完工区域使当前素材呈现质量至少为轻微问题",
+        )
+
+    if str(quality.get("quality_severity") or "normal") != "normal":
+        force_not_professional("系统规则：存在画质或呈现问题，不标记为专业摄影")
+
+    return precheck
+
+
 COMBINED_DIMENSION_ALIASES = {
     "spatial_design_coherence": "spatial_design_furnishing",
     "detail_finish": "detail_completion",

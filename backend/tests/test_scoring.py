@@ -108,3 +108,12 @@ def test_calibrated_l5_requires_high_confidence() -> None:
     assert result["raw_level"] == "L5"
     assert result["level"] == "L4"
     assert result["score"] == 89.0
+
+
+def test_calibrated_uniform_mid_grades_require_review() -> None:
+    result_aesthetic = aesthetic(3)
+    result_aesthetic["scoring_profile"] = "space_aesthetic_v1.3"
+    result = calculate_score(precheck(), result_aesthetic)
+    assert result["level"] == "L3"
+    assert result["needs_review"] is True
+    assert any("中间分坍缩" in reason for reason in result["review_reasons"])
