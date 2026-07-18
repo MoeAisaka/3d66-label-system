@@ -11,13 +11,13 @@ colors:
   muted: "#62685F"
 typography:
   display:
-    fontFamily: "Source Han Serif SC, Noto Serif CJK SC, SimSun, serif"
+    fontFamily: "Microsoft YaHei, 微软雅黑, PingFang SC, sans-serif"
     fontSize: "3rem"
     fontWeight: 700
     lineHeight: 1.08
     letterSpacing: "-0.025em"
   body:
-    fontFamily: "Geist, Segoe UI, PingFang SC, Microsoft YaHei, sans-serif"
+    fontFamily: "Microsoft YaHei, 微软雅黑, PingFang SC, sans-serif"
     fontSize: "1rem"
     fontWeight: 400
     lineHeight: 1.5
@@ -51,14 +51,14 @@ components:
 
 **Creative North Star: “建筑设计刊物 × 精密评测台”**
 
-界面采用明亮、克制的编辑排版，把高对比中文衬线标题与高可读无衬线操作字体结合。结构依赖非对称网格、淡冷灰分割线、明确的编号与测量感细节，而不是依赖卡片、阴影或装饰。
+界面采用明亮、克制的编辑排版，全部文字统一使用微软雅黑，通过字号、字重和间距建立层级。结构依赖非对称网格、淡冷灰分割线、明确的编号与测量感细节，而不是依赖卡片、阴影或装饰。
 
 图片始终在白色评测环境中展示。酸性青柠是稀缺的状态信号，只在主操作、当前选择、进度和焦点出现。
 
 **Key Characteristics:**
 
 - 白底审图与高对比文字
-- 现代中文衬线标题，无衬线操作控件
+- 全局微软雅黑字体，通过字重区分标题与操作控件
 - 极浅结构线与少量中等强度外边界
 - 非对称但可预测的高密度产品布局
 - 酸性青柠作为唯一强调色
@@ -87,11 +87,13 @@ components:
 
 ## 3. Typography
 
-**Display Font:** Source Han Serif SC（回退 Noto Serif CJK SC、SimSun）  
-**Body Font:** Geist / Segoe UI（中文回退 PingFang SC、Microsoft YaHei）  
-**Label/Mono Font:** Geist Mono / Consolas
+**Display Font:** Microsoft YaHei（微软雅黑）
 
-**Character:** 衬线标题建立建筑刊物的编辑气质，无衬线正文和等宽数字保持密集操作的清晰度。
+**Body Font:** Microsoft YaHei（微软雅黑）
+
+**Label/Data Font:** Microsoft YaHei（微软雅黑）
+
+**Character:** 全站以微软雅黑保持统一和清晰，通过粗细、字号及留白延续编辑式层级；数字启用等宽数字特性以方便纵向比较。
 
 ### Hierarchy
 
@@ -103,7 +105,7 @@ components:
 
 ### Named Rules
 
-**The Dual Voice Rule.** 衬线只用于品牌和标题；按钮、输入、表格、数字与小字号标签必须使用无衬线或等宽字体。
+**The Unified Typeface Rule.** 标题、正文、按钮、输入框、表格、数字与小字号标签全部使用微软雅黑，不再混用衬线或等宽字体。
 
 ## 4. Elevation
 
@@ -158,7 +160,7 @@ components:
 ### Do:
 
 - **Do** 在白底上展示原图，并保留明确但轻量的图像边界。
-- **Do** 使用现代中文衬线字体建立页面标题层级。
+- **Do** 使用微软雅黑的字号和字重变化建立页面标题层级。
 - **Do** 使用极浅冷灰线组织高密度信息。
 - **Do** 为所有模型结论显示证据、置信度和版本。
 - **Do** 为键盘焦点、加载、错误、空状态和冲突提供完整反馈。
@@ -169,4 +171,4 @@ components:
 - **Don't** 使用传统模板化后台、玻璃拟态、紫蓝渐变或霓虹光晕。
 - **Don't** 使用大面积酸性青柠、青柠渐变或低对比青柠文字。
 - **Don't** 堆叠胶囊、重阴影、重复卡片网格或深色分割线。
-- **Don't** 在按钮、评分数字、小字号操作标签上使用衬线字体。
+- **Don't** 在任何页面区域混用衬线、等宽或其他装饰字体。
