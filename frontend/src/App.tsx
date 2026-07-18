@@ -13,10 +13,12 @@ import { LoginPage } from "@/pages/login-page"
 import { ModelPage } from "@/pages/model-page"
 import { MigrationsPage } from "@/pages/migrations-page"
 import { PromptsPage } from "@/pages/prompts-page"
-import { ReviewPage } from "@/pages/review-page"
 
 const SampleSetsPage = lazy(() =>
   import("@/pages/sample-sets-page").then((module) => ({ default: module.SampleSetsPage })),
+)
+const ReviewPage = lazy(() =>
+  import("@/pages/review-page").then((module) => ({ default: module.ReviewPage })),
 )
 
 export default function App() {
@@ -46,7 +48,7 @@ export default function App() {
             <Route index element={<DashboardPage />} />
             <Route path="assets" element={<AssetsPage />} />
             <Route path="jobs" element={<JobsPage />} />
-            <Route path="review" element={<ReviewPage />} />
+            <Route path="review" element={<Suspense fallback={<RouteLoading />}><ReviewPage /></Suspense>} />
             <Route path="prompts" element={<PromptsPage />} />
             <Route path="model" element={<ModelPage />} />
             <Route path="sample-sets" element={<Suspense fallback={<RouteLoading />}><SampleSetsPage /></Suspense>} />

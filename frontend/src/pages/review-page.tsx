@@ -22,6 +22,7 @@ import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
 import { api, jsonBody } from "@/lib/api"
 import type { Asset } from "@/lib/types"
+import { filterReviewAssets, ReviewList } from "@/pages/review-list"
 
 const dimensionLabels: Record<string, string> = {
   composition_viewpoint: "构图与机位",
@@ -47,17 +48,21 @@ export function ReviewPage() {
   const queryClient = useQueryClient()
   const assets = useQuery({
     queryKey: ["assets", "review-list"],
-    queryFn: () => api<{ items: Asset[] }>("/api/assets?limit=200"),
+    queryFn: () => api<{ items: Asset[] }>("/api/assets?limit=1000"),
     refetchInterval: 4000,
   })
-  const currentId = requestedId || assets.data?.items[0]?.id || 0
+  const currentId = requestedId
+  const filteredAssets = useMemo(
+    () => filterReviewAssets(assets.data?.items ?? [], searchParams),
+    [assets.data?.items, searchParams],
+  )
   const detail = useQuery({
     queryKey: ["asset", currentId],
     queryFn: () => api<Asset>(`/api/assets/${currentId}`),
     enabled: Boolean(currentId),
     refetchInterval: (query) => (query.state.data?.status === "queued" ? 2500 : false),
   })
-  const currentIndex = assets.data?.items.findIndex((item) => item.id === currentId) ?? -1
+  const currentIndex = filteredAssets.findIndex((item) => item.id === currentId)
   const asset = detail.data
   const evaluation = asset?.evaluation
   const dimensions = evaluation?.aesthetic?.dimensions ?? {}
@@ -139,10 +144,22 @@ export function ReviewPage() {
   }
 
   function go(offset: number) {
-    if (!assets.data?.items.length || currentIndex < 0) return
-    const next = assets.data.items[currentIndex + offset]
-    if (next) setSearchParams({ asset: String(next.id) })
+    if (!filteredAssets.length || currentIndex < 0) return
+    const next = filteredAssets[currentIndex + offset]
+    if (next) {
+      const params = new URLSearchParams(searchParams)
+      params.set("asset", String(next.id))
+      setSearchParams(params)
+    }
   }
+
+  if (!requestedId) {
+    return <ReviewList items={assets.data?.items ?? []} loading={assets.isLoading} searchParams={searchParams} setSearchParams={setSearchParams} />
+  }
+
+  const listParams = new URLSearchParams(searchParams)
+  listParams.delete("asset")
+  const listUrl = `/review${listParams.toString() ? `?${listParams.toString()}` : ""}`
 
   return (
     <>
@@ -151,10 +168,13 @@ export function ReviewPage() {
         title="美感评测"
         description="在原图旁核对模型证据、等级限制和版本快照。"
         actions={
-          <div className="flex items-center border border-[var(--line-strong)] bg-white">
-            <Button variant="ghost" size="icon" className="rounded-none" onClick={() => go(-1)} disabled={currentIndex <= 0} aria-label="上一张"><ArrowLeft /></Button>
-            <span className="font-data min-w-24 border-x border-[var(--line)] px-3 text-center text-xs">{currentIndex >= 0 ? currentIndex + 1 : 0} / {assets.data?.items.length ?? 0}</span>
-            <Button variant="ghost" size="icon" className="rounded-none" onClick={() => go(1)} disabled={currentIndex < 0 || currentIndex >= (assets.data?.items.length ?? 0) - 1} aria-label="下一张"><ArrowRight /></Button>
+          <div className="flex flex-wrap items-center gap-2">
+            <Button asChild variant="secondary"><Link to={listUrl}><ArrowLeft />返回审核列表</Link></Button>
+            <div className="flex items-center border border-[var(--line-strong)] bg-white">
+              <Button variant="ghost" size="icon" className="rounded-none" onClick={() => go(-1)} disabled={currentIndex <= 0} aria-label="上一张"><ArrowLeft /></Button>
+              <span className="font-data min-w-24 border-x border-[var(--line)] px-3 text-center text-xs">{currentIndex >= 0 ? currentIndex + 1 : 0} / {filteredAssets.length}</span>
+              <Button variant="ghost" size="icon" className="rounded-none" onClick={() => go(1)} disabled={currentIndex < 0 || currentIndex >= filteredAssets.length - 1} aria-label="下一张"><ArrowRight /></Button>
+            </div>
           </div>
         }
       />
