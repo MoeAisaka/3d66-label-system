@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from fastapi import Cookie, Depends, FastAPI, File, HTTPException, Response, UploadFile
+from fastapi import BackgroundTasks, Cookie, Depends, FastAPI, File, HTTPException, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field, model_validator
@@ -31,6 +31,8 @@ from .models import (
     MigrationItem,
     MigrationRun,
     ModelConfig,
+    OptimizerConfig,
+    PromptOptimizationRun,
     PromptVersion,
     SampleSet,
     SampleSetItem,
@@ -43,6 +45,7 @@ from .security import (
     protect_secret,
     verify_password,
 )
+from .optimizer import run_prompt_optimization
 from .seed import seed_defaults
 
 
@@ -71,6 +74,19 @@ class ModelConfigUpdate(BaseModel):
     structured_output: bool = True
 
 
+class OptimizerConfigUpdate(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    base_url: str = Field(min_length=8, max_length=300)
+    api_path: str = Field(min_length=1, max_length=120)
+    model_id: str = Field(min_length=1, max_length=200)
+    api_key: str | None = Field(default=None, max_length=1000)
+    temperature: float = Field(default=0.1, ge=0, le=2)
+    max_tokens: int = Field(default=12000, ge=512, le=65536)
+    timeout_seconds: int = Field(default=300, ge=10, le=900)
+    max_retries: int = Field(default=1, ge=0, le=5)
+    structured_output: bool = True
+
+
 class EnqueueRequest(BaseModel):
     asset_ids: list[int] = Field(min_length=1, max_length=1000)
 
@@ -91,22 +107,46 @@ class PromptAiReviseRequest(BaseModel):
     instruction: str = Field(min_length=4, max_length=2000)
 
 
+class ReviewCorrection(BaseModel):
+    target_type: str = Field(pattern="^(dimension|scoring)$")
+    field_key: str = Field(min_length=1, max_length=80)
+    model_value: int | str | None = None
+    human_value: int | str | None = None
+    reason_codes: list[str] = Field(min_length=1, max_length=8)
+    note: str = Field(default="", max_length=1000)
+
+    @model_validator(mode="after")
+    def validate_changed_value(self) -> "ReviewCorrection":
+        if self.target_type == "dimension":
+            if not isinstance(self.human_value, int) or not 1 <= self.human_value <= 5:
+                raise ValueError("维度纠错必须填写 1 至 5 的人工分数")
+            if self.human_value == self.model_value:
+                raise ValueError("人工维度分数必须与模型分数不同")
+        return self
+
+
 class ReviewRequest(BaseModel):
     reviewer_name: str = Field(min_length=1, max_length=80)
     decision: str = Field(pattern="^(approved|corrected|rejected)$")
     corrected_level: str | None = Field(default=None, pattern="^L[1-5]$")
     note: str = Field(default="", max_length=2000)
+    corrections: list[ReviewCorrection] = Field(default_factory=list, max_length=12)
 
     @model_validator(mode="after")
     def validate_correction(self) -> "ReviewRequest":
         if self.decision == "corrected":
-            if not self.corrected_level:
-                raise ValueError("修改结果时必须选择最终等级")
-            if not self.note.strip():
+            if not self.corrected_level and not self.corrections:
+                raise ValueError("修改结果时必须选择最终等级或填写维度纠错")
+            if not self.note.strip() and not self.corrections:
                 raise ValueError("修改结果时必须填写修改原因")
-        elif self.corrected_level is not None:
-            raise ValueError("只有修改结果时才能填写修正等级")
+        elif self.corrected_level is not None or self.corrections:
+            raise ValueError("只有修改结果时才能填写修正等级或维度纠错")
         return self
+
+
+class PromptOptimizationCreateRequest(BaseModel):
+    prompt_id: int = Field(ge=1)
+    sample_set_id: int = Field(ge=1)
 
 
 class SampleSetCreateRequest(BaseModel):
@@ -198,7 +238,7 @@ def _result_payload(result: EvaluationResult | None) -> dict[str, Any] | None:
         return None
     latest_review = result.reviews[-1] if result.reviews else None
     final_level = (
-        latest_review.corrected_level
+        latest_review.corrected_level or result.level
         if latest_review and latest_review.decision == "corrected"
         else result.level
     )
@@ -221,6 +261,7 @@ def _result_payload(result: EvaluationResult | None) -> dict[str, Any] | None:
                 "decision": latest_review.decision,
                 "corrected_level": latest_review.corrected_level,
                 "note": latest_review.note,
+                "corrections": json.loads(latest_review.corrections_json or "[]"),
                 "created_at": latest_review.created_at,
             }
             if latest_review
@@ -542,6 +583,80 @@ async def test_model_config(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+def _optimizer_config_payload(config: OptimizerConfig) -> dict[str, Any]:
+    return {
+        "id": config.id,
+        "name": config.name,
+        "provider": config.provider,
+        "base_url": config.base_url,
+        "api_path": config.api_path,
+        "model_id": config.model_id,
+        "temperature": config.temperature,
+        "max_tokens": config.max_tokens,
+        "timeout_seconds": config.timeout_seconds,
+        "max_retries": config.max_retries,
+        "structured_output": config.structured_output,
+        "has_api_key": bool(config.encrypted_api_key),
+        "api_key_mask": "••••••••" if config.encrypted_api_key else "",
+        "updated_at": config.updated_at,
+    }
+
+
+@app.get("/api/optimizer-config")
+def get_optimizer_config(
+    _user: User = Depends(current_user), db: Session = Depends(get_db)
+) -> dict[str, Any]:
+    config = db.scalar(select(OptimizerConfig).limit(1))
+    if not config:
+        config = OptimizerConfig()
+        db.add(config)
+        db.commit()
+        db.refresh(config)
+    return _optimizer_config_payload(config)
+
+
+@app.put("/api/optimizer-config")
+def update_optimizer_config(
+    payload: OptimizerConfigUpdate,
+    _user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, bool]:
+    config = db.scalar(select(OptimizerConfig).limit(1))
+    if not config:
+        config = OptimizerConfig()
+        db.add(config)
+    for field in (
+        "name",
+        "base_url",
+        "api_path",
+        "model_id",
+        "temperature",
+        "max_tokens",
+        "timeout_seconds",
+        "max_retries",
+        "structured_output",
+    ):
+        setattr(config, field, getattr(payload, field))
+    if payload.api_key:
+        config.encrypted_api_key = protect_secret(payload.api_key.strip())
+    db.commit()
+    return {"ok": True}
+
+
+@app.post("/api/optimizer-config/test")
+async def test_optimizer_config(
+    _user: User = Depends(current_user), db: Session = Depends(get_db)
+) -> dict[str, Any]:
+    config = db.scalar(select(OptimizerConfig).limit(1))
+    if not config:
+        raise HTTPException(status_code=404, detail="提示词诊断模型配置不存在")
+    try:
+        text = await DoubaoClient(config).test_connection()
+        return {"ok": True, "message": text or "连接成功"}
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @app.get("/api/prompts")
 def list_prompts(
     _user: User = Depends(current_user), db: Session = Depends(get_db)
@@ -637,6 +752,93 @@ async def ai_revise_prompt(
     }
 
 
+def _optimization_payload(run: PromptOptimizationRun) -> dict[str, Any]:
+    return {
+        "id": run.id,
+        "base_prompt_id": run.base_prompt_id,
+        "base_prompt_version": run.base_prompt.version,
+        "sample_set_id": run.sample_set_id,
+        "sample_set_name": run.sample_set.name,
+        "optimizer_model_id": run.optimizer_model_id,
+        "status": run.status,
+        "progress": run.progress,
+        "sample_count": run.sample_count,
+        "corrected_count": run.corrected_count,
+        "diagnosis": json.loads(run.diagnosis_json or "{}"),
+        "candidate_system_prompt": run.candidate_system_prompt,
+        "candidate_user_prompt": run.candidate_user_prompt,
+        "change_note": run.change_note,
+        "error_message": run.error_message,
+        "created_by": run.created_by,
+        "created_at": run.created_at,
+        "finished_at": run.finished_at,
+    }
+
+
+@app.get("/api/prompt-optimizations")
+def list_prompt_optimizations(
+    limit: int = 20,
+    _user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    runs = db.scalars(
+        select(PromptOptimizationRun)
+        .order_by(PromptOptimizationRun.created_at.desc())
+        .limit(min(max(limit, 1), 100))
+    ).all()
+    return {"items": [_optimization_payload(run) for run in runs]}
+
+
+@app.get("/api/prompt-optimizations/{run_id}")
+def get_prompt_optimization(
+    run_id: int,
+    _user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    run = db.get(PromptOptimizationRun, run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="提示词优化任务不存在")
+    return _optimization_payload(run)
+
+
+@app.post("/api/prompt-optimizations")
+def create_prompt_optimization(
+    payload: PromptOptimizationCreateRequest,
+    background_tasks: BackgroundTasks,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, int]:
+    prompt = db.get(PromptVersion, payload.prompt_id)
+    sample_set = db.get(SampleSet, payload.sample_set_id)
+    config = db.scalar(select(OptimizerConfig).limit(1))
+    if not prompt or not sample_set:
+        raise HTTPException(status_code=404, detail="提示词或样本集不存在")
+    if prompt.stage != "B":
+        raise HTTPException(status_code=400, detail="样本驱动优化目前用于调用 B 的美感维度提示词")
+    if not config or not config.encrypted_api_key:
+        raise HTTPException(status_code=400, detail="请先在模型配置中填写 SOL API Key")
+    if not sample_set.items:
+        raise HTTPException(status_code=400, detail="样本集还没有图片")
+    active_run = db.scalar(
+        select(PromptOptimizationRun).where(
+            PromptOptimizationRun.status.in_(["queued", "running"])
+        )
+    )
+    if active_run:
+        raise HTTPException(status_code=409, detail="已有提示词优化任务正在运行")
+    run = PromptOptimizationRun(
+        base_prompt_id=prompt.id,
+        sample_set_id=sample_set.id,
+        optimizer_model_id=config.model_id,
+        created_by=user.username,
+    )
+    db.add(run)
+    db.commit()
+    db.refresh(run)
+    background_tasks.add_task(run_prompt_optimization, run.id)
+    return {"id": run.id}
+
+
 @app.post("/api/evaluations/{evaluation_id}/review")
 def create_review(
     evaluation_id: int,
@@ -647,9 +849,20 @@ def create_review(
     evaluation = db.get(EvaluationResult, evaluation_id)
     if not evaluation:
         raise HTTPException(status_code=404, detail="评测结果不存在")
-    if payload.decision == "corrected" and payload.corrected_level == evaluation.level:
-        raise HTTPException(status_code=400, detail="修正等级与模型等级相同，请使用“确认结果”")
-    review = HumanReview(evaluation_id=evaluation_id, **payload.model_dump())
+    if (
+        payload.decision == "corrected"
+        and payload.corrected_level == evaluation.level
+        and not payload.corrections
+    ):
+        raise HTTPException(status_code=400, detail="没有维度纠错时，请修改最终等级或使用“确认结果”")
+    review_data = payload.model_dump(exclude={"corrections"})
+    review = HumanReview(
+        evaluation_id=evaluation_id,
+        corrections_json=json.dumps(
+            [item.model_dump() for item in payload.corrections], ensure_ascii=False
+        ),
+        **review_data,
+    )
     if payload.decision in {"approved", "corrected"}:
         evaluation.needs_review = False
     else:

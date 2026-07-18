@@ -74,6 +74,31 @@ def test_sample_set_captures_human_final_level() -> None:
     app.dependency_overrides[current_user] = lambda: user
     client = TestClient(app)
     try:
+        reviewed = client.post(
+            f"/api/evaluations/{result.id}/review",
+            json={
+                "reviewer_name": "审核员",
+                "decision": "corrected",
+                "corrected_level": "L4",
+                "note": "色彩与材质评分偏高",
+                "corrections": [
+                    {
+                        "target_type": "dimension",
+                        "field_key": "color_material",
+                        "model_value": 5,
+                        "human_value": 3,
+                        "reason_codes": ["photography_as_design"],
+                        "note": "统一色调主要来自摄影调色",
+                    }
+                ],
+            },
+        )
+        assert reviewed.status_code == 200
+        asset_detail = client.get(f"/api/assets/{asset.id}").json()
+        correction = asset_detail["evaluation"]["human_review"]["corrections"][0]
+        assert correction["field_key"] == "color_material"
+        assert correction["human_value"] == 3
+
         created = client.post(
             "/api/sample-sets",
             json={"name": "黄金样本", "description": "迁移回归"},

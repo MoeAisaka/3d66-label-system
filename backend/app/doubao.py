@@ -10,7 +10,7 @@ from typing import Any
 
 import httpx
 
-from .models import ModelConfig
+from .models import ModelConfig, OptimizerConfig
 from .security import unprotect_secret
 
 
@@ -64,9 +64,9 @@ def parse_json_text(text: str) -> dict[str, Any]:
 
 
 class DoubaoClient:
-    def __init__(self, config: ModelConfig):
+    def __init__(self, config: ModelConfig | OptimizerConfig):
         if not config.encrypted_api_key:
-            raise ValueError("尚未配置豆包 API Key")
+            raise ValueError("尚未配置模型 API Key")
         self.config = config
         self.api_key = unprotect_secret(config.encrypted_api_key)
 
@@ -81,7 +81,7 @@ class DoubaoClient:
             response = await client.post(self.url, headers=headers, json=payload)
             if response.is_error:
                 detail = response.text[:1200]
-                raise RuntimeError(f"豆包 API 返回 {response.status_code}: {detail}")
+                raise RuntimeError(f"模型 API 返回 {response.status_code}: {detail}")
             data = response.json()
             if not isinstance(data, dict):
                 raise RuntimeError("豆包 API 返回了无法识别的数据结构")
@@ -108,9 +108,13 @@ class DoubaoClient:
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": content},
             ],
-            "temperature": self.config.temperature,
-            "max_tokens": self.config.max_tokens,
         }
+        if self.config.provider == "openai":
+            payload["max_completion_tokens"] = self.config.max_tokens
+            payload["reasoning_effort"] = "high"
+        else:
+            payload["temperature"] = self.config.temperature
+            payload["max_tokens"] = self.config.max_tokens
         if self.config.structured_output:
             payload["response_format"] = {"type": "json_object"}
 
@@ -135,12 +139,58 @@ class DoubaoClient:
                 last_error = exc
         raise RuntimeError(str(last_error) if last_error else "模型调用失败")
 
+    async def chat_json_images(
+        self,
+        system_prompt: str,
+        samples: list[tuple[str, Path, str | None]],
+    ) -> DoubaoResponse:
+        content: list[dict[str, Any]] = []
+        for text, image_path, mime_type in samples:
+            content.append({"type": "text", "text": text})
+            content.append(
+                {
+                    "type": "image_url",
+                    "image_url": {"url": _image_data_url(image_path, mime_type), "detail": "high"},
+                }
+            )
+        payload: dict[str, Any] = {
+            "model": self.config.model_id,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": content},
+            ],
+        }
+        if self.config.provider == "openai":
+            payload["max_completion_tokens"] = self.config.max_tokens
+            payload["reasoning_effort"] = "high"
+        else:
+            payload["temperature"] = self.config.temperature
+            payload["max_tokens"] = self.config.max_tokens
+        if self.config.structured_output:
+            payload["response_format"] = {"type": "json_object"}
+
+        last_error: Exception | None = None
+        for _attempt in range(max(1, self.config.max_retries + 1)):
+            try:
+                raw = await self._post(payload)
+                raw_text = _extract_message_text(raw)
+                return DoubaoResponse(
+                    parsed=parse_json_text(raw_text), raw_text=raw_text, raw_payload=raw
+                )
+            except Exception as exc:
+                last_error = exc
+        raise RuntimeError(str(last_error) if last_error else "模型调用失败")
+
     async def test_connection(self) -> str:
         payload = {
             "model": self.config.model_id,
             "messages": [{"role": "user", "content": "只回复：连接成功"}],
-            "temperature": 0,
-            "max_tokens": 16,
         }
+        if self.config.provider == "openai":
+            payload["max_completion_tokens"] = 64
+            payload["reasoning_effort"] = "low"
+        else:
+            payload["temperature"] = 0
+            payload["max_tokens"] = 16
         raw = await self._post(payload)
         return _extract_message_text(raw).strip()

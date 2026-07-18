@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react"
-import { ArrowClockwise, Check, MagicWand, Plus, UploadSimple } from "@phosphor-icons/react"
+import { ArrowClockwise, Check, MagicWand, Plus, Sparkle, UploadSimple, WarningCircle } from "@phosphor-icons/react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { toast } from "sonner"
 
@@ -9,13 +9,20 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
 import { api, jsonBody } from "@/lib/api"
-import type { PromptVersion } from "@/lib/types"
+import type { OptimizerConfig, PromptOptimizationRun, PromptVersion, SampleSetSummary } from "@/lib/types"
 
 export function PromptsPage() {
   const queryClient = useQueryClient()
   const prompts = useQuery({
     queryKey: ["prompts"],
     queryFn: () => api<{ items: PromptVersion[] }>("/api/prompts"),
+  })
+  const sampleSets = useQuery({ queryKey: ["sample-sets"], queryFn: () => api<{ items: SampleSetSummary[] }>("/api/sample-sets") })
+  const optimizerConfig = useQuery({ queryKey: ["optimizer-config"], queryFn: () => api<OptimizerConfig>("/api/optimizer-config") })
+  const optimizations = useQuery({
+    queryKey: ["prompt-optimizations"],
+    queryFn: () => api<{ items: PromptOptimizationRun[] }>("/api/prompt-optimizations"),
+    refetchInterval: (query) => query.state.data?.items.some((item) => ["queued", "running"].includes(item.status)) ? 2500 : false,
   })
   const [selectedId, setSelectedId] = useState<number | null>(null)
   const selected = useMemo(
@@ -27,6 +34,7 @@ export function PromptsPage() {
   const [version, setVersion] = useState("")
   const [changeNote, setChangeNote] = useState("")
   const [aiInstruction, setAiInstruction] = useState("")
+  const [sampleSetId, setSampleSetId] = useState<number | null>(null)
 
   useEffect(() => {
     if (!selected) return
@@ -80,13 +88,36 @@ export function PromptsPage() {
     },
     onError: (error) => toast.error(error.message),
   })
+  const startOptimization = useMutation({
+    mutationFn: () => api<{ id: number }>("/api/prompt-optimizations", { method: "POST", ...jsonBody({ prompt_id: selected?.id, sample_set_id: sampleSetId }) }),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["prompt-optimizations"] })
+      toast.success("已创建样本驱动的提示词优化任务")
+    },
+    onError: (error) => toast.error(error.message),
+  })
+
+  const latestOptimization = optimizations.data?.items.find((item) => item.base_prompt_id === selected?.id) ?? optimizations.data?.items[0]
+
+  function loadCandidate(run: PromptOptimizationRun) {
+    setSystemPrompt(run.candidate_system_prompt)
+    setUserPrompt(run.candidate_user_prompt)
+    setChangeNote(run.change_note)
+    setVersion(`${selected?.version || "prompt-b"}-sol-draft`)
+    toast.success("候选提示词已载入编辑器，请检查后另存草稿")
+  }
+
+  const diagnosis = latestOptimization?.diagnosis ?? {}
+  const samplePolicy = diagnosis.sample_policy ?? {}
+  const promptChanges = Array.isArray(diagnosis.prompt_changes) ? diagnosis.prompt_changes : []
+  const activeOptimization = latestOptimization && ["queued", "running"].includes(latestOptimization.status)
 
   return (
     <>
       <PageHeader
         index="05"
         title="提示词工作室"
-        description="AI 只能生成修改草案；新版本必须保存、评测并由人工发布，线上版本不会被直接覆盖。"
+        description="使用人工维度纠错样本定位高频误判，生成候选提示词。候选版本必须回测、另存并由人工发布。"
         actions={
           <>
             <Button variant="secondary" onClick={() => prompts.refetch()}><ArrowClockwise />刷新</Button>
@@ -118,6 +149,32 @@ export function PromptsPage() {
               <div><p className="font-data text-xs text-[var(--muted)]">调用 {selected.stage} · {selected.rubric_version}</p><h2 className="font-editorial mt-2 text-3xl font-bold">{selected.name}</h2><p className="mt-2 text-sm text-[var(--muted)]">当前选择：{selected.version}，创建者 {selected.created_by}</p></div>
               {selected.status !== "published" && <Button onClick={() => publish.mutate()} disabled={publish.isPending}><UploadSimple />发布此版本</Button>}
             </div>
+
+            <section className="mt-7 border-y border-[var(--line-strong)] bg-white">
+              <div className="grid gap-5 p-5 xl:grid-cols-[minmax(0,1fr)_240px_auto] xl:items-end">
+                <div>
+                  <div className="flex items-center gap-2"><Sparkle size={20} weight="fill" /><h3 className="font-semibold">从人工校验样本生成候选提示词</h3></div>
+                  <p className="mt-2 max-w-[72ch] text-xs leading-5 text-[var(--muted)]">SOL 会读取样本中的维度纠错、原因和图片，保留一部分图片作为盲测，不会直接改动当前提示词。</p>
+                </div>
+                <label><span className="mb-2 block text-xs font-semibold">选择校验样本集</span><select className="h-11 w-full rounded-[4px] border border-[var(--line-strong)] bg-white px-3 text-sm" value={sampleSetId ?? ""} onChange={(event) => setSampleSetId(event.target.value ? Number(event.target.value) : null)}><option value="">请选择样本集</option>{sampleSets.data?.items.map((set) => <option key={set.id} value={set.id}>{set.name} · {set.item_count}张</option>)}</select></label>
+                <Button onClick={() => startOptimization.mutate()} disabled={!sampleSetId || selected.stage !== "B" || !optimizerConfig.data?.has_api_key || Boolean(activeOptimization) || startOptimization.isPending}>{activeOptimization ? "SOL 正在分析" : "生成候选提示词"}<MagicWand /></Button>
+              </div>
+              {!optimizerConfig.data?.has_api_key && <div className="flex items-start gap-2 border-t border-[var(--line)] bg-[#fff9ef] px-5 py-3 text-xs leading-5 text-[#7d4308]"><WarningCircle className="mt-0.5 shrink-0" />请先到“模型配置”填写 SOL API Key。Codex 登录权限不能直接供网站调用。</div>}
+              {selected.stage !== "B" && <div className="border-t border-[var(--line)] px-5 py-3 text-xs text-[var(--muted)]">样本驱动优化目前用于调用 B 的八个美感维度。请选择调用 B 的提示词版本。</div>}
+              {latestOptimization && <div className="border-t border-[var(--line)] px-5 py-4">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div><p className="text-sm font-semibold">最近一次：{latestOptimization.sample_set_name}</p><p className="font-data mt-1 text-xs text-[var(--muted)]">{latestOptimization.optimizer_model_id} · {latestOptimization.sample_count || "—"} 张已校验样本</p></div>
+                  <Badge tone={latestOptimization.status === "completed" ? "success" : latestOptimization.status === "failed" ? "warning" : "active"}>{latestOptimization.status === "completed" ? "候选已生成" : latestOptimization.status === "failed" ? "生成失败" : `分析中 ${latestOptimization.progress}%`}</Badge>
+                </div>
+                {activeOptimization && <div className="mt-4 h-1.5 overflow-hidden bg-[#edf0e9]"><div className="h-full bg-primary transition-[width] duration-200" style={{ width: `${latestOptimization.progress}%` }} /></div>}
+                {latestOptimization.error_message && <p className="mt-3 text-xs leading-5 text-[#8d2924]">{latestOptimization.error_message}</p>}
+                {latestOptimization.status === "completed" && <div className="mt-4 grid gap-4 xl:grid-cols-[220px_1fr_auto] xl:items-start">
+                  <div className="grid grid-cols-2 gap-px border border-[var(--line)] bg-[var(--line)] text-center"><div className="bg-white px-3 py-3"><p className="font-data text-xl font-semibold">{samplePolicy.analysis_count ?? "—"}</p><p className="mt-1 text-[0.68rem] text-[var(--muted)]">参与诊断</p></div><div className="bg-white px-3 py-3"><p className="font-data text-xl font-semibold">{samplePolicy.blind_holdout_count ?? 0}</p><p className="mt-1 text-[0.68rem] text-[var(--muted)]">保留盲测</p></div></div>
+                  <div><p className="text-xs font-semibold">建议修改 {promptChanges.length} 处</p><div className="mt-2 space-y-2">{promptChanges.slice(0, 4).map((change: any, index: number) => <div key={index} className="border-t border-[var(--line)] pt-2 text-xs leading-5"><span className="font-semibold">{change.section || "提示词规则"}</span><span className="ml-2 text-[var(--muted)]">{change.reason || change.operation || "根据人工纠错样本调整"}</span></div>)}</div></div>
+                  <Button onClick={() => loadCandidate(latestOptimization)}>载入候选内容</Button>
+                </div>}
+              </div>}
+            </section>
 
             <section className="mt-7 grid gap-4 border-y border-[var(--line-strong)] bg-white p-4 xl:grid-cols-[minmax(0,1fr)_280px] xl:p-5">
               <div>

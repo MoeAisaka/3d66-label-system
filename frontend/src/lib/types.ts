@@ -31,10 +31,20 @@ export type Evaluation = {
     decision: "approved" | "corrected" | "rejected"
     corrected_level: string | null
     note: string
+    corrections: ReviewCorrection[]
     created_at: string
   } | null
   versions: Record<string, string | null>
   created_at: string
+}
+
+export type ReviewCorrection = {
+  target_type: "dimension" | "scoring"
+  field_key: string
+  model_value: number | string | null
+  human_value: number | string | null
+  reason_codes: string[]
+  note: string
 }
 
 export type Asset = {
@@ -83,6 +93,8 @@ export type ModelConfig = {
   updated_at: string
 }
 
+export type OptimizerConfig = Omit<ModelConfig, "max_concurrency">
+
 export type PromptVersion = {
   id: number
   stage: "A" | "B"
@@ -96,6 +108,27 @@ export type PromptVersion = {
   change_note: string
   created_by: string
   created_at: string
+}
+
+export type PromptOptimizationRun = {
+  id: number
+  base_prompt_id: number
+  base_prompt_version: string
+  sample_set_id: number
+  sample_set_name: string
+  optimizer_model_id: string
+  status: "queued" | "running" | "completed" | "failed"
+  progress: number
+  sample_count: number
+  corrected_count: number
+  diagnosis: Record<string, any>
+  candidate_system_prompt: string
+  candidate_user_prompt: string
+  change_note: string
+  error_message: string
+  created_by: string
+  created_at: string
+  finished_at: string | null
 }
 
 export type SampleSetSummary = {

@@ -4,7 +4,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .config import get_settings
-from .models import ModelConfig, PromptVersion, User
+from .models import ModelConfig, OptimizerConfig, PromptVersion, User
 from .prompt_loader import load_prompt_pairs
 from .security import DEFAULT_ADMIN_PASSWORD_HASH
 
@@ -21,6 +21,9 @@ def seed_defaults(db: Session) -> None:
 
     if db.scalar(select(ModelConfig).limit(1)) is None:
         db.add(ModelConfig())
+
+    if db.scalar(select(OptimizerConfig).limit(1)) is None:
+        db.add(OptimizerConfig())
 
     if db.scalar(select(PromptVersion).limit(1)) is None:
         pairs = load_prompt_pairs(get_settings().prompt_source)

@@ -9,7 +9,6 @@ import {
   MagnifyingGlassPlus,
   PencilSimple,
   WarningCircle,
-  X,
 } from "@phosphor-icons/react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { Link, useSearchParams } from "react-router-dom"
@@ -19,21 +18,10 @@ import { PageHeader } from "@/components/app-shell"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
-import { Textarea } from "@/components/ui/textarea"
 import { api, jsonBody } from "@/lib/api"
-import type { Asset } from "@/lib/types"
+import type { Asset, ReviewCorrection } from "@/lib/types"
+import { dimensionLabels, ReviewCorrectionForm } from "@/pages/review-correction-form"
 import { filterReviewAssets, ReviewList } from "@/pages/review-list"
-
-const dimensionLabels: Record<string, string> = {
-  composition_viewpoint: "构图与机位",
-  lighting_atmosphere: "光影与氛围",
-  color_material: "色彩与材质",
-  spatial_design_furnishing: "空间设计与家具软装",
-  visual_hierarchy: "视觉层级",
-  detail_completion: "细节完成度",
-  inspiration_reference: "灵感与参考价值",
-  presentation_integrity: "画面呈现完整性",
-}
 
 export function ReviewPage() {
   const [searchParams, setSearchParams] = useSearchParams()
@@ -42,9 +30,6 @@ export function ReviewPage() {
   const [reviewer, setReviewer] = useState(() => localStorage.getItem("3d66-reviewer") || "")
   const [note, setNote] = useState("")
   const [correctionOpen, setCorrectionOpen] = useState(false)
-  const [correctedLevel, setCorrectedLevel] = useState<string | null>(null)
-  const [correctionNote, setCorrectionNote] = useState("")
-  const [correctionError, setCorrectionError] = useState("")
   const queryClient = useQueryClient()
   const assets = useQuery({
     queryKey: ["assets", "review-list"],
@@ -72,15 +57,7 @@ export function ReviewPage() {
     setZoom(100)
     setNote("")
     setCorrectionOpen(false)
-    setCorrectedLevel(null)
-    setCorrectionNote("")
-    setCorrectionError("")
   }, [currentId])
-
-  useEffect(() => {
-    if (!evaluation) return
-    setCorrectedLevel(evaluation.human_review?.corrected_level || evaluation.level)
-  }, [evaluation?.id, evaluation?.human_review?.corrected_level, evaluation?.level])
 
   const mediaLabels = useMemo(() => {
     const media = evaluation?.precheck?.media_form ?? {}
@@ -101,18 +78,16 @@ export function ReviewPage() {
     onError: (error) => toast.error(error.message),
   })
   const review = useMutation({
-    mutationFn: ({ decision, corrected_level, reviewNote }: { decision: "approved" | "corrected" | "rejected"; corrected_level: string | null; reviewNote: string }) =>
+    mutationFn: ({ decision, corrected_level, reviewNote, corrections = [] }: { decision: "approved" | "corrected" | "rejected"; corrected_level: string | null; reviewNote: string; corrections?: ReviewCorrection[] }) =>
       api(`/api/evaluations/${evaluation?.id}/review`, {
         method: "POST",
-        ...jsonBody({ reviewer_name: reviewer, decision, corrected_level, note: reviewNote }),
+        ...jsonBody({ reviewer_name: reviewer, decision, corrected_level, note: reviewNote, corrections }),
       }),
     onSuccess: async (_data, variables) => {
       localStorage.setItem("3d66-reviewer", reviewer)
       setCorrectionOpen(false)
-      setCorrectionError("")
       setNote("")
-      setCorrectionNote("")
-      toast.success(variables.decision === "corrected" ? "人工最终等级已保存，模型原始结果仍保留" : variables.decision === "approved" ? "已确认模型结果" : "已退回复核")
+      toast.success(variables.decision === "corrected" ? "人工维度纠错和最终结果已保存" : variables.decision === "approved" ? "已确认模型结果" : "已退回复核")
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ["asset", currentId] }),
         queryClient.invalidateQueries({ queryKey: ["assets"] }),
@@ -121,27 +96,6 @@ export function ReviewPage() {
     },
     onError: (error) => toast.error(error.message),
   })
-
-  function submitCorrection() {
-    if (!reviewer.trim()) {
-      setCorrectionError("请先填写审核姓名")
-      return
-    }
-    if (!correctedLevel) {
-      setCorrectionError("请选择人工最终等级")
-      return
-    }
-    if (correctedLevel === evaluation?.level) {
-      setCorrectionError("人工等级与模型一致时，请使用“确认结果”")
-      return
-    }
-    if (!correctionNote.trim()) {
-      setCorrectionError("请填写修改原因，说明可见证据或判断依据")
-      return
-    }
-    setCorrectionError("")
-    review.mutate({ decision: "corrected", corrected_level: correctedLevel, reviewNote: correctionNote.trim() })
-  }
 
   function go(offset: number) {
     if (!filteredAssets.length || currentIndex < 0) return
@@ -187,7 +141,7 @@ export function ReviewPage() {
           <Button asChild className="mt-6"><Link to="/assets">前往素材页<ArrowRight /></Link></Button>
         </div>
       ) : (
-        <div className="mx-auto grid max-w-[1720px] gap-0 bg-white xl:grid-cols-[minmax(0,1fr)_410px]">
+        <div className="mx-auto grid max-w-[1820px] gap-0 bg-white xl:grid-cols-[minmax(0,1fr)_560px]">
           <section className="min-w-0 border-r border-[var(--line)]">
             <div className="flex min-h-14 flex-wrap items-center justify-between gap-2 border-b border-[var(--line)] px-4 py-2">
               <div className="min-w-0">
@@ -286,6 +240,7 @@ export function ReviewPage() {
                         <span className="font-data text-[0.68rem] text-[var(--muted)]">{evaluation.human_review.reviewer_name} · {new Date(evaluation.human_review.created_at).toLocaleString("zh-CN")}</span>
                       </div>
                       {evaluation.human_review.note && <p className="mt-2 text-xs leading-5 text-[var(--muted)]">{evaluation.human_review.note}</p>}
+                      {(evaluation.human_review.corrections?.length ?? 0) > 0 && <div className="mt-3 flex flex-wrap gap-1.5">{evaluation.human_review.corrections.map((correction, index) => <Badge key={`${correction.field_key}-${index}`} tone="active">{correction.target_type === "dimension" ? dimensionLabels[correction.field_key] || correction.field_key : "评分规则"}{correction.target_type === "dimension" ? ` ${correction.model_value}→${correction.human_value}` : ""}</Badge>)}</div>}
                     </div>
                   )}
                   <div className="grid grid-cols-2 gap-3">
@@ -295,35 +250,14 @@ export function ReviewPage() {
                   <label className="mt-3 block"><span className="mb-2 block text-xs font-semibold">审核说明（确认或退回时可选）</span><Input value={note} onChange={(event) => setNote(event.target.value)} placeholder="补充判断依据" /></label>
                   <div className="mt-3 grid grid-cols-3 gap-2">
                     <Button variant="secondary" onClick={() => review.mutate({ decision: "rejected", corrected_level: null, reviewNote: note.trim() })} disabled={!reviewer || review.isPending}>退回复核</Button>
-                    <Button variant="secondary" onClick={() => { setCorrectionOpen((value) => !value); setCorrectionError("") }} disabled={review.isPending}><PencilSimple />修改等级</Button>
+                    <Button variant="secondary" onClick={() => setCorrectionOpen((value) => !value)} disabled={review.isPending}><PencilSimple />纠正结果</Button>
                     <Button onClick={() => review.mutate({ decision: "approved", corrected_level: null, reviewNote: note.trim() })} disabled={!reviewer || review.isPending}><Check weight="bold" />确认结果</Button>
                   </div>
 
-                  {correctionOpen && (
-                    <section className="mt-4 border-y border-[var(--line-strong)] bg-[#f8faf4] px-4 py-4" aria-labelledby="correction-title">
-                      <div className="flex items-start justify-between gap-4">
-                        <div><h3 id="correction-title" className="text-sm font-semibold">修改人工最终等级</h3><p className="mt-1 text-xs leading-5 text-[var(--muted)]">模型原始等级 {evaluation.level} 和原始响应不会被覆盖。</p></div>
-                        <Button variant="ghost" size="icon" className="-mr-2 -mt-2" onClick={() => { setCorrectionOpen(false); setCorrectionError("") }} aria-label="关闭修改等级"><X /></Button>
-                      </div>
-                      <div className="mt-4 grid grid-cols-5 gap-2" role="radiogroup" aria-label="人工最终等级">
-                        {["L1", "L2", "L3", "L4", "L5"].map((level) => (
-                          <button
-                            key={level}
-                            type="button"
-                            role="radio"
-                            aria-checked={correctedLevel === level}
-                            onClick={() => { setCorrectedLevel(level); setCorrectionError("") }}
-                            className={`min-h-11 rounded-[4px] border text-sm font-semibold transition-colors ${correctedLevel === level ? "border-[#7f991b] bg-primary text-foreground" : "border-[var(--line-strong)] bg-white hover:bg-[#f3f5f0]"}`}
-                          >
-                            {level}{level === evaluation.level && <span className="ml-1 text-[0.65rem] font-normal">模型</span>}
-                          </button>
-                        ))}
-                      </div>
-                      <label className="mt-4 block"><span className="mb-2 block text-xs font-semibold">修改原因（必填）</span><Textarea value={correctionNote} onChange={(event) => { setCorrectionNote(event.target.value); setCorrectionError("") }} placeholder="例如：主体空间完整，但模型把艺术性浅景深误判为画质缺陷" rows={3} aria-describedby={correctionError ? "correction-error" : undefined} /></label>
-                      {correctionError && <p id="correction-error" role="alert" className="mt-2 flex items-start gap-2 text-xs leading-5 text-[#8d2924]"><WarningCircle className="mt-0.5 shrink-0" />{correctionError}</p>}
-                      <Button className="mt-4 w-full" onClick={submitCorrection} disabled={review.isPending}>{review.isPending ? "正在保存人工结果" : "保存人工最终等级"}</Button>
-                    </section>
-                  )}
+                  {correctionOpen && <ReviewCorrectionForm dimensions={dimensions} modelLevel={evaluation.level} pending={review.isPending} onCancel={() => setCorrectionOpen(false)} onSubmit={({ correctedLevel, note: correctionNote, corrections }) => {
+                    if (!reviewer.trim()) { toast.error("请先填写审核姓名"); return }
+                    review.mutate({ decision: "corrected", corrected_level: correctedLevel, reviewNote: correctionNote, corrections })
+                  }} />}
                 </div>
               </>
             )}

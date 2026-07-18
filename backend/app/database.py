@@ -54,6 +54,13 @@ def init_database() -> None:
             connection.exec_driver_sql(
                 "ALTER TABLE migration_items ADD COLUMN sample_expected_level VARCHAR(10)"
             )
+        review_columns = {
+            row[1] for row in connection.exec_driver_sql("PRAGMA table_info(human_reviews)")
+        }
+        if "corrections_json" not in review_columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE human_reviews ADD COLUMN corrections_json TEXT NOT NULL DEFAULT '[]'"
+            )
 
 
 def get_db() -> Generator[Session, None, None]:

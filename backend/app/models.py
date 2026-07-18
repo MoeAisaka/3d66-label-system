@@ -58,6 +58,26 @@ class ModelConfig(Base):
     )
 
 
+class OptimizerConfig(Base):
+    __tablename__ = "optimizer_configs"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(120), default="SOL 提示词诊断模型")
+    provider: Mapped[str] = mapped_column(String(40), default="openai")
+    base_url: Mapped[str] = mapped_column(String(300), default="https://api.openai.com/v1")
+    api_path: Mapped[str] = mapped_column(String(120), default="/chat/completions")
+    model_id: Mapped[str] = mapped_column(String(200), default="gpt-5.6-sol")
+    encrypted_api_key: Mapped[str | None] = mapped_column(Text, nullable=True)
+    temperature: Mapped[float] = mapped_column(Float, default=0.1)
+    max_tokens: Mapped[int] = mapped_column(Integer, default=12000)
+    timeout_seconds: Mapped[int] = mapped_column(Integer, default=300)
+    max_retries: Mapped[int] = mapped_column(Integer, default=1)
+    structured_output: Mapped[bool] = mapped_column(Boolean, default=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+
 class PromptVersion(Base):
     __tablename__ = "prompt_versions"
 
@@ -148,6 +168,7 @@ class HumanReview(Base):
     decision: Mapped[str] = mapped_column(String(30))
     corrected_level: Mapped[str | None] = mapped_column(String(10), nullable=True)
     note: Mapped[str] = mapped_column(Text, default="")
+    corrections_json: Mapped[str] = mapped_column(Text, default="[]")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     evaluation: Mapped[EvaluationResult] = relationship(back_populates="reviews")
 
@@ -188,6 +209,34 @@ class SampleSetItem(Base):
     sample_set: Mapped[SampleSet] = relationship(back_populates="items")
     asset: Mapped[Asset] = relationship()
     source_result: Mapped[EvaluationResult] = relationship()
+
+
+class PromptOptimizationRun(Base):
+    __tablename__ = "prompt_optimization_runs"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    base_prompt_id: Mapped[int] = mapped_column(
+        ForeignKey("prompt_versions.id", ondelete="CASCADE"), index=True
+    )
+    sample_set_id: Mapped[int] = mapped_column(
+        ForeignKey("sample_sets.id", ondelete="CASCADE"), index=True
+    )
+    optimizer_model_id: Mapped[str] = mapped_column(String(200))
+    status: Mapped[str] = mapped_column(String(30), default="queued", index=True)
+    progress: Mapped[int] = mapped_column(Integer, default=0)
+    sample_count: Mapped[int] = mapped_column(Integer, default=0)
+    corrected_count: Mapped[int] = mapped_column(Integer, default=0)
+    diagnosis_json: Mapped[str] = mapped_column(Text, default="{}")
+    candidate_system_prompt: Mapped[str] = mapped_column(Text, default="")
+    candidate_user_prompt: Mapped[str] = mapped_column(Text, default="")
+    change_note: Mapped[str] = mapped_column(Text, default="")
+    error_message: Mapped[str] = mapped_column(Text, default="")
+    created_by: Mapped[str] = mapped_column(String(80), default="system")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    base_prompt: Mapped[PromptVersion] = relationship()
+    sample_set: Mapped[SampleSet] = relationship()
 
 
 class MigrationRun(Base):
