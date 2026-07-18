@@ -26,7 +26,20 @@ const statusNames: Record<string, string> = {
   approved: "已确认",
   rejected: "已退回复核",
   unevaluated: "未评测",
+  out_of_scope: "范围外",
+  incomplete: "结果不完整",
 }
+
+const requiredDimensionKeys = [
+  "composition_viewpoint",
+  "lighting_atmosphere",
+  "color_material",
+  "spatial_design_furnishing",
+  "visual_hierarchy",
+  "detail_completion",
+  "inspiration_reference",
+  "presentation_integrity",
+]
 
 const qualityNames: Record<string, string> = {
   good: "画质正常",
@@ -38,6 +51,9 @@ const qualityNames: Record<string, string> = {
 
 function reviewStatus(asset: Asset) {
   if (!asset.evaluation) return "unevaluated"
+  if (asset.evaluation.precheck?.classification?.scope_status === "out_of_scope") return "out_of_scope"
+  const dimensions = asset.evaluation.aesthetic?.dimensions ?? {}
+  if (requiredDimensionKeys.some((key) => !Number(dimensions[key]?.grade))) return "incomplete"
   return asset.evaluation.human_review?.decision || "pending"
 }
 
@@ -129,6 +145,7 @@ function statusTone(status: string) {
   if (status === "corrected" || status === "approved") return "success" as const
   if (status === "rejected") return "warning" as const
   if (status === "pending") return "active" as const
+  if (status === "incomplete") return "danger" as const
   return "neutral" as const
 }
 
@@ -200,12 +217,13 @@ export function ReviewList({ items, loading, searchParams, setSearchParams }: { 
               const category = evaluation?.precheck?.classification?.primary_category || "无法判断"
               const quality = normalizedQuality(evaluation?.precheck?.image_quality?.quality_severity)
               const forms = mediaLabels(asset)
+              const nonScored = status === "out_of_scope" || status === "incomplete"
               return <tr key={asset.id} className="border-b border-[var(--line)] last:border-0 hover:bg-[#fbfcfa]">
                 <td className="px-4 py-3"><div className="flex min-w-0 items-center gap-3"><img src={asset.image_url} alt="" loading="lazy" className="size-16 rounded-[4px] border border-[var(--line)] object-cover" /><div className="min-w-0"><p className="file-name max-w-[260px] truncate">{asset.name}</p><p className="font-data mt-1 text-[0.68rem] text-[var(--muted)]">#{String(asset.id).padStart(5, "0")} · {asset.width} × {asset.height}</p></div></div></td>
                 <td className="px-3 py-3"><Badge tone="active">{category}</Badge><div className="mt-2 flex max-w-52 flex-wrap gap-1">{forms.slice(0, 3).map((label) => <Badge key={label}>{label}</Badge>)}{forms.length > 3 && <Badge>+{forms.length - 3}</Badge>}</div></td>
                 <td className="px-3 py-3"><span className={`text-xs font-semibold ${quality === "severe" || quality === "unusable" ? "text-[#8d2924]" : "text-[var(--muted)]"}`}>{qualityNames[quality] || quality || "—"}</span>{(evaluation?.scoring?.caps?.length ?? 0) > 0 && <p className="mt-2 text-xs text-[#7d4308]">{evaluation?.scoring.caps.length} 项等级限制</p>}</td>
-                <td className="px-3 py-3"><div className="flex items-baseline gap-2"><strong className="font-data text-xl">{level || "—"}</strong><span className="font-data text-xs text-[var(--muted)]">{evaluation?.score?.toFixed(1) ?? "—"}</span></div>{evaluation?.final_level !== evaluation?.level && <p className="mt-1 text-xs text-[var(--muted)]">模型 {evaluation?.level}</p>}</td>
-                <td className="font-data px-3 py-3"><span className={evaluation?.confidence != null && evaluation.confidence < 0.7 ? "font-semibold text-[#8d2924]" : ""}>{evaluation?.confidence != null ? `${Math.round(evaluation.confidence * 100)}%` : "—"}</span>{evaluation?.needs_review && <p className="mt-2 text-xs text-[#7d4308]">需要复核</p>}</td>
+                <td className="px-3 py-3">{status === "out_of_scope" ? <><Badge>范围外</Badge><p className="mt-2 text-xs text-[var(--muted)]">A 判定后未调用 B</p></> : status === "incomplete" ? <><Badge tone="danger">结果不完整</Badge><p className="mt-2 text-xs text-[#8d2924]">缺少八维数据</p></> : <><div className="flex items-baseline gap-2"><strong className="font-data text-xl">{level || "—"}</strong><span className="font-data text-xs text-[var(--muted)]">{evaluation?.score?.toFixed(1) ?? "—"}</span></div>{evaluation?.final_level !== evaluation?.level && <p className="mt-1 text-xs text-[var(--muted)]">模型 {evaluation?.level}</p>}</>}</td>
+                <td className="font-data px-3 py-3"><span className={evaluation?.confidence != null && evaluation.confidence < 0.7 ? "font-semibold text-[#8d2924]" : ""}>{nonScored ? "不适用" : evaluation?.confidence != null ? `${Math.round(evaluation.confidence * 100)}%` : "—"}</span>{evaluation?.needs_review && <p className="mt-2 text-xs text-[#7d4308]">需要复核</p>}</td>
                 <td className="px-3 py-3"><Badge tone={statusTone(status)}>{statusNames[status]}</Badge>{evaluation?.human_review && <p className="mt-2 max-w-32 truncate text-xs text-[var(--muted)]">{evaluation.human_review.reviewer_name}</p>}</td>
                 <td className="px-3 py-3"><p className="font-data max-w-44 truncate text-xs" title={evaluation?.versions.model || ""}>{evaluation?.versions.model || "—"}</p><p className="font-data mt-2 text-[0.68rem] text-[var(--muted)]">A {evaluation?.versions.prompt_a || "—"}{evaluation?.versions.prompt_b ? ` · B ${evaluation.versions.prompt_b}` : ""}</p></td>
                 <td className="w-28 px-4 py-3 text-right"><Button asChild size="sm" variant="secondary"><Link to={detailUrl(asset.id, searchParams)}><span>审核</span><ArrowRight /></Link></Button></td>

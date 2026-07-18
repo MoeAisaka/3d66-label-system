@@ -21,7 +21,8 @@ from .worker import run_forever
 
 def _worker_entry() -> None:
     signal.signal(signal.SIGINT, signal.SIG_IGN)
-    run_forever()
+    parent = mp.parent_process()
+    run_forever(should_continue=lambda: parent is None or parent.is_alive())
 
 
 def _local_ip() -> str | None:

@@ -144,3 +144,33 @@ def repair_combined_aesthetic_results(db: Session) -> int:
     if repaired:
         db.commit()
     return repaired
+
+
+def rescore_stored_results(db: Session) -> int:
+    """Apply the latest deterministic scoring rules to unreviewed stored model outputs."""
+    rescored = 0
+    results = db.scalars(
+        select(EvaluationResult).where(EvaluationResult.engine_version != ENGINE_VERSION)
+    ).all()
+    for result in results:
+        if result.reviews:
+            continue
+        try:
+            precheck = json.loads(result.precheck_json)
+            aesthetic = json.loads(result.aesthetic_json) if result.aesthetic_json else None
+        except (TypeError, json.JSONDecodeError):
+            continue
+        try:
+            scoring = calculate_score(precheck, aesthetic)
+        except (TypeError, ValueError):
+            continue
+        result.scoring_json = json.dumps(scoring, ensure_ascii=False)
+        result.score = scoring.get("score")
+        result.level = scoring.get("level")
+        result.confidence = scoring.get("confidence")
+        result.needs_review = bool(scoring.get("needs_review"))
+        result.engine_version = ENGINE_VERSION
+        rescored += 1
+    if rescored:
+        db.commit()
+    return rescored

@@ -73,6 +73,22 @@ def seed_defaults(db: Session) -> None:
             "filename": "space-aesthetic-dimensions-v1.3-split.1.md",
             "note": "从 space_aesthetic_v1.3-draft.2 拆分的 B 阶段美感提示词",
         },
+        {
+            "stage": "A",
+            "name": "空间图片严格预检与拍摄方式校准",
+            "version": "space_precheck_v1.3-split.2",
+            "filename": "space-precheck-v1.3-split.1.md",
+            "calibration_filename": "space-precheck-v1.3-split.2-calibration.md",
+            "note": "Split.2 严格区分专业摄影、现场记录和随拍，修正拍摄方式误判",
+        },
+        {
+            "stage": "B",
+            "name": "空间八维美感严格校准评价",
+            "version": "space_aesthetic_dimensions_v1.3-split.2",
+            "filename": "space-aesthetic-dimensions-v1.3-split.1.md",
+            "calibration_filename": "space-aesthetic-v1.3-split.2-calibration.md",
+            "note": "Split.2 以3级为基准，增加4/5级证据门槛和防机械同分校验",
+        },
     )
     for item in split_prompts:
         exists = db.scalar(
@@ -81,12 +97,18 @@ def seed_defaults(db: Session) -> None:
         if exists is not None:
             continue
         prompt = load_standalone_prompt(settings.project_root / "prompts" / item["filename"])
+        calibration_filename = item.get("calibration_filename")
+        calibration = (
+            (settings.project_root / "prompts" / calibration_filename).read_text(encoding="utf-8")
+            if calibration_filename
+            else ""
+        )
         db.add(
             PromptVersion(
                 stage=item["stage"],
                 name=item["name"],
                 version=item["version"],
-                system_prompt=prompt.system,
+                system_prompt=(prompt.system + "\n\n" + calibration).strip(),
                 user_prompt=prompt.user,
                 rubric_version="space-rubric-v1.3",
                 status="draft",

@@ -5,6 +5,7 @@ import json
 import logging
 import socket
 import time
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -231,15 +232,19 @@ async def process_one() -> bool:
     return True
 
 
-def run_forever(poll_seconds: float = 1.5) -> None:
+def run_forever(
+    poll_seconds: float = 1.5,
+    should_continue: Callable[[], bool] | None = None,
+) -> None:
     init_database()
     with session_scope() as db:
         seed_defaults(db)
     logger.info("Worker 已启动：%s", WORKER_ID)
-    while True:
+    while should_continue is None or should_continue():
         worked = asyncio.run(process_one())
         if not worked:
             time.sleep(poll_seconds)
+    logger.info("Worker 检测到主服务已退出，正在停止：%s", WORKER_ID)
 
 
 if __name__ == "__main__":

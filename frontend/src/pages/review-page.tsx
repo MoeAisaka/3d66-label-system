@@ -23,6 +23,8 @@ import type { Asset, ReviewCorrection } from "@/lib/types"
 import { dimensionLabels, ReviewCorrectionForm } from "@/pages/review-correction-form"
 import { filterReviewAssets, ReviewList } from "@/pages/review-list"
 
+const requiredDimensionKeys = Object.keys(dimensionLabels)
+
 export function ReviewPage() {
   const [searchParams, setSearchParams] = useSearchParams()
   const requestedId = Number(searchParams.get("asset") || 0)
@@ -52,6 +54,8 @@ export function ReviewPage() {
   const evaluation = asset?.evaluation
   const dimensions = evaluation?.aesthetic?.dimensions ?? {}
   const scoring = evaluation?.scoring
+  const scopeStatus = evaluation?.precheck?.classification?.scope_status
+  const completeDimensionCount = requiredDimensionKeys.filter((key) => Number(dimensions[key]?.grade)).length
 
   useEffect(() => {
     setZoom(100)
@@ -183,7 +187,7 @@ export function ReviewPage() {
           <aside className="min-w-0 bg-white">
             <div className="flex min-h-20 items-center justify-between border-b border-[var(--line)] px-5 py-4">
               <div><h2 className="font-editorial text-2xl font-bold">证据</h2><p className="mt-1 text-xs text-[var(--muted)]">八个审美维度</p></div>
-              {evaluation?.level && (
+              {scopeStatus !== "out_of_scope" && completeDimensionCount === requiredDimensionKeys.length && evaluation?.level && (
                 <div className="text-right">
                   {evaluation.human_review?.decision === "corrected" && <Badge tone="success" className="mb-2">人工最终</Badge>}
                   <p className="font-data text-3xl font-semibold">{evaluation.final_level || evaluation.level}</p>
@@ -200,6 +204,22 @@ export function ReviewPage() {
                 <h3 className="font-editorial mt-4 text-xl font-bold">{asset?.status === "queued" ? "等待模型处理" : "还没有评测结果"}</h3>
                 <p className="mt-2 text-sm leading-6 text-[var(--muted)]">任务完成后，这里会显示维度等级、证据、缺陷和最终限制。</p>
                 {asset?.status !== "queued" && <Button className="mt-6" onClick={() => enqueue.mutate()} disabled={enqueue.isPending}>开始评测<ArrowRight /></Button>}
+              </div>
+            ) : scopeStatus === "out_of_scope" ? (
+              <div className="flex min-h-[520px] flex-col items-center justify-center px-8 text-center">
+                <Badge>不参与空间美感评分</Badge>
+                <ImageSquare className="mt-5" size={32} weight="light" />
+                <h3 className="font-editorial mt-4 text-xl font-bold">A 阶段判定为范围外</h3>
+                <p className="mt-2 max-w-[46ch] text-sm leading-6 text-[var(--muted)]">该素材属于“{evaluation.precheck?.classification?.primary_category || "其他类型"}”，因此没有调用 B，也不会生成八个空间美感维度。这不是数据丢失。</p>
+                <Button className="mt-6" variant="secondary" onClick={() => enqueue.mutate()} disabled={enqueue.isPending}>使用当前版本重新评测<ArrowRight /></Button>
+              </div>
+            ) : completeDimensionCount < requiredDimensionKeys.length ? (
+              <div className="flex min-h-[520px] flex-col items-center justify-center px-8 text-center">
+                <Badge tone="danger">评测不完整</Badge>
+                <WarningCircle className="mt-5 text-[#8d2924]" size={32} weight="light" />
+                <h3 className="font-editorial mt-4 text-xl font-bold">缺少八维评分数据</h3>
+                <p className="mt-2 max-w-[46ch] text-sm leading-6 text-[var(--muted)]">当前结果只有 {completeDimensionCount} / {requiredDimensionKeys.length} 个有效维度，系统不会把它当作正式评分。请使用当前提示词版本重新评测。</p>
+                <Button className="mt-6" onClick={() => enqueue.mutate()} disabled={enqueue.isPending}>重新评测<ArrowRight /></Button>
               </div>
             ) : (
               <>

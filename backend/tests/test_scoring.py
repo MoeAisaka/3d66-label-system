@@ -84,3 +84,27 @@ def test_out_of_scope_skips_aesthetic_scoring() -> None:
     assert result["score"] is None
     assert result["level"] is None
 
+
+def test_calibrated_uniform_high_grades_with_weak_evidence_are_capped() -> None:
+    result_aesthetic = aesthetic(4)
+    result_aesthetic["scoring_profile"] = "space_aesthetic_v1.3"
+    for item in result_aesthetic["dimensions"].values():
+        item["evidence"] = ["只有一条笼统证据"]
+    result = calculate_score(precheck(), result_aesthetic)
+    assert result["raw_level"] == "L4"
+    assert result["level"] == "L3"
+    assert result["score"] == 74.0
+    assert result["needs_review"] is True
+    assert any("高分证据不足" in reason for reason in result["review_reasons"])
+
+
+def test_calibrated_l5_requires_high_confidence() -> None:
+    result_aesthetic = aesthetic(5)
+    result_aesthetic["scoring_profile"] = "space_aesthetic_v1.3"
+    result_aesthetic["assessment_confidence"] = 0.8
+    for item in result_aesthetic["dimensions"].values():
+        item["evidence"] = ["优势一", "优势二", "优势三"]
+    result = calculate_score(precheck(), result_aesthetic)
+    assert result["raw_level"] == "L5"
+    assert result["level"] == "L4"
+    assert result["score"] == 89.0

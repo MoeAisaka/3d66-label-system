@@ -32,3 +32,17 @@ def test_v13_split_prompts_match_runtime_contract() -> None:
     assert '"scoring_profile": "space_aesthetic_v1.3"' in prompt_b.system
     assert "{{precheck_json}}" in prompt_b.user
     assert "{{rubric_version}}" in prompt_b.user
+
+
+def test_v13_split2_calibration_has_strict_high_grade_gates() -> None:
+    prompt_a_calibration = (
+        PROJECT_ROOT / "prompts" / "space-precheck-v1.3-split.2-calibration.md"
+    ).read_text(encoding="utf-8")
+    prompt_b_calibration = (
+        PROJECT_ROOT / "prompts" / "space-aesthetic-v1.3-split.2-calibration.md"
+    ).read_text(encoding="utf-8")
+    assert "professional_photography=yes" in prompt_a_calibration
+    assert "documentary_record.status=yes" in prompt_a_calibration
+    assert "以3级为默认基准" in prompt_b_calibration
+    assert "每个4级维度必须" in prompt_b_calibration
+    assert "至少五个维度为5级" in prompt_b_calibration

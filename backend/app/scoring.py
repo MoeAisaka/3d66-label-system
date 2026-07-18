@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 
-ENGINE_VERSION = "engine-v2.2.0"
+ENGINE_VERSION = "engine-v2.3.0"
 
 GRADE_POINTS = {1: 20.0, 2: 45.0, 3: 65.0, 4: 82.0, 5: 95.0}
 WEIGHTS = {
@@ -71,6 +71,7 @@ def calculate_score(precheck: dict[str, Any], aesthetic: dict[str, Any] | None) 
 
     weighted_score = 0.0
     dimension_points: dict[str, dict[str, float | int]] = {}
+    dimension_grades: dict[str, int] = {}
     dimensions = aesthetic.get("dimensions") or {}
     weights = (
         COMBINED_WEIGHTS
@@ -84,17 +85,20 @@ def calculate_score(precheck: dict[str, Any], aesthetic: dict[str, Any] | None) 
             raise ValueError(f"维度 {key} 的等级无效：{grade}")
         points = GRADE_POINTS[grade]
         weighted_score += points * weight
+        dimension_grades[key] = grade
         dimension_points[key] = {"grade": grade, "points": points, "weight": weight}
 
     score = round(weighted_score, 2)
     raw_level = _level_for_score(score)
     final_level = raw_level
+    final_score = score
     caps: list[dict[str, Any]] = []
 
     def apply_cap(cap: int, reason: str) -> None:
-        nonlocal final_level
+        nonlocal final_level, final_score
         before = final_level
         final_level = _cap_level(final_level, cap)
+        final_score = min(final_score, {1: 39.0, 2: 59.0, 3: 74.0, 4: 89.0}[cap])
         if before != final_level or int(raw_level[1:]) > cap:
             caps.append({"cap": f"L{cap}", "reason": reason})
 
@@ -138,6 +142,39 @@ def calculate_score(precheck: dict[str, Any], aesthetic: dict[str, Any] | None) 
             if score < 90 or grade_fives < 2:
                 apply_cap(4, "效果图进入 L5 的原始分或 5 级特殊检查数量不足")
 
+    model_review = bool(precheck.get("needs_review")) or bool(aesthetic.get("needs_review"))
+    confidence = float(aesthetic.get("assessment_confidence") or 0.0)
+
+    if aesthetic.get("scoring_profile") == "space_aesthetic_v1.3":
+        grade_values = list(dimension_grades.values())
+        if len(set(grade_values)) == 1 and grade_values[0] >= 4:
+            review_reasons.append("八维高分完全一致，疑似出现评分坍缩")
+
+        unsupported_high = [
+            key
+            for key, grade in dimension_grades.items()
+            if grade >= 4
+            and len((dimensions.get(key) or {}).get("evidence") or []) < 2
+        ]
+        if len(unsupported_high) >= 2:
+            apply_cap(3, "多个高分维度缺少至少两条独立视觉证据")
+            review_reasons.append("高分证据不足：" + "、".join(unsupported_high))
+
+        if raw_level == "L5":
+            grade_fives = sum(1 for grade in grade_values if grade == 5)
+            if (
+                grade_fives < 5
+                or min(grade_values) < 4
+                or confidence < 0.9
+                or model_review
+            ):
+                apply_cap(4, "L5 需要至少五个5级维度、其余不低于4级、置信度不低于0.9且无复核项")
+
+        professional_status, _ = _status(media.get("professional_photography"))
+        documentary_status, _ = _status(media.get("documentary_record"))
+        if professional_status == "yes" and documentary_status == "yes":
+            review_reasons.append("专业摄影与现场记录不能同时为是")
+
     decision_rules = aesthetic.get("decision_rules") or {}
     if decision_rules.get("hard_gate_triggered") is True:
         reasons = decision_rules.get("hard_gate_reasons") or []
@@ -152,14 +189,12 @@ def calculate_score(precheck: dict[str, Any], aesthetic: dict[str, Any] | None) 
     if primary_confidence < 0.55:
         review_reasons.append("业务分类置信度低于 0.55，不生成正式等级")
 
-    model_review = bool(precheck.get("needs_review")) or bool(aesthetic.get("needs_review"))
     review_reasons.extend(aesthetic.get("review_reasons") or [])
     formal = primary_confidence >= 0.55
-    confidence = float(aesthetic.get("assessment_confidence") or 0.0)
     return {
         "engine_version": ENGINE_VERSION,
         "formal": formal,
-        "score": score if formal else None,
+        "score": round(final_score, 2) if formal else None,
         "level": final_level if formal else None,
         "raw_level": raw_level,
         "raw_score": score,
