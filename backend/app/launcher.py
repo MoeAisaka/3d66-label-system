@@ -3,6 +3,8 @@ from __future__ import annotations
 import multiprocessing as mp
 import signal
 import socket
+import threading
+import webbrowser
 
 import uvicorn
 from sqlalchemy import select
@@ -52,6 +54,14 @@ def main() -> None:
     if lan_ip:
         print(f"同一局域网：http://{lan_ip}:{settings.port}")
     print("关闭此窗口即可停止服务。首次联网访问时，请允许 Windows 防火墙放行专用网络。\n")
+
+    browser_timer = threading.Timer(
+        1.2,
+        webbrowser.open,
+        args=(f"http://127.0.0.1:{settings.port}",),
+    )
+    browser_timer.daemon = True
+    browser_timer.start()
 
     try:
         uvicorn.run(
