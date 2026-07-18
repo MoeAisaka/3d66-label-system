@@ -63,7 +63,7 @@ export function ReviewPage() {
     const media = evaluation?.precheck?.media_form ?? {}
     return Object.entries(media)
       .filter(([, value]: any) => value?.status === "yes")
-      .map(([key]) => ({ real_photo: "实景图", rendering: "效果图", ai_generated: "AI 图", casual_snapshot: "随拍", collage_or_multiview: "多视角", unfinished_scene: "未完工", white_background_product: "白底产品" })[key] || key)
+      .map(([key]) => ({ real_photo: "实景图", rendering: "效果图", ai_generated: "AI 图", professional_photography: "专业摄影", documentary_record: "现场记录", casual_snapshot: "随拍", collage_or_multiview: "多视角", unfinished_scene: "未完工", white_background_product: "白底产品" })[key] || key)
   }, [evaluation])
 
   const enqueue = useMutation({

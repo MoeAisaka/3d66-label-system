@@ -5,11 +5,12 @@ from sqlalchemy.orm import Session
 
 from .config import get_settings
 from .models import EvaluationControl, ModelConfig, OptimizerConfig, PromptVersion, User
-from .prompt_loader import load_prompt_pairs
+from .prompt_loader import load_prompt_pairs, load_standalone_prompt
 from .security import DEFAULT_ADMIN_PASSWORD_HASH
 
 
 def seed_defaults(db: Session) -> None:
+    settings = get_settings()
     if db.scalar(select(User).where(User.username == "sol")) is None:
         db.add(
             User(
@@ -29,7 +30,7 @@ def seed_defaults(db: Session) -> None:
         db.add(EvaluationControl(id=1))
 
     if db.scalar(select(PromptVersion).limit(1)) is None:
-        pairs = load_prompt_pairs(get_settings().prompt_source)
+        pairs = load_prompt_pairs(settings.prompt_source)
         db.add_all(
             [
                 PromptVersion(
@@ -55,5 +56,42 @@ def seed_defaults(db: Session) -> None:
                     change_note="来自用户提供的 Doubao-Seed-2.0-Lite V2.1 提示词",
                 ),
             ]
+        )
+
+    split_prompts = (
+        {
+            "stage": "A",
+            "name": "空间图片范围、分类与画质预检",
+            "version": "space_precheck_v1.3-split.1",
+            "filename": "space-precheck-v1.3-split.1.md",
+            "note": "从 space_aesthetic_v1.3-draft.2 拆分的 A 阶段预检提示词",
+        },
+        {
+            "stage": "B",
+            "name": "空间与建筑八维美感评价",
+            "version": "space_aesthetic_dimensions_v1.3-split.1",
+            "filename": "space-aesthetic-dimensions-v1.3-split.1.md",
+            "note": "从 space_aesthetic_v1.3-draft.2 拆分的 B 阶段美感提示词",
+        },
+    )
+    for item in split_prompts:
+        exists = db.scalar(
+            select(PromptVersion.id).where(PromptVersion.version == item["version"])
+        )
+        if exists is not None:
+            continue
+        prompt = load_standalone_prompt(settings.project_root / "prompts" / item["filename"])
+        db.add(
+            PromptVersion(
+                stage=item["stage"],
+                name=item["name"],
+                version=item["version"],
+                system_prompt=prompt.system,
+                user_prompt=prompt.user,
+                rubric_version="space-rubric-v1.3",
+                status="draft",
+                source="split",
+                change_note=item["note"],
+            )
         )
     db.commit()

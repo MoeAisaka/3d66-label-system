@@ -29,3 +29,13 @@ def load_prompt_pairs(path: Path) -> dict[str, PromptPair]:
         "A": PromptPair(system=system_a, user=user_a),
         "B": PromptPair(system=system_b, user=user_b),
     }
+
+
+def load_standalone_prompt(path: Path) -> PromptPair:
+    source = path.read_text(encoding="utf-8")
+    system = _extract(source, "### System Prompt\n", "### User Prompt")
+    try:
+        user = source.split("### User Prompt\n", 1)[1].strip()
+    except IndexError as exc:
+        raise RuntimeError("提示词文件缺少 User Prompt") from exc
+    return PromptPair(system=system, user=user)

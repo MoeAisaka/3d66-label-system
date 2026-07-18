@@ -12,6 +12,8 @@ const mediaNames: Record<string, string> = {
   real_photo: "实景图",
   rendering: "效果图",
   ai_generated: "AI 图",
+  professional_photography: "专业摄影",
+  documentary_record: "现场记录",
   casual_snapshot: "随拍",
   collage_or_multiview: "多视角",
   unfinished_scene: "未完工",

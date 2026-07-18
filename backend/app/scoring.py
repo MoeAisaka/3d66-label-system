@@ -109,6 +109,7 @@ def calculate_score(precheck: dict[str, Any], aesthetic: dict[str, Any] | None) 
     for key, cap, label in (
         ("ai_generated", 4, "AI 图"),
         ("casual_snapshot", 3, "随拍图"),
+        ("documentary_record", 3, "现场记录图"),
         ("collage_or_multiview", 3, "拼图或多视角"),
         ("unfinished_scene", 3, "未完工现场"),
     ):
