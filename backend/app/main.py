@@ -53,6 +53,7 @@ from .optimizer import run_prompt_optimization
 from .seed import seed_defaults
 from .schema_adapter import repair_combined_aesthetic_results, rescore_stored_results
 from .regression import truth_from_result
+from .review_sampling import build_review_sampling
 
 
 settings = get_settings()
@@ -256,11 +257,47 @@ def _asset_payload(asset: Asset) -> dict[str, Any]:
     }
 
 
-def _evaluation_asset_payload(result: EvaluationResult) -> dict[str, Any]:
+def _evaluation_asset_payload(
+    result: EvaluationResult, sampling: dict[str, Any] | None = None
+) -> dict[str, Any]:
     return {
         **_asset_payload(result.asset),
         "evaluation": _result_payload(result),
+        "sampling": sampling or {},
     }
+
+
+def _review_sampling_decisions(db: Session) -> dict[int, dict[str, Any]]:
+    all_results = db.scalars(
+        select(EvaluationResult).order_by(
+            EvaluationResult.created_at.asc(), EvaluationResult.id.asc()
+        )
+    ).all()
+    golden_asset_ids = set(
+        db.scalars(
+            select(SampleSetItem.asset_id)
+            .join(SampleSet, SampleSet.id == SampleSetItem.sample_set_id)
+            .where(SampleSet.kind == "golden", SampleSet.status == "locked")
+        ).all()
+    )
+    previous_level_by_asset: dict[int, str | None] = {}
+    combination_counts: dict[tuple[str, str, str | None], int] = {}
+    decisions: dict[int, dict[str, Any]] = {}
+    for result in all_results:
+        combination = (
+            result.model_id,
+            result.prompt_a_version,
+            result.prompt_b_version,
+        )
+        combination_counts[combination] = combination_counts.get(combination, 0) + 1
+        decisions[result.id] = build_review_sampling(
+            result,
+            is_golden=result.asset_id in golden_asset_ids,
+            previous_level=previous_level_by_asset.get(result.asset_id),
+            combination_index=combination_counts[combination],
+        )
+        previous_level_by_asset[result.asset_id] = result.level
+    return decisions
 
 
 def _result_payload(result: EvaluationResult | None) -> dict[str, Any] | None:
@@ -497,9 +534,12 @@ def list_evaluations(
         .offset(max(0, offset))
         .limit(min(1000, limit))
     ).all()
+    sampling = _review_sampling_decisions(db)
     total = db.scalar(select(func.count()).select_from(EvaluationResult)) or 0
     return {
-        "items": [_evaluation_asset_payload(result) for result in results],
+        "items": [
+            _evaluation_asset_payload(result, sampling.get(result.id)) for result in results
+        ],
         "total": total,
     }
 
@@ -513,7 +553,8 @@ def evaluation_detail(
     result = db.get(EvaluationResult, evaluation_id)
     if not result:
         raise HTTPException(status_code=404, detail="评测结果不存在")
-    return _evaluation_asset_payload(result)
+    sampling = _review_sampling_decisions(db)
+    return _evaluation_asset_payload(result, sampling.get(result.id))
 
 
 @app.post("/api/jobs/enqueue")

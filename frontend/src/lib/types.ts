@@ -70,6 +70,13 @@ export type Asset = {
 
 export type EvaluationRecord = Asset & {
   evaluation: Evaluation
+  sampling: {
+    version: string
+    tier: "required" | "sampled" | "deferred" | "reviewed"
+    priority: number
+    sample_rate: number
+    reasons: Array<{ code: string; label: string }>
+  }
 }
 
 export type Job = {

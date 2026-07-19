@@ -25,6 +25,20 @@ import { filterReviewAssets, ReviewList } from "@/pages/review-list"
 
 const requiredDimensionKeys = Object.keys(dimensionLabels)
 
+const samplingNames: Record<EvaluationRecord["sampling"]["tier"], string> = {
+  required: "必须审核",
+  sampled: "抽样审核",
+  deferred: "暂缓审核",
+  reviewed: "已审核",
+}
+
+function samplingTone(tier: EvaluationRecord["sampling"]["tier"]) {
+  if (tier === "required") return "danger" as const
+  if (tier === "sampled") return "warning" as const
+  if (tier === "reviewed") return "success" as const
+  return "neutral" as const
+}
+
 export function ReviewPage() {
   const [searchParams, setSearchParams] = useSearchParams()
   const requestedEvaluationId = Number(searchParams.get("evaluation") || 0)
@@ -53,6 +67,7 @@ export function ReviewPage() {
   const currentIndex = filteredAssets.findIndex((item) => item.evaluation.id === currentId)
   const asset = detail.data
   const evaluation = asset?.evaluation
+  const sampling = asset?.sampling
   const dimensions = evaluation?.aesthetic?.dimensions ?? {}
   const scoring = evaluation?.scoring
   const scopeStatus = evaluation?.precheck?.classification?.scope_status
@@ -226,6 +241,21 @@ export function ReviewPage() {
               </div>
             ) : (
               <>
+                {sampling && (
+                  <div className="border-b border-[var(--line)] bg-[#fafbf8] px-5 py-4">
+                    <div className="flex flex-wrap items-center justify-between gap-3">
+                      <div>
+                        <p className="text-sm font-bold">智能抽样建议</p>
+                        <p className="font-data mt-1 text-[0.68rem] text-[var(--muted)]">{sampling.version} · 常规抽样 {sampling.sample_rate}%</p>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <Badge tone={samplingTone(sampling.tier)}>{samplingNames[sampling.tier]}</Badge>
+                        <span className="font-data text-xs font-bold">优先级 P{sampling.priority}</span>
+                      </div>
+                    </div>
+                    <p className="mt-3 text-xs leading-5 text-[var(--muted)]">入队依据：{sampling.reasons.map((reason) => reason.label).join("；")}</p>
+                  </div>
+                )}
                 {evaluation.risk_review?.triggered && (
                   <div className={`border-b border-[var(--line)] px-5 py-4 ${evaluation.risk_review.verdict === "downgrade" ? "bg-[#fff9ef]" : evaluation.risk_review.verdict === "error" || evaluation.risk_review.verdict === "uncertain" ? "bg-[#fff8f7]" : "bg-[#fafbf8]"}`}>
                     <div className="flex flex-wrap items-center justify-between gap-2">

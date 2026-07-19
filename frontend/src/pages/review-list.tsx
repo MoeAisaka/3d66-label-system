@@ -29,6 +29,13 @@ const statusNames: Record<string, string> = {
   incomplete: "结果不完整",
 }
 
+const samplingNames = {
+  required: "必须审核",
+  sampled: "抽样审核",
+  deferred: "暂缓审核",
+  reviewed: "已审核",
+} as const
+
 const requiredDimensionKeys = [
   "composition_viewpoint",
   "lighting_atmosphere",
@@ -80,6 +87,7 @@ export function filterReviewAssets(items: EvaluationRecord[], params: URLSearchP
   const model = params.get("model") || ""
   const prompt = params.get("prompt") || ""
   const reviewer = params.get("reviewer") || ""
+  const sampling = params.get("sampling") || ""
   const needsReview = params.get("needs_review") === "1"
   const sort = params.get("sort") || "priority"
 
@@ -97,6 +105,7 @@ export function filterReviewAssets(items: EvaluationRecord[], params: URLSearchP
     if (model && evaluation?.versions.model !== model) return false
     if (prompt && evaluation?.versions.prompt_a !== prompt && evaluation?.versions.prompt_b !== prompt) return false
     if (reviewer && evaluation?.human_review?.reviewer_name !== reviewer) return false
+    if (sampling && asset.sampling.tier !== sampling) return false
     if (needsReview && !evaluation?.needs_review) return false
     if (confidence === "low" && (confidenceValue == null || confidenceValue >= 0.7)) return false
     if (confidence === "medium" && (confidenceValue == null || confidenceValue < 0.7 || confidenceValue >= 0.9)) return false
@@ -109,13 +118,7 @@ export function filterReviewAssets(items: EvaluationRecord[], params: URLSearchP
     if (sort === "confidence_asc") return (a.evaluation?.confidence ?? 2) - (b.evaluation?.confidence ?? 2)
     if (sort === "score_desc") return (b.evaluation?.score ?? -1) - (a.evaluation?.score ?? -1)
     if (sort === "score_asc") return (a.evaluation?.score ?? 101) - (b.evaluation?.score ?? 101)
-    const priority = (asset: EvaluationRecord) => {
-      if (asset.evaluation.human_review?.decision === "rejected") return 0
-      if (asset.evaluation.needs_review && !asset.evaluation.human_review) return 1
-      if (!asset.evaluation.human_review) return 2
-      return 3
-    }
-    return priority(a) - priority(b) || new Date(b.evaluation.created_at).getTime() - new Date(a.evaluation.created_at).getTime()
+    return b.sampling.priority - a.sampling.priority || new Date(b.evaluation.created_at).getTime() - new Date(a.evaluation.created_at).getTime()
   })
 }
 
@@ -149,6 +152,13 @@ function statusTone(status: string) {
   return "neutral" as const
 }
 
+function samplingTone(tier: EvaluationRecord["sampling"]["tier"]) {
+  if (tier === "required") return "danger" as const
+  if (tier === "sampled") return "warning" as const
+  if (tier === "reviewed") return "success" as const
+  return "neutral" as const
+}
+
 function detailUrl(evaluationId: number, params: URLSearchParams) {
   const next = new URLSearchParams(params)
   next.delete("asset")
@@ -160,7 +170,11 @@ export function ReviewList({ items, loading, searchParams, setSearchParams }: { 
   const [filtersOpen, setFiltersOpen] = useState(false)
   const filtered = filterReviewAssets(items, searchParams)
   const options = filterOptions(items)
-  const activeFilters = ["q", "status", "level", "category", "media", "quality", "confidence", "model", "prompt", "reviewer", "needs_review"].filter((key) => searchParams.get(key)).length
+  const samplingCounts = items.reduce<Record<EvaluationRecord["sampling"]["tier"], number>>((counts, item) => {
+    counts[item.sampling.tier] += 1
+    return counts
+  }, { required: 0, sampled: 0, deferred: 0, reviewed: 0 })
+  const activeFilters = ["q", "status", "level", "category", "media", "quality", "confidence", "model", "prompt", "reviewer", "sampling", "needs_review"].filter((key) => searchParams.get(key)).length
 
   function update(key: string, value: string) {
     const next = new URLSearchParams(searchParams)
@@ -178,8 +192,20 @@ export function ReviewList({ items, loading, searchParams, setSearchParams }: { 
   }
 
   return <>
-    <PageHeader index="04" title="评测结果" description="先筛选和定位需要介入的结果，再进入大图证据页完成确认或修改。" />
+    <PageHeader index="04" title="评测结果" description="智能抽样优先安排高风险与黄金样本，常规稳定结果按固定比例抽查。" />
     <div className="mx-auto max-w-[1720px] px-5 py-7 md:px-8 lg:px-10 lg:py-9">
+      <section className="mb-5 grid border-y border-[var(--line-strong)] bg-white lg:grid-cols-[minmax(280px,1fr)_auto] lg:items-stretch" aria-label="智能抽样队列">
+        <div className="px-4 py-4 lg:border-r lg:border-[var(--line)]">
+          <div className="flex flex-wrap items-center gap-2"><h2 className="text-sm font-bold">智能抽样审核</h2><Badge>规则 {items[0]?.sampling.version || "smart-sampling-v1.0"}</Badge></div>
+          <p className="mt-2 max-w-[70ch] text-xs leading-5 text-[var(--muted)]">黄金样本、高分、低置信度、版本差异和异常同分进入必审；其余常规结果稳定抽取 {items[0]?.sampling.sample_rate ?? 10}%。</p>
+        </div>
+        <div className="grid grid-cols-2 border-t border-[var(--line)] sm:grid-cols-4 lg:border-t-0">
+          {(Object.keys(samplingNames) as Array<keyof typeof samplingNames>).map((tier) => {
+            const selected = searchParams.get("sampling") === tier
+            return <button key={tier} type="button" className={`min-w-28 border-r border-[var(--line)] px-4 py-3 text-left last:border-r-0 transition-colors ${selected ? "bg-primary" : "hover:bg-[#fafbf8]"}`} onClick={() => update("sampling", selected ? "" : tier)} aria-pressed={selected}><span className="block text-xs font-semibold">{samplingNames[tier]}</span><span className="font-data mt-1 block text-xl font-bold">{samplingCounts[tier]}</span></button>
+          })}
+        </div>
+      </section>
       <section className="border-y border-[var(--line-strong)] bg-white" aria-label="审核列表筛选">
         <button type="button" className="flex min-h-12 w-full items-center justify-between px-4 text-sm font-semibold md:hidden" onClick={() => setFiltersOpen((value) => !value)} aria-expanded={filtersOpen} aria-controls="review-filters"><span className="flex items-center gap-2"><Funnel />筛选条件{activeFilters ? ` · ${activeFilters}` : ""}</span><span>{filtersOpen ? "收起" : "展开"}</span></button>
         <div id="review-filters" className={`${filtersOpen ? "block" : "hidden"} md:block`}>
@@ -210,8 +236,8 @@ export function ReviewList({ items, loading, searchParams, setSearchParams }: { 
 
       <div className="mt-4 overflow-x-auto border-y border-[var(--line-strong)] bg-white scrollbar-thin">
         {loading ? <div className="h-72 animate-pulse bg-white" /> : filtered.length ? (
-          <table className="w-full min-w-[1280px] border-collapse text-left text-sm">
-            <thead><tr className="border-b border-[var(--line)] bg-[#fafbf8] text-xs text-[var(--muted)]"><th className="px-4 py-3 font-semibold">图片</th><th className="px-3 py-3 font-semibold">分类与形态</th><th className="px-3 py-3 font-semibold">画质</th><th className="px-3 py-3 font-semibold">美感结果</th><th className="px-3 py-3 font-semibold">置信度</th><th className="px-3 py-3 font-semibold">审核状态</th><th className="px-3 py-3 font-semibold">版本</th><th className="w-28 px-4 py-3 text-right font-semibold">操作</th></tr></thead>
+          <table className="w-full min-w-[1460px] border-collapse text-left text-sm">
+            <thead><tr className="border-b border-[var(--line)] bg-[#fafbf8] text-xs text-[var(--muted)]"><th className="px-4 py-3 font-semibold">图片</th><th className="px-3 py-3 font-semibold">分类与形态</th><th className="px-3 py-3 font-semibold">画质</th><th className="px-3 py-3 font-semibold">美感结果</th><th className="px-3 py-3 font-semibold">置信度</th><th className="px-3 py-3 font-semibold">审核建议</th><th className="px-3 py-3 font-semibold">审核状态</th><th className="px-3 py-3 font-semibold">版本</th><th className="w-28 px-4 py-3 text-right font-semibold">操作</th></tr></thead>
             <tbody>{filtered.map((asset) => {
               const evaluation = asset.evaluation
               const status = reviewStatus(asset)
@@ -226,6 +252,7 @@ export function ReviewList({ items, loading, searchParams, setSearchParams }: { 
                 <td className="px-3 py-3"><span className={`text-xs font-semibold ${quality === "severe" || quality === "unusable" ? "text-[#8d2924]" : "text-[var(--muted)]"}`}>{qualityNames[quality] || quality || "—"}</span>{(evaluation?.scoring?.caps?.length ?? 0) > 0 && <p className="mt-2 text-xs text-[#7d4308]">{evaluation?.scoring.caps.length} 项等级限制</p>}</td>
                 <td className="px-3 py-3">{status === "out_of_scope" ? <><Badge>范围外</Badge><p className="mt-2 text-xs text-[var(--muted)]">A 判定后未调用 B</p></> : status === "incomplete" ? <><Badge tone="danger">结果不完整</Badge><p className="mt-2 text-xs text-[#8d2924]">缺少八维数据</p></> : <><div className="flex items-baseline gap-2"><strong className="font-data text-xl">{level || "—"}</strong><span className="font-data text-xs text-[var(--muted)]">{evaluation?.score?.toFixed(1) ?? "—"}</span></div>{evaluation?.risk_review?.verdict === "downgrade" && <p className="mt-1 text-xs font-semibold text-[#7d4308]">高风险复核已降级</p>}{evaluation?.final_level !== evaluation?.level && <p className="mt-1 text-xs text-[var(--muted)]">模型 {evaluation?.level}</p>}</>}</td>
                 <td className="font-data px-3 py-3"><span className={evaluation?.confidence != null && evaluation.confidence < 0.7 ? "font-semibold text-[#8d2924]" : ""}>{nonScored ? "不适用" : evaluation?.confidence != null ? `${Math.round(evaluation.confidence * 100)}%` : "—"}</span>{evaluation?.needs_review && <p className="mt-2 text-xs text-[#7d4308]">需要复核</p>}</td>
+                <td className="px-3 py-3"><div className="flex items-center gap-2"><Badge tone={samplingTone(asset.sampling.tier)}>{samplingNames[asset.sampling.tier]}</Badge><span className="font-data text-xs font-semibold">P{asset.sampling.priority}</span></div><p className="mt-2 max-w-48 text-xs leading-5 text-[var(--muted)]">{asset.sampling.reasons.slice(0, 2).map((reason) => reason.label).join("；")}</p></td>
                 <td className="px-3 py-3"><Badge tone={statusTone(status)}>{statusNames[status]}</Badge>{evaluation?.human_review && <p className="mt-2 max-w-32 truncate text-xs text-[var(--muted)]">{evaluation.human_review.reviewer_name}</p>}</td>
                 <td className="px-3 py-3"><p className="font-data max-w-44 truncate text-xs" title={evaluation?.versions.model || ""}>{evaluation?.versions.model || "—"}</p><p className="font-data mt-2 text-[0.68rem] text-[var(--muted)]">A {evaluation?.versions.prompt_a || "—"}{evaluation?.versions.prompt_b ? ` · B ${evaluation.versions.prompt_b}` : ""}</p></td>
                 <td className="w-28 px-4 py-3 text-right"><Button asChild size="sm" variant="secondary"><Link to={detailUrl(evaluation.id, searchParams)}><span>审核</span><ArrowRight /></Link></Button></td>
