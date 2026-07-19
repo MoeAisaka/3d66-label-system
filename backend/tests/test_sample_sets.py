@@ -95,7 +95,10 @@ def test_sample_set_captures_human_final_level() -> None:
         )
         assert reviewed.status_code == 200
         asset_detail = client.get(f"/api/assets/{asset.id}").json()
-        correction = asset_detail["evaluation"]["human_review"]["corrections"][0]
+        assert "evaluation" not in asset_detail
+        assert "status" not in asset_detail
+        evaluation_detail = client.get(f"/api/evaluations/{result.id}").json()
+        correction = evaluation_detail["evaluation"]["human_review"]["corrections"][0]
         assert correction["field_key"] == "color_material"
         assert correction["human_value"] == 3
 
@@ -129,6 +132,40 @@ def test_sample_set_captures_human_final_level() -> None:
         )
         overridden_detail = client.get(f"/api/sample-sets/{overridden_id}").json()
         assert overridden_detail["items"][0]["expected_level"] == "L2"
+
+        second_job = EvaluationJob(asset_id=asset.id, status="completed", stage="done", progress=100)
+        db.add(second_job)
+        db.flush()
+        second_result = EvaluationResult(
+            asset_id=asset.id,
+            job_id=second_job.id,
+            precheck_json=json.dumps(
+                {"classification": {"primary_category": "商业空间"}}, ensure_ascii=False
+            ),
+            aesthetic_json=None,
+            scoring_json="{}",
+            raw_response_a="{}",
+            raw_response_b=None,
+            score=52,
+            level="L2",
+            confidence=0.8,
+            needs_review=True,
+            model_id="doubao-2.0",
+            prompt_a_version="A2",
+            prompt_b_version="B2",
+            rubric_version="R1",
+            engine_version="E1",
+        )
+        db.add(second_result)
+        db.commit()
+
+        evaluation_rows = client.get("/api/evaluations?limit=100").json()["items"]
+        matching = [item for item in evaluation_rows if item["id"] == asset.id]
+        assert len(matching) == 2
+        assert {item["evaluation"]["versions"]["model"] for item in matching} == {
+            "doubao-1.8",
+            "doubao-2.0",
+        }
     finally:
         app.dependency_overrides.clear()
         db.close()

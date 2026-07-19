@@ -19,7 +19,7 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { api, jsonBody } from "@/lib/api"
-import type { Asset, ReviewCorrection } from "@/lib/types"
+import type { EvaluationRecord, ReviewCorrection } from "@/lib/types"
 import { dimensionLabels, ReviewCorrectionForm } from "@/pages/review-correction-form"
 import { filterReviewAssets, ReviewList } from "@/pages/review-list"
 
@@ -27,29 +27,30 @@ const requiredDimensionKeys = Object.keys(dimensionLabels)
 
 export function ReviewPage() {
   const [searchParams, setSearchParams] = useSearchParams()
-  const requestedId = Number(searchParams.get("asset") || 0)
+  const requestedEvaluationId = Number(searchParams.get("evaluation") || 0)
+  const legacyAssetId = Number(searchParams.get("asset") || 0)
   const [zoom, setZoom] = useState(100)
   const [reviewer, setReviewer] = useState(() => localStorage.getItem("3d66-reviewer") || "")
   const [note, setNote] = useState("")
   const [correctionOpen, setCorrectionOpen] = useState(false)
   const queryClient = useQueryClient()
-  const assets = useQuery({
-    queryKey: ["assets", "review-list"],
-    queryFn: () => api<{ items: Asset[] }>("/api/assets?limit=1000"),
+  const evaluations = useQuery({
+    queryKey: ["evaluations", "review-list"],
+    queryFn: () => api<{ items: EvaluationRecord[] }>("/api/evaluations?limit=1000"),
     refetchInterval: 4000,
   })
-  const currentId = requestedId
+  const legacyEvaluationId = evaluations.data?.items.find((item) => item.id === legacyAssetId)?.evaluation.id ?? 0
+  const currentId = requestedEvaluationId || legacyEvaluationId
   const filteredAssets = useMemo(
-    () => filterReviewAssets(assets.data?.items ?? [], searchParams),
-    [assets.data?.items, searchParams],
+    () => filterReviewAssets(evaluations.data?.items ?? [], searchParams),
+    [evaluations.data?.items, searchParams],
   )
   const detail = useQuery({
-    queryKey: ["asset", currentId],
-    queryFn: () => api<Asset>(`/api/assets/${currentId}`),
+    queryKey: ["evaluation", currentId],
+    queryFn: () => api<EvaluationRecord>(`/api/evaluations/${currentId}`),
     enabled: Boolean(currentId),
-    refetchInterval: (query) => (query.state.data?.status === "queued" ? 2500 : false),
   })
-  const currentIndex = filteredAssets.findIndex((item) => item.id === currentId)
+  const currentIndex = filteredAssets.findIndex((item) => item.evaluation.id === currentId)
   const asset = detail.data
   const evaluation = asset?.evaluation
   const dimensions = evaluation?.aesthetic?.dimensions ?? {}
@@ -71,11 +72,12 @@ export function ReviewPage() {
   }, [evaluation])
 
   const enqueue = useMutation({
-    mutationFn: () => api("/api/jobs/enqueue", { method: "POST", ...jsonBody({ asset_ids: [currentId] }) }),
+    mutationFn: () => api("/api/jobs/enqueue", { method: "POST", ...jsonBody({ asset_ids: [asset?.id] }) }),
     onSuccess: async () => {
       toast.success("已创建评测任务")
       await Promise.all([
-        queryClient.invalidateQueries({ queryKey: ["asset", currentId] }),
+        queryClient.invalidateQueries({ queryKey: ["evaluation", currentId] }),
+        queryClient.invalidateQueries({ queryKey: ["evaluations"] }),
         queryClient.invalidateQueries({ queryKey: ["jobs"] }),
       ])
     },
@@ -93,8 +95,8 @@ export function ReviewPage() {
       setNote("")
       toast.success(variables.decision === "corrected" ? "人工维度纠错和最终结果已保存" : variables.decision === "approved" ? "已确认模型结果" : "已退回复核")
       await Promise.all([
-        queryClient.invalidateQueries({ queryKey: ["asset", currentId] }),
-        queryClient.invalidateQueries({ queryKey: ["assets"] }),
+        queryClient.invalidateQueries({ queryKey: ["evaluation", currentId] }),
+        queryClient.invalidateQueries({ queryKey: ["evaluations"] }),
         queryClient.invalidateQueries({ queryKey: ["dashboard"] }),
       ])
     },
@@ -106,17 +108,19 @@ export function ReviewPage() {
     const next = filteredAssets[currentIndex + offset]
     if (next) {
       const params = new URLSearchParams(searchParams)
-      params.set("asset", String(next.id))
+      params.delete("asset")
+      params.set("evaluation", String(next.evaluation.id))
       setSearchParams(params)
     }
   }
 
-  if (!requestedId) {
-    return <ReviewList items={assets.data?.items ?? []} loading={assets.isLoading} searchParams={searchParams} setSearchParams={setSearchParams} />
+  if (!requestedEvaluationId && !legacyAssetId) {
+    return <ReviewList items={evaluations.data?.items ?? []} loading={evaluations.isLoading} searchParams={searchParams} setSearchParams={setSearchParams} />
   }
 
   const listParams = new URLSearchParams(searchParams)
   listParams.delete("asset")
+  listParams.delete("evaluation")
   const listUrl = `/review${listParams.toString() ? `?${listParams.toString()}` : ""}`
 
   return (
@@ -150,7 +154,7 @@ export function ReviewPage() {
             <div className="flex min-h-14 flex-wrap items-center justify-between gap-2 border-b border-[var(--line)] px-4 py-2">
               <div className="min-w-0">
                 <p className="file-name max-w-[60vw] truncate text-sm">{asset?.name || "正在读取"}</p>
-                <p className="font-data mt-1 text-[0.68rem] text-[var(--muted)]">{asset?.width} × {asset?.height} · #{currentId.toString().padStart(5, "0")}</p>
+                <p className="font-data mt-1 text-[0.68rem] text-[var(--muted)]">{asset?.width} × {asset?.height} · 素材 #{String(asset?.id || 0).padStart(5, "0")} · 结果 #{String(currentId).padStart(5, "0")}</p>
               </div>
               <div className="flex items-center gap-1">
                 <Button variant="ghost" size="icon" onClick={() => setZoom(Math.max(50, zoom - 10))} aria-label="缩小"><MagnifyingGlassMinus /></Button>
@@ -180,7 +184,7 @@ export function ReviewPage() {
             <div className="flex flex-wrap items-center gap-2 border-t border-[var(--line)] px-4 py-3">
               {mediaLabels.map((label) => <Badge key={label}>{label}</Badge>)}
               {evaluation?.precheck?.classification?.primary_category && <Badge tone="active">{evaluation.precheck.classification.primary_category}</Badge>}
-              <span className="ml-auto font-data text-[0.68rem] text-[var(--muted)]">{evaluation ? `${evaluation.versions.model} · ${evaluation.versions.engine}` : asset?.status}</span>
+              <span className="ml-auto font-data text-[0.68rem] text-[var(--muted)]">{evaluation ? `${evaluation.versions.model} · ${evaluation.versions.engine}` : "正在读取评测版本"}</span>
             </div>
           </section>
 
@@ -200,10 +204,9 @@ export function ReviewPage() {
 
             {!evaluation ? (
               <div className="flex min-h-[520px] flex-col items-center justify-center px-8 text-center">
-                {asset?.status === "queued" ? <WarningCircle size={30} /> : <ImageSquare size={30} weight="light" />}
-                <h3 className="font-editorial mt-4 text-xl font-bold">{asset?.status === "queued" ? "等待模型处理" : "还没有评测结果"}</h3>
-                <p className="mt-2 text-sm leading-6 text-[var(--muted)]">任务完成后，这里会显示维度等级、证据、缺陷和最终限制。</p>
-                {asset?.status !== "queued" && <Button className="mt-6" onClick={() => enqueue.mutate()} disabled={enqueue.isPending}>开始评测<ArrowRight /></Button>}
+                <ImageSquare size={30} weight="light" />
+                <h3 className="font-editorial mt-4 text-xl font-bold">正在读取评测结果</h3>
+                <p className="mt-2 text-sm leading-6 text-[var(--muted)]">每条结果都固定对应一次模型和提示词版本运行。</p>
               </div>
             ) : scopeStatus === "out_of_scope" ? (
               <div className="flex min-h-[520px] flex-col items-center justify-center px-8 text-center">

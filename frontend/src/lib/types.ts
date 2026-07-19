@@ -63,11 +63,13 @@ export type Asset = {
   size_bytes: number
   width: number | null
   height: number | null
-  status: string
   created_at: string
   image_url: string
-  evaluation: Evaluation | null
   duplicate?: boolean
+}
+
+export type EvaluationRecord = Asset & {
+  evaluation: Evaluation
 }
 
 export type Job = {

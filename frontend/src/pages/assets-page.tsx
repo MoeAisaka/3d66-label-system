@@ -1,20 +1,20 @@
 import { useMemo, useRef, useState } from "react"
 import { ArrowRight, CheckSquare, CloudArrowUp, ImageSquare, Square } from "@phosphor-icons/react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
-import { Link } from "react-router-dom"
 import { toast } from "sonner"
 
 import { PageHeader } from "@/components/app-shell"
-import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { api, jsonBody } from "@/lib/api"
 import type { Asset, PromptVersion } from "@/lib/types"
 
-function statusTone(status: string) {
-  if (status === "evaluated") return "success" as const
-  if (status === "queued") return "active" as const
-  if (status === "failed") return "danger" as const
-  return "neutral" as const
+function fileSize(bytes: number) {
+  if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`
+}
+
+function fileType(mimeType: string) {
+  return mimeType.split("/")[1]?.toUpperCase().replace("JPEG", "JPG") || "图片"
 }
 
 export function AssetsPage() {
@@ -87,7 +87,7 @@ export function AssetsPage() {
       <PageHeader
         index="02"
         title="素材"
-        description="上传原图，选择需要评测的图片并创建任务。重复文件不会再次占用本地空间。"
+        description="管理原始图片并创建评测任务。同一素材可使用不同模型与提示词版本反复评测，每次结果独立保存。"
         actions={
           <Button variant="secondary" onClick={() => inputRef.current?.click()}><CloudArrowUp />选择图片</Button>
         }
@@ -158,6 +158,7 @@ export function AssetsPage() {
             >
               开始评测 {selected.size ? `(${selected.size})` : ""}<ArrowRight weight="bold" />
             </Button>
+            <p className="text-xs leading-5 text-[var(--muted)] lg:col-span-3">创建任务不会覆盖旧结果。评测结果、模型版本和提示词版本请到“评测结果”查看。</p>
           </div>
           <div className="overflow-x-auto border-y border-[var(--line-strong)] bg-white scrollbar-thin">
             {assets.isLoading ? (
@@ -169,10 +170,9 @@ export function AssetsPage() {
                     <th className="w-12 px-4 py-3"><span className="sr-only">选择</span></th>
                     <th className="px-3 py-3 font-semibold">图片</th>
                     <th className="px-3 py-3 font-semibold">尺寸</th>
-                    <th className="px-3 py-3 font-semibold">状态</th>
-                    <th className="px-3 py-3 font-semibold">等级</th>
-                    <th className="px-3 py-3 font-semibold">置信度</th>
-                    <th className="w-24 px-4 py-3 text-right font-semibold">操作</th>
+                    <th className="px-3 py-3 font-semibold">文件格式</th>
+                    <th className="px-3 py-3 font-semibold">文件大小</th>
+                    <th className="px-4 py-3 text-right font-semibold">上传时间</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -200,10 +200,9 @@ export function AssetsPage() {
                           </div>
                         </td>
                         <td className="font-data px-3 py-3 text-xs text-[var(--muted)]">{asset.width} × {asset.height}</td>
-                        <td className="px-3 py-3"><Badge tone={statusTone(asset.status)}>{asset.status}</Badge></td>
-                        <td className="font-data px-3 py-3 text-base font-semibold">{asset.evaluation?.level ?? "—"}</td>
-                        <td className="font-data px-3 py-3 text-xs text-[var(--muted)]">{asset.evaluation?.confidence != null ? `${Math.round(asset.evaluation.confidence * 100)}%` : "—"}</td>
-                        <td className="px-4 py-3 text-right"><Button asChild variant="ghost" size="sm"><Link to={`/review?asset=${asset.id}`}>查看<ArrowRight /></Link></Button></td>
+                        <td className="font-data px-3 py-3 text-xs text-[var(--muted)]">{fileType(asset.mime_type)}</td>
+                        <td className="font-data px-3 py-3 text-xs text-[var(--muted)]">{fileSize(asset.size_bytes)}</td>
+                        <td className="font-data px-4 py-3 text-right text-xs text-[var(--muted)]">{new Date(asset.created_at).toLocaleString("zh-CN")}</td>
                       </tr>
                     )
                   })}

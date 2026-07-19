@@ -243,7 +243,7 @@ def current_user(
     return user
 
 
-def _asset_payload(asset: Asset, result: EvaluationResult | None = None) -> dict[str, Any]:
+def _asset_payload(asset: Asset) -> dict[str, Any]:
     return {
         "id": asset.id,
         "name": asset.original_name,
@@ -251,10 +251,15 @@ def _asset_payload(asset: Asset, result: EvaluationResult | None = None) -> dict
         "size_bytes": asset.size_bytes,
         "width": asset.width,
         "height": asset.height,
-        "status": asset.status,
         "created_at": asset.created_at,
         "image_url": f"/api/assets/{asset.id}/file",
-        "evaluation": _result_payload(result) if result else None,
+    }
+
+
+def _evaluation_asset_payload(result: EvaluationResult) -> dict[str, Any]:
+    return {
+        **_asset_payload(result.asset),
+        "evaluation": _result_payload(result),
     }
 
 
@@ -448,17 +453,8 @@ def list_assets(
     assets = db.scalars(
         select(Asset).order_by(Asset.created_at.desc()).offset(max(0, offset)).limit(min(1000, limit))
     ).all()
-    items = []
-    for asset in assets:
-        result = db.scalar(
-            select(EvaluationResult)
-            .where(EvaluationResult.asset_id == asset.id)
-            .order_by(EvaluationResult.created_at.desc())
-            .limit(1)
-        )
-        items.append(_asset_payload(asset, result))
     total = db.scalar(select(func.count()).select_from(Asset)) or 0
-    return {"items": items, "total": total}
+    return {"items": [_asset_payload(asset) for asset in assets], "total": total}
 
 
 @app.get("/api/assets/{asset_id}/file")
@@ -485,13 +481,39 @@ def asset_detail(
     asset = db.get(Asset, asset_id)
     if not asset:
         raise HTTPException(status_code=404, detail="图片不存在")
-    result = db.scalar(
+    return _asset_payload(asset)
+
+
+@app.get("/api/evaluations")
+def list_evaluations(
+    limit: int = 100,
+    offset: int = 0,
+    _user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    results = db.scalars(
         select(EvaluationResult)
-        .where(EvaluationResult.asset_id == asset.id)
-        .order_by(EvaluationResult.created_at.desc())
-        .limit(1)
-    )
-    return _asset_payload(asset, result)
+        .order_by(EvaluationResult.created_at.desc(), EvaluationResult.id.desc())
+        .offset(max(0, offset))
+        .limit(min(1000, limit))
+    ).all()
+    total = db.scalar(select(func.count()).select_from(EvaluationResult)) or 0
+    return {
+        "items": [_evaluation_asset_payload(result) for result in results],
+        "total": total,
+    }
+
+
+@app.get("/api/evaluations/{evaluation_id}")
+def evaluation_detail(
+    evaluation_id: int,
+    _user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    result = db.get(EvaluationResult, evaluation_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="评测结果不存在")
+    return _evaluation_asset_payload(result)
 
 
 @app.post("/api/jobs/enqueue")

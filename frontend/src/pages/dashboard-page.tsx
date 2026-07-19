@@ -62,7 +62,7 @@ export function DashboardPage() {
             <div className="mb-4 flex items-end justify-between gap-4">
               <div>
                 <h2 className="font-editorial text-2xl font-bold">最近素材</h2>
-                <p className="mt-1 text-sm text-[var(--muted)]">最新上传和评测结果</p>
+                <p className="mt-1 text-sm text-[var(--muted)]">最新上传的原始图片</p>
               </div>
               <Button asChild variant="ghost" size="sm"><Link to="/assets">查看全部<ArrowRight /></Link></Button>
             </div>
@@ -74,21 +74,14 @@ export function DashboardPage() {
               ) : assets.data?.items.length ? (
                 <div className="divide-y divide-[var(--line)]">
                   {assets.data.items.map((asset) => (
-                    <Link key={asset.id} to={`/review?asset=${asset.id}`} className="group grid grid-cols-[56px_1fr_auto] items-center gap-4 px-3 py-3 transition-colors hover:bg-[#fafbf8]">
+                    <div key={asset.id} className="grid grid-cols-[56px_1fr_auto] items-center gap-4 px-3 py-3">
                       <img src={asset.image_url} alt="" className="size-14 rounded-[4px] border border-[var(--line)] object-cover" />
                       <div className="min-w-0">
-                        <p className="file-name truncate text-sm group-hover:underline">{asset.name}</p>
+                        <p className="file-name truncate text-sm">{asset.name}</p>
                         <p className="font-data mt-1 text-xs text-[var(--muted)]">{asset.width} × {asset.height}</p>
                       </div>
-                      {asset.evaluation?.level ? (
-                        <div className="text-right">
-                          <span className="font-data text-lg font-semibold">{asset.evaluation.final_level || asset.evaluation.level}</span>
-                          <p className="font-data text-xs text-[var(--muted)]">
-                            {asset.evaluation.final_level !== asset.evaluation.level ? `模型 ${asset.evaluation.level}` : asset.evaluation.score?.toFixed(1)}
-                          </p>
-                        </div>
-                      ) : <Badge>{asset.status}</Badge>}
-                    </Link>
+                      <time className="font-data text-right text-xs text-[var(--muted)]" dateTime={asset.created_at}>{new Date(asset.created_at).toLocaleDateString("zh-CN")}</time>
+                    </div>
                   ))}
                 </div>
               ) : (

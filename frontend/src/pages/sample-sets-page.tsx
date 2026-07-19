@@ -25,7 +25,7 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { api, jsonBody } from "@/lib/api"
 import type {
-  Asset,
+  EvaluationRecord,
   PromptVersion,
   RegressionDetail,
   RegressionSummary,
@@ -81,8 +81,8 @@ export function SampleSetsPage() {
     enabled: Boolean(selectedId),
   })
   const assets = useQuery({
-    queryKey: ["assets", "sample-set-candidates"],
-    queryFn: () => api<{ items: Asset[]; total: number }>("/api/assets?limit=1000"),
+    queryKey: ["evaluations", "sample-set-candidates"],
+    queryFn: () => api<{ items: EvaluationRecord[]; total: number }>("/api/evaluations?limit=1000"),
     enabled: mode === "available",
   })
   const history = useQuery({
@@ -176,7 +176,11 @@ export function SampleSetsPage() {
   const includedIds = useMemo(() => new Set(detail.data?.items.map((item) => item.asset_id) ?? []), [detail.data?.items])
   const availableAssets = useMemo(() => {
     const keyword = search.trim().toLowerCase()
-    return (assets.data?.items ?? []).filter((asset) => asset.evaluation && ["approved", "corrected"].includes(asset.evaluation.human_review?.decision || "") && !includedIds.has(asset.id) && (!keyword || asset.name.toLowerCase().includes(keyword) || String(asset.id).includes(keyword)))
+    const latestReviewed = new Map<number, EvaluationRecord>()
+    for (const asset of assets.data?.items ?? []) {
+      if (["approved", "corrected"].includes(asset.evaluation.human_review?.decision || "") && !latestReviewed.has(asset.id)) latestReviewed.set(asset.id, asset)
+    }
+    return Array.from(latestReviewed.values()).filter((asset) => !includedIds.has(asset.id) && (!keyword || asset.name.toLowerCase().includes(keyword) || String(asset.id).includes(keyword)))
   }, [assets.data?.items, includedIds, search])
 
   return <>
@@ -269,7 +273,7 @@ function SampleRow({ item, selected, onHistory, onRemove }: { item: SampleSetIte
   </article>
 }
 
-function AddAssetsPanel({ search, setSearch, batchLevel, setBatchLevel, assets, selected, setSelected, onAdd, pending }: { search: string; setSearch: (v: string) => void; batchLevel: string; setBatchLevel: (v: string) => void; assets: Asset[]; selected: Set<number>; setSelected: (v: Set<number>) => void; onAdd: () => void; pending: boolean }) {
+function AddAssetsPanel({ search, setSearch, batchLevel, setBatchLevel, assets, selected, setSelected, onAdd, pending }: { search: string; setSearch: (v: string) => void; batchLevel: string; setBatchLevel: (v: string) => void; assets: EvaluationRecord[]; selected: Set<number>; setSelected: (v: Set<number>) => void; onAdd: () => void; pending: boolean }) {
   return <section className="mt-4"><div className="grid gap-4 border-y border-[var(--line-strong)] bg-white p-4 lg:grid-cols-[1fr_190px_auto] lg:items-end"><label><FieldLabel>搜索已审核素材</FieldLabel><div className="relative"><MagnifyingGlass className="absolute left-3 top-1/2 -translate-y-1/2 text-[var(--muted)]" /><Input className="pl-10" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="文件名或素材编号" /></div></label><label><FieldLabel>整批最终等级（可选）</FieldLabel><select className="h-11 w-full rounded-[4px] border border-[var(--line-strong)] bg-white px-3 text-sm" value={batchLevel} onChange={(event) => setBatchLevel(event.target.value)}><option value="">沿用人工结果</option>{["L1", "L2", "L3", "L4", "L5"].map((level) => <option key={level}>{level}</option>)}</select></label><Button disabled={!selected.size || pending} onClick={onAdd}>收录所选 {selected.size ? `(${selected.size})` : ""}</Button></div><div className="mt-4 max-h-[62vh] overflow-y-auto border-y border-[var(--line-strong)] bg-white">{assets.length ? assets.map((asset) => { const checked = selected.has(asset.id); return <button key={asset.id} className={`grid w-full grid-cols-[32px_56px_1fr_auto] items-center gap-3 border-b border-[var(--line)] px-4 py-3 text-left ${checked ? "bg-[#f5f8ed]" : "hover:bg-[#fafbf8]"}`} onClick={() => { const next = new Set(selected); checked ? next.delete(asset.id) : next.add(asset.id); setSelected(next) }}>{checked ? <CheckSquare size={20} weight="fill" /> : <Square size={20} />}<img src={asset.image_url} alt="" className="size-14 rounded-[4px] object-cover" /><div className="min-w-0"><p className="file-name truncate text-sm">{asset.name}</p><p className="mt-1 text-xs text-[var(--muted)]">#{String(asset.id).padStart(5, "0")} · {asset.evaluation?.versions.model}</p></div><Badge tone="active">人工 {asset.evaluation?.final_level}</Badge></button> }) : <div className="px-6 py-14 text-center text-sm text-[var(--muted)]">没有可收录的已审核素材</div>}</div></section>
 }
 
