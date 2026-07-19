@@ -125,6 +125,19 @@ export type ModelConfig = {
 
 export type OptimizerConfig = Omit<ModelConfig, "max_concurrency">
 
+export type SamplingPolicy = {
+  id: number
+  version: string
+  revision: number
+  sample_rate: number
+  low_confidence_threshold: number
+  medium_confidence_threshold: number
+  cold_start_required_count: number
+  high_level_required_from: number
+  updated_by: string
+  updated_at: string
+}
+
 export type PromptVersion = {
   id: number
   stage: "A" | "B"

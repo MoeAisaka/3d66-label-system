@@ -1,5 +1,5 @@
 import { useEffect, useState, type ReactNode } from "react"
-import { CheckCircle, FloppyDisk, Key, PlugsConnected, WarningCircle } from "@phosphor-icons/react"
+import { CheckCircle, FloppyDisk, Key, PlugsConnected, SlidersHorizontal, WarningCircle } from "@phosphor-icons/react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { toast } from "sonner"
 
@@ -8,7 +8,7 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { api, jsonBody } from "@/lib/api"
-import type { ModelConfig, OptimizerConfig } from "@/lib/types"
+import type { ModelConfig, OptimizerConfig, SamplingPolicy } from "@/lib/types"
 
 type FormState = Omit<ModelConfig, "id" | "provider" | "api_key_mask" | "updated_at" | "has_api_key"> & { api_key: string }
 type OptimizerFormState = Omit<OptimizerConfig, "id" | "provider" | "api_key_mask" | "updated_at" | "has_api_key"> & { api_key: string }
@@ -17,8 +17,10 @@ export function ModelPage() {
   const queryClient = useQueryClient()
   const config = useQuery({ queryKey: ["model-config"], queryFn: () => api<ModelConfig>("/api/model-config") })
   const optimizerConfig = useQuery({ queryKey: ["optimizer-config"], queryFn: () => api<OptimizerConfig>("/api/optimizer-config") })
+  const samplingPolicy = useQuery({ queryKey: ["sampling-policy"], queryFn: () => api<SamplingPolicy>("/api/sampling-policy") })
   const [form, setForm] = useState<FormState | null>(null)
   const [optimizerForm, setOptimizerForm] = useState<OptimizerFormState | null>(null)
+  const [samplingForm, setSamplingForm] = useState<SamplingPolicy | null>(null)
   useEffect(() => {
     if (!config.data) return
     const { id: _id, provider: _provider, api_key_mask: _mask, updated_at: _updated, has_api_key: _hasApiKey, ...rest } = config.data
@@ -29,6 +31,9 @@ export function ModelPage() {
     const { id: _id, provider: _provider, api_key_mask: _mask, updated_at: _updated, has_api_key: _hasApiKey, ...rest } = optimizerConfig.data
     setOptimizerForm({ ...rest, api_key: "" })
   }, [optimizerConfig.data])
+  useEffect(() => {
+    if (samplingPolicy.data) setSamplingForm(samplingPolicy.data)
+  }, [samplingPolicy.data])
 
   const save = useMutation({
     mutationFn: () => api("/api/model-config", { method: "PUT", ...jsonBody(form) }),
@@ -61,6 +66,18 @@ export function ModelPage() {
     onSuccess: (data) => toast.success(data.message || "SOL 连接成功"),
     onError: (error) => toast.error(error.message),
   })
+  const saveSampling = useMutation({
+    mutationFn: () => api<SamplingPolicy>("/api/sampling-policy", { method: "PUT", ...jsonBody(samplingForm) }),
+    onSuccess: async (data) => {
+      setSamplingForm(data)
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["sampling-policy"] }),
+        queryClient.invalidateQueries({ queryKey: ["evaluations"] }),
+      ])
+      toast.success(`抽样策略已保存为 ${data.version}`)
+    },
+    onError: (error) => toast.error(error.message),
+  })
 
   function update<K extends keyof FormState>(key: K, value: FormState[K]) {
     setForm((current) => current ? { ...current, [key]: value } : current)
@@ -68,6 +85,10 @@ export function ModelPage() {
 
   function updateOptimizer<K extends keyof OptimizerFormState>(key: K, value: OptimizerFormState[K]) {
     setOptimizerForm((current) => current ? { ...current, [key]: value } : current)
+  }
+
+  function updateSampling<K extends keyof SamplingPolicy>(key: K, value: SamplingPolicy[K]) {
+    setSamplingForm((current) => current ? { ...current, [key]: value } : current)
   }
 
   return (
@@ -151,6 +172,31 @@ export function ModelPage() {
             <div className="flex items-center gap-2">{optimizerConfig.data?.has_api_key ? <CheckCircle size={20} weight="fill" className="text-[#2f6f48]" /> : <WarningCircle size={20} className="text-[#a85a0a]" />}<span className="text-sm font-semibold">{optimizerConfig.data?.has_api_key ? "当前电脑已保存 SOL 密钥" : "尚未保存 SOL 密钥"}</span></div>
             <div className="flex gap-2"><Button variant="secondary" onClick={() => testOptimizer.mutate()} disabled={!optimizerConfig.data?.has_api_key || testOptimizer.isPending}><PlugsConnected />测试 SOL 连接</Button><Button onClick={() => saveOptimizer.mutate()} disabled={!optimizerForm || saveOptimizer.isPending}><FloppyDisk />保存 SOL 配置</Button></div>
           </div>
+        </section>
+
+        <section className="mt-10 grid gap-7 border-y border-[var(--line-strong)] bg-white px-5 py-6 lg:grid-cols-[230px_1fr] lg:px-7">
+          <div>
+            <div className="flex size-10 items-center justify-center rounded-[4px] border border-[var(--line-strong)]"><SlidersHorizontal size={21} /></div>
+            <h2 className="font-editorial mt-5 text-2xl font-bold">智能抽样策略</h2>
+            <p className="mt-2 text-sm leading-6 text-[var(--muted)]">调整结果进入必审或抽样队列的阈值。每次保存生成新修订号，列表与详情同步显示当前策略版本。</p>
+            {samplingForm && <Badge>{samplingForm.version}</Badge>}
+          </div>
+          {samplingForm ? (
+            <div>
+              <div className="grid gap-5 sm:grid-cols-2 xl:grid-cols-3">
+                <Field label="常规稳定抽样（%）"><Input type="number" min="0" max="100" value={samplingForm.sample_rate} onChange={(event) => updateSampling("sample_rate", Number(event.target.value))} /></Field>
+                <Field label="低置信度必审阈值（%）"><Input type="number" min="0" max="100" value={Math.round(samplingForm.low_confidence_threshold * 100)} onChange={(event) => updateSampling("low_confidence_threshold", Number(event.target.value) / 100)} /></Field>
+                <Field label="中置信度抽样上限（%）"><Input type="number" min="0" max="100" value={Math.round(samplingForm.medium_confidence_threshold * 100)} onChange={(event) => updateSampling("medium_confidence_threshold", Number(event.target.value) / 100)} /></Field>
+                <Field label="新组合冷启动必审数"><Input type="number" min="0" max="100" value={samplingForm.cold_start_required_count} onChange={(event) => updateSampling("cold_start_required_count", Number(event.target.value))} /></Field>
+                <Field label="高等级从哪一级开始必审"><select className="flex h-11 w-full rounded-[4px] border border-input bg-transparent px-3 text-sm" value={samplingForm.high_level_required_from} onChange={(event) => updateSampling("high_level_required_from", Number(event.target.value))}>{[1, 2, 3, 4, 5].map((level) => <option key={level} value={level}>L{level} 及以上</option>)}</select></Field>
+              </div>
+              <div className="mt-6 flex flex-wrap items-center justify-between gap-3 border-t border-[var(--line)] pt-4">
+                <p className="text-xs text-[var(--muted)]">最后更新：{samplingForm.updated_by} · {new Date(samplingForm.updated_at).toLocaleString("zh-CN")}</p>
+                <Button onClick={() => saveSampling.mutate()} disabled={saveSampling.isPending || samplingForm.medium_confidence_threshold < samplingForm.low_confidence_threshold}><FloppyDisk />保存抽样策略</Button>
+              </div>
+              {samplingForm.medium_confidence_threshold < samplingForm.low_confidence_threshold && <p role="alert" className="mt-3 text-sm font-semibold text-[var(--danger)]">中置信度抽样上限不能低于低置信度必审阈值。</p>}
+            </div>
+          ) : <div className="h-44 animate-pulse bg-[#f1f3ef]" />}
         </section>
 
         <div className="mt-8 flex justify-end"><Button onClick={() => save.mutate()} disabled={!form || save.isPending}><FloppyDisk />保存豆包配置</Button></div>

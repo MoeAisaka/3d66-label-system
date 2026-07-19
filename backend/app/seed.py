@@ -4,7 +4,14 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .config import get_settings
-from .models import EvaluationControl, ModelConfig, OptimizerConfig, PromptVersion, User
+from .models import (
+    EvaluationControl,
+    ModelConfig,
+    OptimizerConfig,
+    PromptVersion,
+    SamplingPolicy,
+    User,
+)
 from .prompt_loader import load_prompt_pairs, load_standalone_prompt
 from .security import DEFAULT_ADMIN_PASSWORD_HASH
 
@@ -28,6 +35,9 @@ def seed_defaults(db: Session) -> None:
 
     if db.get(EvaluationControl, 1) is None:
         db.add(EvaluationControl(id=1))
+
+    if db.get(SamplingPolicy, 1) is None:
+        db.add(SamplingPolicy(id=1))
 
     if db.scalar(select(PromptVersion).limit(1)) is None:
         pairs = load_prompt_pairs(settings.prompt_source)

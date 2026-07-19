@@ -40,6 +40,7 @@ from .models import (
     SampleSet,
     SampleSetItem,
     SampleTruthRevision,
+    SamplingPolicy,
     SessionToken,
     User,
 )
@@ -93,6 +94,20 @@ class OptimizerConfigUpdate(BaseModel):
     timeout_seconds: int = Field(default=300, ge=10, le=900)
     max_retries: int = Field(default=1, ge=0, le=5)
     structured_output: bool = True
+
+
+class SamplingPolicyUpdate(BaseModel):
+    sample_rate: int = Field(ge=0, le=100)
+    low_confidence_threshold: float = Field(ge=0, le=1)
+    medium_confidence_threshold: float = Field(ge=0, le=1)
+    cold_start_required_count: int = Field(ge=0, le=100)
+    high_level_required_from: int = Field(ge=1, le=5)
+
+    @model_validator(mode="after")
+    def validate_confidence_thresholds(self) -> "SamplingPolicyUpdate":
+        if self.medium_confidence_threshold < self.low_confidence_threshold:
+            raise ValueError("中置信度上限不能低于低置信度阈值")
+        return self
 
 
 class EnqueueRequest(BaseModel):
@@ -268,6 +283,13 @@ def _evaluation_asset_payload(
 
 
 def _review_sampling_decisions(db: Session) -> dict[int, dict[str, Any]]:
+    policy = db.get(SamplingPolicy, 1) or SamplingPolicy(id=1)
+    sample_rate = policy.sample_rate if policy.sample_rate is not None else 10
+    low_threshold = policy.low_confidence_threshold if policy.low_confidence_threshold is not None else 0.7
+    medium_threshold = policy.medium_confidence_threshold if policy.medium_confidence_threshold is not None else 0.9
+    cold_start_count = policy.cold_start_required_count if policy.cold_start_required_count is not None else 5
+    high_level_from = policy.high_level_required_from if policy.high_level_required_from is not None else 4
+    policy_revision = policy.revision if policy.revision is not None else 1
     all_results = db.scalars(
         select(EvaluationResult).order_by(
             EvaluationResult.created_at.asc(), EvaluationResult.id.asc()
@@ -295,6 +317,12 @@ def _review_sampling_decisions(db: Session) -> dict[int, dict[str, Any]]:
             is_golden=result.asset_id in golden_asset_ids,
             previous_level=previous_level_by_asset.get(result.asset_id),
             combination_index=combination_counts[combination],
+            sample_rate=sample_rate,
+            low_confidence_threshold=low_threshold,
+            medium_confidence_threshold=medium_threshold,
+            cold_start_required_count=cold_start_count,
+            high_level_required_from=high_level_from,
+            policy_version=f"smart-sampling-v1.1/policy-{policy_revision}",
         )
         previous_level_by_asset[result.asset_id] = result.level
     return decisions
@@ -761,6 +789,59 @@ def get_model_config(
         "api_key_mask": "••••••••" if config.encrypted_api_key else "",
         "updated_at": config.updated_at,
     }
+
+
+def _sampling_policy_payload(policy: SamplingPolicy) -> dict[str, Any]:
+    return {
+        "id": policy.id,
+        "version": f"smart-sampling-v1.1/policy-{policy.revision}",
+        "revision": policy.revision,
+        "sample_rate": policy.sample_rate,
+        "low_confidence_threshold": policy.low_confidence_threshold,
+        "medium_confidence_threshold": policy.medium_confidence_threshold,
+        "cold_start_required_count": policy.cold_start_required_count,
+        "high_level_required_from": policy.high_level_required_from,
+        "updated_by": policy.updated_by,
+        "updated_at": policy.updated_at,
+    }
+
+
+@app.get("/api/sampling-policy")
+def get_sampling_policy(
+    _user: User = Depends(current_user), db: Session = Depends(get_db)
+) -> dict[str, Any]:
+    policy = db.get(SamplingPolicy, 1)
+    if not policy:
+        policy = SamplingPolicy(id=1)
+        db.add(policy)
+        db.commit()
+        db.refresh(policy)
+    return _sampling_policy_payload(policy)
+
+
+@app.put("/api/sampling-policy")
+def update_sampling_policy(
+    payload: SamplingPolicyUpdate,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    policy = db.get(SamplingPolicy, 1)
+    if not policy:
+        policy = SamplingPolicy(id=1)
+        db.add(policy)
+    for field in (
+        "sample_rate",
+        "low_confidence_threshold",
+        "medium_confidence_threshold",
+        "cold_start_required_count",
+        "high_level_required_from",
+    ):
+        setattr(policy, field, getattr(payload, field))
+    policy.revision = (policy.revision or 0) + 1
+    policy.updated_by = user.display_name
+    db.commit()
+    db.refresh(policy)
+    return _sampling_policy_payload(policy)
 
 
 @app.put("/api/model-config")

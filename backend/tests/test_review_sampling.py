@@ -96,3 +96,23 @@ def test_first_results_of_new_model_prompt_combination_are_required() -> None:
 
     assert decision["tier"] == "required"
     assert "new_combination" in reason_codes(decision)
+
+
+def test_configurable_thresholds_and_policy_version_are_applied() -> None:
+    decision = build_review_sampling(
+        result_stub(confidence=0.82, level="L4"),
+        combination_index=4,
+        sample_rate=17,
+        low_confidence_threshold=0.85,
+        medium_confidence_threshold=0.95,
+        cold_start_required_count=3,
+        high_level_required_from=5,
+        policy_version="smart-sampling-v1.1/policy-8",
+    )
+
+    assert decision["version"] == "smart-sampling-v1.1/policy-8"
+    assert decision["sample_rate"] == 17
+    assert decision["tier"] == "required"
+    assert "low_confidence" in reason_codes(decision)
+    assert "new_combination" not in reason_codes(decision)
+    assert "high_level" not in reason_codes(decision)

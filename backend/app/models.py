@@ -149,6 +149,22 @@ class EvaluationControl(Base):
     )
 
 
+class SamplingPolicy(Base):
+    __tablename__ = "sampling_policies"
+
+    id: Mapped[int] = mapped_column(primary_key=True, default=1)
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+    sample_rate: Mapped[int] = mapped_column(Integer, default=10)
+    low_confidence_threshold: Mapped[float] = mapped_column(Float, default=0.7)
+    medium_confidence_threshold: Mapped[float] = mapped_column(Float, default=0.9)
+    cold_start_required_count: Mapped[int] = mapped_column(Integer, default=5)
+    high_level_required_from: Mapped[int] = mapped_column(Integer, default=4)
+    updated_by: Mapped[str] = mapped_column(String(80), default="system")
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+
 class EvaluationResult(Base):
     __tablename__ = "evaluation_results"
 

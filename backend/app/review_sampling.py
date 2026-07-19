@@ -5,7 +5,7 @@ import json
 from typing import Any
 
 
-SMART_SAMPLING_VERSION = "smart-sampling-v1.0"
+SMART_SAMPLING_VERSION = "smart-sampling-v1.1"
 DEFAULT_SAMPLE_RATE = 10
 
 DIMENSION_KEYS = (
@@ -60,12 +60,17 @@ def build_review_sampling(
     previous_level: str | None = None,
     combination_index: int | None = None,
     sample_rate: int = DEFAULT_SAMPLE_RATE,
+    low_confidence_threshold: float = 0.7,
+    medium_confidence_threshold: float = 0.9,
+    cold_start_required_count: int = 5,
+    high_level_required_from: int = 4,
+    policy_version: str | None = None,
 ) -> dict[str, Any]:
     """Return a stable and explainable review recommendation for one evaluation result."""
     latest_review = result.reviews[-1] if getattr(result, "reviews", None) else None
     if latest_review and latest_review.decision in {"approved", "corrected"}:
         return {
-            "version": SMART_SAMPLING_VERSION,
+            "version": policy_version or SMART_SAMPLING_VERSION,
             "tier": "reviewed",
             "priority": 0,
             "sample_rate": sample_rate,
@@ -105,12 +110,15 @@ def build_review_sampling(
         require("golden_sample", "属于已锁定黄金样本", 100)
     if getattr(result, "needs_review", False):
         require("model_needs_review", "模型标记需要人工复核", 88)
-    if getattr(result, "confidence", None) is None or result.confidence < 0.7:
-        require("low_confidence", "模型置信度低于70%或缺失", 90)
-    elif result.confidence < 0.9:
-        sample("medium_confidence", "模型置信度低于90%", 55)
+    low_percent = round(low_confidence_threshold * 100)
+    medium_percent = round(medium_confidence_threshold * 100)
+    if getattr(result, "confidence", None) is None or result.confidence < low_confidence_threshold:
+        require("low_confidence", f"模型置信度低于{low_percent}%或缺失", 90)
+    elif result.confidence < medium_confidence_threshold:
+        sample("medium_confidence", f"模型置信度低于{medium_percent}%", 55)
 
-    if getattr(result, "level", None) in {"L4", "L5"}:
+    result_level_rank = LEVEL_RANK.get(getattr(result, "level", None), 0)
+    if result_level_rank >= high_level_required_from:
         require("high_level", f"模型给出高等级{result.level}", 82)
 
     professional = media.get("professional_photography") or {}
@@ -138,7 +146,7 @@ def build_review_sampling(
         elif gap == 1:
             sample("version_shift", "与同素材上一结果相差1个等级", 60)
 
-    if combination_index is not None and combination_index <= 5:
+    if combination_index is not None and combination_index <= cold_start_required_count:
         require("new_combination", f"模型与提示词组合的第{combination_index}条结果", 80)
 
     grades = [
@@ -158,7 +166,7 @@ def build_review_sampling(
 
     if required:
         return {
-            "version": SMART_SAMPLING_VERSION,
+            "version": policy_version or SMART_SAMPLING_VERSION,
             "tier": "required",
             "priority": min(100, required_priority + min(8, len(required) - 1)),
             "sample_rate": sample_rate,
@@ -170,7 +178,7 @@ def build_review_sampling(
 
     if sampled:
         return {
-            "version": SMART_SAMPLING_VERSION,
+            "version": policy_version or SMART_SAMPLING_VERSION,
             "tier": "sampled",
             "priority": min(79, sampled_priority + min(8, len(sampled) - 1)),
             "sample_rate": sample_rate,
@@ -178,7 +186,7 @@ def build_review_sampling(
         }
 
     return {
-        "version": SMART_SAMPLING_VERSION,
+        "version": policy_version or SMART_SAMPLING_VERSION,
         "tier": "deferred",
         "priority": 20,
         "sample_rate": sample_rate,
