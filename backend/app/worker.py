@@ -29,6 +29,7 @@ from .schema_adapter import (
     is_combined_aesthetic_response,
     normalize_precheck_business_rules,
 )
+from .regression import complete_regression_item, fail_regression_item
 from .seed import seed_defaults
 
 
@@ -220,8 +221,7 @@ async def evaluate_job(job_id: int) -> None:
         current_job = db.get(EvaluationJob, job_id)
         if current_job is None or current_job.status != "processing":
             raise JobInterrupted("任务已暂停或取消，忽略本次模型返回")
-        db.add(
-            EvaluationResult(
+        result = EvaluationResult(
                 asset_id=asset.id,
                 job_id=job_id,
                 precheck_json=json.dumps(precheck, ensure_ascii=False),
@@ -248,7 +248,8 @@ async def evaluate_job(job_id: int) -> None:
                 rubric_version=prompt_b.rubric_version if prompt_b else prompt_a.rubric_version,
                 engine_version=ENGINE_VERSION,
             )
-        )
+        db.add(result)
+        db.flush()
         db.execute(
             update(Asset).where(Asset.id == asset.id).values(status="evaluated")
         )
@@ -257,6 +258,8 @@ async def evaluate_job(job_id: int) -> None:
             .where(EvaluationJob.id == job_id)
             .values(status="completed", stage="done", progress=100, finished_at=now)
         )
+        if current_job.regression_item_id:
+            complete_regression_item(db, current_job.regression_item_id, result)
 
 
 async def process_one() -> bool:
@@ -278,6 +281,10 @@ async def process_one() -> bool:
             error_message=str(exc)[:4000],
             finished_at=datetime.now(timezone.utc),
         )
+        with session_scope() as db:
+            failed_job = db.get(EvaluationJob, job_id)
+            if failed_job and failed_job.regression_item_id:
+                fail_regression_item(db, failed_job.regression_item_id, str(exc))
     return True
 
 

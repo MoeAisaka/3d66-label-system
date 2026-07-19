@@ -67,10 +67,11 @@ export function PromptsPage() {
     onError: (error) => toast.error(error.message),
   })
   const publish = useMutation({
-    mutationFn: () => api(`/api/prompts/${selected?.id}/publish`, { method: "POST" }),
-    onSuccess: async () => {
+    mutationFn: () => api<{ ok: boolean; regression_run_ids: number[] }>(`/api/prompts/${selected?.id}/publish`, { method: "POST" }),
+    onSuccess: async (data) => {
       await queryClient.invalidateQueries({ queryKey: ["prompts"] })
-      toast.success("提示词版本已发布")
+      await queryClient.invalidateQueries({ queryKey: ["prompt-regressions"] })
+      toast.success(data.regression_run_ids.length ? `提示词已发布，并启动 ${data.regression_run_ids.length} 组黄金回归` : "提示词已发布；当前没有已锁定的黄金样本")
     },
     onError: (error) => toast.error(error.message),
   })

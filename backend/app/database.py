@@ -72,6 +72,34 @@ def init_database() -> None:
             connection.exec_driver_sql(
                 "ALTER TABLE evaluation_jobs ADD COLUMN prompt_b_id INTEGER REFERENCES prompt_versions(id) ON DELETE SET NULL"
             )
+        if "regression_item_id" not in job_columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE evaluation_jobs ADD COLUMN regression_item_id INTEGER REFERENCES prompt_regression_items(id) ON DELETE SET NULL"
+            )
+        sample_set_columns = {
+            row[1] for row in connection.exec_driver_sql("PRAGMA table_info(sample_sets)")
+        }
+        if "kind" not in sample_set_columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE sample_sets ADD COLUMN kind VARCHAR(20) NOT NULL DEFAULT 'test'"
+            )
+        if "status" not in sample_set_columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE sample_sets ADD COLUMN status VARCHAR(20) NOT NULL DEFAULT 'draft'"
+            )
+        sample_item_columns = {
+            row[1] for row in connection.exec_driver_sql("PRAGMA table_info(sample_set_items)")
+        }
+        for column_name, definition in (
+            ("truth_json", "TEXT NOT NULL DEFAULT '{}'"),
+            ("truth_revision", "INTEGER NOT NULL DEFAULT 1"),
+            ("truth_updated_by", "VARCHAR(80)"),
+            ("truth_updated_at", "DATETIME"),
+        ):
+            if column_name not in sample_item_columns:
+                connection.exec_driver_sql(
+                    f"ALTER TABLE sample_set_items ADD COLUMN {column_name} {definition}"
+                )
 
 
 def get_db() -> Generator[Session, None, None]:

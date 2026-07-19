@@ -146,7 +146,10 @@ export type SampleSetSummary = {
   id: number
   name: string
   description: string
+  kind: "golden" | "test"
+  status: "draft" | "locked"
   item_count: number
+  truth_complete_count: number
   created_by: string
   created_at: string
 }
@@ -159,10 +162,83 @@ export type SampleSetItem = {
   expected_level: string | null
   expected_category: string
   note: string
+  truth: SampleTruth
+  truth_revision: number
+  truth_updated_by: string | null
+  truth_updated_at: string | null
   source_model_id: string
   source_level: string | null
   added_by: string
   created_at: string
+}
+
+export type SampleTruth = {
+  level?: string | null
+  category?: string
+  quality_severity?: string
+  media_form?: Record<string, "yes" | "no" | "uncertain">
+  dimensions?: Record<string, number>
+}
+
+export type SampleItemHistory = {
+  item: SampleSetItem
+  evaluations: Array<Evaluation & { reviews: NonNullable<Evaluation["human_review"]>[] }>
+  truth_revisions: Array<{
+    id: number
+    revision: number
+    truth: SampleTruth
+    reason: string
+    reviewer_name: string
+    created_at: string
+  }>
+  regressions: Array<{
+    id: number
+    run_id: number
+    run_name: string
+    status: string
+    passed: boolean | null
+    comparison: Record<string, any>
+    created_at: string
+    finished_at: string | null
+  }>
+}
+
+export type RegressionSummary = {
+  id: number
+  name: string
+  sample_set_id: number
+  sample_set_name: string
+  prompt_a_id: number
+  prompt_a_version: string
+  prompt_b_id: number
+  prompt_b_version: string
+  status: "queued" | "running" | "passed" | "regressed"
+  threshold: number
+  total: number
+  completed: number
+  passed: number
+  failed: number
+  pass_rate: number
+  release_gate_passed: boolean
+  created_by: string
+  created_at: string
+  finished_at: string | null
+}
+
+export type RegressionDetail = {
+  summary: RegressionSummary
+  items: Array<{
+    id: number
+    sample_item_id: number
+    asset_id: number
+    asset_name: string
+    image_url: string
+    expected: SampleTruth
+    status: string
+    passed: boolean | null
+    comparison: Record<string, any>
+    evaluation: Evaluation | null
+  }>
 }
 
 export type SampleSetDetail = {

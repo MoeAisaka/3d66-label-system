@@ -34,9 +34,12 @@ from .models import (
     ModelConfig,
     OptimizerConfig,
     PromptOptimizationRun,
+    PromptRegressionItem,
+    PromptRegressionRun,
     PromptVersion,
     SampleSet,
     SampleSetItem,
+    SampleTruthRevision,
     SessionToken,
     User,
 )
@@ -49,6 +52,7 @@ from .security import (
 from .optimizer import run_prompt_optimization
 from .seed import seed_defaults
 from .schema_adapter import repair_combined_aesthetic_results, rescore_stored_results
+from .regression import truth_from_result
 
 
 settings = get_settings()
@@ -156,6 +160,7 @@ class PromptOptimizationCreateRequest(BaseModel):
 class SampleSetCreateRequest(BaseModel):
     name: str = Field(min_length=1, max_length=160)
     description: str = Field(default="", max_length=2000)
+    kind: str = Field(default="test", pattern="^(golden|test)$")
 
 
 class SampleSetAddItemsRequest(BaseModel):
@@ -166,6 +171,19 @@ class SampleSetAddItemsRequest(BaseModel):
 class SampleSetItemUpdateRequest(BaseModel):
     expected_level: str | None = Field(default=None, pattern="^L[1-5]$")
     note: str = Field(default="", max_length=2000)
+    truth: dict[str, Any] | None = None
+    revision_reason: str = Field(default="", max_length=2000)
+
+
+class SampleSetStatusRequest(BaseModel):
+    status: str = Field(pattern="^(draft|locked)$")
+
+
+class RegressionCreateRequest(BaseModel):
+    sample_set_id: int | None = Field(default=None, ge=1)
+    prompt_a_id: int | None = Field(default=None, ge=1)
+    prompt_b_id: int | None = Field(default=None, ge=1)
+    threshold: float = Field(default=0.9, ge=0.5, le=1.0)
 
 
 class MigrationCreateRequest(BaseModel):
@@ -838,9 +856,9 @@ def create_prompt(
 @app.post("/api/prompts/{prompt_id}/publish")
 def publish_prompt(
     prompt_id: int,
-    _user: User = Depends(current_user),
+    user: User = Depends(current_user),
     db: Session = Depends(get_db),
-) -> dict[str, bool]:
+) -> dict[str, Any]:
     prompt = db.get(PromptVersion, prompt_id)
     if not prompt:
         raise HTTPException(status_code=404, detail="提示词版本不存在")
@@ -850,8 +868,28 @@ def publish_prompt(
         .values(status="archived")
     )
     prompt.status = "published"
+    db.flush()
+    prompt_a = prompt if prompt.stage == "A" else db.scalar(
+        select(PromptVersion)
+        .where(PromptVersion.stage == "A", PromptVersion.status == "published")
+        .order_by(PromptVersion.created_at.desc())
+    )
+    prompt_b = prompt if prompt.stage == "B" else db.scalar(
+        select(PromptVersion)
+        .where(PromptVersion.stage == "B", PromptVersion.status == "published")
+        .order_by(PromptVersion.created_at.desc())
+    )
+    regression_ids: list[int] = []
+    if prompt_a and prompt_b:
+        regression_ids = _create_regression_runs(
+            db,
+            prompt_a=prompt_a,
+            prompt_b=prompt_b,
+            created_by=user.username,
+            trigger_prompt_id=prompt.id,
+        )
     db.commit()
-    return {"ok": True}
+    return {"ok": True, "regression_run_ids": regression_ids}
 
 
 @app.post("/api/prompts/ai-revise")
@@ -1010,11 +1048,15 @@ def create_review(
 
 
 def _sample_set_summary(sample_set: SampleSet) -> dict[str, Any]:
+    truth_complete = sum(1 for item in sample_set.items if bool(json.loads(item.truth_json or "{}")))
     return {
         "id": sample_set.id,
         "name": sample_set.name,
         "description": sample_set.description,
+        "kind": sample_set.kind,
+        "status": sample_set.status,
         "item_count": len(sample_set.items),
+        "truth_complete_count": truth_complete,
         "created_by": sample_set.created_by,
         "created_at": sample_set.created_at,
     }
@@ -1022,6 +1064,7 @@ def _sample_set_summary(sample_set: SampleSet) -> dict[str, Any]:
 
 def _sample_set_item_payload(item: SampleSetItem) -> dict[str, Any]:
     source = _result_payload(item.source_result)
+    truth = json.loads(item.truth_json or "{}")
     return {
         "id": item.id,
         "asset_id": item.asset_id,
@@ -1030,11 +1073,71 @@ def _sample_set_item_payload(item: SampleSetItem) -> dict[str, Any]:
         "expected_level": item.expected_level,
         "expected_category": item.expected_category,
         "note": item.note,
+        "truth": truth,
+        "truth_revision": item.truth_revision,
+        "truth_updated_by": item.truth_updated_by,
+        "truth_updated_at": item.truth_updated_at,
         "source_model_id": item.source_result.model_id,
         "source_level": source.get("final_level") if source else None,
         "added_by": item.added_by,
         "created_at": item.created_at,
     }
+
+
+def _create_regression_runs(
+    db: Session,
+    *,
+    prompt_a: PromptVersion,
+    prompt_b: PromptVersion,
+    created_by: str,
+    trigger_prompt_id: int | None = None,
+    sample_set_id: int | None = None,
+    threshold: float = 0.9,
+) -> list[int]:
+    query = select(SampleSet).where(
+        SampleSet.kind == "golden",
+        SampleSet.status == "locked",
+    )
+    if sample_set_id is not None:
+        query = query.where(SampleSet.id == sample_set_id)
+    sample_sets = db.scalars(query.order_by(SampleSet.created_at.asc())).all()
+    run_ids: list[int] = []
+    for sample_set in sample_sets:
+        eligible = [item for item in sample_set.items if json.loads(item.truth_json or "{}")]
+        if not eligible:
+            continue
+        run = PromptRegressionRun(
+            name=f"{prompt_a.version} + {prompt_b.version} · {sample_set.name}",
+            sample_set_id=sample_set.id,
+            trigger_prompt_id=trigger_prompt_id,
+            prompt_a_id=prompt_a.id,
+            prompt_b_id=prompt_b.id,
+            threshold=threshold,
+            total=len(eligible),
+            status="queued",
+            created_by=created_by,
+        )
+        db.add(run)
+        db.flush()
+        for sample_item in eligible:
+            regression_item = PromptRegressionItem(
+                run_id=run.id,
+                sample_item_id=sample_item.id,
+                status="queued",
+            )
+            db.add(regression_item)
+            db.flush()
+            job = EvaluationJob(
+                asset_id=sample_item.asset_id,
+                prompt_a_id=prompt_a.id,
+                prompt_b_id=prompt_b.id,
+                regression_item_id=regression_item.id,
+            )
+            db.add(job)
+            db.flush()
+            regression_item.job_id = job.id
+        run_ids.append(run.id)
+    return run_ids
 
 
 @app.get("/api/sample-sets")
@@ -1059,6 +1162,7 @@ def create_sample_set(
     sample_set = SampleSet(
         name=name,
         description=payload.description.strip(),
+        kind=payload.kind,
         created_by=user.username,
     )
     db.add(sample_set)
@@ -1121,14 +1225,28 @@ def add_sample_set_items(
             continue
         precheck = result_payload.get("precheck") or {}
         category = ((precheck.get("classification") or {}).get("primary_category") or "无法判断")
-        db.add(
-            SampleSetItem(
+        item = SampleSetItem(
                 sample_set_id=sample_set.id,
                 asset_id=asset_id,
                 source_result_id=result.id,
                 expected_level=payload.expected_level or result_payload.get("final_level"),
                 expected_category=category,
+                truth_json=json.dumps(
+                    truth_from_result(result, payload.expected_level), ensure_ascii=False
+                ),
+                truth_updated_by=user.username,
+                truth_updated_at=datetime.now(timezone.utc),
                 added_by=user.username,
+            )
+        db.add(item)
+        db.flush()
+        db.add(
+            SampleTruthRevision(
+                sample_item_id=item.id,
+                revision=1,
+                truth_json=item.truth_json,
+                reason="收录样本时建立首版标准答案",
+                reviewer_name=user.username,
             )
         )
         added += 1
@@ -1143,7 +1261,7 @@ def update_sample_set_item(
     sample_set_id: int,
     item_id: int,
     payload: SampleSetItemUpdateRequest,
-    _user: User = Depends(current_user),
+    user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ) -> dict[str, bool]:
     item = db.scalar(
@@ -1156,8 +1274,122 @@ def update_sample_set_item(
         raise HTTPException(status_code=404, detail="样本不存在")
     item.expected_level = payload.expected_level
     item.note = payload.note.strip()
+    if payload.truth is not None:
+        truth = dict(payload.truth)
+        if payload.expected_level:
+            truth["level"] = payload.expected_level
+        item.truth_revision += 1
+        item.truth_json = json.dumps(truth, ensure_ascii=False)
+        item.truth_updated_by = user.username
+        item.truth_updated_at = datetime.now(timezone.utc)
+        db.add(
+            SampleTruthRevision(
+                sample_item_id=item.id,
+                revision=item.truth_revision,
+                truth_json=item.truth_json,
+                reason=payload.revision_reason.strip() or "更新标准答案",
+                reviewer_name=user.username,
+            )
+        )
     db.commit()
     return {"ok": True}
+
+
+@app.patch("/api/sample-sets/{sample_set_id}/status")
+def update_sample_set_status(
+    sample_set_id: int,
+    payload: SampleSetStatusRequest,
+    _user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, bool]:
+    sample_set = db.get(SampleSet, sample_set_id)
+    if not sample_set:
+        raise HTTPException(status_code=404, detail="样本集不存在")
+    if payload.status == "locked":
+        if sample_set.kind != "golden":
+            raise HTTPException(status_code=400, detail="只有黄金样本集需要锁定")
+        incomplete = [item for item in sample_set.items if not json.loads(item.truth_json or "{}")]
+        if not sample_set.items or incomplete:
+            raise HTTPException(status_code=400, detail="请先补全所有黄金样本的标准答案")
+    sample_set.status = payload.status
+    db.commit()
+    return {"ok": True}
+
+
+@app.get("/api/sample-sets/{sample_set_id}/items/{item_id}/history")
+def sample_item_history(
+    sample_set_id: int,
+    item_id: int,
+    _user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    item = db.scalar(
+        select(SampleSetItem).where(
+            SampleSetItem.id == item_id,
+            SampleSetItem.sample_set_id == sample_set_id,
+        )
+    )
+    if not item:
+        raise HTTPException(status_code=404, detail="样本不存在")
+    results = db.scalars(
+        select(EvaluationResult)
+        .where(EvaluationResult.asset_id == item.asset_id)
+        .order_by(EvaluationResult.created_at.desc())
+    ).all()
+    evaluations = []
+    for result in results:
+        payload = _result_payload(result) or {}
+        payload["reviews"] = [
+            {
+                "id": review.id,
+                "reviewer_name": review.reviewer_name,
+                "decision": review.decision,
+                "corrected_level": review.corrected_level,
+                "note": review.note,
+                "corrections": json.loads(review.corrections_json or "[]"),
+                "created_at": review.created_at,
+            }
+            for review in result.reviews
+        ]
+        evaluations.append(payload)
+    revisions = db.scalars(
+        select(SampleTruthRevision)
+        .where(SampleTruthRevision.sample_item_id == item.id)
+        .order_by(SampleTruthRevision.revision.desc())
+    ).all()
+    regression_items = db.scalars(
+        select(PromptRegressionItem)
+        .where(PromptRegressionItem.sample_item_id == item.id)
+        .order_by(PromptRegressionItem.created_at.desc())
+    ).all()
+    return {
+        "item": _sample_set_item_payload(item),
+        "evaluations": evaluations,
+        "truth_revisions": [
+            {
+                "id": revision.id,
+                "revision": revision.revision,
+                "truth": json.loads(revision.truth_json or "{}"),
+                "reason": revision.reason,
+                "reviewer_name": revision.reviewer_name,
+                "created_at": revision.created_at,
+            }
+            for revision in revisions
+        ],
+        "regressions": [
+            {
+                "id": regression.id,
+                "run_id": regression.run_id,
+                "run_name": regression.run.name,
+                "status": regression.status,
+                "passed": regression.passed,
+                "comparison": json.loads(regression.comparison_json or "{}"),
+                "created_at": regression.created_at,
+                "finished_at": regression.finished_at,
+            }
+            for regression in regression_items
+        ],
+    }
 
 
 @app.delete("/api/sample-sets/{sample_set_id}/items/{item_id}")
@@ -1178,6 +1410,106 @@ def remove_sample_set_item(
     db.delete(item)
     db.commit()
     return {"ok": True}
+
+
+def _regression_summary(run: PromptRegressionRun) -> dict[str, Any]:
+    metrics = json.loads(run.metrics_json or "{}")
+    return {
+        "id": run.id,
+        "name": run.name,
+        "sample_set_id": run.sample_set_id,
+        "sample_set_name": run.sample_set.name,
+        "prompt_a_id": run.prompt_a_id,
+        "prompt_a_version": run.prompt_a.version,
+        "prompt_b_id": run.prompt_b_id,
+        "prompt_b_version": run.prompt_b.version,
+        "status": run.status,
+        "threshold": run.threshold,
+        "total": run.total,
+        "completed": run.completed,
+        "passed": run.passed,
+        "failed": run.failed,
+        "pass_rate": metrics.get("pass_rate", 0),
+        "release_gate_passed": metrics.get("release_gate_passed", False),
+        "created_by": run.created_by,
+        "created_at": run.created_at,
+        "finished_at": run.finished_at,
+    }
+
+
+@app.get("/api/prompt-regressions")
+def list_prompt_regressions(
+    limit: int = 100,
+    _user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    runs = db.scalars(
+        select(PromptRegressionRun)
+        .order_by(PromptRegressionRun.created_at.desc())
+        .limit(min(limit, 200))
+    ).all()
+    return {"items": [_regression_summary(run) for run in runs]}
+
+
+@app.get("/api/prompt-regressions/{run_id}")
+def prompt_regression_detail(
+    run_id: int,
+    _user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    run = db.get(PromptRegressionRun, run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="回归任务不存在")
+    return {
+        "summary": _regression_summary(run),
+        "items": [
+            {
+                "id": item.id,
+                "sample_item_id": item.sample_item_id,
+                "asset_id": item.sample_item.asset_id,
+                "asset_name": item.sample_item.asset.original_name,
+                "image_url": f"/api/assets/{item.sample_item.asset_id}/file",
+                "expected": json.loads(item.sample_item.truth_json or "{}"),
+                "status": item.status,
+                "passed": item.passed,
+                "comparison": json.loads(item.comparison_json or "{}"),
+                "evaluation": _result_payload(item.evaluation),
+            }
+            for item in run.items
+        ],
+    }
+
+
+@app.post("/api/prompt-regressions")
+def create_prompt_regression(
+    payload: RegressionCreateRequest,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    prompt_a = db.get(PromptVersion, payload.prompt_a_id) if payload.prompt_a_id else db.scalar(
+        select(PromptVersion)
+        .where(PromptVersion.stage == "A", PromptVersion.status == "published")
+        .order_by(PromptVersion.created_at.desc())
+    )
+    prompt_b = db.get(PromptVersion, payload.prompt_b_id) if payload.prompt_b_id else db.scalar(
+        select(PromptVersion)
+        .where(PromptVersion.stage == "B", PromptVersion.status == "published")
+        .order_by(PromptVersion.created_at.desc())
+    )
+    if not prompt_a or prompt_a.stage != "A" or not prompt_b or prompt_b.stage != "B":
+        raise HTTPException(status_code=400, detail="请选择有效的 A、B 提示词版本")
+    run_ids = _create_regression_runs(
+        db,
+        prompt_a=prompt_a,
+        prompt_b=prompt_b,
+        created_by=user.username,
+        sample_set_id=payload.sample_set_id,
+        threshold=payload.threshold,
+    )
+    if not run_ids:
+        raise HTTPException(status_code=400, detail="没有可回归的已锁定黄金样本")
+    db.commit()
+    return {"ids": run_ids}
 
 
 def _migration_summary(run: MigrationRun, items: list[MigrationItem]) -> dict[str, Any]:

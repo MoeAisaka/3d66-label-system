@@ -121,6 +121,9 @@ class EvaluationJob(Base):
     prompt_b_id: Mapped[int | None] = mapped_column(
         ForeignKey("prompt_versions.id", ondelete="SET NULL"), nullable=True, index=True
     )
+    regression_item_id: Mapped[int | None] = mapped_column(
+        ForeignKey("prompt_regression_items.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     status: Mapped[str] = mapped_column(String(30), default="queued", index=True)
     stage: Mapped[str] = mapped_column(String(30), default="waiting")
     progress: Mapped[int] = mapped_column(Integer, default=0)
@@ -197,6 +200,8 @@ class SampleSet(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     name: Mapped[str] = mapped_column(String(160), unique=True, index=True)
     description: Mapped[str] = mapped_column(Text, default="")
+    kind: Mapped[str] = mapped_column(String(20), default="test", index=True)
+    status: Mapped[str] = mapped_column(String(20), default="draft", index=True)
     created_by: Mapped[str] = mapped_column(String(80), default="system")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     items: Mapped[list["SampleSetItem"]] = relationship(
@@ -220,6 +225,10 @@ class SampleSetItem(Base):
     )
     expected_level: Mapped[str | None] = mapped_column(String(10), nullable=True)
     expected_category: Mapped[str] = mapped_column(String(120), default="无法判断")
+    truth_json: Mapped[str] = mapped_column(Text, default="{}")
+    truth_revision: Mapped[int] = mapped_column(Integer, default=1)
+    truth_updated_by: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    truth_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     note: Mapped[str] = mapped_column(Text, default="")
     added_by: Mapped[str] = mapped_column(String(80), default="system")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
@@ -227,6 +236,88 @@ class SampleSetItem(Base):
     sample_set: Mapped[SampleSet] = relationship(back_populates="items")
     asset: Mapped[Asset] = relationship()
     source_result: Mapped[EvaluationResult] = relationship()
+
+
+class SampleTruthRevision(Base):
+    __tablename__ = "sample_truth_revisions"
+    __table_args__ = (
+        UniqueConstraint("sample_item_id", "revision", name="uq_sample_truth_revision"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    sample_item_id: Mapped[int] = mapped_column(
+        ForeignKey("sample_set_items.id", ondelete="CASCADE"), index=True
+    )
+    revision: Mapped[int] = mapped_column(Integer)
+    truth_json: Mapped[str] = mapped_column(Text, default="{}")
+    reason: Mapped[str] = mapped_column(Text, default="")
+    reviewer_name: Mapped[str] = mapped_column(String(80))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    sample_item: Mapped[SampleSetItem] = relationship()
+
+
+class PromptRegressionRun(Base):
+    __tablename__ = "prompt_regression_runs"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(200))
+    sample_set_id: Mapped[int] = mapped_column(
+        ForeignKey("sample_sets.id", ondelete="CASCADE"), index=True
+    )
+    trigger_prompt_id: Mapped[int | None] = mapped_column(
+        ForeignKey("prompt_versions.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    prompt_a_id: Mapped[int] = mapped_column(
+        ForeignKey("prompt_versions.id", ondelete="CASCADE"), index=True
+    )
+    prompt_b_id: Mapped[int] = mapped_column(
+        ForeignKey("prompt_versions.id", ondelete="CASCADE"), index=True
+    )
+    status: Mapped[str] = mapped_column(String(30), default="queued", index=True)
+    threshold: Mapped[float] = mapped_column(Float, default=0.9)
+    total: Mapped[int] = mapped_column(Integer, default=0)
+    completed: Mapped[int] = mapped_column(Integer, default=0)
+    passed: Mapped[int] = mapped_column(Integer, default=0)
+    failed: Mapped[int] = mapped_column(Integer, default=0)
+    metrics_json: Mapped[str] = mapped_column(Text, default="{}")
+    created_by: Mapped[str] = mapped_column(String(80), default="system")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    sample_set: Mapped[SampleSet] = relationship()
+    prompt_a: Mapped[PromptVersion] = relationship(foreign_keys=[prompt_a_id])
+    prompt_b: Mapped[PromptVersion] = relationship(foreign_keys=[prompt_b_id])
+    items: Mapped[list["PromptRegressionItem"]] = relationship(
+        back_populates="run", cascade="all, delete-orphan", order_by="PromptRegressionItem.id"
+    )
+
+
+class PromptRegressionItem(Base):
+    __tablename__ = "prompt_regression_items"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    run_id: Mapped[int] = mapped_column(
+        ForeignKey("prompt_regression_runs.id", ondelete="CASCADE"), index=True
+    )
+    sample_item_id: Mapped[int] = mapped_column(
+        ForeignKey("sample_set_items.id", ondelete="CASCADE"), index=True
+    )
+    job_id: Mapped[int | None] = mapped_column(
+        ForeignKey("evaluation_jobs.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    evaluation_id: Mapped[int | None] = mapped_column(
+        ForeignKey("evaluation_results.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    status: Mapped[str] = mapped_column(String(30), default="queued", index=True)
+    passed: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    comparison_json: Mapped[str] = mapped_column(Text, default="{}")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    run: Mapped[PromptRegressionRun] = relationship(back_populates="items")
+    sample_item: Mapped[SampleSetItem] = relationship()
+    evaluation: Mapped[EvaluationResult | None] = relationship()
 
 
 class PromptOptimizationRun(Base):
