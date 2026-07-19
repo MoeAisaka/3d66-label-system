@@ -59,3 +59,20 @@ def test_v13_split3_calibration_catches_quality_and_grade_collapse() -> None:
     assert "画质正常”必须全部通过" in prompt_a_calibration
     assert "八个维度全部相同视为无效初稿" in prompt_b_calibration
     assert "至少形成两个有证据支持的等级档位" in prompt_b_calibration
+
+
+def test_v14_lite_prompts_are_compact_and_keep_runtime_contract() -> None:
+    prompt_a = load_standalone_prompt(
+        PROJECT_ROOT / "prompts" / "space-precheck-v1.4-lite.1.md"
+    )
+    prompt_b = load_standalone_prompt(
+        PROJECT_ROOT / "prompts" / "space-aesthetic-v1.4-lite.1.md"
+    )
+    assert 2000 < len(prompt_a.system) < 4000
+    assert 2000 < len(prompt_b.system) < 4500
+    assert "professional_photography" in prompt_a.system
+    assert "documentary_record" in prompt_a.system
+    assert "{{image_metadata}}" in prompt_a.user
+    assert '"scoring_profile": "space_aesthetic_v1.3"' in prompt_b.system
+    assert "{{precheck_json}}" in prompt_b.user
+    assert "{{rubric_version}}" in prompt_b.user

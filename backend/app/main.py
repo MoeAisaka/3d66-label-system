@@ -78,6 +78,7 @@ class ModelConfigUpdate(BaseModel):
     max_retries: int = Field(ge=0, le=5)
     max_concurrency: int = Field(ge=1, le=10)
     structured_output: bool = True
+    high_risk_review_enabled: bool = True
 
 
 class OptimizerConfigUpdate(BaseModel):
@@ -291,10 +292,14 @@ def _result_payload(result: EvaluationResult | None) -> dict[str, Any] | None:
             if latest_review
             else None
         ),
+        "risk_review": (
+            json.loads(result.risk_review_json) if result.risk_review_json else None
+        ),
         "versions": {
             "model": result.model_id,
             "prompt_a": result.prompt_a_version,
             "prompt_b": result.prompt_b_version,
+            "risk_review": result.risk_review_version,
             "rubric": result.rubric_version,
             "engine": result.engine_version,
         },
@@ -688,6 +693,7 @@ def get_model_config(
         "max_retries": config.max_retries,
         "max_concurrency": config.max_concurrency,
         "structured_output": config.structured_output,
+        "high_risk_review_enabled": config.high_risk_review_enabled,
         "has_api_key": bool(config.encrypted_api_key),
         "api_key_mask": "••••••••" if config.encrypted_api_key else "",
         "updated_at": config.updated_at,
@@ -715,6 +721,7 @@ def update_model_config(
         "max_retries",
         "max_concurrency",
         "structured_output",
+        "high_risk_review_enabled",
     ):
         setattr(config, field, getattr(payload, field))
     if payload.api_key:

@@ -34,6 +34,15 @@ export type Evaluation = {
     corrections: ReviewCorrection[]
     created_at: string
   } | null
+  risk_review: {
+    version: string
+    triggered: boolean
+    verdict: "keep" | "downgrade" | "uncertain" | "error"
+    confidence?: number
+    trigger_reasons?: string[]
+    reasons?: string[]
+    corrections?: Array<{ field: string; before: unknown; after: unknown }>
+  } | null
   versions: Record<string, string | null>
   created_at: string
 }
@@ -99,6 +108,7 @@ export type ModelConfig = {
   max_retries: number
   max_concurrency: number
   structured_output: boolean
+  high_risk_review_enabled: boolean
   has_api_key: boolean
   api_key_mask: string
   updated_at: string

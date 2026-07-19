@@ -19,6 +19,8 @@ const stageLabels: Record<string, string> = {
   waiting: "等待领取",
   precheck: "分类与画质预检",
   aesthetic: "美感维度评测",
+  aesthetic_repair: "维度评分校准",
+  risk_review: "高风险结果复核",
   scoring: "外部评分计算",
   paused: "已暂停",
   canceled: "已取消",

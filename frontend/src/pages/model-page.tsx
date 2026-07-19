@@ -125,6 +125,7 @@ export function ModelPage() {
               <Field label="失败重试"><Input type="number" min="0" max="5" value={form.max_retries} onChange={(event) => update("max_retries", Number(event.target.value))} /></Field>
               <Field label="最大并发"><Input type="number" min="1" max="10" value={form.max_concurrency} onChange={(event) => update("max_concurrency", Number(event.target.value))} /></Field>
               <label className="flex min-h-20 items-center justify-between gap-4 border border-[var(--line)] bg-[#fafbf8] px-4"><span><span className="block text-sm font-semibold">结构化输出</span><span className="mt-1 block text-xs text-[var(--muted)]">仍保留服务端 JSON 校验</span></span><input type="checkbox" checked={form.structured_output} onChange={(event) => update("structured_output", event.target.checked)} className="size-5 accent-[#11130f]" /></label>
+              <label className="flex min-h-20 items-center justify-between gap-4 border border-[var(--line)] bg-[#fafbf8] px-4 sm:col-span-2 xl:col-span-3"><span><span className="block text-sm font-semibold">高风险结果自动复核</span><span className="mt-1 block text-xs leading-5 text-[var(--muted)]">仅在专业摄影、L4/L5或出现5级维度时增加一次短调用；复核只能保持或降级，不会抬高分数。</span></span><input type="checkbox" checked={form.high_risk_review_enabled} onChange={(event) => update("high_risk_review_enabled", event.target.checked)} className="size-5 shrink-0 accent-[#11130f]" /></label>
             </div>
           )}
         </section>

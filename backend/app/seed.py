@@ -122,6 +122,20 @@ def seed_defaults(db: Session) -> None:
             ],
             "note": "Split.3.1 增加局部空间、水印、边框和未完工不得判为画质正常或专业摄影的硬约束",
         },
+        {
+            "stage": "A",
+            "name": "空间图片Lite精简预检",
+            "version": "space_precheck_v1.4-lite.1",
+            "filename": "space-precheck-v1.4-lite.1.md",
+            "note": "Lite精简候选版：删除重复校准段，按范围、形态、拍摄方式、画质决策树执行",
+        },
+        {
+            "stage": "B",
+            "name": "空间八维美感Lite精简评价",
+            "version": "space_aesthetic_dimensions_v1.4-lite.1",
+            "filename": "space-aesthetic-v1.4-lite.1.md",
+            "note": "Lite精简候选版：统一等级锚点、反高分规则和八维输出，等待黄金回归后发布",
+        },
     )
     for item in split_prompts:
         exists = db.scalar(

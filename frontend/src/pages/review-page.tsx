@@ -223,6 +223,17 @@ export function ReviewPage() {
               </div>
             ) : (
               <>
+                {evaluation.risk_review?.triggered && (
+                  <div className={`border-b border-[var(--line)] px-5 py-4 ${evaluation.risk_review.verdict === "downgrade" ? "bg-[#fff9ef]" : evaluation.risk_review.verdict === "error" || evaluation.risk_review.verdict === "uncertain" ? "bg-[#fff8f7]" : "bg-[#fafbf8]"}`}>
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <p className="flex items-center gap-2 text-sm font-semibold"><WarningCircle />高风险自动复核</p>
+                      <Badge tone={evaluation.risk_review.verdict === "downgrade" ? "warning" : evaluation.risk_review.verdict === "keep" ? "success" : "danger"}>{evaluation.risk_review.verdict === "downgrade" ? `已修正 ${evaluation.risk_review.corrections?.length ?? 0} 项` : evaluation.risk_review.verdict === "keep" ? "维持初评" : evaluation.risk_review.verdict === "error" ? "复核失败" : "需要人工确认"}</Badge>
+                    </div>
+                    {(evaluation.risk_review.trigger_reasons?.length ?? 0) > 0 && <p className="mt-2 text-xs leading-5 text-[var(--muted)]">触发原因：{evaluation.risk_review.trigger_reasons?.join("、")}</p>}
+                    {(evaluation.risk_review.corrections?.length ?? 0) > 0 && <div className="mt-3 flex flex-wrap gap-1.5">{evaluation.risk_review.corrections?.map((correction, index) => <Badge key={`${correction.field}-${index}`} tone="active">{riskFieldLabel(correction.field)} {String(correction.before)} → {String(correction.after)}</Badge>)}</div>}
+                    {(evaluation.risk_review.reasons?.length ?? 0) > 0 && <p className="mt-3 line-clamp-3 text-xs leading-5 text-[var(--muted)]">{evaluation.risk_review.reasons?.join("；")}</p>}
+                  </div>
+                )}
                 <div className="max-h-[calc(100dvh-330px)] overflow-y-auto scrollbar-thin">
                   {Object.entries(dimensionLabels).map(([key, label], index) => {
                     const item = dimensions[key] ?? {}
@@ -286,4 +297,9 @@ export function ReviewPage() {
       )}
     </>
   )
+}
+
+function riskFieldLabel(field: string) {
+  if (field.startsWith("dimensions.")) return dimensionLabels[field.replace("dimensions.", "")] || field
+  return ({ professional_photography: "专业摄影", documentary_record: "现场记录", quality_severity: "画质", level_cap: "等级上限" } as Record<string, string>)[field] || field
 }

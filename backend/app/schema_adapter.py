@@ -41,6 +41,13 @@ def normalize_precheck_business_rules(precheck: dict[str, Any]) -> dict[str, Any
             media["professional_photography"] = professional
         professional.update({"status": "no", "confidence": 1.0, "evidence": [reason]})
 
+    def force_documentary(reason: str) -> None:
+        documentary = media.get("documentary_record")
+        if not isinstance(documentary, dict):
+            documentary = {}
+            media["documentary_record"] = documentary
+        documentary.update({"status": "yes", "confidence": 1.0, "evidence": [reason]})
+
     def ensure_quality_issue(issue: str, reason: str) -> None:
         severity = str(quality.get("quality_severity") or "uncertain")
         if QUALITY_RANK.get(severity, 1) < QUALITY_RANK["slight"]:
@@ -65,6 +72,17 @@ def normalize_precheck_business_rules(precheck: dict[str, Any]) -> dict[str, Any
     if is_yes("rendering") or is_yes("ai_generated"):
         force_not_professional("系统规则：效果图或AI图不属于专业摄影")
 
+    professional = media.get("professional_photography")
+    professional_evidence = (
+        professional.get("evidence") if isinstance(professional, dict) else []
+    )
+    if is_yes("professional_photography") and len(professional_evidence or []) < 4:
+        force_not_professional("系统规则：专业摄影缺少四类互不重复的可见证据")
+        if is_yes("real_photo") and not is_yes("casual_snapshot"):
+            force_documentary("系统规则：实景图的专业摄影证据不足，按现场记录处理")
+    if is_yes("professional_photography") and is_yes("documentary_record"):
+        force_not_professional("系统规则：专业摄影与现场记录不能同时为是")
+
     scene_scope = precheck.get("scene_scope")
     if isinstance(scene_scope, dict) and scene_scope.get("type") == "partial_space":
         ensure_quality_issue(
@@ -73,17 +91,7 @@ def normalize_precheck_business_rules(precheck: dict[str, Any]) -> dict[str, Any
         )
         force_not_professional("系统规则：局部空间记录不标记为专业摄影")
         if is_yes("real_photo") and not is_yes("casual_snapshot"):
-            documentary = media.get("documentary_record")
-            if not isinstance(documentary, dict):
-                documentary = {}
-                media["documentary_record"] = documentary
-            documentary.update(
-                {
-                    "status": "yes",
-                    "confidence": 1.0,
-                    "evidence": ["系统规则：局部空间实景按现场记录处理"],
-                }
-            )
+            force_documentary("系统规则：局部空间实景按现场记录处理")
 
     display_flags = precheck.get("display_flags")
     if isinstance(display_flags, dict) and (

@@ -30,6 +30,13 @@ from .schema_adapter import (
     normalize_precheck_business_rules,
 )
 from .regression import complete_regression_item, fail_regression_item
+from .risk_review import (
+    RISK_REVIEW_SYSTEM_PROMPT,
+    RISK_REVIEW_VERSION,
+    apply_risk_review,
+    build_risk_review_user_prompt,
+    risk_review_reasons,
+)
 from .seed import seed_defaults
 
 
@@ -193,7 +200,9 @@ async def evaluate_job(job_id: int) -> None:
         response_b_attempts.append(response_b.raw_payload)
         _ensure_job_processing(job_id)
         aesthetic = response_b.parsed
-        if prompt_b.version.endswith("split.3") and aesthetic_grade_collapse(aesthetic):
+        if (
+            prompt_b.version.endswith("split.3") or "lite" in prompt_b.version
+        ) and aesthetic_grade_collapse(aesthetic):
             _set_job(job_id, stage="aesthetic_repair", progress=68)
             repair_user = (
                 user_b
@@ -212,6 +221,37 @@ async def evaluate_job(job_id: int) -> None:
             response_b_attempts.append(response_b.raw_payload)
             _ensure_job_processing(job_id)
             aesthetic = response_b.parsed
+
+    risk_review_report = None
+    risk_review_raw = None
+    preliminary_scoring = calculate_score(precheck, aesthetic)
+    trigger_reasons = risk_review_reasons(precheck, aesthetic, preliminary_scoring)
+    if model_config.high_risk_review_enabled and aesthetic and trigger_reasons:
+        _set_job(job_id, stage="risk_review", progress=76)
+        try:
+            risk_response = await client.chat_json(
+                RISK_REVIEW_SYSTEM_PROMPT,
+                build_risk_review_user_prompt(precheck, aesthetic, preliminary_scoring),
+                image_path=image_path,
+                mime_type=asset.mime_type,
+            )
+            risk_review_raw = risk_response.raw_payload
+            risk_review_report = apply_risk_review(precheck, aesthetic, risk_response.parsed)
+            risk_review_report["trigger_reasons"] = trigger_reasons
+            precheck = normalize_precheck_business_rules(precheck)
+        except Exception as exc:
+            risk_review_report = {
+                "version": RISK_REVIEW_VERSION,
+                "triggered": True,
+                "verdict": "error",
+                "trigger_reasons": trigger_reasons,
+                "reasons": [str(exc)[:500]],
+                "corrections": [],
+            }
+            aesthetic["needs_review"] = True
+            review_reasons = list(aesthetic.get("review_reasons") or [])
+            review_reasons.append("高风险复核调用失败，需要人工确认")
+            aesthetic["review_reasons"] = list(dict.fromkeys(review_reasons))
 
     _set_job(job_id, stage="scoring", progress=86)
     _ensure_job_processing(job_id)
@@ -238,6 +278,14 @@ async def evaluate_job(job_id: int) -> None:
                     if response_b
                     else None
                 ),
+                raw_response_risk_review=(
+                    json.dumps(risk_review_raw, ensure_ascii=False) if risk_review_raw else None
+                ),
+                risk_review_json=(
+                    json.dumps(risk_review_report, ensure_ascii=False)
+                    if risk_review_report
+                    else None
+                ),
                 score=scoring.get("score"),
                 level=scoring.get("level"),
                 confidence=scoring.get("confidence"),
@@ -245,6 +293,9 @@ async def evaluate_job(job_id: int) -> None:
                 model_id=model_config.model_id,
                 prompt_a_version=prompt_a.version,
                 prompt_b_version=prompt_b.version if response_b and prompt_b else None,
+                risk_review_version=(
+                    RISK_REVIEW_VERSION if risk_review_report else None
+                ),
                 rubric_version=prompt_b.rubric_version if prompt_b else prompt_a.rubric_version,
                 engine_version=ENGINE_VERSION,
             )

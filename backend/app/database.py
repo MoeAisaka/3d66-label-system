@@ -100,6 +100,25 @@ def init_database() -> None:
                 connection.exec_driver_sql(
                     f"ALTER TABLE sample_set_items ADD COLUMN {column_name} {definition}"
                 )
+        model_columns = {
+            row[1] for row in connection.exec_driver_sql("PRAGMA table_info(model_configs)")
+        }
+        if "high_risk_review_enabled" not in model_columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE model_configs ADD COLUMN high_risk_review_enabled BOOLEAN NOT NULL DEFAULT 1"
+            )
+        result_columns = {
+            row[1] for row in connection.exec_driver_sql("PRAGMA table_info(evaluation_results)")
+        }
+        for column_name, definition in (
+            ("raw_response_risk_review", "TEXT"),
+            ("risk_review_json", "TEXT"),
+            ("risk_review_version", "VARCHAR(40)"),
+        ):
+            if column_name not in result_columns:
+                connection.exec_driver_sql(
+                    f"ALTER TABLE evaluation_results ADD COLUMN {column_name} {definition}"
+                )
 
 
 def get_db() -> Generator[Session, None, None]:

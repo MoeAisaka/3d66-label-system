@@ -52,6 +52,7 @@ class ModelConfig(Base):
     max_retries: Mapped[int] = mapped_column(Integer, default=1)
     max_concurrency: Mapped[int] = mapped_column(Integer, default=2)
     structured_output: Mapped[bool] = mapped_column(Boolean, default=True)
+    high_risk_review_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     active: Mapped[bool] = mapped_column(Boolean, default=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, onupdate=utcnow
@@ -159,6 +160,8 @@ class EvaluationResult(Base):
     scoring_json: Mapped[str] = mapped_column(Text)
     raw_response_a: Mapped[str] = mapped_column(Text)
     raw_response_b: Mapped[str | None] = mapped_column(Text, nullable=True)
+    raw_response_risk_review: Mapped[str | None] = mapped_column(Text, nullable=True)
+    risk_review_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     score: Mapped[float | None] = mapped_column(Float, nullable=True)
     level: Mapped[str | None] = mapped_column(String(10), nullable=True, index=True)
     confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
@@ -166,6 +169,7 @@ class EvaluationResult(Base):
     model_id: Mapped[str] = mapped_column(String(200))
     prompt_a_version: Mapped[str] = mapped_column(String(40))
     prompt_b_version: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    risk_review_version: Mapped[str | None] = mapped_column(String(40), nullable=True)
     rubric_version: Mapped[str] = mapped_column(String(40))
     engine_version: Mapped[str] = mapped_column(String(40))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
