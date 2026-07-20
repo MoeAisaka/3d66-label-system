@@ -45,6 +45,7 @@ export type Evaluation = {
   } | null
   versions: Record<string, string | null>
   created_at: string
+  updated_at: string
 }
 
 export type ReviewCorrection = {
@@ -91,6 +92,7 @@ export type Job = {
   attempts: number
   error_message: string
   created_at: string
+  updated_at: string
   started_at: string | null
   finished_at: string | null
 }
@@ -151,6 +153,7 @@ export type PromptVersion = {
   change_note: string
   created_by: string
   created_at: string
+  updated_at: string
 }
 
 export type PromptOptimizationRun = {

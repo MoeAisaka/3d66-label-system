@@ -139,6 +139,7 @@ export function PromptsPage() {
                 <div className="flex items-center justify-between gap-2"><span className="font-data text-xs font-semibold">调用 {prompt.stage}</span><Badge tone={prompt.status === "published" ? "active" : prompt.status === "draft" ? "warning" : "neutral"}>{prompt.status}</Badge></div>
                 <p className="mt-2 truncate text-sm font-semibold">{prompt.version}</p>
                 <p className="mt-1 line-clamp-2 text-xs leading-5 text-[var(--muted)]">{prompt.change_note || prompt.name}</p>
+                <p className="font-data mt-2 text-[0.68rem] text-[var(--muted)]">最新更新 {new Date(prompt.updated_at).toLocaleString("zh-CN")}</p>
               </button>
             ))}
           </div>
@@ -147,7 +148,7 @@ export function PromptsPage() {
         {selected ? (
           <main className="min-w-0 px-5 py-7 md:px-8 lg:px-10 lg:py-9">
             <div className="flex flex-wrap items-start justify-between gap-5 border-b border-[var(--line-strong)] pb-6">
-              <div><p className="font-data text-xs text-[var(--muted)]">调用 {selected.stage} · {selected.rubric_version}</p><h2 className="font-editorial mt-2 text-3xl font-bold">{selected.name}</h2><p className="mt-2 text-sm text-[var(--muted)]">当前选择：{selected.version}，创建者 {selected.created_by}</p></div>
+              <div><p className="font-data text-xs text-[var(--muted)]">调用 {selected.stage} · {selected.rubric_version}</p><h2 className="font-editorial mt-2 text-3xl font-bold">{selected.name}</h2><p className="mt-2 text-sm text-[var(--muted)]">当前选择：{selected.version}，创建者 {selected.created_by}</p><p className="font-data mt-1 text-xs text-[var(--muted)]">最新更新时间：{new Date(selected.updated_at).toLocaleString("zh-CN")}</p></div>
               {selected.status !== "published" && <Button onClick={() => publish.mutate()} disabled={publish.isPending}><UploadSimple />发布此版本</Button>}
             </div>
 

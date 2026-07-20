@@ -66,12 +66,14 @@ def test_jobs_pin_prompts_and_support_pause_resume_cancel() -> None:
         listed = client.get("/api/jobs").json()["items"][0]
         assert listed["prompt_a_version"] == "A-2.1"
         assert listed["prompt_b_version"] == "B-2.3"
+        assert listed["updated_at"]
 
         paused = client.post("/api/jobs/control/pause")
         assert paused.status_code == 200
         assert paused.json()["affected"] == 1
         db.expire_all()
         assert db.get(EvaluationJob, job_id).status == "paused"
+        assert db.get(EvaluationJob, job_id).updated_at is not None
         assert client.get("/api/jobs/control").json()["paused"] is True
 
         resumed = client.post("/api/jobs/control/resume")

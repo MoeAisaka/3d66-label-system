@@ -94,6 +94,9 @@ class PromptVersion(Base):
     change_note: Mapped[str] = mapped_column(Text, default="")
     created_by: Mapped[str] = mapped_column(String(80), default="system")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
 
 
 class Asset(Base):
@@ -132,6 +135,9 @@ class EvaluationJob(Base):
     error_message: Mapped[str] = mapped_column(Text, default="")
     worker_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     asset: Mapped[Asset] = relationship()
@@ -189,6 +195,9 @@ class EvaluationResult(Base):
     rubric_version: Mapped[str] = mapped_column(String(40))
     engine_version: Mapped[str] = mapped_column(String(40))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
     asset: Mapped[Asset] = relationship()
     job: Mapped[EvaluationJob] = relationship()
     reviews: Mapped[list["HumanReview"]] = relationship(

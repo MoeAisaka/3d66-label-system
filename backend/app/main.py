@@ -374,6 +374,7 @@ def _result_payload(result: EvaluationResult | None) -> dict[str, Any] | None:
             "engine": result.engine_version,
         },
         "created_at": result.created_at,
+        "updated_at": result.updated_at,
     }
 
 
@@ -663,6 +664,7 @@ def list_jobs(
                 "attempts": job.attempts,
                 "error_message": job.error_message,
                 "created_at": job.created_at,
+                "updated_at": job.updated_at,
                 "started_at": job.started_at,
                 "finished_at": job.finished_at,
             }
@@ -982,6 +984,7 @@ def list_prompts(
                 "change_note": prompt.change_note,
                 "created_by": prompt.created_by,
                 "created_at": prompt.created_at,
+                "updated_at": prompt.updated_at,
             }
             for prompt in prompts
         ]
@@ -1192,6 +1195,7 @@ def create_review(
         evaluation.needs_review = False
     else:
         evaluation.needs_review = True
+    evaluation.updated_at = datetime.now(timezone.utc)
     db.add(review)
     db.commit()
     db.refresh(review)

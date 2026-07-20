@@ -98,6 +98,7 @@ def test_sample_set_captures_human_final_level() -> None:
         assert "evaluation" not in asset_detail
         assert "status" not in asset_detail
         evaluation_detail = client.get(f"/api/evaluations/{result.id}").json()
+        assert evaluation_detail["evaluation"]["updated_at"]
         correction = evaluation_detail["evaluation"]["human_review"]["corrections"][0]
         assert correction["field_key"] == "color_material"
         assert correction["human_value"] == 3

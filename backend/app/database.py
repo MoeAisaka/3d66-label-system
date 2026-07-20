@@ -76,6 +76,23 @@ def init_database() -> None:
             connection.exec_driver_sql(
                 "ALTER TABLE evaluation_jobs ADD COLUMN regression_item_id INTEGER REFERENCES prompt_regression_items(id) ON DELETE SET NULL"
             )
+        if "updated_at" not in job_columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE evaluation_jobs ADD COLUMN updated_at DATETIME"
+            )
+            connection.exec_driver_sql(
+                "UPDATE evaluation_jobs SET updated_at = created_at WHERE updated_at IS NULL"
+            )
+        prompt_columns = {
+            row[1] for row in connection.exec_driver_sql("PRAGMA table_info(prompt_versions)")
+        }
+        if "updated_at" not in prompt_columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE prompt_versions ADD COLUMN updated_at DATETIME"
+            )
+            connection.exec_driver_sql(
+                "UPDATE prompt_versions SET updated_at = created_at WHERE updated_at IS NULL"
+            )
         sample_set_columns = {
             row[1] for row in connection.exec_driver_sql("PRAGMA table_info(sample_sets)")
         }
@@ -119,6 +136,13 @@ def init_database() -> None:
                 connection.exec_driver_sql(
                     f"ALTER TABLE evaluation_results ADD COLUMN {column_name} {definition}"
                 )
+        if "updated_at" not in result_columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE evaluation_results ADD COLUMN updated_at DATETIME"
+            )
+            connection.exec_driver_sql(
+                "UPDATE evaluation_results SET updated_at = created_at WHERE updated_at IS NULL"
+            )
 
 
 def get_db() -> Generator[Session, None, None]:

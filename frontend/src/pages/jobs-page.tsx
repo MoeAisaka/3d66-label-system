@@ -115,7 +115,7 @@ export function JobsPage() {
         </div>
         <div className="overflow-x-auto border-y border-[var(--line-strong)] bg-white scrollbar-thin">
           {jobs.data?.items.length ? (
-            <table className="w-full min-w-[1120px] border-collapse text-left text-sm">
+            <table className="w-full min-w-[1300px] border-collapse text-left text-sm">
               <thead>
                 <tr className="border-b border-[var(--line)] bg-[#fafbf8] text-xs text-[var(--muted)]">
                   <th className="px-4 py-3">任务</th>
@@ -124,6 +124,7 @@ export function JobsPage() {
                   <th className="px-3 py-3">阶段</th>
                   <th className="px-3 py-3">进度</th>
                   <th className="px-3 py-3">尝试</th>
+                  <th className="px-3 py-3">最新更新时间</th>
                   <th className="px-4 py-3">状态</th>
                 </tr>
               </thead>
@@ -144,6 +145,7 @@ export function JobsPage() {
                       </div>
                     </td>
                     <td className="font-data px-3 py-4 text-xs text-[var(--muted)]">{job.attempts}</td>
+                    <td className="font-data whitespace-nowrap px-3 py-4 text-xs text-[var(--muted)]">{new Date(job.updated_at).toLocaleString("zh-CN")}</td>
                     <td className="px-4 py-4">
                       <div className="flex items-center gap-2">
                         {job.status === "processing" && <CircleNotch className="animate-spin" />}

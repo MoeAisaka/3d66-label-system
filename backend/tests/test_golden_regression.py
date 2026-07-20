@@ -167,6 +167,12 @@ def test_golden_set_locks_runs_and_preserves_history() -> None:
         db.commit()
         published = client.post(f"/api/prompts/{prompt_b2.id}/publish")
         assert published.status_code == 200
+        listed_prompt = next(
+            item
+            for item in client.get("/api/prompts").json()["items"]
+            if item["id"] == prompt_b2.id
+        )
+        assert listed_prompt["updated_at"]
         assert len(published.json()["regression_run_ids"]) == 1
         auto_run = db.scalar(
             select(PromptRegressionRun).where(

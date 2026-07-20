@@ -236,8 +236,8 @@ export function ReviewList({ items, loading, searchParams, setSearchParams }: { 
 
       <div className="mt-4 overflow-x-auto border-y border-[var(--line-strong)] bg-white scrollbar-thin">
         {loading ? <div className="h-72 animate-pulse bg-white" /> : filtered.length ? (
-          <table className="w-full min-w-[1460px] border-collapse text-left text-sm">
-            <thead><tr className="border-b border-[var(--line)] bg-[#fafbf8] text-xs text-[var(--muted)]"><th className="px-4 py-3 font-semibold">图片</th><th className="px-3 py-3 font-semibold">分类与形态</th><th className="px-3 py-3 font-semibold">画质</th><th className="px-3 py-3 font-semibold">美感结果</th><th className="px-3 py-3 font-semibold">置信度</th><th className="px-3 py-3 font-semibold">审核建议</th><th className="px-3 py-3 font-semibold">审核状态</th><th className="px-3 py-3 font-semibold">版本</th><th className="w-28 px-4 py-3 text-right font-semibold">操作</th></tr></thead>
+          <table className="w-full min-w-[1640px] border-collapse text-left text-sm">
+            <thead><tr className="border-b border-[var(--line)] bg-[#fafbf8] text-xs text-[var(--muted)]"><th className="px-4 py-3 font-semibold">图片</th><th className="px-3 py-3 font-semibold">分类与形态</th><th className="px-3 py-3 font-semibold">画质</th><th className="px-3 py-3 font-semibold">美感结果</th><th className="px-3 py-3 font-semibold">置信度</th><th className="px-3 py-3 font-semibold">审核建议</th><th className="px-3 py-3 font-semibold">审核状态</th><th className="px-3 py-3 font-semibold">版本</th><th className="px-3 py-3 font-semibold">最新更新时间</th><th className="w-28 px-4 py-3 text-right font-semibold">操作</th></tr></thead>
             <tbody>{filtered.map((asset) => {
               const evaluation = asset.evaluation
               const status = reviewStatus(asset)
@@ -255,6 +255,7 @@ export function ReviewList({ items, loading, searchParams, setSearchParams }: { 
                 <td className="px-3 py-3"><div className="flex items-center gap-2"><Badge tone={samplingTone(asset.sampling.tier)}>{samplingNames[asset.sampling.tier]}</Badge><span className="font-data text-xs font-semibold">P{asset.sampling.priority}</span></div><p className="mt-2 max-w-48 text-xs leading-5 text-[var(--muted)]">{asset.sampling.reasons.slice(0, 2).map((reason) => reason.label).join("；")}</p></td>
                 <td className="px-3 py-3"><Badge tone={statusTone(status)}>{statusNames[status]}</Badge>{evaluation?.human_review && <p className="mt-2 max-w-32 truncate text-xs text-[var(--muted)]">{evaluation.human_review.reviewer_name}</p>}</td>
                 <td className="px-3 py-3"><p className="font-data max-w-44 truncate text-xs" title={evaluation?.versions.model || ""}>{evaluation?.versions.model || "—"}</p><p className="font-data mt-2 text-[0.68rem] text-[var(--muted)]">A {evaluation?.versions.prompt_a || "—"}{evaluation?.versions.prompt_b ? ` · B ${evaluation.versions.prompt_b}` : ""}</p></td>
+                <td className="font-data whitespace-nowrap px-3 py-3 text-xs text-[var(--muted)]">{new Date(evaluation.updated_at).toLocaleString("zh-CN")}</td>
                 <td className="w-28 px-4 py-3 text-right"><Button asChild size="sm" variant="secondary"><Link to={detailUrl(evaluation.id, searchParams)}><span>审核</span><ArrowRight /></Link></Button></td>
               </tr>
             })}</tbody>

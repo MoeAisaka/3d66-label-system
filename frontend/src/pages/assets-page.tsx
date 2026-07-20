@@ -172,7 +172,7 @@ export function AssetsPage() {
                     <th className="px-3 py-3 font-semibold">尺寸</th>
                     <th className="px-3 py-3 font-semibold">文件格式</th>
                     <th className="px-3 py-3 font-semibold">文件大小</th>
-                    <th className="px-4 py-3 text-right font-semibold">上传时间</th>
+                    <th className="px-4 py-3 text-right font-semibold">创建时间</th>
                   </tr>
                 </thead>
                 <tbody>

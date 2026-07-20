@@ -1,6 +1,6 @@
 # 3d66 标签系统｜当前项目状态
 
-> 最后更新：2026-07-19  
+> 最后更新：2026-07-20
 > 本文件只记录“现在做到哪里”；长期原则见 `PRODUCT.md` 和 `AGENTS.md`，历史背景见 `CODEX_HANDOFF.md`。
 
 ## 仓库状态
@@ -10,6 +10,15 @@
 - 当前功能基线：`b809996 feat: add configurable review sampling policy`（治理文档提交请以 `git log -1` 为准）
 - 远程仓库：`origin = https://github.com/chishiyu07-max/3d66-label-system.git`
 - 分支关系：检查时 `main` 与 `origin/main` 同步（ahead 0 / behind 0）。
+
+## 最新完成：核心列表时间信息
+
+- 提示词版本、评测任务和评测结果新增 `updated_at`，旧 SQLite 数据启动时以创建时间安全回填。
+- 提示词发布/归档、任务状态与进度变化、评测结果人工审核都会刷新最新更新时间。
+- 提示词版本列表、任务列表和评测结果列表显示“最新更新时间”；素材列表将原“上传时间”明确为“创建时间”。
+- 后端接口和前端类型已同步，新增时间字段契约测试。
+- 验证：后端 `43 passed`；TypeScript + Vite 正式构建通过；真实数据库迁移与 `/api/health` 通过。
+- 浏览器已验证服务登录页可达；因仓库不保存管理员明文密码，登录后四个列表的最终目视验收待使用现有账号完成。
 - GitHub CLI 未安装，但不影响现有 Git 操作。
 - 已验证：带本机凭据的 `git ls-remote origin HEAD` 成功，GitHub 官方 API 匿名访问返回 404，仓库存在且未公开暴露。
 
