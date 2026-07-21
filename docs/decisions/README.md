@@ -19,6 +19,7 @@
 | [0004](0004-human-truth-and-golden-regression.md) | Accepted | 人工真值与黄金样本回归 |
 | [0005](0005-local-first-data-and-secret-security.md) | Accepted | 本地优先数据与密钥安全 |
 | [0006](0006-risk-based-stable-review-sampling.md) | Accepted | 风险优先、稳定可解释的审核抽样 |
+| [0007](0007-optional-single-prompt-and-server-scoring.md) | Accepted | 可选单提示词评测与服务端权威评分 |
 
 ## 新增 ADR 的规则
 
@@ -29,4 +30,3 @@ NNNN-short-kebab-case-title.md
 ```
 
 每条至少包含：状态、日期、背景、决策、后果和不可破坏约束。已经接受的决策若要改变，应新增 ADR 并把旧记录标记为 `Superseded by ADR-NNNN`，不要直接改写历史理由。
-

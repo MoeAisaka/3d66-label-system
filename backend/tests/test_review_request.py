@@ -4,7 +4,7 @@ from pydantic import ValidationError
 from app.main import ReviewCorrection, ReviewRequest
 
 
-def test_corrected_review_requires_level_and_reason() -> None:
+def test_corrected_review_requires_dimension_correction() -> None:
     with pytest.raises(ValidationError):
         ReviewRequest(reviewer_name="审核员", decision="corrected")
 
@@ -17,15 +17,22 @@ def test_corrected_review_requires_level_and_reason() -> None:
         )
 
 
-def test_corrected_review_accepts_explicit_level_and_reason() -> None:
-    review = ReviewRequest(
-        reviewer_name="审核员",
-        decision="corrected",
-        corrected_level="L4",
-        note="模型把艺术性浅景深误判为画质问题",
-    )
-
-    assert review.corrected_level == "L4"
+def test_corrected_review_rejects_manually_selected_level() -> None:
+    with pytest.raises(ValidationError):
+        ReviewRequest(
+            reviewer_name="审核员",
+            decision="corrected",
+            corrected_level="L4",
+            corrections=[
+                ReviewCorrection(
+                    target_type="dimension",
+                    field_key="color_material",
+                    model_value=5,
+                    human_value=3,
+                    reason_codes=["overrated"],
+                )
+            ],
+        )
 
 
 def test_non_corrected_review_rejects_corrected_level() -> None:
@@ -41,7 +48,6 @@ def test_dimension_correction_can_keep_final_level() -> None:
     review = ReviewRequest(
         reviewer_name="审核员",
         decision="corrected",
-        corrected_level="L4",
         corrections=[
             ReviewCorrection(
                 target_type="dimension",

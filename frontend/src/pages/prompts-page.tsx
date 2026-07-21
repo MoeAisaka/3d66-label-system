@@ -112,6 +112,7 @@ export function PromptsPage() {
   const samplePolicy = diagnosis.sample_policy ?? {}
   const promptChanges = Array.isArray(diagnosis.prompt_changes) ? diagnosis.prompt_changes : []
   const activeOptimization = latestOptimization && ["queued", "running"].includes(latestOptimization.status)
+  const singlePromptCatalog = (prompts.data?.items.length ?? 0) === 1
 
   return (
     <>
@@ -136,7 +137,7 @@ export function PromptsPage() {
                 className={`w-full rounded-[4px] border px-3 py-3 text-left transition-colors ${selected?.id === prompt.id ? "border-[var(--line-strong)] bg-[#f6f9dc]" : "border-transparent hover:bg-[#f8f9f6]"}`}
                 onClick={() => setSelectedId(prompt.id)}
               >
-                <div className="flex items-center justify-between gap-2"><span className="font-data text-xs font-semibold">调用 {prompt.stage}</span><Badge tone={prompt.status === "published" ? "active" : prompt.status === "draft" ? "warning" : "neutral"}>{prompt.status}</Badge></div>
+                <div className="flex items-center justify-between gap-2"><span className="font-data text-xs font-semibold">{singlePromptCatalog ? "单提示词" : `调用 ${prompt.stage}`}</span><Badge tone={prompt.status === "published" ? "active" : prompt.status === "draft" ? "warning" : "neutral"}>{prompt.status}</Badge></div>
                 <p className="mt-2 truncate text-sm font-semibold">{prompt.version}</p>
                 <p className="mt-1 line-clamp-2 text-xs leading-5 text-[var(--muted)]">{prompt.change_note || prompt.name}</p>
                 <p className="font-data mt-2 text-[0.68rem] text-[var(--muted)]">最新更新 {new Date(prompt.updated_at).toLocaleString("zh-CN")}</p>

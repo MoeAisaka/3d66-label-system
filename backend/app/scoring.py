@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter
+from copy import deepcopy
 from typing import Any
 
 
@@ -207,3 +208,28 @@ def calculate_score(precheck: dict[str, Any], aesthetic: dict[str, Any] | None) 
         "needs_review": model_review or bool(review_reasons),
         "review_reasons": list(dict.fromkeys(review_reasons)),
     }
+
+
+def calculate_corrected_score(
+    precheck: dict[str, Any],
+    aesthetic: dict[str, Any] | None,
+    corrections: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Recalculate the authoritative score after human dimension corrections."""
+    if not aesthetic:
+        raise ValueError("当前结果没有可纠正的美感维度")
+    corrected = deepcopy(aesthetic)
+    dimensions = corrected.get("dimensions")
+    if not isinstance(dimensions, dict):
+        raise ValueError("当前结果缺少美感维度")
+    for correction in corrections:
+        if correction.get("target_type") != "dimension":
+            raise ValueError("人工纠正只能修改维度分数")
+        key = str(correction.get("field_key") or "")
+        if key not in WEIGHTS or not isinstance(dimensions.get(key), dict):
+            raise ValueError(f"未知的纠正维度：{key}")
+        grade = correction.get("human_value")
+        if not isinstance(grade, int) or grade not in GRADE_POINTS:
+            raise ValueError(f"维度 {key} 的人工分数无效")
+        dimensions[key]["grade"] = grade
+    return calculate_score(precheck, corrected)

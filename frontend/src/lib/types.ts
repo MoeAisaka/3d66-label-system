@@ -17,12 +17,16 @@ export type Evaluation = {
   id: number
   asset_id: number
   job_id: number
+  prompt_id: number | null
+  prompt_a_id: number | null
+  prompt_b_id: number | null
   precheck: Record<string, any>
   aesthetic: Record<string, any> | null
   scoring: Record<string, any>
   score: number | null
   level: string | null
   final_level: string | null
+  final_score: number | null
   confidence: number | null
   needs_review: boolean
   human_review: {
@@ -30,6 +34,7 @@ export type Evaluation = {
     reviewer_name: string
     decision: "approved" | "corrected" | "rejected"
     corrected_level: string | null
+    corrected_score: number | null
     note: string
     corrections: ReviewCorrection[]
     created_at: string
@@ -49,7 +54,7 @@ export type Evaluation = {
 }
 
 export type ReviewCorrection = {
-  target_type: "dimension" | "scoring"
+  target_type: "dimension"
   field_key: string
   model_value: number | string | null
   human_value: number | string | null
@@ -86,6 +91,7 @@ export type Job = {
   asset_name: string
   prompt_a_version: string | null
   prompt_b_version: string | null
+  prompt_version: string | null
   status: string
   stage: string
   progress: number

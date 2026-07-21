@@ -55,6 +55,7 @@ from .seed import seed_defaults
 from .schema_adapter import repair_combined_aesthetic_results, rescore_stored_results
 from .regression import truth_from_result
 from .review_sampling import build_review_sampling
+from .scoring import calculate_corrected_score
 
 
 settings = get_settings()
@@ -112,8 +113,15 @@ class SamplingPolicyUpdate(BaseModel):
 
 class EnqueueRequest(BaseModel):
     asset_ids: list[int] = Field(min_length=1, max_length=1000)
+    prompt_id: int | None = Field(default=None, ge=1)
     prompt_a_id: int | None = Field(default=None, ge=1)
     prompt_b_id: int | None = Field(default=None, ge=1)
+
+    @model_validator(mode="after")
+    def validate_prompt_mode(self) -> "EnqueueRequest":
+        if self.prompt_id and (self.prompt_a_id or self.prompt_b_id):
+            raise ValueError("单提示词模式不能同时选择 A/B 提示词")
+        return self
 
 
 class PromptCreateRequest(BaseModel):
@@ -133,7 +141,7 @@ class PromptAiReviseRequest(BaseModel):
 
 
 class ReviewCorrection(BaseModel):
-    target_type: str = Field(pattern="^(dimension|scoring)$")
+    target_type: str = Field(pattern="^dimension$")
     field_key: str = Field(min_length=1, max_length=80)
     model_value: int | str | None = None
     human_value: int | str | None = None
@@ -160,10 +168,10 @@ class ReviewRequest(BaseModel):
     @model_validator(mode="after")
     def validate_correction(self) -> "ReviewRequest":
         if self.decision == "corrected":
-            if not self.corrected_level and not self.corrections:
-                raise ValueError("修改结果时必须选择最终等级或填写维度纠错")
-            if not self.note.strip() and not self.corrections:
-                raise ValueError("修改结果时必须填写修改原因")
+            if self.corrected_level is not None:
+                raise ValueError("最终等级由维度纠正自动计算，不能手工指定")
+            if not self.corrections:
+                raise ValueError("修改结果时必须填写至少一个维度纠正")
         elif self.corrected_level is not None or self.corrections:
             raise ValueError("只有修改结果时才能填写修正等级或维度纠错")
         return self
@@ -337,16 +345,28 @@ def _result_payload(result: EvaluationResult | None) -> dict[str, Any] | None:
         if latest_review and latest_review.decision == "corrected"
         else result.level
     )
+    final_score = (
+        latest_review.corrected_score
+        if latest_review
+        and latest_review.decision == "corrected"
+        and latest_review.corrected_score is not None
+        else result.score
+    )
+    single_prompt = result.job.prompt_b_id is None and result.prompt_b_version is None
     return {
         "id": result.id,
         "asset_id": result.asset_id,
         "job_id": result.job_id,
+        "prompt_id": result.job.prompt_a_id if single_prompt else None,
+        "prompt_a_id": result.job.prompt_a_id if not single_prompt else None,
+        "prompt_b_id": result.job.prompt_b_id,
         "precheck": json.loads(result.precheck_json),
         "aesthetic": json.loads(result.aesthetic_json) if result.aesthetic_json else None,
         "scoring": json.loads(result.scoring_json),
         "score": result.score,
         "level": result.level,
         "final_level": final_level,
+        "final_score": final_score,
         "confidence": result.confidence,
         "needs_review": result.needs_review,
         "human_review": (
@@ -355,6 +375,7 @@ def _result_payload(result: EvaluationResult | None) -> dict[str, Any] | None:
                 "reviewer_name": latest_review.reviewer_name,
                 "decision": latest_review.decision,
                 "corrected_level": latest_review.corrected_level,
+                "corrected_score": latest_review.corrected_score,
                 "note": latest_review.note,
                 "corrections": json.loads(latest_review.corrections_json or "[]"),
                 "created_at": latest_review.created_at,
@@ -367,7 +388,8 @@ def _result_payload(result: EvaluationResult | None) -> dict[str, Any] | None:
         ),
         "versions": {
             "model": result.model_id,
-            "prompt_a": result.prompt_a_version,
+            "prompt": result.prompt_a_version if single_prompt else None,
+            "prompt_a": result.prompt_a_version if not single_prompt else None,
             "prompt_b": result.prompt_b_version,
             "risk_review": result.risk_review_version,
             "rubric": result.rubric_version,
@@ -612,14 +634,17 @@ def enqueue_jobs(
             raise HTTPException(status_code=400, detail=f"没有可用的提示词 {stage} 发布版本")
         return prompt
 
-    prompt_a = selected_prompt("A", payload.prompt_a_id)
-    prompt_b = selected_prompt("B", payload.prompt_b_id)
+    single_prompt = db.get(PromptVersion, payload.prompt_id) if payload.prompt_id else None
+    if payload.prompt_id and not single_prompt:
+        raise HTTPException(status_code=400, detail="单提示词版本无效")
+    prompt_a = None if single_prompt else selected_prompt("A", payload.prompt_a_id)
+    prompt_b = None if single_prompt else selected_prompt("B", payload.prompt_b_id)
     jobs = []
     for asset in assets:
         job = EvaluationJob(
             asset_id=asset.id,
-            prompt_a_id=prompt_a.id,
-            prompt_b_id=prompt_b.id,
+            prompt_a_id=single_prompt.id if single_prompt else prompt_a.id,
+            prompt_b_id=None if single_prompt else prompt_b.id,
         )
         asset.status = "queued"
         db.add(job)
@@ -651,12 +676,15 @@ def list_jobs(
                 "asset_id": job.asset_id,
                 "asset_name": job.asset.original_name,
                 "prompt_a_version": (
-                    job.prompt_a.version if job.prompt_a else
+                    job.prompt_a.version if job.prompt_a and job.prompt_b else
                     result_versions[job.id].prompt_a_version if job.id in result_versions else None
                 ),
                 "prompt_b_version": (
                     job.prompt_b.version if job.prompt_b else
                     result_versions[job.id].prompt_b_version if job.id in result_versions else None
+                ),
+                "prompt_version": (
+                    job.prompt_a.version if job.prompt_a and not job.prompt_b else None
                 ),
                 "status": job.status,
                 "stage": job.stage,
@@ -1177,18 +1205,28 @@ def create_review(
     evaluation = db.get(EvaluationResult, evaluation_id)
     if not evaluation:
         raise HTTPException(status_code=404, detail="评测结果不存在")
-    if (
-        payload.decision == "corrected"
-        and payload.corrected_level == evaluation.level
-        and not payload.corrections
-    ):
-        raise HTTPException(status_code=400, detail="没有维度纠错时，请修改最终等级或使用“确认结果”")
-    review_data = payload.model_dump(exclude={"corrections"})
+    correction_data = [item.model_dump() for item in payload.corrections]
+    corrected_score = None
+    corrected_level = None
+    if payload.decision == "corrected":
+        try:
+            recalculated = calculate_corrected_score(
+                json.loads(evaluation.precheck_json),
+                json.loads(evaluation.aesthetic_json) if evaluation.aesthetic_json else None,
+                correction_data,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        corrected_score = recalculated.get("score")
+        corrected_level = recalculated.get("level")
+        if corrected_score is None or corrected_level is None:
+            raise HTTPException(status_code=400, detail="当前结果无法自动计算正式等级")
+    review_data = payload.model_dump(exclude={"corrections", "corrected_level"})
     review = HumanReview(
         evaluation_id=evaluation_id,
-        corrections_json=json.dumps(
-            [item.model_dump() for item in payload.corrections], ensure_ascii=False
-        ),
+        corrected_level=corrected_level,
+        corrected_score=corrected_score,
+        corrections_json=json.dumps(correction_data, ensure_ascii=False),
         **review_data,
     )
     if payload.decision in {"approved", "corrected"}:

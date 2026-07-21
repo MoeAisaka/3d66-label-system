@@ -38,9 +38,36 @@ def test_sample_set_captures_human_final_level() -> None:
         asset_id=asset.id,
         job_id=job.id,
         precheck_json=json.dumps(
-            {"classification": {"primary_category": "住宅设计"}}, ensure_ascii=False
+            {
+                "classification": {
+                    "primary_category": "住宅设计",
+                    "scope_status": "in_scope",
+                    "primary_confidence": 0.95,
+                },
+                "image_quality": {"quality_severity": "good", "confidence": 0.95},
+                "media_form": {},
+            },
+            ensure_ascii=False,
         ),
-        aesthetic_json=None,
+        aesthetic_json=json.dumps(
+            {
+                "dimensions": {
+                    key: {"grade": 5 if key == "color_material" else 4}
+                    for key in (
+                        "composition_viewpoint",
+                        "lighting_atmosphere",
+                        "color_material",
+                        "spatial_design_furnishing",
+                        "visual_hierarchy",
+                        "detail_completion",
+                        "inspiration_reference",
+                        "presentation_integrity",
+                    )
+                },
+                "assessment_confidence": 0.9,
+            },
+            ensure_ascii=False,
+        ),
         scoring_json="{}",
         raw_response_a="{}",
         raw_response_b=None,
@@ -79,7 +106,7 @@ def test_sample_set_captures_human_final_level() -> None:
             json={
                 "reviewer_name": "审核员",
                 "decision": "corrected",
-                "corrected_level": "L4",
+                "corrected_level": None,
                 "note": "色彩与材质评分偏高",
                 "corrections": [
                     {
@@ -99,6 +126,7 @@ def test_sample_set_captures_human_final_level() -> None:
         assert "status" not in asset_detail
         evaluation_detail = client.get(f"/api/evaluations/{result.id}").json()
         assert evaluation_detail["evaluation"]["updated_at"]
+        assert evaluation_detail["evaluation"]["human_review"]["corrected_score"] is not None
         correction = evaluation_detail["evaluation"]["human_review"]["corrections"][0]
         assert correction["field_key"] == "color_material"
         assert correction["human_value"] == 3

@@ -88,6 +88,14 @@ def _prompt_for_job(stage: str, prompt_id: int | None) -> PromptVersion:
         return prompt
 
 
+def _single_prompt_for_job(prompt_id: int | None) -> PromptVersion:
+    with session_scope() as db:
+        prompt = db.get(PromptVersion, prompt_id) if prompt_id else None
+        if not prompt:
+            raise RuntimeError("单提示词版本不存在")
+        return prompt
+
+
 def claim_next_job() -> int | None:
     with session_scope() as db:
         control = db.get(EvaluationControl, 1)
@@ -157,7 +165,12 @@ async def evaluate_job(job_id: int) -> None:
         prompt_a_id = job.prompt_a_id
         prompt_b_id = job.prompt_b_id
 
-    prompt_a = _prompt_for_job("A", prompt_a_id)
+    single_mode = prompt_b_id is None
+    prompt_a = (
+        _single_prompt_for_job(prompt_a_id)
+        if single_mode
+        else _prompt_for_job("A", prompt_a_id)
+    )
     prompt_b = None
     image_path = settings.upload_dir / asset.stored_name
     if not image_path.exists():
@@ -172,12 +185,16 @@ async def evaluate_job(job_id: int) -> None:
     user_a = prompt_a.user_prompt.replace(
         "{{image_metadata}}", json.dumps(metadata, ensure_ascii=False)
     )
+    if single_mode:
+        _set_job(job_id, stage="single", progress=20)
     client = DoubaoClient(model_config)
     response_a = await client.chat_json(
         prompt_a.system_prompt, user_a, image_path=image_path, mime_type=asset.mime_type
     )
     _ensure_job_processing(job_id)
     combined_response = is_combined_aesthetic_response(response_a.parsed)
+    if single_mode and not combined_response:
+        raise RuntimeError("单提示词必须一次返回分类、画质和八个美感维度的完整结构")
     if combined_response:
         precheck, aesthetic = adapt_combined_aesthetic_response(response_a.parsed)
     else:
@@ -188,7 +205,7 @@ async def evaluate_job(job_id: int) -> None:
 
     response_b = None
     response_b_attempts: list[object] = []
-    if not combined_response and scope_status in {"in_scope", "boundary"}:
+    if not single_mode and not combined_response and scope_status in {"in_scope", "boundary"}:
         prompt_b = _prompt_for_job("B", prompt_b_id)
         _set_job(job_id, stage="aesthetic", progress=48)
         user_b = prompt_b.user_prompt.replace(

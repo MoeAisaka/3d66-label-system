@@ -217,6 +217,7 @@ class HumanReview(Base):
     reviewer_name: Mapped[str] = mapped_column(String(80))
     decision: Mapped[str] = mapped_column(String(30))
     corrected_level: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    corrected_score: Mapped[float | None] = mapped_column(Float, nullable=True)
     note: Mapped[str] = mapped_column(Text, default="")
     corrections_json: Mapped[str] = mapped_column(Text, default="[]")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

@@ -61,6 +61,10 @@ def init_database() -> None:
             connection.exec_driver_sql(
                 "ALTER TABLE human_reviews ADD COLUMN corrections_json TEXT NOT NULL DEFAULT '[]'"
             )
+        if "corrected_score" not in review_columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE human_reviews ADD COLUMN corrected_score FLOAT"
+            )
         job_columns = {
             row[1] for row in connection.exec_driver_sql("PRAGMA table_info(evaluation_jobs)")
         }

@@ -16,6 +16,7 @@ import { api } from "@/lib/api"
 import type { Job, JobControl } from "@/lib/types"
 
 const stageLabels: Record<string, string> = {
+  single: "单提示词完整评测",
   waiting: "等待领取",
   precheck: "分类与画质预检",
   aesthetic: "美感维度评测",
@@ -134,8 +135,7 @@ export function JobsPage() {
                     <td className="font-data px-4 py-4 text-xs">#{job.id.toString().padStart(5, "0")}</td>
                     <td className="file-name max-w-[280px] truncate px-3 py-4">{job.asset_name}</td>
                     <td className="px-3 py-4">
-                      <p className="font-data text-xs">A · {job.prompt_a_version ?? "未记录（历史任务）"}</p>
-                      <p className="font-data mt-1 text-xs text-[var(--muted)]">B · {job.prompt_b_version ?? "未记录（历史任务）"}</p>
+                      {job.prompt_version ? <p className="font-data text-xs">单提示词 · {job.prompt_version}</p> : <><p className="font-data text-xs">A · {job.prompt_a_version ?? "未记录（历史任务）"}</p><p className="font-data mt-1 text-xs text-[var(--muted)]">B · {job.prompt_b_version ?? "未记录（历史任务）"}</p></>}
                     </td>
                     <td className="px-3 py-4">{stageLabels[job.stage] ?? job.stage}</td>
                     <td className="px-3 py-4">

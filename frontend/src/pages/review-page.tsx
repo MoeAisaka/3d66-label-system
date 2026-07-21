@@ -87,7 +87,7 @@ export function ReviewPage() {
   }, [evaluation])
 
   const enqueue = useMutation({
-    mutationFn: () => api("/api/jobs/enqueue", { method: "POST", ...jsonBody({ asset_ids: [asset?.id] }) }),
+    mutationFn: () => api("/api/jobs/enqueue", { method: "POST", ...jsonBody({ asset_ids: [asset?.id], prompt_id: evaluation?.prompt_id, prompt_a_id: evaluation?.prompt_a_id, prompt_b_id: evaluation?.prompt_b_id }) }),
     onSuccess: async () => {
       toast.success("已创建评测任务")
       await Promise.all([
@@ -211,7 +211,7 @@ export function ReviewPage() {
                   {evaluation.human_review?.decision === "corrected" && <Badge tone="success" className="mb-2">人工最终</Badge>}
                   <p className="font-data text-3xl font-semibold">{evaluation.final_level || evaluation.level}</p>
                   <p className="font-data mt-1 text-xs text-[var(--muted)]">
-                    {evaluation.human_review?.decision === "corrected" ? `模型 ${evaluation.level} · ${evaluation.score?.toFixed(1)}` : `${evaluation.score?.toFixed(1)} / 100`}
+                    {evaluation.human_review?.decision === "corrected" ? `${evaluation.final_score?.toFixed(1)} / 100 · 模型 ${evaluation.level} ${evaluation.score?.toFixed(1)}` : `${evaluation.score?.toFixed(1)} / 100`}
                   </p>
                 </div>
               )}
@@ -227,8 +227,8 @@ export function ReviewPage() {
               <div className="flex min-h-[520px] flex-col items-center justify-center px-8 text-center">
                 <Badge>不参与空间美感评分</Badge>
                 <ImageSquare className="mt-5" size={32} weight="light" />
-                <h3 className="font-editorial mt-4 text-xl font-bold">A 阶段判定为范围外</h3>
-                <p className="mt-2 max-w-[46ch] text-sm leading-6 text-[var(--muted)]">该素材属于“{evaluation.precheck?.classification?.primary_category || "其他类型"}”，因此没有调用 B，也不会生成八个空间美感维度。这不是数据丢失。</p>
+                <h3 className="font-editorial mt-4 text-xl font-bold">{evaluation.versions.prompt ? "单提示词判定为范围外" : "A 阶段判定为范围外"}</h3>
+                <p className="mt-2 max-w-[46ch] text-sm leading-6 text-[var(--muted)]">该素材属于“{evaluation.precheck?.classification?.primary_category || "其他类型"}”，因此不会生成八个空间美感维度。这不是数据丢失。</p>
                 <Button className="mt-6" variant="secondary" onClick={() => enqueue.mutate()} disabled={enqueue.isPending}>使用当前版本重新评测<ArrowRight /></Button>
               </div>
             ) : completeDimensionCount < requiredDimensionKeys.length ? (
@@ -299,12 +299,12 @@ export function ReviewPage() {
                     <div className="mb-4 border-y border-[var(--line)] bg-[#fafbf8] px-3 py-3">
                       <div className="flex flex-wrap items-center justify-between gap-2">
                         <Badge tone={evaluation.human_review.decision === "rejected" ? "warning" : "success"}>
-                          {evaluation.human_review.decision === "corrected" ? `已人工修正为 ${evaluation.human_review.corrected_level}` : evaluation.human_review.decision === "approved" ? "已确认模型结果" : "已退回复核"}
+                          {evaluation.human_review.decision === "corrected" ? `已人工纠正 · 自动计算 ${evaluation.human_review.corrected_level} / ${evaluation.human_review.corrected_score?.toFixed(1)}` : evaluation.human_review.decision === "approved" ? "已确认模型结果" : "已退回复核"}
                         </Badge>
                         <span className="font-data text-[0.68rem] text-[var(--muted)]">{evaluation.human_review.reviewer_name} · {new Date(evaluation.human_review.created_at).toLocaleString("zh-CN")}</span>
                       </div>
                       {evaluation.human_review.note && <p className="mt-2 text-xs leading-5 text-[var(--muted)]">{evaluation.human_review.note}</p>}
-                      {(evaluation.human_review.corrections?.length ?? 0) > 0 && <div className="mt-3 flex flex-wrap gap-1.5">{evaluation.human_review.corrections.map((correction, index) => <Badge key={`${correction.field_key}-${index}`} tone="active">{correction.target_type === "dimension" ? dimensionLabels[correction.field_key] || correction.field_key : "评分规则"}{correction.target_type === "dimension" ? ` ${correction.model_value}→${correction.human_value}` : ""}</Badge>)}</div>}
+                      {(evaluation.human_review.corrections?.length ?? 0) > 0 && <div className="mt-3 flex flex-wrap gap-1.5">{evaluation.human_review.corrections.map((correction, index) => <Badge key={`${correction.field_key}-${index}`} tone="active">{dimensionLabels[correction.field_key] || correction.field_key} {correction.model_value}→{correction.human_value}</Badge>)}</div>}
                     </div>
                   )}
                   <div className="grid grid-cols-2 gap-3">
@@ -318,9 +318,9 @@ export function ReviewPage() {
                     <Button onClick={() => review.mutate({ decision: "approved", corrected_level: null, reviewNote: note.trim() })} disabled={!reviewer || review.isPending}><Check weight="bold" />确认结果</Button>
                   </div>
 
-                  {correctionOpen && <ReviewCorrectionForm dimensions={dimensions} modelLevel={evaluation.level} pending={review.isPending} onCancel={() => setCorrectionOpen(false)} onSubmit={({ correctedLevel, note: correctionNote, corrections }) => {
+                  {correctionOpen && <ReviewCorrectionForm dimensions={dimensions} scoring={scoring ?? {}} pending={review.isPending} onCancel={() => setCorrectionOpen(false)} onSubmit={({ note: correctionNote, corrections }) => {
                     if (!reviewer.trim()) { toast.error("请先填写审核姓名"); return }
-                    review.mutate({ decision: "corrected", corrected_level: correctedLevel, reviewNote: correctionNote, corrections })
+                    review.mutate({ decision: "corrected", corrected_level: null, reviewNote: correctionNote, corrections })
                   }} />}
                 </div>
               </>

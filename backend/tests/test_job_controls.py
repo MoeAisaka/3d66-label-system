@@ -86,6 +86,16 @@ def test_jobs_pin_prompts_and_support_pause_resume_cancel() -> None:
         db.expire_all()
         assert db.get(EvaluationJob, job_id).status == "canceled"
         assert db.get(Asset, asset.id).status == "uploaded"
+
+        single = client.post(
+            "/api/jobs/enqueue",
+            json={"asset_ids": [asset.id], "prompt_id": prompt_a.id},
+        )
+        assert single.status_code == 200
+        single_job = client.get("/api/jobs").json()["items"][0]
+        assert single_job["prompt_version"] == "A-2.1"
+        assert single_job["prompt_a_version"] is None
+        assert single_job["prompt_b_version"] is None
     finally:
         app.dependency_overrides.clear()
         db.close()

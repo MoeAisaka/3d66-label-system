@@ -21,6 +21,8 @@ export function AssetsPage() {
   const inputRef = useRef<HTMLInputElement>(null)
   const [dragging, setDragging] = useState(false)
   const [selected, setSelected] = useState<Set<number>>(new Set())
+  const [promptMode, setPromptMode] = useState<"single" | "split" | null>(null)
+  const [promptId, setPromptId] = useState<number | null>(null)
   const [promptAId, setPromptAId] = useState<number | null>(null)
   const [promptBId, setPromptBId] = useState<number | null>(null)
   const queryClient = useQueryClient()
@@ -34,6 +36,9 @@ export function AssetsPage() {
   })
   const promptAOptions = prompts.data?.items.filter((item) => item.stage === "A") ?? []
   const promptBOptions = prompts.data?.items.filter((item) => item.stage === "B") ?? []
+  const allPromptOptions = prompts.data?.items ?? []
+  const effectivePromptMode = promptMode ?? (allPromptOptions.length === 1 ? "single" : "split")
+  const effectivePromptId = promptId ?? allPromptOptions.find((item) => item.status === "published")?.id ?? allPromptOptions[0]?.id ?? null
   const effectivePromptAId = promptAId ?? promptAOptions.find((item) => item.status === "published")?.id ?? null
   const effectivePromptBId = promptBId ?? promptBOptions.find((item) => item.status === "published")?.id ?? null
   const upload = useMutation({
@@ -56,8 +61,9 @@ export function AssetsPage() {
         method: "POST",
         ...jsonBody({
           asset_ids: Array.from(selected),
-          prompt_a_id: effectivePromptAId,
-          prompt_b_id: effectivePromptBId,
+          prompt_id: effectivePromptMode === "single" ? effectivePromptId : null,
+          prompt_a_id: effectivePromptMode === "split" ? effectivePromptAId : null,
+          prompt_b_id: effectivePromptMode === "split" ? effectivePromptBId : null,
         }),
       }),
     onSuccess: async (data) => {
@@ -128,7 +134,16 @@ export function AssetsPage() {
               {allSelected ? <CheckSquare weight="fill" /> : <Square />}{allSelected ? "取消全选" : "全选"}
             </Button>
           </div>
-          <div className="mb-5 grid gap-4 border border-[var(--line)] bg-[#fafbf8] p-4 lg:grid-cols-[minmax(220px,1fr)_minmax(220px,1fr)_auto] lg:items-end">
+          <div className="mb-5 border border-[var(--line)] bg-[#fafbf8] p-4">
+            <div className="mb-4 flex flex-wrap items-center gap-2"><span className="mr-2 text-xs font-semibold">评测方式</span><button type="button" onClick={() => setPromptMode("single")} className={`rounded-[4px] border px-3 py-2 text-xs font-semibold ${effectivePromptMode === "single" ? "border-[#7f991b] bg-[#eff8c7]" : "border-[var(--line-strong)] bg-white"}`}>单提示词</button><button type="button" onClick={() => setPromptMode("split")} className={`rounded-[4px] border px-3 py-2 text-xs font-semibold ${effectivePromptMode === "split" ? "border-[#7f991b] bg-[#eff8c7]" : "border-[var(--line-strong)] bg-white"}`}>A/B 两阶段</button></div>
+            <div className={`grid gap-4 lg:items-end ${effectivePromptMode === "single" ? "lg:grid-cols-[minmax(300px,1fr)_auto]" : "lg:grid-cols-[minmax(220px,1fr)_minmax(220px,1fr)_auto]"}`}>
+            {effectivePromptMode === "single" ? <label className="block min-w-0">
+              <span className="mb-2 block text-xs font-semibold">完整评测提示词（一次调用）</span>
+              <select className="h-11 w-full rounded-[4px] border border-[var(--line-strong)] bg-white px-3 text-sm" value={effectivePromptId ?? ""} onChange={(event) => setPromptId(Number(event.target.value))}>
+                {!allPromptOptions.length && <option value="">暂无可用版本</option>}
+                {allPromptOptions.map((prompt) => <option key={prompt.id} value={prompt.id}>{prompt.version} · {prompt.name} · {prompt.status === "published" ? "已发布" : prompt.status === "draft" ? "草稿" : "已归档"}</option>)}
+              </select>
+            </label> : <>
             <label className="block min-w-0">
               <span className="mb-2 block text-xs font-semibold">分类与画质提示词（A）</span>
               <select
@@ -151,14 +166,16 @@ export function AssetsPage() {
                 {promptBOptions.map((prompt) => <option key={prompt.id} value={prompt.id}>{prompt.version} · {prompt.name} · {prompt.status === "published" ? "已发布" : prompt.status === "draft" ? "草稿" : "已归档"}</option>)}
               </select>
             </label>
+            </>}
             <Button
               className="lg:min-w-40"
-              disabled={!selected.size || !effectivePromptAId || !effectivePromptBId || enqueue.isPending}
+              disabled={!selected.size || (effectivePromptMode === "single" ? !effectivePromptId : !effectivePromptAId || !effectivePromptBId) || enqueue.isPending}
               onClick={() => enqueue.mutate()}
             >
               开始评测 {selected.size ? `(${selected.size})` : ""}<ArrowRight weight="bold" />
             </Button>
-            <p className="text-xs leading-5 text-[var(--muted)] lg:col-span-3">创建任务不会覆盖旧结果。评测结果、模型版本和提示词版本请到“评测结果”查看。</p>
+            </div>
+            <p className="mt-3 text-xs leading-5 text-[var(--muted)]">{effectivePromptMode === "single" ? "单提示词必须一次返回分类、画质和八个美感维度的完整结果。" : "A/B 两阶段先完成分类与画质预检，再对范围内图片执行美感评测。"} 创建任务不会覆盖旧结果。</p>
           </div>
           <div className="overflow-x-auto border-y border-[var(--line-strong)] bg-white scrollbar-thin">
             {assets.isLoading ? (

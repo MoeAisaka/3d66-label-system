@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from app.scoring import calculate_score
+from app.scoring import calculate_corrected_score, calculate_score
 
 
 DIMENSIONS = (
@@ -117,3 +117,19 @@ def test_calibrated_uniform_mid_grades_require_review() -> None:
     assert result["level"] == "L3"
     assert result["needs_review"] is True
     assert any("中间分坍缩" in reason for reason in result["review_reasons"])
+
+
+def test_human_dimension_correction_recalculates_score_and_level() -> None:
+    result = calculate_corrected_score(
+        precheck(),
+        aesthetic(4),
+        [
+            {
+                "target_type": "dimension",
+                "field_key": "spatial_design_furnishing",
+                "human_value": 1,
+            }
+        ],
+    )
+    assert result["score"] == 70.84
+    assert result["level"] == "L3"
