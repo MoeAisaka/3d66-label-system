@@ -20,6 +20,7 @@
 | [0005](0005-local-first-data-and-secret-security.md) | Accepted | 本地优先数据与密钥安全 |
 | [0006](0006-risk-based-stable-review-sampling.md) | Accepted | 风险优先、稳定可解释的审核抽样 |
 | [0007](0007-optional-single-prompt-and-server-scoring.md) | Accepted | 可选单提示词评测与服务端权威评分 |
+| [0008](0008-cap-casual-and-damaged-images-at-l2.md) | Accepted | 随拍图与画质受损图片最高 L2 |
 
 ## 新增 ADR 的规则
 

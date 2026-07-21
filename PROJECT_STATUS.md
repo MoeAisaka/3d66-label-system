@@ -1,15 +1,15 @@
 # 3d66 标签系统｜当前项目状态
 
-> 最后更新：2026-07-20
+> 最后更新：2026-07-21
 > 本文件只记录“现在做到哪里”；长期原则见 `PRODUCT.md` 和 `AGENTS.md`，历史背景见 `CODEX_HANDOFF.md`。
 
 ## 仓库状态
 
 - 项目目录：`D:\3d66-label-system`
 - 当前分支：`main`
-- 当前功能基线：`b809996 feat: add configurable review sampling policy`（治理文档提交请以 `git log -1` 为准）
+- 当前功能基线：以 `main` 分支最新提交为准，精确提交号请执行 `git log -1` 查看。
 - 远程仓库：`origin = https://github.com/chishiyu07-max/3d66-label-system.git`
-- 分支关系：检查时 `main` 与 `origin/main` 同步（ahead 0 / behind 0）。
+- 分支关系：每次交付以 `git status -sb` 的实时结果为准。
 
 ## 最新完成：人工纠正与单提示词兼容
 
@@ -18,6 +18,14 @@
 - 审核状态只显示待审核、暂缓审核、已确认、已纠正和已退回；范围外与结果不完整回归美感结果列。
 - 任务创建新增单提示词模式；一次调用返回完整结构，同时保留原有 A/B 两阶段模式和历史数据。
 - 验证：后端 `44 passed`；TypeScript + Vite 正式构建通过；真实 SQLite 已新增 `human_reviews.corrected_score`；服务健康检查通过。
+
+## 最新完成：随拍图与画质受损等级封顶
+
+- 服务端评分引擎升级为 `engine-v2.5.0`：随拍图或 `slight` 及以上画质受损时最高 L2；严重/不可用画质满足证据阈值时仍最高 L1。
+- 人工纠正预览与保存后的服务端自动重算使用相同等级上限。
+- 新增 `space_aesthetic_dimensions_v1.4-lite.2` / `space-rubric-v1.4` 提示词候选，不覆盖旧提示词版本。
+- 决策记录见 ADR-0008。
+- 验证：后端 `47 passed`；TypeScript + Vite 正式构建通过；本地登录页加载正常且无控制台错误。因仓库不保存管理员明文密码，登录后的纠正表单目视验收待使用现有账号完成。
 
 ## 已完成：核心列表时间信息
 

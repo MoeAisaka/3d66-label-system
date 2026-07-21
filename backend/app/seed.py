@@ -146,6 +146,15 @@ def seed_defaults(db: Session) -> None:
             "filename": "space-aesthetic-v1.4-lite.1.md",
             "note": "Lite精简候选版：统一等级锚点、反高分规则和八维输出，等待黄金回归后发布",
         },
+        {
+            "stage": "B",
+            "name": "空间八维美感Lite等级上限校准",
+            "version": "space_aesthetic_dimensions_v1.4-lite.2",
+            "filename": "space-aesthetic-v1.4-lite.1.md",
+            "calibration_filename": "space-aesthetic-v1.4-lite.2-calibration.md",
+            "rubric_version": "space-rubric-v1.4",
+            "note": "Lite精简候选版：随拍图或画质受损时最终等级最高为L2",
+        },
     )
     for item in split_prompts:
         exists = db.scalar(
@@ -169,7 +178,7 @@ def seed_defaults(db: Session) -> None:
                 version=item["version"],
                 system_prompt=(prompt.system + "\n\n" + calibration).strip(),
                 user_prompt=prompt.user,
-                rubric_version="space-rubric-v1.3",
+                rubric_version=item.get("rubric_version", "space-rubric-v1.3"),
                 status="draft",
                 source="split",
                 change_note=item["note"],

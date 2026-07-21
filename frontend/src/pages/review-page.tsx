@@ -318,7 +318,7 @@ export function ReviewPage() {
                     <Button onClick={() => review.mutate({ decision: "approved", corrected_level: null, reviewNote: note.trim() })} disabled={!reviewer || review.isPending}><Check weight="bold" />确认结果</Button>
                   </div>
 
-                  {correctionOpen && <ReviewCorrectionForm dimensions={dimensions} scoring={scoring ?? {}} pending={review.isPending} onCancel={() => setCorrectionOpen(false)} onSubmit={({ note: correctionNote, corrections }) => {
+                  {correctionOpen && <ReviewCorrectionForm dimensions={dimensions} precheck={evaluation?.precheck ?? {}} scoring={scoring ?? {}} pending={review.isPending} onCancel={() => setCorrectionOpen(false)} onSubmit={({ note: correctionNote, corrections }) => {
                     if (!reviewer.trim()) { toast.error("请先填写审核姓名"); return }
                     review.mutate({ decision: "corrected", corrected_level: null, reviewNote: correctionNote, corrections })
                   }} />}

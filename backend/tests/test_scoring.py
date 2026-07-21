@@ -59,6 +59,28 @@ def test_ai_image_is_capped_at_l4() -> None:
     assert result["caps"][0]["cap"] == "L4"
 
 
+def test_casual_snapshot_is_capped_at_l2() -> None:
+    check = precheck()
+    check["media_form"]["casual_snapshot"] = {"status": "yes", "confidence": 0.4}
+    result = calculate_score(check, aesthetic(5))
+    assert result["raw_level"] == "L5"
+    assert result["level"] == "L2"
+    assert result["score"] == 59.0
+    assert any(item["cap"] == "L2" and "随拍图" in item["reason"] for item in result["caps"])
+    assert result["needs_review"] is True
+
+
+def test_damaged_quality_is_capped_at_l2() -> None:
+    for severity in ("slight", "moderate", "severe", "unusable"):
+        check = precheck()
+        check["image_quality"]["quality_severity"] = severity
+        result = calculate_score(check, aesthetic(5))
+        assert result["raw_level"] == "L5"
+        assert result["level"] == "L2"
+        assert result["score"] == 59.0
+        assert any(item["cap"] == "L2" and "画质受损" in item["reason"] for item in result["caps"])
+
+
 def test_severe_quality_with_evidence_is_capped_at_l1() -> None:
     check = precheck()
     check["image_quality"] = {

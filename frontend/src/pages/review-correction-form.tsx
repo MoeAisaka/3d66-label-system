@@ -52,12 +52,14 @@ function levelForScore(score: number) {
 
 export function ReviewCorrectionForm({
   dimensions,
+  precheck,
   scoring,
   pending,
   onCancel,
   onSubmit,
 }: {
   dimensions: Record<string, any>
+  precheck: Record<string, any>
   scoring: Record<string, any>
   pending: boolean
   onCancel: () => void
@@ -88,13 +90,20 @@ export function ReviewCorrectionForm({
     score = Math.round(score * 100) / 100
     let level = levelForScore(score)
     const caps = (scoring?.caps ?? []).map((item: any) => Number(String(item.cap || "").replace("L", ""))).filter(Boolean)
+    const qualitySeverity = String(precheck?.image_quality?.quality_severity ?? "normal")
+    if (["slight", "moderate", "severe", "unusable"].includes(qualitySeverity)) caps.push(2)
+    const qualityConfidence = Number(precheck?.image_quality?.confidence ?? 0)
+    const qualityEvidence = precheck?.image_quality?.evidence
+    if (["severe", "unusable"].includes(qualitySeverity) && qualityConfidence >= 0.8 && Array.isArray(qualityEvidence) && qualityEvidence.length >= 2) caps.push(1)
+    const casualSnapshot = precheck?.media_form?.casual_snapshot
+    if (casualSnapshot?.status === "yes") caps.push(2)
     if (caps.length) {
       const cap = Math.min(...caps)
       level = `L${Math.min(Number(level.replace("L", "")), cap)}`
       score = Math.min(score, { 1: 39, 2: 59, 3: 74, 4: 89 }[cap as 1 | 2 | 3 | 4] ?? score)
     }
     return { score, level }
-  }, [dimensions, drafts, scoring])
+  }, [dimensions, drafts, precheck, scoring])
 
   function updateDraft(key: string, patch: Partial<Draft>) {
     setError("")

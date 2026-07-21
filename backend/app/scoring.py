@@ -5,7 +5,7 @@ from copy import deepcopy
 from typing import Any
 
 
-ENGINE_VERSION = "engine-v2.4.0"
+ENGINE_VERSION = "engine-v2.5.0"
 
 GRADE_POINTS = {1: 20.0, 2: 45.0, 3: 65.0, 4: 82.0, 5: 95.0}
 WEIGHTS = {
@@ -108,13 +108,22 @@ def calculate_score(precheck: dict[str, Any], aesthetic: dict[str, Any] | None) 
     severity = quality.get("quality_severity")
     quality_confidence = float(quality.get("confidence") or 0.0)
     quality_evidence = quality.get("evidence") or []
+    if severity in {"slight", "moderate", "severe", "unusable"}:
+        apply_cap(2, "画质受损最高 L2")
     if severity in {"severe", "unusable"} and quality_confidence >= 0.8 and len(quality_evidence) >= 2:
         apply_cap(1, "严重或不可用画质，且证据与置信度达到规则阈值")
 
     media = precheck.get("media_form") or {}
+    casual_status, casual_confidence = _status(media.get("casual_snapshot"))
+    if casual_status == "yes":
+        apply_cap(2, "随拍图最高 L2")
+        if casual_confidence < 0.75:
+            review_reasons.append("随拍图判断置信度低于 0.75，等级已封顶并需要复核")
+    elif casual_status == "uncertain":
+        review_reasons.append("随拍图判断不确定")
+
     for key, cap, label in (
         ("ai_generated", 4, "AI 图"),
-        ("casual_snapshot", 3, "随拍图"),
         ("documentary_record", 3, "现场记录图"),
         ("collage_or_multiview", 3, "拼图或多视角"),
         ("unfinished_scene", 3, "未完工现场"),

@@ -76,3 +76,12 @@ def test_v14_lite_prompts_are_compact_and_keep_runtime_contract() -> None:
     assert '"scoring_profile": "space_aesthetic_v1.3"' in prompt_b.system
     assert "{{precheck_json}}" in prompt_b.user
     assert "{{rubric_version}}" in prompt_b.user
+
+
+def test_v14_lite2_calibration_caps_snapshot_and_damaged_quality_at_l2() -> None:
+    calibration = (
+        PROJECT_ROOT / "prompts" / "space-aesthetic-v1.4-lite.2-calibration.md"
+    ).read_text(encoding="utf-8")
+    assert "casual_snapshot.status=yes" in calibration
+    assert "slight|moderate|severe|unusable" in calibration
+    assert "最高为 `L2`" in calibration
