@@ -21,6 +21,44 @@ class DoubaoResponse:
     raw_payload: dict[str, Any]
 
 
+class DoubaoError(RuntimeError):
+    technical_error_type = "non_retryable"
+    retryable = False
+
+
+class DoubaoHTTPError(DoubaoError):
+    def __init__(self, status_code: int, headers: dict[str, str]):
+        super().__init__(f"模型 API HTTP {status_code}")
+        self.status_code = status_code
+        self.headers = headers
+        self.technical_error_type = (
+            "429"
+            if status_code == 429
+            else "provider5xx"
+            if 500 <= status_code <= 599
+            else "non_retryable"
+        )
+        self.retryable = self.technical_error_type != "non_retryable"
+
+
+class DoubaoTransportError(DoubaoError):
+    def __init__(self, error_type: str):
+        if error_type not in {"timeout", "network"}:
+            raise ValueError("不支持的传输错误类型")
+        super().__init__(f"模型 API {error_type}")
+        self.technical_error_type = error_type
+        self.retryable = True
+
+
+class DoubaoParseError(DoubaoError):
+    def __init__(self, message: str, *, truncated: bool = False):
+        super().__init__(message)
+        self.technical_error_type = (
+            "json_truncated" if truncated else "transient_parse"
+        )
+        self.retryable = True
+
+
 def _image_data_url(path: Path, mime_type: str | None = None) -> str:
     media_type = mime_type or mimetypes.guess_type(path.name)[0] or "image/jpeg"
     encoded = base64.b64encode(path.read_bytes()).decode("ascii")
@@ -53,13 +91,22 @@ def parse_json_text(text: str) -> dict[str, Any]:
     cleaned = re.sub(r"\s*```$", "", cleaned)
     try:
         value = json.loads(cleaned)
-    except json.JSONDecodeError:
+    except json.JSONDecodeError as first_error:
         start, end = cleaned.find("{"), cleaned.rfind("}")
         if start < 0 or end <= start:
-            raise ValueError("模型未返回合法 JSON")
-        value = json.loads(cleaned[start : end + 1])
+            raise DoubaoParseError(
+                "模型未返回合法 JSON",
+                truncated=first_error.pos >= max(0, len(cleaned) - 2),
+            ) from first_error
+        try:
+            value = json.loads(cleaned[start : end + 1])
+        except json.JSONDecodeError as exc:
+            raise DoubaoParseError(
+                "模型未返回合法 JSON",
+                truncated=exc.pos >= max(0, len(cleaned[start : end + 1]) - 2),
+            ) from exc
     if not isinstance(value, dict):
-        raise ValueError("模型 JSON 顶层必须是对象")
+        raise DoubaoParseError("模型 JSON 顶层必须是对象")
     return value
 
 
@@ -78,13 +125,28 @@ class DoubaoClient:
         timeout = httpx.Timeout(float(self.config.timeout_seconds))
         headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
         async with httpx.AsyncClient(timeout=timeout) as client:
-            response = await client.post(self.url, headers=headers, json=payload)
+            try:
+                response = await client.post(
+                    self.url, headers=headers, json=payload
+                )
+            except httpx.TimeoutException as exc:
+                raise DoubaoTransportError("timeout") from exc
+            except httpx.NetworkError as exc:
+                raise DoubaoTransportError("network") from exc
             if response.is_error:
-                detail = response.text[:1200]
-                raise RuntimeError(f"模型 API 返回 {response.status_code}: {detail}")
-            data = response.json()
+                raise DoubaoHTTPError(
+                    response.status_code,
+                    dict(response.headers),
+                )
+            try:
+                data = response.json()
+            except json.JSONDecodeError as exc:
+                raise DoubaoParseError(
+                    "模型 API 返回无效 JSON",
+                    truncated=exc.pos >= max(0, len(exc.doc) - 2),
+                ) from exc
             if not isinstance(data, dict):
-                raise RuntimeError("豆包 API 返回了无法识别的数据结构")
+                raise DoubaoParseError("豆包 API 返回了无法识别的数据结构")
             return data
 
     async def chat_json(
@@ -137,7 +199,9 @@ class DoubaoClient:
                 return DoubaoResponse(parsed=parse_json_text(raw_text), raw_text=raw_text, raw_payload=raw)
             except Exception as exc:  # API 与 JSON 错误都按配置重试
                 last_error = exc
-        raise RuntimeError(str(last_error) if last_error else "模型调用失败")
+        if last_error is not None:
+            raise last_error
+        raise DoubaoError("模型调用失败")
 
     async def chat_json_images(
         self,
@@ -179,7 +243,9 @@ class DoubaoClient:
                 )
             except Exception as exc:
                 last_error = exc
-        raise RuntimeError(str(last_error) if last_error else "模型调用失败")
+        if last_error is not None:
+            raise last_error
+        raise DoubaoError("模型调用失败")
 
     async def test_connection(self) -> str:
         payload = {

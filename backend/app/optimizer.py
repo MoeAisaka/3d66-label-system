@@ -10,6 +10,7 @@ from .config import get_settings
 from .database import SessionLocal
 from .doubao import DoubaoClient
 from .models import OptimizerConfig, PromptOptimizationRun
+from .regression import latest_review_for_result
 
 
 DIMENSION_LABELS = {
@@ -26,7 +27,7 @@ DIMENSION_LABELS = {
 
 def _review_record(item: Any) -> dict[str, Any] | None:
     result = item.source_result
-    review = result.reviews[-1] if result.reviews else None
+    review = latest_review_for_result(result)
     if not review or review.decision not in {"approved", "corrected"}:
         return None
     aesthetic = json.loads(result.aesthetic_json) if result.aesthetic_json else {}
@@ -34,6 +35,8 @@ def _review_record(item: Any) -> dict[str, Any] | None:
     return {
         "asset_id": item.asset_id,
         "asset_name": item.asset.original_name,
+        "source_evaluation_id": result.id,
+        "source_review_id": review.id,
         "decision": review.decision,
         "model_level": result.level,
         "human_level": review.corrected_level or result.level,
@@ -64,6 +67,12 @@ def _select_records(items: list[Any]) -> tuple[list[tuple[Any, dict[str, Any]]],
     corrected = [pair for pair in analysis_pool if pair[1]["decision"] == "corrected"]
     controls = [pair for pair in analysis_pool if pair[1]["decision"] == "approved"]
     selected = corrected[:24] + controls[:8]
+    for _, record in selected:
+        record["sample_role"] = (
+            "target_error"
+            if record["decision"] == "corrected"
+            else "stable_control"
+        )
     return selected, holdout_ids, len(eligible)
 
 
@@ -154,6 +163,11 @@ async def run_prompt_optimization(run_id: int) -> None:
                     "control_count": len(selected) - corrected_count,
                     "blind_holdout_count": len(holdout_ids),
                     "blind_holdout_asset_ids": holdout_ids,
+                    "regression_roles": [
+                        "target_error",
+                        "stable_control",
+                        "blind_holdout",
+                    ],
                     "note": "盲测样本没有发送给提示词生成模型，后续用于豆包回测。",
                 },
                 "batch_diagnoses": chunk_results,
@@ -179,6 +193,11 @@ async def run_prompt_optimization(run_id: int) -> None:
                     "control_count": len(selected) - corrected_count,
                     "blind_holdout_count": len(holdout_ids),
                     "blind_holdout_asset_ids": holdout_ids,
+                    "regression_roles": [
+                        "target_error",
+                        "stable_control",
+                        "blind_holdout",
+                    ],
                 },
             },
             ensure_ascii=False,

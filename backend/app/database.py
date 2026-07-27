@@ -44,109 +44,11 @@ SessionLocal = sessionmaker(bind=engine, expire_on_commit=False, autoflush=False
 
 def init_database() -> None:
     from . import models  # noqa: F401
+    from .migrations import run_migrations
 
     Base.metadata.create_all(bind=engine)
     with engine.begin() as connection:
-        migration_columns = {
-            row[1] for row in connection.exec_driver_sql("PRAGMA table_info(migration_items)")
-        }
-        if "sample_expected_level" not in migration_columns:
-            connection.exec_driver_sql(
-                "ALTER TABLE migration_items ADD COLUMN sample_expected_level VARCHAR(10)"
-            )
-        review_columns = {
-            row[1] for row in connection.exec_driver_sql("PRAGMA table_info(human_reviews)")
-        }
-        if "corrections_json" not in review_columns:
-            connection.exec_driver_sql(
-                "ALTER TABLE human_reviews ADD COLUMN corrections_json TEXT NOT NULL DEFAULT '[]'"
-            )
-        if "corrected_score" not in review_columns:
-            connection.exec_driver_sql(
-                "ALTER TABLE human_reviews ADD COLUMN corrected_score FLOAT"
-            )
-        job_columns = {
-            row[1] for row in connection.exec_driver_sql("PRAGMA table_info(evaluation_jobs)")
-        }
-        if "prompt_a_id" not in job_columns:
-            connection.exec_driver_sql(
-                "ALTER TABLE evaluation_jobs ADD COLUMN prompt_a_id INTEGER REFERENCES prompt_versions(id) ON DELETE SET NULL"
-            )
-        if "prompt_b_id" not in job_columns:
-            connection.exec_driver_sql(
-                "ALTER TABLE evaluation_jobs ADD COLUMN prompt_b_id INTEGER REFERENCES prompt_versions(id) ON DELETE SET NULL"
-            )
-        if "regression_item_id" not in job_columns:
-            connection.exec_driver_sql(
-                "ALTER TABLE evaluation_jobs ADD COLUMN regression_item_id INTEGER REFERENCES prompt_regression_items(id) ON DELETE SET NULL"
-            )
-        if "updated_at" not in job_columns:
-            connection.exec_driver_sql(
-                "ALTER TABLE evaluation_jobs ADD COLUMN updated_at DATETIME"
-            )
-            connection.exec_driver_sql(
-                "UPDATE evaluation_jobs SET updated_at = created_at WHERE updated_at IS NULL"
-            )
-        prompt_columns = {
-            row[1] for row in connection.exec_driver_sql("PRAGMA table_info(prompt_versions)")
-        }
-        if "updated_at" not in prompt_columns:
-            connection.exec_driver_sql(
-                "ALTER TABLE prompt_versions ADD COLUMN updated_at DATETIME"
-            )
-            connection.exec_driver_sql(
-                "UPDATE prompt_versions SET updated_at = created_at WHERE updated_at IS NULL"
-            )
-        sample_set_columns = {
-            row[1] for row in connection.exec_driver_sql("PRAGMA table_info(sample_sets)")
-        }
-        if "kind" not in sample_set_columns:
-            connection.exec_driver_sql(
-                "ALTER TABLE sample_sets ADD COLUMN kind VARCHAR(20) NOT NULL DEFAULT 'test'"
-            )
-        if "status" not in sample_set_columns:
-            connection.exec_driver_sql(
-                "ALTER TABLE sample_sets ADD COLUMN status VARCHAR(20) NOT NULL DEFAULT 'draft'"
-            )
-        sample_item_columns = {
-            row[1] for row in connection.exec_driver_sql("PRAGMA table_info(sample_set_items)")
-        }
-        for column_name, definition in (
-            ("truth_json", "TEXT NOT NULL DEFAULT '{}'"),
-            ("truth_revision", "INTEGER NOT NULL DEFAULT 1"),
-            ("truth_updated_by", "VARCHAR(80)"),
-            ("truth_updated_at", "DATETIME"),
-        ):
-            if column_name not in sample_item_columns:
-                connection.exec_driver_sql(
-                    f"ALTER TABLE sample_set_items ADD COLUMN {column_name} {definition}"
-                )
-        model_columns = {
-            row[1] for row in connection.exec_driver_sql("PRAGMA table_info(model_configs)")
-        }
-        if "high_risk_review_enabled" not in model_columns:
-            connection.exec_driver_sql(
-                "ALTER TABLE model_configs ADD COLUMN high_risk_review_enabled BOOLEAN NOT NULL DEFAULT 1"
-            )
-        result_columns = {
-            row[1] for row in connection.exec_driver_sql("PRAGMA table_info(evaluation_results)")
-        }
-        for column_name, definition in (
-            ("raw_response_risk_review", "TEXT"),
-            ("risk_review_json", "TEXT"),
-            ("risk_review_version", "VARCHAR(40)"),
-        ):
-            if column_name not in result_columns:
-                connection.exec_driver_sql(
-                    f"ALTER TABLE evaluation_results ADD COLUMN {column_name} {definition}"
-                )
-        if "updated_at" not in result_columns:
-            connection.exec_driver_sql(
-                "ALTER TABLE evaluation_results ADD COLUMN updated_at DATETIME"
-            )
-            connection.exec_driver_sql(
-                "UPDATE evaluation_results SET updated_at = created_at WHERE updated_at IS NULL"
-            )
+        run_migrations(connection)
 
 
 def get_db() -> Generator[Session, None, None]:

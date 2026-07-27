@@ -9,14 +9,22 @@ import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any, Literal
 
 from fastapi import BackgroundTasks, Cookie, Depends, FastAPI, File, HTTPException, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
-from pydantic import BaseModel, Field, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SkipValidation,
+    WithJsonSchema,
+    model_validator,
+)
 from PIL import Image, UnidentifiedImageError
 from sqlalchemy import func, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from .config import get_settings
@@ -25,6 +33,7 @@ from .doubao import DoubaoClient
 from .migration import compare_results
 from .models import (
     Asset,
+    CircuitBreaker,
     EvaluationControl,
     EvaluationJob,
     EvaluationResult,
@@ -32,17 +41,38 @@ from .models import (
     MigrationItem,
     MigrationRun,
     ModelConfig,
+    LoopAttempt,
+    LoopRun,
     OptimizerConfig,
     PromptOptimizationRun,
     PromptRegressionItem,
     PromptRegressionRun,
     PromptVersion,
+    QueueSchedulerState,
     SampleSet,
     SampleSetItem,
     SampleTruthRevision,
     SamplingPolicy,
     SessionToken,
+    StrategyBundle,
     User,
+)
+from .loop_engine import (
+    LoopContractError,
+    ROUND_KIND,
+    advance_loop_attempt,
+    assert_safe_normalized_payload,
+    canonical_json,
+    enqueue_loop_evaluation_job,
+    normalize_targeted_model_result,
+    request_fingerprint,
+    validate_result_scope,
+    validate_submission_scope,
+)
+from .queue_scheduler import (
+    QUEUE_CLASSES,
+    DeterministicQueueScheduler,
+    QueuePolicy,
 )
 from .security import (
     create_session_token,
@@ -53,9 +83,20 @@ from .security import (
 from .optimizer import run_prompt_optimization
 from .seed import seed_defaults
 from .schema_adapter import repair_combined_aesthetic_results, rescore_stored_results
-from .regression import truth_from_result
+from .regression import (
+    SAMPLE_ROLES,
+    complete_paired_regression_item,
+    paired_gate_policy,
+    refresh_paired_regression_run,
+    reviewed_truth_snapshot,
+    truth_from_result,
+)
 from .review_sampling import build_review_sampling
 from .scoring import calculate_corrected_score
+from .strategy_bundle import (
+    build_strategy_snapshot,
+    safe_strategy_snapshot_payload,
+)
 
 
 settings = get_settings()
@@ -116,11 +157,22 @@ class EnqueueRequest(BaseModel):
     prompt_id: int | None = Field(default=None, ge=1)
     prompt_a_id: int | None = Field(default=None, ge=1)
     prompt_b_id: int | None = Field(default=None, ge=1)
+    queue_class: Literal[
+        "validation",
+        "interactive",
+        "production_batch",
+        "canary",
+    ] | None = None
+    manual_recheck: bool = False
 
     @model_validator(mode="after")
     def validate_prompt_mode(self) -> "EnqueueRequest":
         if self.prompt_id and (self.prompt_a_id or self.prompt_b_id):
             raise ValueError("单提示词模式不能同时选择 A/B 提示词")
+        if self.manual_recheck and len(self.asset_ids) != 1:
+            raise ValueError("人工单图复判只能包含一张图片")
+        if self.manual_recheck and self.queue_class not in (None, "interactive"):
+            raise ValueError("人工单图复判固定进入 interactive")
         return self
 
 
@@ -211,6 +263,50 @@ class RegressionCreateRequest(BaseModel):
     threshold: float = Field(default=0.9, ge=0.5, le=1.0)
 
 
+class PairedRegressionSampleRequest(BaseModel):
+    sample_item_id: int = Field(ge=1)
+    role: str = Field(pattern="^(target_error|stable_control|blind_holdout)$")
+
+
+class PairedRegressionCreateRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    sample_set_id: int = Field(ge=1)
+    baseline_strategy_bundle_id: int = Field(ge=1)
+    candidate_strategy_bundle_id: int = Field(ge=1)
+    samples: list[PairedRegressionSampleRequest] = Field(
+        min_length=3, max_length=1000
+    )
+    metric_rules_version: str = Field(min_length=1, max_length=80)
+    aesthetic_accuracy_max_drop: float = Field(ge=0, le=1)
+    whole_image_accuracy_max_drop: float = Field(ge=0, le=1)
+    level_consistency_max_drop: float = Field(ge=0, le=1)
+
+    @model_validator(mode="after")
+    def validate_paired_contract(self) -> "PairedRegressionCreateRequest":
+        if self.baseline_strategy_bundle_id == self.candidate_strategy_bundle_id:
+            raise ValueError("基线与候选 StrategyBundle 必须不同")
+        item_ids = [sample.sample_item_id for sample in self.samples]
+        if len(item_ids) != len(set(item_ids)):
+            raise ValueError("同一冻结样本不能重复")
+        roles = {sample.role for sample in self.samples}
+        if roles != set(SAMPLE_ROLES):
+            raise ValueError(
+                "配对回归必须同时包含 target_error、stable_control、blind_holdout"
+            )
+        return self
+
+
+class PairedRegressionResultsRequest(BaseModel):
+    baseline_evaluation_id: int = Field(ge=1)
+    candidate_evaluation_id: int = Field(ge=1)
+
+
+class PairedRegressionApprovalRequest(BaseModel):
+    status: str = Field(pattern="^(approved|rejected)$")
+    reviewer_name: str = Field(min_length=1, max_length=80)
+    note: str = Field(min_length=1, max_length=2000)
+
+
 class MigrationCreateRequest(BaseModel):
     name: str = Field(min_length=1, max_length=160)
     baseline_model_id: str = Field(min_length=1, max_length=200)
@@ -222,6 +318,202 @@ class MigrationReviewRequest(BaseModel):
     verdict: str = Field(pattern="^(candidate_better|same|baseline_better)$")
     reviewer_name: str = Field(min_length=1, max_length=80)
     note: str = Field(default="", max_length=2000)
+
+
+def _missing_loop_value() -> object:
+    return _LOOP_MISSING
+
+
+def _loop_create_schema(schema: dict[str, Any]) -> None:
+    schema.pop("additionalProperties", None)
+    schema["required"] = [
+        "asset_id",
+        "strategy_bundle_id",
+        "idempotency_key",
+    ]
+
+
+def _loop_result_schema(schema: dict[str, Any]) -> None:
+    schema.pop("additionalProperties", None)
+    schema["required"] = [
+        "idempotency_key",
+        "strategy_bundle_id",
+        "kind",
+        "normalized_result",
+    ]
+
+
+_LOOP_MISSING = object()
+LoopPositiveInteger = Annotated[
+    SkipValidation[int],
+    WithJsonSchema({"type": "integer", "minimum": 1.0}),
+]
+LoopIdempotencyKey = Annotated[
+    SkipValidation[str],
+    WithJsonSchema(
+        {
+            "type": "string",
+            "minLength": 8,
+            "maxLength": 160,
+        }
+    ),
+]
+LoopEvidenceObject = Annotated[
+    SkipValidation[dict[str, Any]],
+    WithJsonSchema(
+        {
+            "type": "object",
+            "additionalProperties": True,
+        }
+    ),
+]
+LoopNullableModelId = Annotated[
+    SkipValidation[str | None],
+    WithJsonSchema(
+        {
+            "anyOf": [
+                {"type": "string", "maxLength": 200},
+                {"type": "null"},
+            ]
+        }
+    ),
+]
+LoopNullablePromptVersion = Annotated[
+    SkipValidation[str | None],
+    WithJsonSchema(
+        {
+            "anyOf": [
+                {"type": "string", "maxLength": 40},
+                {"type": "null"},
+            ]
+        }
+    ),
+]
+LoopNullableSource = Annotated[
+    SkipValidation[str | None],
+    WithJsonSchema(
+        {
+            "anyOf": [
+                {
+                    "type": "string",
+                    "enum": ["interactive", "validation"],
+                },
+                {"type": "null"},
+            ]
+        }
+    ),
+]
+LoopResultKind = Annotated[
+    SkipValidation[str],
+    WithJsonSchema(
+        {
+            "type": "string",
+            "enum": ["base", "targeted_recheck", "arbitration"],
+        }
+    ),
+]
+LoopTargetDimensions = Annotated[
+    SkipValidation[list[str]],
+    WithJsonSchema(
+        {
+            "type": "array",
+            "items": {"type": "string"},
+            "maxItems": 100,
+        }
+    ),
+]
+LoopConflicts = Annotated[
+    SkipValidation[list[dict[str, Any]]],
+    WithJsonSchema(
+        {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": True,
+            },
+            "maxItems": 100,
+        }
+    ),
+]
+LoopTechnicalAttempt = Annotated[
+    SkipValidation[int],
+    WithJsonSchema({"type": "integer", "const": 0}),
+]
+LoopNullableCost = Annotated[
+    SkipValidation[float | None],
+    WithJsonSchema(
+        {
+            "anyOf": [
+                {"type": "number", "minimum": 0.0},
+                {"type": "null"},
+            ]
+        }
+    ),
+]
+LoopNullableLatency = Annotated[
+    SkipValidation[int | None],
+    WithJsonSchema(
+        {
+            "anyOf": [
+                {"type": "integer", "minimum": 0.0},
+                {"type": "null"},
+            ]
+        }
+    ),
+]
+
+
+class LoopCreateRequest(BaseModel):
+    model_config = ConfigDict(
+        extra="allow",
+        json_schema_extra=_loop_create_schema,
+    )
+
+    asset_id: LoopPositiveInteger = Field(
+        default_factory=_missing_loop_value
+    )
+    strategy_bundle_id: LoopPositiveInteger = Field(
+        default_factory=_missing_loop_value
+    )
+    idempotency_key: LoopIdempotencyKey = Field(
+        default_factory=_missing_loop_value
+    )
+    input_evidence: LoopEvidenceObject = Field(default_factory=dict)
+    model_id: LoopNullableModelId = None
+    prompt_a_version: LoopNullablePromptVersion = None
+    prompt_b_version: LoopNullablePromptVersion = None
+    source: LoopNullableSource = None
+
+
+class LoopResultRequest(BaseModel):
+    model_config = ConfigDict(
+        extra="allow",
+        json_schema_extra=_loop_result_schema,
+    )
+
+    idempotency_key: LoopIdempotencyKey = Field(
+        default_factory=_missing_loop_value
+    )
+    strategy_bundle_id: LoopPositiveInteger = Field(
+        default_factory=_missing_loop_value
+    )
+    kind: LoopResultKind = Field(default_factory=_missing_loop_value)
+    target_dimensions: LoopTargetDimensions = Field(default_factory=list)
+    normalized_result: LoopEvidenceObject = Field(
+        default_factory=_missing_loop_value
+    )
+    conflicts: LoopConflicts = Field(default_factory=list)
+    technical_attempt: LoopTechnicalAttempt = 0
+    cost: LoopNullableCost = None
+    latency_ms: LoopNullableLatency = None
+    model_id: LoopNullableModelId = None
+    prompt_a_version: LoopNullablePromptVersion = None
+    prompt_b_version: LoopNullablePromptVersion = None
+
+
+class BreakerOpenRequest(BaseModel):
+    reason: str = Field(min_length=1, max_length=80)
+    cooldown_seconds: int = Field(default=300, ge=1, le=86400)
 
 
 @asynccontextmanager
@@ -403,6 +695,690 @@ def _result_payload(result: EvaluationResult | None) -> dict[str, Any] | None:
 @app.get("/api/health")
 def health() -> dict[str, str]:
     return {"status": "ok", "service": "3d66-label-system"}
+
+
+def _assert_bundle_versions(
+    bundle: StrategyBundle,
+    *,
+    model_id: str | None,
+    prompt_a_version: str | None,
+    prompt_b_version: str | None,
+) -> None:
+    supplied = {
+        "model_id": model_id,
+        "prompt_a_version": prompt_a_version,
+        "prompt_b_version": prompt_b_version,
+    }
+    actual = {
+        "model_id": bundle.model_id,
+        "prompt_a_version": bundle.prompt_a_version,
+        "prompt_b_version": bundle.prompt_b_version,
+    }
+    if any(
+        value is not None and value != actual[field]
+        for field, value in supplied.items()
+    ):
+        raise HTTPException(status_code=409, detail="Loop 内禁止模型或提示词策略漂移")
+
+
+def _reject_invalid_loop_request() -> None:
+    raise LoopContractError("Loop 请求不符合接口约束")
+
+
+def _is_loop_integer(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _is_optional_bounded_loop_string(
+    value: object,
+    *,
+    max_length: int,
+) -> bool:
+    return value is None or (
+        isinstance(value, str) and len(value) <= max_length
+    )
+
+
+def _assert_loop_request_is_safe(
+    payload: LoopCreateRequest | LoopResultRequest,
+) -> None:
+    """Scan the untouched request before any type or contract validation."""
+    request_data = payload.model_dump(warnings=False)
+    assert_safe_normalized_payload(request_data)
+    if payload.model_extra:
+        _reject_invalid_loop_request()
+
+    idempotency_key = request_data.get("idempotency_key")
+    if not (
+        isinstance(idempotency_key, str)
+        and 8 <= len(idempotency_key) <= 160
+    ):
+        _reject_invalid_loop_request()
+    if not (
+        _is_loop_integer(request_data.get("strategy_bundle_id"))
+        and request_data["strategy_bundle_id"] >= 1
+    ):
+        _reject_invalid_loop_request()
+    for field, max_length in (
+        ("model_id", 200),
+        ("prompt_a_version", 40),
+        ("prompt_b_version", 40),
+    ):
+        if not _is_optional_bounded_loop_string(
+            request_data.get(field),
+            max_length=max_length,
+        ):
+            _reject_invalid_loop_request()
+
+    if isinstance(payload, LoopCreateRequest):
+        if not (
+            _is_loop_integer(request_data.get("asset_id"))
+            and request_data["asset_id"] >= 1
+        ):
+            _reject_invalid_loop_request()
+        if not isinstance(request_data.get("input_evidence"), dict):
+            _reject_invalid_loop_request()
+        source = request_data.get("source")
+        if source is not None and (
+            not isinstance(source, str)
+            or source not in {"interactive", "validation"}
+        ):
+            _reject_invalid_loop_request()
+        return
+
+    kind = request_data.get("kind")
+    if not isinstance(kind, str) or kind not in {
+        "base",
+        "targeted_recheck",
+        "arbitration",
+    }:
+        _reject_invalid_loop_request()
+    target_dimensions = request_data.get("target_dimensions")
+    if not (
+        isinstance(target_dimensions, list)
+        and len(target_dimensions) <= 100
+        and all(isinstance(item, str) for item in target_dimensions)
+    ):
+        _reject_invalid_loop_request()
+    if not isinstance(request_data.get("normalized_result"), dict):
+        _reject_invalid_loop_request()
+    conflicts = request_data.get("conflicts")
+    if not (
+        isinstance(conflicts, list)
+        and len(conflicts) <= 100
+        and all(isinstance(item, dict) for item in conflicts)
+    ):
+        _reject_invalid_loop_request()
+    technical_attempt = request_data.get("technical_attempt")
+    if not (_is_loop_integer(technical_attempt) and technical_attempt == 0):
+        _reject_invalid_loop_request()
+    cost = request_data.get("cost")
+    if not (
+        cost is None
+        or (
+            isinstance(cost, (int, float))
+            and not isinstance(cost, bool)
+            and cost >= 0
+        )
+    ):
+        _reject_invalid_loop_request()
+    latency_ms = request_data.get("latency_ms")
+    if not (
+        latency_ms is None
+        or (_is_loop_integer(latency_ms) and latency_ms >= 0)
+    ):
+        _reject_invalid_loop_request()
+
+
+def _loop_attempt_payload(attempt: LoopAttempt) -> dict[str, Any]:
+    return {
+        "id": attempt.id,
+        "round": attempt.business_round,
+        "kind": attempt.kind,
+        "target_dimensions": json.loads(attempt.target_dimensions_json),
+        "input_evidence": json.loads(attempt.input_evidence_json),
+        "normalized_result": (
+            json.loads(attempt.normalized_result_json)
+            if attempt.normalized_result_json
+            else None
+        ),
+        "conflicts": json.loads(attempt.conflict_json),
+        "status": attempt.status,
+        "technical_attempt": attempt.technical_attempt,
+        "cost": attempt.cost,
+        "latency_ms": attempt.latency_ms,
+        "created_at": attempt.created_at,
+        "completed_at": attempt.completed_at,
+    }
+
+
+def _loop_payload(loop_run: LoopRun) -> dict[str, Any]:
+    return {
+        "id": loop_run.id,
+        "asset_id": loop_run.asset_id,
+        "strategy_bundle_id": loop_run.strategy_bundle_id,
+        "strategy": {
+            "model_id": loop_run.strategy_bundle.model_id,
+            "prompt_a_version": loop_run.strategy_bundle.prompt_a_version,
+            "prompt_b_version": loop_run.strategy_bundle.prompt_b_version,
+            "rubric_version": loop_run.strategy_bundle.rubric_version,
+            "engine_version": loop_run.strategy_bundle.engine_version,
+        },
+        "status": loop_run.status,
+        "current_round": loop_run.current_round,
+        "decision": json.loads(loop_run.decision_json or "{}"),
+        "attempts": [
+            _loop_attempt_payload(attempt) for attempt in loop_run.attempts
+        ],
+        "created_at": loop_run.created_at,
+        "updated_at": loop_run.updated_at,
+        "completed_at": loop_run.completed_at,
+    }
+
+
+@app.post("/api/loops")
+@app.post("/api/loop-runs")
+def create_loop(
+    payload: LoopCreateRequest,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    try:
+        _assert_loop_request_is_safe(payload)
+    except LoopContractError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    fingerprint_payload = payload.model_dump(exclude={"idempotency_key"})
+    fingerprint = request_fingerprint(fingerprint_payload)
+    existing = db.scalar(
+        select(LoopRun).where(
+            LoopRun.idempotency_key == payload.idempotency_key
+        )
+    )
+    if existing is not None:
+        if existing.request_fingerprint != fingerprint:
+            raise HTTPException(
+                status_code=409,
+                detail="idempotency_key 已用于不同 Loop 请求",
+            )
+        return _loop_payload(existing)
+
+    asset = db.get(Asset, payload.asset_id)
+    bundle = db.get(StrategyBundle, payload.strategy_bundle_id)
+    if asset is None:
+        raise HTTPException(status_code=404, detail="图片不存在")
+    if bundle is None:
+        raise HTTPException(status_code=404, detail="StrategyBundle 不存在")
+    _assert_bundle_versions(
+        bundle,
+        model_id=payload.model_id,
+        prompt_a_version=payload.prompt_a_version,
+        prompt_b_version=payload.prompt_b_version,
+    )
+
+    loop_run = LoopRun(
+        idempotency_key=payload.idempotency_key,
+        request_fingerprint=fingerprint,
+        asset_id=asset.id,
+        strategy_bundle_id=bundle.id,
+        status="waiting_result",
+        current_round=1,
+        decision_json=canonical_json(
+            {
+                "status": "waiting_result",
+                "machine_converged": False,
+                "needs_human": False,
+                "reason_codes": ["ROUND1_RESULT_REQUIRED"],
+                "evidence": {},
+                "next_round": 1,
+                "next_kind": ROUND_KIND[1],
+                "target_dimensions": [],
+            }
+        ),
+        created_by=user.username,
+    )
+    loop_run.attempts.append(
+        LoopAttempt(
+            business_round=1,
+            kind=ROUND_KIND[1],
+            target_dimensions_json="[]",
+            input_evidence_json=canonical_json(payload.input_evidence),
+            status="waiting_result",
+        )
+    )
+    db.add(loop_run)
+    try:
+        db.flush()
+        evidence_source = str(
+            payload.input_evidence.get("source")
+            or payload.input_evidence.get("queue_class")
+            or ""
+        ).lower()
+        queue_class = (
+            "validation"
+            if payload.source == "validation"
+            or evidence_source in {
+                "validation",
+                "golden_regression",
+                "paired_regression",
+            }
+            else "interactive"
+        )
+        enqueue_loop_evaluation_job(
+            db,
+            loop_run=loop_run,
+            attempt=loop_run.attempts[0],
+            queue_class=queue_class,
+        )
+        db.commit()
+    except (IntegrityError, LoopContractError) as exc:
+        db.rollback()
+        existing = db.scalar(
+            select(LoopRun).where(
+                LoopRun.idempotency_key == payload.idempotency_key
+            )
+        )
+        if isinstance(exc, LoopContractError):
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        if existing is None or existing.request_fingerprint != fingerprint:
+            raise HTTPException(
+                status_code=409,
+                detail="Loop 创建发生幂等冲突",
+            )
+        return _loop_payload(existing)
+    db.refresh(loop_run)
+    return _loop_payload(loop_run)
+
+
+@app.get("/api/loops/{loop_id}")
+@app.get("/api/loop-runs/{loop_id}")
+def loop_detail(
+    loop_id: int,
+    _user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    loop_run = db.get(LoopRun, loop_id)
+    if loop_run is None:
+        raise HTTPException(status_code=404, detail="Loop 不存在")
+    return _loop_payload(loop_run)
+
+
+@app.post("/api/loops/{loop_id}/attempts/{business_round}/result")
+@app.post("/api/loop-runs/{loop_id}/attempts/{business_round}/result")
+def submit_loop_result(
+    loop_id: int,
+    business_round: int,
+    payload: LoopResultRequest,
+    _user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    try:
+        _assert_loop_request_is_safe(payload)
+    except LoopContractError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    submitted_dimensions = [
+        dimension.strip() for dimension in payload.target_dimensions
+    ]
+    if (
+        any(not dimension for dimension in submitted_dimensions)
+        or len(submitted_dimensions) != len(set(submitted_dimensions))
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="target_dimensions 不能包含空值或重复值",
+        )
+    if business_round not in ROUND_KIND:
+        raise HTTPException(status_code=409, detail="最多三轮，禁止第四轮")
+    loop_run = db.get(LoopRun, loop_id)
+    if loop_run is None:
+        raise HTTPException(status_code=404, detail="Loop 不存在")
+    if payload.strategy_bundle_id != loop_run.strategy_bundle_id:
+        raise HTTPException(status_code=409, detail="Loop 内禁止 StrategyBundle 漂移")
+    _assert_bundle_versions(
+        loop_run.strategy_bundle,
+        model_id=payload.model_id,
+        prompt_a_version=payload.prompt_a_version,
+        prompt_b_version=payload.prompt_b_version,
+    )
+    attempt = db.scalar(
+        select(LoopAttempt).where(
+            LoopAttempt.loop_run_id == loop_run.id,
+            LoopAttempt.business_round == business_round,
+        )
+    )
+    content = payload.model_dump(exclude={"idempotency_key"})
+    content["target_dimensions"] = submitted_dimensions
+    fingerprint = request_fingerprint(content)
+    if attempt is not None and attempt.status == "completed":
+        if (
+            attempt.result_idempotency_key == payload.idempotency_key
+            and attempt.result_fingerprint == fingerprint
+        ):
+            return _loop_payload(loop_run)
+        raise HTTPException(status_code=409, detail="完成的 LoopAttempt 不可变")
+    if (
+        attempt is None
+        or loop_run.status != "waiting_result"
+        or business_round != loop_run.current_round
+    ):
+        raise HTTPException(status_code=409, detail="禁止越序提交 Loop 轮次")
+
+    expected_dimensions = json.loads(attempt.target_dimensions_json)
+    try:
+        validate_submission_scope(
+            business_round=business_round,
+            expected_kind=attempt.kind,
+            expected_dimensions=expected_dimensions,
+            submitted_kind=payload.kind,
+            submitted_dimensions=submitted_dimensions,
+        )
+        validate_result_scope(
+            business_round=business_round,
+            target_dimensions=submitted_dimensions,
+            normalized_result={
+                **payload.normalized_result,
+                **({"conflicts": payload.conflicts} if payload.conflicts else {}),
+            },
+        )
+    except LoopContractError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    normalized_result = dict(payload.normalized_result)
+    if business_round in (2, 3):
+        normalized_result = normalize_targeted_model_result(
+            normalized_result,
+            business_round=business_round,
+            target_dimensions=submitted_dimensions,
+        )
+    elif payload.conflicts:
+        # Round 1 conflict declarations are conservative input only; later
+        # rounds derive actual conflicts from adjacent server-normalized values.
+        normalized_result["conflicts"] = payload.conflicts
+    jobs = db.scalars(
+        select(EvaluationJob)
+        .where(EvaluationJob.loop_attempt_id == attempt.id)
+        .order_by(
+            EvaluationJob.technical_attempt.desc(),
+            EvaluationJob.id.desc(),
+        )
+    ).all()
+    if any(job.status == "processing" for job in jobs):
+        raise HTTPException(
+            status_code=409,
+            detail="关联 EvaluationJob 正在执行，禁止人工结果覆盖",
+        )
+    if any(job.technical_attempt > 0 for job in jobs):
+        raise HTTPException(
+            status_code=409,
+            detail="技术 recovery 链已启动，人工导入只能使用 attempt 0",
+        )
+    for job in jobs:
+        if job.status == "queued":
+            job.status = "canceled"
+            job.stage = "manual_attach"
+            job.finished_at = datetime.now(timezone.utc)
+    try:
+        advance_loop_attempt(
+            db,
+            loop_run=loop_run,
+            attempt=attempt,
+            normalized_result=normalized_result,
+            result_idempotency_key=payload.idempotency_key,
+            result_fingerprint=fingerprint,
+            technical_attempt=0,
+            cost=payload.cost,
+            latency_ms=payload.latency_ms,
+            next_queue_class=(
+                jobs[0].origin_queue_class
+                if jobs and jobs[0].origin_queue_class
+                else "interactive"
+            ),
+        )
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        concurrent_attempt = db.scalar(
+            select(LoopAttempt).where(
+                LoopAttempt.loop_run_id == loop_id,
+                LoopAttempt.business_round == business_round,
+            )
+        )
+        concurrent_loop = db.get(LoopRun, loop_id)
+        if (
+            concurrent_attempt is not None
+            and concurrent_loop is not None
+            and concurrent_attempt.status == "completed"
+            and concurrent_attempt.result_idempotency_key
+            == payload.idempotency_key
+            and concurrent_attempt.result_fingerprint == fingerprint
+        ):
+            return _loop_payload(concurrent_loop)
+        raise HTTPException(
+            status_code=409,
+            detail="LoopAttempt 并发提交冲突",
+        )
+    except LoopContractError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    db.refresh(loop_run)
+    return _loop_payload(loop_run)
+
+
+def _breaker_payload(breaker: CircuitBreaker) -> dict[str, Any]:
+    now = datetime.now(timezone.utc)
+    cooldown_until = breaker.cooldown_until
+    if cooldown_until is not None and cooldown_until.tzinfo is None:
+        cooldown_until = cooldown_until.replace(tzinfo=timezone.utc)
+    return {
+        "id": breaker.id,
+        "scope_type": breaker.scope_type,
+        "scope_key": breaker.scope_key,
+        "state": breaker.state,
+        "failure_count": breaker.failure_count,
+        "window_started_at": breaker.window_started_at,
+        "last_failure_at": breaker.last_failure_at,
+        "opened_at": breaker.opened_at,
+        "cooldown_until": breaker.cooldown_until,
+        "cooldown_elapsed": bool(
+            cooldown_until is not None and cooldown_until <= now
+        ),
+        "reason": breaker.reason,
+        "reset_by": breaker.reset_by,
+        "reset_at": breaker.reset_at,
+        "updated_at": breaker.updated_at,
+    }
+
+
+@app.get("/api/circuit-breakers")
+def list_circuit_breakers(
+    _user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    breakers = db.scalars(
+        select(CircuitBreaker).order_by(
+            CircuitBreaker.scope_type.asc(),
+            CircuitBreaker.scope_key.asc(),
+        )
+    ).all()
+    return {"items": [_breaker_payload(breaker) for breaker in breakers]}
+
+
+@app.post("/api/circuit-breakers/{scope_type}/{scope_key}/open")
+def open_circuit_breaker(
+    scope_type: Literal["strategy", "batch"],
+    scope_key: str,
+    payload: BreakerOpenRequest,
+    _user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    breaker = db.scalar(
+        select(CircuitBreaker).where(
+            CircuitBreaker.scope_type == scope_type,
+            CircuitBreaker.scope_key == scope_key,
+        )
+    )
+    if breaker is None:
+        breaker = CircuitBreaker(
+            scope_type=scope_type,
+            scope_key=scope_key,
+        )
+        db.add(breaker)
+    now = datetime.now(timezone.utc)
+    breaker.state = "open"
+    breaker.opened_at = now
+    breaker.cooldown_until = now + timedelta(
+        seconds=payload.cooldown_seconds
+    )
+    breaker.reason = payload.reason
+    breaker.reset_by = None
+    breaker.reset_at = None
+    db.commit()
+    db.refresh(breaker)
+    return _breaker_payload(breaker)
+
+
+@app.post("/api/circuit-breakers/{scope_type}/{scope_key}/reset")
+def reset_circuit_breaker(
+    scope_type: Literal["strategy", "batch"],
+    scope_key: str,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    breaker = db.scalar(
+        select(CircuitBreaker).where(
+            CircuitBreaker.scope_type == scope_type,
+            CircuitBreaker.scope_key == scope_key,
+        )
+    )
+    if breaker is None:
+        raise HTTPException(status_code=404, detail="Circuit breaker 不存在")
+    breaker.state = "closed"
+    breaker.failure_count = 0
+    breaker.window_started_at = None
+    breaker.last_failure_at = None
+    breaker.opened_at = None
+    breaker.cooldown_until = None
+    breaker.reason = None
+    breaker.reset_by = user.username
+    breaker.reset_at = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(breaker)
+    return _breaker_payload(breaker)
+
+
+@app.get("/api/queues/status")
+def queue_status(
+    _user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    pending = {queue: 0 for queue in QUEUE_CLASSES}
+    running = {queue: 0 for queue in QUEUE_CLASSES}
+    dispatchable = {queue: 0 for queue in QUEUE_CLASSES}
+    delayed = {queue: 0 for queue in QUEUE_CLASSES}
+    rows = db.execute(
+        select(
+            EvaluationJob.queue_class,
+            EvaluationJob.status,
+            func.count(EvaluationJob.id),
+        )
+        .where(EvaluationJob.status.in_(("queued", "processing")))
+        .group_by(EvaluationJob.queue_class, EvaluationJob.status)
+    ).all()
+    for queue_class, status, count in rows:
+        queue = queue_class or "production_batch"
+        if queue not in pending:
+            continue
+        if status == "queued":
+            pending[queue] = count
+        else:
+            running[queue] = count
+    blocked = {queue: 0 for queue in QUEUE_CLASSES}
+    open_breakers = set(
+        db.execute(
+            select(
+                CircuitBreaker.scope_type,
+                CircuitBreaker.scope_key,
+            ).where(CircuitBreaker.state == "open")
+        ).all()
+    )
+    now = datetime.now(timezone.utc)
+    for job in db.scalars(
+        select(EvaluationJob).where(EvaluationJob.status == "queued")
+    ):
+        queue = job.queue_class or "production_batch"
+        strategy_blocked = (
+            job.strategy_bundle_id is not None
+            and ("strategy", str(job.strategy_bundle_id)) in open_breakers
+        )
+        batch_blocked = bool(
+            job.batch_key
+            and ("batch", job.batch_key) in open_breakers
+        )
+        if queue not in blocked:
+            continue
+        breaker_blocked = strategy_blocked or batch_blocked
+        retry_at = job.retry_after_at
+        if retry_at is not None and retry_at.tzinfo is None:
+            retry_at = retry_at.replace(tzinfo=timezone.utc)
+        retry_delayed = retry_at is not None and retry_at > now
+        if breaker_blocked:
+            blocked[queue] += 1
+        if retry_delayed:
+            delayed[queue] += 1
+        if not breaker_blocked and not retry_delayed:
+            dispatchable[queue] += 1
+    model = db.scalar(
+        select(ModelConfig)
+        .where(ModelConfig.active.is_(True))
+        .order_by(ModelConfig.id.asc())
+    )
+    policy = QueuePolicy(
+        global_limit=model.max_concurrency if model else 2
+    )
+    persisted = db.get(QueueSchedulerState, 1)
+    scheduler = DeterministicQueueScheduler(
+        policy,
+        deficits=(
+            {
+                "validation": persisted.validation_deficit,
+                "interactive": persisted.interactive_deficit,
+                "production_batch": (
+                    persisted.production_batch_deficit
+                ),
+                "canary": persisted.canary_deficit,
+                "recovery": persisted.recovery_deficit,
+            }
+            if persisted is not None
+            and persisted.policy_version == policy.version
+            and persisted.global_limit == policy.global_limit
+            else None
+        ),
+        dispatch_count=(
+            persisted.dispatch_count
+            if persisted is not None
+            and persisted.policy_version == policy.version
+            and persisted.global_limit == policy.global_limit
+            else 0
+        ),
+        last_recovery_dispatch=(
+            persisted.last_recovery_dispatch
+            if persisted is not None
+            and persisted.policy_version == policy.version
+            and persisted.global_limit == policy.global_limit
+            else None
+        ),
+    )
+    snapshot = scheduler.snapshot(
+        pending=dispatchable,
+        running=running,
+    )
+    for item in snapshot["queues"]:
+        queue = item["queue_class"]
+        item["pending"] = pending[queue]
+        item["pending_total"] = pending[queue]
+        item["blocked_by_breaker"] = blocked[queue]
+        item["delayed_by_retry_after"] = delayed[queue]
+        item["dispatchable_pending"] = dispatchable[queue]
+    return snapshot
 
 
 @app.post("/api/auth/login")
@@ -640,18 +1616,31 @@ def enqueue_jobs(
     prompt_a = None if single_prompt else selected_prompt("A", payload.prompt_a_id)
     prompt_b = None if single_prompt else selected_prompt("B", payload.prompt_b_id)
     jobs = []
+    queue_class = (
+        "interactive"
+        if payload.manual_recheck
+        else payload.queue_class or "production_batch"
+    )
+    batch_key = f"enqueue:{uuid.uuid4().hex}"
     for asset in assets:
         job = EvaluationJob(
             asset_id=asset.id,
             prompt_a_id=single_prompt.id if single_prompt else prompt_a.id,
             prompt_b_id=None if single_prompt else prompt_b.id,
+            queue_class=queue_class,
+            origin_queue_class=queue_class,
+            batch_key=batch_key,
         )
         asset.status = "queued"
         db.add(job)
         db.flush()
         jobs.append(job.id)
     db.commit()
-    return {"job_ids": jobs}
+    return {
+        "job_ids": jobs,
+        "batch_key": batch_key,
+        "queue_class": queue_class,
+    }
 
 
 @app.get("/api/jobs")
@@ -690,6 +1679,13 @@ def list_jobs(
                 "stage": job.stage,
                 "progress": job.progress,
                 "attempts": job.attempts,
+                "queue_class": job.queue_class,
+                "origin_queue_class": job.origin_queue_class,
+                "parent_job_id": job.parent_job_id,
+                "technical_attempt": job.technical_attempt,
+                "technical_error_type": job.technical_error_type,
+                "retry_after_at": job.retry_after_at,
+                "batch_key": job.batch_key,
                 "error_message": job.error_message,
                 "created_at": job.created_at,
                 "updated_at": job.updated_at,
@@ -1325,6 +2321,9 @@ def _create_regression_runs(
                 prompt_a_id=prompt_a.id,
                 prompt_b_id=prompt_b.id,
                 regression_item_id=regression_item.id,
+                queue_class="validation",
+                origin_queue_class="validation",
+                batch_key=f"regression:{run.id}",
             )
             db.add(job)
             db.flush()
@@ -1607,15 +2606,39 @@ def remove_sample_set_item(
 
 def _regression_summary(run: PromptRegressionRun) -> dict[str, Any]:
     metrics = json.loads(run.metrics_json or "{}")
-    return {
+    candidate_strategy = (
+        json.loads(run.candidate_strategy_snapshot_json or "{}")
+        if run.regression_mode == "paired"
+        else {}
+    )
+    candidate_prompt_a = candidate_strategy.get("prompt_a") or {}
+    candidate_prompt_b = candidate_strategy.get("prompt_b") or {}
+    payload = {
         "id": run.id,
         "name": run.name,
+        "regression_mode": run.regression_mode,
         "sample_set_id": run.sample_set_id,
         "sample_set_name": run.sample_set.name,
-        "prompt_a_id": run.prompt_a_id,
-        "prompt_a_version": run.prompt_a.version,
-        "prompt_b_id": run.prompt_b_id,
-        "prompt_b_version": run.prompt_b.version,
+        "prompt_a_id": (
+            candidate_prompt_a.get("id")
+            if candidate_prompt_a
+            else run.prompt_a_id
+        ),
+        "prompt_a_version": (
+            candidate_prompt_a.get("version")
+            if candidate_prompt_a
+            else run.prompt_a.version
+        ),
+        "prompt_b_id": (
+            candidate_prompt_b.get("id")
+            if candidate_prompt_b
+            else run.prompt_b_id
+        ),
+        "prompt_b_version": (
+            candidate_prompt_b.get("version")
+            if candidate_prompt_b
+            else run.prompt_b.version
+        ),
         "status": run.status,
         "threshold": run.threshold,
         "total": run.total,
@@ -1628,6 +2651,23 @@ def _regression_summary(run: PromptRegressionRun) -> dict[str, Any]:
         "created_at": run.created_at,
         "finished_at": run.finished_at,
     }
+    if run.regression_mode == "paired":
+        payload.update(
+            {
+                "baseline_strategy_bundle_id": run.baseline_strategy_bundle_id,
+                "candidate_strategy_bundle_id": run.candidate_strategy_bundle_id,
+                "sample_set_version": run.sample_set_version,
+                "metric_rules_version": run.metric_rules_version,
+                "metric_rules": json.loads(run.metric_rules_json or "{}"),
+                "recommendation": run.recommendation,
+                "approval_status": run.approval_status,
+                "approved_by": run.approved_by,
+                "approval_note": run.approval_note,
+                "approved_at": run.approved_at,
+                "summary": json.loads(run.summary_json or "{}"),
+            }
+        )
+    return payload
 
 
 @app.get("/api/prompt-regressions")
@@ -1644,32 +2684,641 @@ def list_prompt_regressions(
     return {"items": [_regression_summary(run) for run in runs]}
 
 
+def _paired_metric_rules(payload: PairedRegressionCreateRequest) -> dict[str, Any]:
+    return {
+        "schema_version": "paired-metric-rules-v1",
+        "version": payload.metric_rules_version.strip(),
+        "thresholds": {
+            "aesthetic_accuracy_max_drop": payload.aesthetic_accuracy_max_drop,
+            "whole_image_accuracy_max_drop": payload.whole_image_accuracy_max_drop,
+            "level_consistency_max_drop": payload.level_consistency_max_drop,
+        },
+        **paired_gate_policy(),
+    }
+
+
+def _latest_bundle_result(
+    db: Session, *, asset_id: int, strategy_bundle_id: int
+) -> EvaluationResult | None:
+    return db.scalar(
+        select(EvaluationResult)
+        .where(
+            EvaluationResult.asset_id == asset_id,
+            EvaluationResult.strategy_bundle_id == strategy_bundle_id,
+        )
+        .order_by(EvaluationResult.created_at.desc(), EvaluationResult.id.desc())
+        .limit(1)
+    )
+
+
+def _ensure_paired_validation_job(
+    db: Session,
+    *,
+    item: PromptRegressionItem,
+    bundle: StrategyBundle,
+    prompt_a: PromptVersion,
+    prompt_b: PromptVersion,
+) -> EvaluationJob:
+    existing = db.scalar(
+        select(EvaluationJob).where(
+            EvaluationJob.regression_item_id == item.id,
+            EvaluationJob.strategy_bundle_id == bundle.id,
+        )
+    )
+    if existing is not None:
+        return existing
+    job = EvaluationJob(
+        asset_id=item.sample_item.asset_id,
+        prompt_a_id=prompt_a.id,
+        prompt_b_id=prompt_b.id,
+        regression_item_id=item.id,
+        strategy_bundle_id=bundle.id,
+        queue_class="validation",
+        origin_queue_class="validation",
+        technical_attempt=0,
+        batch_key=f"paired-regression:{item.run_id}",
+        status="queued",
+        stage="waiting",
+    )
+    db.add(job)
+    db.flush()
+    return job
+
+
+def _strategy_snapshot_for_bundle(
+    db: Session, bundle: StrategyBundle
+) -> tuple[str, PromptVersion, PromptVersion]:
+    """Resolve the exact immutable bundle definition without result history."""
+    if bundle.prompt_b_version is None:
+        raise ValueError("配对回归的 StrategyBundle 必须包含 B 阶段提示词")
+    prompt_a_matches = db.scalars(
+        select(PromptVersion).where(
+            PromptVersion.stage == "A",
+            PromptVersion.version == bundle.prompt_a_version,
+        )
+    ).all()
+    prompt_b_matches = db.scalars(
+        select(PromptVersion).where(
+            PromptVersion.stage == "B",
+            PromptVersion.version == bundle.prompt_b_version,
+        )
+    ).all()
+    if bundle.sampling_policy_revision is None:
+        policy_matches: list[SamplingPolicy | None] = [None]
+    else:
+        policy_matches = list(
+            db.scalars(
+                select(SamplingPolicy).where(
+                    SamplingPolicy.revision
+                    == bundle.sampling_policy_revision
+                )
+            ).all()
+        )
+
+    matches: list[tuple[str, PromptVersion, PromptVersion]] = []
+    for prompt_a in prompt_a_matches:
+        for prompt_b in prompt_b_matches:
+            for policy in policy_matches:
+                try:
+                    snapshot = safe_strategy_snapshot_payload(
+                        build_strategy_snapshot(
+                            bundle, prompt_a, prompt_b, policy
+                        )
+                    )
+                    snapshot_json = json.dumps(
+                        snapshot,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                except ValueError:
+                    continue
+                matches.append((snapshot_json, prompt_a, prompt_b))
+    if len(matches) != 1:
+        raise ValueError(
+            "StrategyBundle 缺少唯一可验证的 Prompt/采样策略定义；"
+            "不能依赖历史评测结果补全"
+        )
+    return matches[0]
+
+
+@app.post("/api/paired-regressions")
+def create_paired_regression(
+    payload: PairedRegressionCreateRequest,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    sample_set = db.get(SampleSet, payload.sample_set_id)
+    if not sample_set:
+        raise HTTPException(status_code=404, detail="样本集不存在")
+    if sample_set.kind != "golden" or sample_set.status != "locked":
+        raise HTTPException(
+            status_code=400, detail="配对回归只能使用已锁定的黄金样本集"
+        )
+    baseline_bundle = db.get(
+        StrategyBundle, payload.baseline_strategy_bundle_id
+    )
+    candidate_bundle = db.get(
+        StrategyBundle, payload.candidate_strategy_bundle_id
+    )
+    if not baseline_bundle or not candidate_bundle:
+        raise HTTPException(
+            status_code=400, detail="基线或候选 StrategyBundle 不存在"
+        )
+    if baseline_bundle.id == candidate_bundle.id:
+        raise HTTPException(
+            status_code=400, detail="基线与候选 StrategyBundle 必须不同"
+        )
+
+    try:
+        (
+            baseline_strategy_snapshot_json,
+            baseline_prompt_a,
+            baseline_prompt_b,
+        ) = _strategy_snapshot_for_bundle(db, baseline_bundle)
+        (
+            candidate_strategy_snapshot_json,
+            candidate_prompt_a,
+            candidate_prompt_b,
+        ) = _strategy_snapshot_for_bundle(db, candidate_bundle)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=str(exc),
+        ) from exc
+
+    requested_ids = [sample.sample_item_id for sample in payload.samples]
+    sample_items = db.scalars(
+        select(SampleSetItem).where(
+            SampleSetItem.sample_set_id == sample_set.id,
+            SampleSetItem.id.in_(requested_ids),
+        )
+    ).all()
+    items_by_id = {item.id: item for item in sample_items}
+    if set(items_by_id) != set(requested_ids):
+        raise HTTPException(
+            status_code=400, detail="存在不属于该样本集的样本"
+        )
+
+    frozen: list[dict[str, Any]] = []
+    for requested in payload.samples:
+        sample_item = items_by_id[requested.sample_item_id]
+        try:
+            truth_snapshot, review = reviewed_truth_snapshot(
+                sample_item.source_result, requested.role
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        frozen.append(
+            {
+                "sample_item": sample_item,
+                "role": requested.role,
+                "truth_snapshot": truth_snapshot,
+                "source_review_id": review.id,
+            }
+        )
+
+    manifest = {
+        "schema_version": "paired-sample-set-v1",
+        "sample_set_id": sample_set.id,
+        "items": [
+            {
+                "sample_item_id": entry["sample_item"].id,
+                "asset_id": entry["sample_item"].asset_id,
+                "role": entry["role"],
+                "truth_revision": entry["sample_item"].truth_revision,
+                "truth_snapshot": entry["truth_snapshot"],
+            }
+            for entry in frozen
+        ],
+    }
+    manifest_json = json.dumps(
+        manifest,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    sample_set_version = hashlib.sha256(
+        manifest_json.encode("utf-8")
+    ).hexdigest()
+    metric_rules = _paired_metric_rules(payload)
+    metric_rules_json = json.dumps(
+        metric_rules,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    prior_rule_run = db.scalar(
+        select(PromptRegressionRun)
+        .where(
+            PromptRegressionRun.regression_mode == "paired",
+            PromptRegressionRun.metric_rules_version
+            == payload.metric_rules_version.strip(),
+        )
+        .order_by(PromptRegressionRun.id.asc())
+        .limit(1)
+    )
+    if (
+        prior_rule_run
+        and prior_rule_run.metric_rules_json != metric_rules_json
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="同一指标规则版本不能对应不同阈值",
+        )
+
+    run = PromptRegressionRun(
+        name=payload.name.strip(),
+        sample_set_id=sample_set.id,
+        prompt_a_id=candidate_prompt_a.id,
+        prompt_b_id=candidate_prompt_b.id,
+        regression_mode="paired",
+        baseline_strategy_bundle_id=baseline_bundle.id,
+        candidate_strategy_bundle_id=candidate_bundle.id,
+        baseline_strategy_snapshot_json=baseline_strategy_snapshot_json,
+        candidate_strategy_snapshot_json=candidate_strategy_snapshot_json,
+        sample_set_version=sample_set_version,
+        sample_manifest_json=manifest_json,
+        metric_rules_version=payload.metric_rules_version.strip(),
+        metric_rules_json=metric_rules_json,
+        summary_json="{}",
+        recommendation="pending",
+        approval_status="pending",
+        threshold=1.0,
+        total=len(frozen),
+        status="waiting_results",
+        created_by=user.username,
+    )
+    db.add(run)
+    db.flush()
+
+    created_items: list[PromptRegressionItem] = []
+    for entry in frozen:
+        sample_item = entry["sample_item"]
+        item = PromptRegressionItem(
+            run_id=run.id,
+            sample_item_id=sample_item.id,
+            sample_role=entry["role"],
+            source_evaluation_id=sample_item.source_result_id,
+            source_review_id=entry["source_review_id"],
+            truth_snapshot_json=json.dumps(
+                entry["truth_snapshot"],
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+            status="waiting_results",
+        )
+        db.add(item)
+        db.flush()
+        created_items.append(item)
+
+    pending_item_ids: list[int] = []
+    pending_job_ids: list[int] = []
+    for item in created_items:
+        sample_item = item.sample_item
+        baseline = _latest_bundle_result(
+            db,
+            asset_id=sample_item.asset_id,
+            strategy_bundle_id=baseline_bundle.id,
+        )
+        candidate = _latest_bundle_result(
+            db,
+            asset_id=sample_item.asset_id,
+            strategy_bundle_id=candidate_bundle.id,
+        )
+        if baseline and candidate:
+            complete_paired_regression_item(
+                db,
+                item=item,
+                baseline=baseline,
+                candidate=candidate,
+            )
+        else:
+            pending_item_ids.append(item.id)
+            if baseline is None:
+                pending_job_ids.append(
+                    _ensure_paired_validation_job(
+                        db,
+                        item=item,
+                        bundle=baseline_bundle,
+                        prompt_a=baseline_prompt_a,
+                        prompt_b=baseline_prompt_b,
+                    ).id
+                )
+            if candidate is None:
+                candidate_job = _ensure_paired_validation_job(
+                    db,
+                    item=item,
+                    bundle=candidate_bundle,
+                    prompt_a=candidate_prompt_a,
+                    prompt_b=candidate_prompt_b,
+                )
+                pending_job_ids.append(candidate_job.id)
+                item.job_id = candidate_job.id
+    refresh_paired_regression_run(db, run)
+    db.commit()
+    return {
+        "id": run.id,
+        "status": run.status,
+        "recommendation": run.recommendation,
+        "approval_status": run.approval_status,
+        "sample_set_version": run.sample_set_version,
+        "pending_item_ids": pending_item_ids,
+        "pending_job_ids": pending_job_ids,
+    }
+
+
+@app.post("/api/paired-regressions/{run_id}/items/{item_id}/results")
+def attach_paired_regression_results(
+    run_id: int,
+    item_id: int,
+    payload: PairedRegressionResultsRequest,
+    _user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    item = db.scalar(
+        select(PromptRegressionItem).where(
+            PromptRegressionItem.id == item_id,
+            PromptRegressionItem.run_id == run_id,
+        )
+    )
+    if not item or item.run.regression_mode != "paired":
+        raise HTTPException(status_code=404, detail="配对回归项不存在")
+    baseline = db.get(EvaluationResult, payload.baseline_evaluation_id)
+    candidate = db.get(EvaluationResult, payload.candidate_evaluation_id)
+    if not baseline or not candidate:
+        raise HTTPException(status_code=400, detail="基线或候选评测结果不存在")
+    try:
+        comparison = complete_paired_regression_item(
+            db,
+            item=item,
+            baseline=baseline,
+            candidate=candidate,
+        )
+    except ValueError as exc:
+        status_code = 409 if item.status == "completed" else 400
+        raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+    db.commit()
+    return {
+        "ok": True,
+        "status": item.status,
+        "passed": item.passed,
+        "comparison": comparison,
+        "recommendation": item.run.recommendation,
+    }
+
+
+@app.post("/api/paired-regressions/{run_id}/approval")
+def approve_paired_regression(
+    run_id: int,
+    payload: PairedRegressionApprovalRequest,
+    _user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    run = db.get(PromptRegressionRun, run_id)
+    if not run or run.regression_mode != "paired":
+        raise HTTPException(status_code=404, detail="配对回归任务不存在")
+    if run.recommendation == "pending":
+        raise HTTPException(status_code=409, detail="配对回归尚未完成")
+    if payload.status == "approved" and run.recommendation != "pass":
+        raise HTTPException(
+            status_code=409, detail="系统建议未通过，不能标记为人工批准"
+        )
+    if run.approval_status != "pending":
+        if (
+            run.approval_status == payload.status
+            and run.approved_by == payload.reviewer_name
+            and run.approval_note == payload.note
+        ):
+            return {
+                "ok": True,
+                "approval_status": run.approval_status,
+                "published": False,
+            }
+        raise HTTPException(status_code=409, detail="人工批准结论已经冻结")
+    run.approval_status = payload.status
+    run.approved_by = payload.reviewer_name
+    run.approval_note = payload.note
+    run.approved_at = datetime.now(timezone.utc)
+    db.commit()
+    return {
+        "ok": True,
+        "approval_status": run.approval_status,
+        "published": False,
+    }
+
+
 @app.get("/api/prompt-regressions/{run_id}")
 def prompt_regression_detail(
     run_id: int,
+    outcome: Literal["passed", "failed", "pending", "sealed"] | None = None,
     _user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     run = db.get(PromptRegressionRun, run_id)
     if not run:
         raise HTTPException(status_code=404, detail="回归任务不存在")
-    return {
-        "summary": _regression_summary(run),
-        "items": [
+    paired = run.regression_mode == "paired"
+    if not paired:
+        return {
+            "summary": _regression_summary(run),
+            "items": [
+                {
+                    "id": item.id,
+                    "sample_item_id": item.sample_item_id,
+                    "asset_id": item.sample_item.asset_id,
+                    "asset_name": item.sample_item.asset.original_name,
+                    "image_url": (
+                        f"/api/assets/{item.sample_item.asset_id}/file"
+                    ),
+                    "sample_role": item.sample_role,
+                    "source_evaluation_id": item.source_evaluation_id,
+                    "source_review_id": item.source_review_id,
+                    "truth_snapshot": None,
+                    "expected": json.loads(
+                        item.sample_item.truth_json or "{}"
+                    ),
+                    "status": item.status,
+                    "passed": item.passed,
+                    "comparison": json.loads(
+                        item.comparison_json or "{}"
+                    ),
+                    "baseline_evaluation": None,
+                    "candidate_evaluation": None,
+                    "evaluation": _result_payload(item.evaluation),
+                }
+                for item in run.items
+            ],
+        }
+
+    answer_visible = (
+        run.status in {"passed", "regressed"}
+        and run.recommendation in {"pass", "fail"}
+        and run.finished_at is not None
+    )
+    item_payloads: list[dict[str, Any]] = []
+    for item in run.items:
+        truth_snapshot = json.loads(item.truth_snapshot_json or "{}")
+        comparison = json.loads(item.comparison_json or "{}")
+        baseline_result = json.loads(item.baseline_result_json or "{}")
+        candidate_result = json.loads(item.candidate_result_json or "{}")
+        blind_withheld = (
+            item.sample_role == "blind_holdout" and not answer_visible
+        )
+        if blind_withheld:
+            truth_snapshot_payload: dict[str, Any] | None = None
+            expected_payload: dict[str, Any] | None = None
+            comparison_payload: dict[str, Any] = {
+                "withheld": True,
+                "reason": "blind_holdout_pending",
+            }
+            baseline_result_payload = {
+                key: baseline_result[key]
+                for key in ("evaluation_id", "strategy_bundle_id", "fields")
+                if key in baseline_result
+            }
+            candidate_result_payload = {
+                key: candidate_result[key]
+                for key in ("evaluation_id", "strategy_bundle_id", "fields")
+                if key in candidate_result
+            }
+            diffs: list[dict[str, Any]] = []
+            failure_reasons: list[dict[str, Any]] = []
+            critical_regressions: list[str] = []
+            new_severe_errors: list[dict[str, Any]] = []
+            passed: bool | None = None
+            failed: bool | None = None
+            baseline_evaluation = None
+            candidate_evaluation = None
+        else:
+            truth_snapshot_payload = truth_snapshot
+            expected_payload = truth_snapshot.get("truth") or {}
+            comparison_payload = comparison
+            baseline_result_payload = baseline_result
+            candidate_result_payload = candidate_result
+            diffs = comparison.get("diffs") or []
+            failure_reasons = comparison.get("failure_reasons") or []
+            if item.status == "error" and not failure_reasons:
+                failure_reasons = [
+                    {
+                        "code": "comparison_error",
+                        "severity": "P0",
+                        "message": str(
+                            comparison.get("error")
+                            or "样本配对比较失败"
+                        ),
+                    }
+                ]
+            critical_regressions = (
+                comparison.get("critical_regressions") or []
+            )
+            new_severe_errors = (
+                comparison.get("new_severe_errors") or []
+            )
+            passed = item.passed
+            failed = (
+                item.status == "error" or item.passed is False
+                if item.status in {"completed", "error"}
+                else None
+            )
+            baseline_evaluation = _result_payload(
+                item.baseline_evaluation
+            )
+            candidate_evaluation = _result_payload(
+                item.candidate_evaluation
+            )
+
+        item_outcome = (
+            "sealed"
+            if blind_withheld
+            else "failed"
+            if item.status == "error" or item.passed is False
+            else "passed"
+            if item.status == "completed" and item.passed is True
+            else "pending"
+        )
+        item_payloads.append(
             {
                 "id": item.id,
                 "sample_item_id": item.sample_item_id,
                 "asset_id": item.sample_item.asset_id,
                 "asset_name": item.sample_item.asset.original_name,
-                "image_url": f"/api/assets/{item.sample_item.asset_id}/file",
-                "expected": json.loads(item.sample_item.truth_json or "{}"),
+                "image_url": (
+                    f"/api/assets/{item.sample_item.asset_id}/file"
+                ),
+                "sample_role": item.sample_role,
+                "source_evaluation_id": (
+                    None
+                    if blind_withheld
+                    else item.source_evaluation_id
+                ),
+                "source_review_id": (
+                    None if blind_withheld else item.source_review_id
+                ),
+                "truth_snapshot": truth_snapshot_payload,
+                "expected": expected_payload,
+                "answer_withheld": blind_withheld,
+                "truth_revealed": not blind_withheld,
                 "status": item.status,
-                "passed": item.passed,
-                "comparison": json.loads(item.comparison_json or "{}"),
-                "evaluation": _result_payload(item.evaluation),
+                "outcome": item_outcome,
+                "passed": passed,
+                "failed": failed,
+                "baseline_evaluation_id": item.baseline_evaluation_id,
+                "candidate_evaluation_id": item.candidate_evaluation_id,
+                "baseline_result": baseline_result_payload,
+                "candidate_result": candidate_result_payload,
+                "diffs": diffs,
+                "failure_reasons": failure_reasons,
+                "critical_regressions": critical_regressions,
+                "new_severe_errors": new_severe_errors,
+                "comparison": comparison_payload,
+                "baseline_evaluation": baseline_evaluation,
+                "candidate_evaluation": candidate_evaluation,
+                "evaluation": candidate_evaluation,
             }
-            for item in run.items
-        ],
+        )
+
+    error_items = [
+        {
+            "item_id": item["id"],
+            "sample_item_id": item["sample_item_id"],
+            "asset_id": item["asset_id"],
+            "asset_name": item["asset_name"],
+            "image_url": item["image_url"],
+            "sample_role": item["sample_role"],
+            "status": item["status"],
+            "passed": item["passed"],
+            "baseline_evaluation_id": item["baseline_evaluation_id"],
+            "candidate_evaluation_id": item["candidate_evaluation_id"],
+            "failure_reasons": item["failure_reasons"],
+            "critical_regressions": item["critical_regressions"],
+            "new_severe_errors": item["new_severe_errors"],
+        }
+        for item in item_payloads
+        if item["answer_withheld"] is False
+        and (item["status"] == "error" or item["passed"] is False)
+    ]
+    filtered_items = (
+        [
+            item
+            for item in item_payloads
+            if item["outcome"] == outcome
+        ]
+        if outcome is not None
+        else item_payloads
+    )
+    return {
+        "summary": _regression_summary(run),
+        "baseline_strategy": safe_strategy_snapshot_payload(
+            run.baseline_strategy_snapshot_json
+        ),
+        "candidate_strategy": safe_strategy_snapshot_payload(
+            run.candidate_strategy_snapshot_json
+        ),
+        "error_items": error_items,
+        "item_filter": {"outcome": outcome},
+        "items": filtered_items,
     }
 
 
