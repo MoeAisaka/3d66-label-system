@@ -1759,6 +1759,66 @@ def _migration_016_finalize_retry_and_loop_guards(
     """)
 
 
+def _migration_017_add_canary_run_persistence(
+    connection: Connection,
+) -> None:
+    connection.exec_driver_sql("""
+        CREATE TABLE IF NOT EXISTS canary_runs (
+            run_id VARCHAR(80) PRIMARY KEY,
+            display_name VARCHAR(160),
+            current_state VARCHAR(30) NOT NULL DEFAULT 'draft',
+            plan_json TEXT NOT NULL,
+            evidence_json TEXT NOT NULL DEFAULT '{}',
+            snapshot_json TEXT NOT NULL,
+            snapshot_fingerprint VARCHAR(64) NOT NULL,
+            created_by VARCHAR(80) NOT NULL,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            CONSTRAINT ck_canary_runs_current_state CHECK (
+                current_state IN (
+                    'draft',
+                    'preflight_ready',
+                    'approvals_ready',
+                    'freeze_ready',
+                    'candidate_ready',
+                    'human_review_ready',
+                    'failed',
+                    'cancelled'
+                )
+            ),
+            CONSTRAINT ck_canary_runs_plan_json CHECK (
+                json_valid(plan_json) = 1
+                AND json_type(plan_json, '$') = 'object'
+            ),
+            CONSTRAINT ck_canary_runs_evidence_json CHECK (
+                json_valid(evidence_json) = 1
+                AND json_type(evidence_json, '$') = 'object'
+            ),
+            CONSTRAINT ck_canary_runs_snapshot_json CHECK (
+                json_valid(snapshot_json) = 1
+                AND json_type(snapshot_json, '$') = 'object'
+            ),
+            CONSTRAINT ck_canary_runs_snapshot_fingerprint CHECK (
+                length(snapshot_fingerprint) = 64
+                AND lower(snapshot_fingerprint)
+                    NOT GLOB '*[^0-9a-f]*'
+            )
+        )
+    """)
+    connection.exec_driver_sql("""
+        CREATE INDEX IF NOT EXISTS ix_canary_runs_current_state
+        ON canary_runs(current_state)
+    """)
+    connection.exec_driver_sql("""
+        CREATE INDEX IF NOT EXISTS ix_canary_runs_snapshot_fingerprint
+        ON canary_runs(snapshot_fingerprint)
+    """)
+    connection.exec_driver_sql("""
+        CREATE INDEX IF NOT EXISTS ix_canary_runs_updated_at
+        ON canary_runs(updated_at)
+    """)
+
+
 MIGRATIONS = [
     Migration(1, "add_sample_expected_level", _migration_001_add_sample_expected_level),
     Migration(2, "add_review_corrections", _migration_002_add_review_corrections),
@@ -1795,6 +1855,11 @@ MIGRATIONS = [
         16,
         "finalize_retry_and_loop_guards",
         _migration_016_finalize_retry_and_loop_guards,
+    ),
+    Migration(
+        17,
+        "add_canary_run_persistence",
+        _migration_017_add_canary_run_persistence,
     ),
 ]
 

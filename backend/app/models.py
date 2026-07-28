@@ -257,6 +257,63 @@ class SamplingPolicy(Base):
     )
 
 
+class CanaryRun(Base):
+    __tablename__ = "canary_runs"
+    __table_args__ = (
+        CheckConstraint(
+            "current_state IN ("
+            "'draft','preflight_ready','approvals_ready','freeze_ready',"
+            "'candidate_ready','human_review_ready','failed','cancelled'"
+            ")",
+            name="ck_canary_runs_current_state",
+        ),
+        CheckConstraint(
+            "json_valid(plan_json) = 1 "
+            "AND json_type(plan_json, '$') = 'object'",
+            name="ck_canary_runs_plan_json",
+        ),
+        CheckConstraint(
+            "json_valid(evidence_json) = 1 "
+            "AND json_type(evidence_json, '$') = 'object'",
+            name="ck_canary_runs_evidence_json",
+        ),
+        CheckConstraint(
+            "json_valid(snapshot_json) = 1 "
+            "AND json_type(snapshot_json, '$') = 'object'",
+            name="ck_canary_runs_snapshot_json",
+        ),
+        CheckConstraint(
+            "length(snapshot_fingerprint) = 64 "
+            "AND lower(snapshot_fingerprint) "
+            "NOT GLOB '*[^0-9a-f]*'",
+            name="ck_canary_runs_snapshot_fingerprint",
+        ),
+    )
+
+    run_id: Mapped[str] = mapped_column(
+        String(80), primary_key=True, unique=True
+    )
+    display_name: Mapped[str | None] = mapped_column(
+        String(160), nullable=True
+    )
+    current_state: Mapped[str] = mapped_column(
+        String(30), default="draft", index=True
+    )
+    plan_json: Mapped[str] = mapped_column(Text)
+    evidence_json: Mapped[str] = mapped_column(Text, default="{}")
+    snapshot_json: Mapped[str] = mapped_column(Text)
+    snapshot_fingerprint: Mapped[str] = mapped_column(
+        String(64), index=True
+    )
+    created_by: Mapped[str] = mapped_column(String(80))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow, index=True
+    )
+
+
 class StrategyBundle(Base):
     __tablename__ = "strategy_bundles"
     __table_args__ = (UniqueConstraint("canonical_hash", name="uq_strategy_canonical_hash"),)

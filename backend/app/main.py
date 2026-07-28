@@ -81,6 +81,7 @@ from .security import (
     verify_password,
 )
 from .optimizer import run_prompt_optimization
+from .p0e_canary_api import build_canary_router
 from .seed import seed_defaults
 from .schema_adapter import repair_combined_aesthetic_results, rescore_stored_results
 from .regression import (
@@ -557,6 +558,9 @@ def current_user(
     if not user or not user.is_active:
         raise HTTPException(status_code=401, detail="账号不可用")
     return user
+
+
+app.include_router(build_canary_router(current_user))
 
 
 def _asset_payload(asset: Asset) -> dict[str, Any]:

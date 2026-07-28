@@ -1,6 +1,6 @@
 # 3d66 标签系统｜当前项目状态
 
-> 最后更新：2026-07-21
+> 最后更新：2026-07-28
 > 本文件只记录“现在做到哪里”；长期原则见 `PRODUCT.md` 和 `AGENTS.md`，历史背景见 `CODEX_HANDOFF.md`。
 
 ## 仓库状态
@@ -10,6 +10,40 @@
 - 当前功能基线：以 `main` 分支最新提交为准，精确提交号请执行 `git log -1` 查看。
 - 远程仓库：`origin = https://github.com/chishiyu07-max/3d66-label-system.git`
 - 分支关系：每次交付以 `git status -sb` 的实时结果为准。
+
+## 最新完成：P0-E E3 金丝雀持久化与认证 API（2026-07-28）
+
+> 本段仅为持久化与 API 接线，**未真实下载、未调用模型、未写
+> Asset/EvaluationResult、未形成 Gold、未发布，也未完成前端或部署**。
+> 决策记录见 ADR-0011。
+
+新增：
+
+- `CanaryRun` 模型与迁移 17：唯一 `run_id`、可选显示名称、当前状态、
+  规范 JSON 计划/累积证据/当前快照、快照指纹、创建者与时间；数据库
+  约束状态和 JSON，读取边界复核指纹、完整快照与五项 False 不变量。
+- `backend/app/p0e_canary_api.py`：认证后的创建、列表、详情、五个顺序
+  转换、取消和失败 API；所有推进调用 E2 纯函数。
+- 相同计划幂等复用 `run_id`；计划或显示名称漂移返回 409；转换使用
+  `expected_snapshot_fingerprint` 条件更新，陈旧请求返回 409，不允许
+  last-write-wins；相同规范证据可幂等重放，不同证据冲突。
+- 请求 DTO 禁止提交额外的状态、指纹或运行级不变量；E2
+  `CanaryRunError` 以稳定五字段映射为 422；不存在运行返回明确 404。
+- 证据 URL 含 query、fragment 或 userinfo 时 fail-closed；响应固定返回
+  五项 False 不变量、时间和创建者，并执行读取边界脱敏。
+- `backend/tests/test_p0e_canary_api.py`：17 项测试覆盖迁移 17 旧库升级、
+  全端点认证、创建幂等与漂移、精确 `3D`、完整顺序、跳级/回退/终止态、
+  缺证据、URL 安全、陈旧冲突、重复转换、取消/失败、列表详情、规范 JSON
+  和无 Asset/EvaluationResult 副作用。
+
+验证：
+
+- E3 API 专项：`17 passed`。
+- E0/E1/E2/E3 指定组合：`124 passed`。
+- 迁移专项：`17 passed`；既有迁移权威清单及最高版本断言已同步至 17。
+- 全后端（排除 Windows-only DPAPI）：`313 passed, 1 deselected`。
+- Python `compileall`、`git diff --check`、E3 OpenAPI 路径核验：通过。
+- 前端生产构建：通过；本阶段未新增或接线 E3 页面。
 
 ## 最新完成：P0-E E2 金丝雀运行计划与状态机（2026-07-28）
 

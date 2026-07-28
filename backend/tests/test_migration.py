@@ -30,6 +30,7 @@ MIGRATION_NAMES = [
     "add_loop_queue_and_breakers",
     "harden_loop_retry_and_scheduler",
     "finalize_retry_and_loop_guards",
+    "add_canary_run_persistence",
 ]
 
 
@@ -248,7 +249,7 @@ def test_schema_migrations_table_created_with_all_versions(tmp_path) -> None:
                     "SELECT version, name FROM schema_migrations ORDER BY version"
                 )
             )
-        assert [row[0] for row in rows] == list(range(1, 17))
+        assert [row[0] for row in rows] == list(range(1, 18))
         assert [row[1] for row in rows] == MIGRATION_NAMES
     finally:
         engine.dispose()
@@ -266,7 +267,7 @@ def test_repeated_migration_is_idempotent(tmp_path) -> None:
                     "SELECT version FROM schema_migrations ORDER BY version"
                 )
             )
-        assert [row[0] for row in versions] == list(range(1, 17))
+        assert [row[0] for row in versions] == list(range(1, 18))
     finally:
         engine.dispose()
 
@@ -375,7 +376,7 @@ def test_complete_v10_database_forward_migrates_versions_11_to_13(tmp_path) -> N
                     "SELECT version FROM schema_migrations ORDER BY version"
                 )
             )
-            assert [row[0] for row in versions] == list(range(1, 17))
+            assert [row[0] for row in versions] == list(range(1, 18))
             old_result = connection.exec_driver_sql(
                 """
                 SELECT model_id, prompt_a_version, strategy_bundle_id,
@@ -420,7 +421,7 @@ def test_complete_v10_database_forward_migrates_versions_11_to_13(tmp_path) -> N
                 connection.exec_driver_sql(
                     "SELECT COUNT(*) FROM schema_migrations"
                 ).scalar_one()
-                == 16
+                == 17
             )
     finally:
         engine.dispose()
@@ -568,7 +569,7 @@ def test_complete_v11_database_forward_migrates_paired_regression_contract(
                     "SELECT version FROM schema_migrations ORDER BY version"
                 )
             ]
-            assert versions == list(range(1, 17))
+            assert versions == list(range(1, 18))
 
             run_columns = {
                 row[1]
@@ -868,7 +869,7 @@ def test_complete_v12_database_forward_adds_frozen_strategy_snapshots(
                     "SELECT version FROM schema_migrations ORDER BY version"
                 )
             ]
-            assert versions == list(range(1, 17))
+            assert versions == list(range(1, 18))
     finally:
         engine.dispose()
 
@@ -949,7 +950,7 @@ def test_complete_v13_database_forward_adds_loop_queue_and_breaker_contract(
                 connection.exec_driver_sql(
                     "SELECT max(version) FROM schema_migrations"
                 ).scalar_one()
-                    == 16
+                    == 17
             )
 
             with pytest.raises(
@@ -1184,7 +1185,7 @@ def test_complete_v14_database_forward_hardens_retry_chain_and_scheduler(
                 connection.exec_driver_sql(
                     "SELECT max(version) FROM schema_migrations"
                 ).scalar_one()
-                == 16
+                == 17
             )
             assert (
                 connection.exec_driver_sql(
@@ -1421,7 +1422,7 @@ def test_complete_v15_database_replaces_root_index_and_hardens_payloads(
                 connection.exec_driver_sql(
                     "SELECT max(version) FROM schema_migrations"
                 ).scalar_one()
-                == 16
+                == 17
             )
             index_sql = connection.exec_driver_sql("""
                 SELECT sql
