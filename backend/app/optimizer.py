@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import time
@@ -19,6 +20,7 @@ DIAGNOSTIC_OUTPUT_BUDGET = 2048
 SYNTHESIS_OUTPUT_BUDGET = 4096
 OPTIMIZER_REASONING_EFFORT = "high"
 MAX_DIAGNOSTIC_IMAGES = 8
+MAX_DIAGNOSTIC_SINGLE_IMAGE_BYTES = 16 * 1024 * 1024
 MAX_DIAGNOSTIC_IMAGE_BYTES = 32 * 1024 * 1024
 STAGE_AUDIT_FIELDS = (
     "status",
@@ -226,6 +228,17 @@ def _select_records(items: list[Any]) -> tuple[list[tuple[Any, dict[str, Any]]],
 
     corrected = [pair for pair in analysis_pool if pair[1]["decision"] == "corrected"]
     controls = [pair for pair in analysis_pool if pair[1]["decision"] == "approved"]
+
+    def stable_sample_key(pair: tuple[Any, dict[str, Any]]) -> str:
+        item, _ = pair
+        identity = (
+            f"{getattr(item.asset, 'sha256', item.asset.stored_name)}:"
+            f"{item.asset_id}"
+        )
+        return hashlib.sha256(identity.encode("utf-8")).hexdigest()
+
+    corrected.sort(key=stable_sample_key)
+    controls.sort(key=stable_sample_key)
     selected = corrected[:24] + controls[:8]
     for _, record in selected:
         record["sample_role"] = (
@@ -240,20 +253,43 @@ def _bounded_diagnostic_records(
     selected: list[tuple[Any, dict[str, Any]]],
     upload_dir: Any,
 ) -> tuple[list[tuple[Any, dict[str, Any], Any]], int, int]:
-    """Bound one diagnostic request before any image is read or encoded."""
-    bounded: list[tuple[Any, dict[str, Any], Any]] = []
-    total_bytes = 0
+    """Choose a deterministic role-stratified request under metadata limits."""
+    candidates: dict[str, list[tuple[Any, dict[str, Any], Any, int]]] = {
+        "target_error": [],
+        "stable_control": [],
+    }
     omitted_count = 0
     for item, record in selected:
         image_path = upload_dir / item.asset.stored_name
         try:
             image_bytes = image_path.stat().st_size
-        except OSError as exc:
-            raise ValueError("诊断图片不可读取") from exc
-        if image_bytes <= 0:
-            raise ValueError("诊断图片为空文件")
-        if image_bytes > MAX_DIAGNOSTIC_IMAGE_BYTES:
-            raise ValueError("单张诊断图片超过请求总字节上限")
+        except OSError:
+            omitted_count += 1
+            continue
+        if not 0 < image_bytes <= MAX_DIAGNOSTIC_SINGLE_IMAGE_BYTES:
+            omitted_count += 1
+            continue
+        candidates[record["sample_role"]].append(
+            (item, record, image_path, image_bytes)
+        )
+
+    ordered = []
+    corrected = candidates["target_error"]
+    controls = candidates["stable_control"]
+    had_controls = bool(controls)
+    if corrected:
+        ordered.append(corrected.pop(0))
+    if controls:
+        ordered.append(controls.pop(0))
+    while corrected or controls:
+        if corrected:
+            ordered.append(corrected.pop(0))
+        if controls:
+            ordered.append(controls.pop(0))
+
+    bounded: list[tuple[Any, dict[str, Any], Any]] = []
+    total_bytes = 0
+    for item, record, image_path, image_bytes in ordered:
         if (
             len(bounded) >= MAX_DIAGNOSTIC_IMAGES
             or total_bytes + image_bytes > MAX_DIAGNOSTIC_IMAGE_BYTES
@@ -262,8 +298,15 @@ def _bounded_diagnostic_records(
             continue
         bounded.append((item, record, image_path))
         total_bytes += image_bytes
-    if not bounded:
-        raise ValueError("诊断图片总量超过安全请求上限")
+    corrected_count = sum(
+        1 for _, record, _ in bounded if record["decision"] == "corrected"
+    )
+    if corrected_count == 0:
+        raise ValueError("安全限额内至少需要一张带有人工纠错的图片")
+    if had_controls and not any(
+        record["decision"] == "approved" for _, record, _ in bounded
+    ):
+        raise ValueError("安全限额内无法保留稳定对照样本")
     return bounded, total_bytes, omitted_count
 
 
@@ -359,6 +402,9 @@ async def run_prompt_optimization(run_id: int) -> None:
                 output_budget=DIAGNOSTIC_OUTPUT_BUDGET,
                 reasoning_effort=OPTIMIZER_REASONING_EFFORT,
                 structured_output=True,
+                max_image_count=MAX_DIAGNOSTIC_IMAGES,
+                max_single_image_bytes=MAX_DIAGNOSTIC_SINGLE_IMAGE_BYTES,
+                max_total_image_bytes=MAX_DIAGNOSTIC_IMAGE_BYTES,
             )
         except Exception as exc:
             status_code, request_id, attempt_count = _response_context(exc)
@@ -385,7 +431,11 @@ async def run_prompt_optimization(run_id: int) -> None:
             "analysis_count": len(selected),
             "corrected_count": corrected_count,
             "control_count": len(selected) - corrected_count,
-            "diagnostic_image_bytes": diagnostic_image_bytes,
+            "diagnostic_image_bytes": (
+                diagnostic_response.input_image_bytes
+                if diagnostic_response.input_image_bytes is not None
+                else diagnostic_image_bytes
+            ),
             "diagnostic_image_limit": MAX_DIAGNOSTIC_IMAGES,
             "diagnostic_byte_limit": MAX_DIAGNOSTIC_IMAGE_BYTES,
             "omitted_image_count": omitted_image_count,

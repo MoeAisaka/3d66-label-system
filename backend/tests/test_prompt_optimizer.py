@@ -128,6 +128,9 @@ def test_diagnostic_image_call_attempt_override_is_exactly_one(
                 output_budget=2048,
                 reasoning_effort="high",
                 structured_output=True,
+                max_image_count=1,
+                max_single_image_bytes=1024,
+                max_total_image_bytes=1024,
             )
         )
 
@@ -138,15 +141,65 @@ def test_diagnostic_image_call_attempt_override_is_exactly_one(
     assert calls[0]["response_format"] == {"type": "json_object"}
 
 
-def test_diagnostic_records_are_bounded_before_image_encoding(tmp_path) -> None:
-    selected = []
-    for index in range(optimizer.MAX_DIAGNOSTIC_IMAGES + 3):
-        image_path = tmp_path / f"sample-{index}.jpg"
-        image_path.write_bytes(b"image")
-        item = SimpleNamespace(
-            asset=SimpleNamespace(stored_name=image_path.name)
+def test_image_limit_is_enforced_at_encoding_boundary(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    config = OptimizerConfig(
+        provider="openai",
+        model_id="offline-optimizer-model",
+        encrypted_api_key="offline-placeholder",
+    )
+    client = _client_without_secret_lookup(config)
+    image_path = tmp_path / "mutable.jpg"
+    image_path.write_bytes(b"123456")
+    calls = 0
+
+    async def must_not_post(_payload):
+        nonlocal calls
+        calls += 1
+        raise AssertionError("oversized image reached HTTP")
+
+    monkeypatch.setattr(client, "_post", must_not_post)
+    with pytest.raises(ValueError, match="字节上限"):
+        asyncio.run(
+            client.chat_json_images(
+                "system",
+                [("sample", image_path, "image/jpeg")],
+                max_attempts=1,
+                max_image_count=1,
+                max_single_image_bytes=5,
+                max_total_image_bytes=5,
+            )
         )
-        selected.append((item, {"decision": "corrected"}))
+    assert calls == 0
+
+
+def _bounded_item(tmp_path, index, decision, payload=b"image"):
+    image_path = tmp_path / f"sample-{index}.jpg"
+    image_path.write_bytes(payload)
+    role = "target_error" if decision == "corrected" else "stable_control"
+    return (
+        SimpleNamespace(
+            asset_id=index + 1,
+            asset=SimpleNamespace(
+                stored_name=image_path.name,
+                sha256=f"{index:064x}",
+            ),
+        ),
+        {"decision": decision, "sample_role": role},
+    )
+
+
+def test_diagnostic_records_are_bounded_and_role_stratified(tmp_path) -> None:
+    selected = [
+        _bounded_item(tmp_path, index, "corrected")
+        for index in range(optimizer.MAX_DIAGNOSTIC_IMAGES + 3)
+    ]
+    selected.extend(
+        _bounded_item(tmp_path, 100 + index, "approved")
+        for index in range(2)
+    )
 
     bounded, total_bytes, omitted_count = (
         optimizer._bounded_diagnostic_records(selected, tmp_path)
@@ -154,7 +207,10 @@ def test_diagnostic_records_are_bounded_before_image_encoding(tmp_path) -> None:
 
     assert len(bounded) == optimizer.MAX_DIAGNOSTIC_IMAGES
     assert total_bytes == optimizer.MAX_DIAGNOSTIC_IMAGES * len(b"image")
-    assert omitted_count == 3
+    assert omitted_count == 5
+    decisions = [record["decision"] for _, record, _ in bounded]
+    assert "corrected" in decisions
+    assert "approved" in decisions
 
 
 def test_diagnostic_records_respect_aggregate_byte_limit(
@@ -162,14 +218,11 @@ def test_diagnostic_records_respect_aggregate_byte_limit(
     monkeypatch,
 ) -> None:
     monkeypatch.setattr(optimizer, "MAX_DIAGNOSTIC_IMAGE_BYTES", 10)
-    selected = []
-    for index in range(3):
-        image_path = tmp_path / f"bytes-{index}.jpg"
-        image_path.write_bytes(b"123456")
-        item = SimpleNamespace(
-            asset=SimpleNamespace(stored_name=image_path.name)
-        )
-        selected.append((item, {"decision": "corrected"}))
+    selected = [
+        _bounded_item(tmp_path, 0, "corrected", b"123456"),
+        _bounded_item(tmp_path, 1, "corrected", b"123456"),
+        _bounded_item(tmp_path, 2, "corrected", b"123456"),
+    ]
 
     bounded, total_bytes, omitted_count = (
         optimizer._bounded_diagnostic_records(selected, tmp_path)
@@ -365,6 +418,9 @@ def test_diagnosis_and_audit_persist_when_synthesis_fails(
                 "output_budget": 2048,
                 "reasoning_effort": "high",
                 "structured_output": True,
+                "max_image_count": 8,
+                "max_single_image_bytes": 16 * 1024 * 1024,
+                "max_total_image_bytes": 32 * 1024 * 1024,
             }
             return DoubaoResponse(
                 parsed={
@@ -468,6 +524,9 @@ def test_success_stores_candidate_without_creating_prompt_version(
             assert options["output_budget"] == 2048
             assert options["reasoning_effort"] == "high"
             assert options["structured_output"] is True
+            assert options["max_image_count"] == 8
+            assert options["max_single_image_bytes"] == 16 * 1024 * 1024
+            assert options["max_total_image_bytes"] == 32 * 1024 * 1024
             return DoubaoResponse(
                 parsed={
                     "summary": "diagnosis",

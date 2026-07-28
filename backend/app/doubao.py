@@ -24,6 +24,7 @@ class DoubaoResponse:
     attempt_count: int = 1
     output_budget: int | None = None
     reasoning_effort: str | None = None
+    input_image_bytes: int | None = None
 
 
 @dataclass(frozen=True)
@@ -99,6 +100,29 @@ def _image_data_url(path: Path, mime_type: str | None = None) -> str:
     media_type = mime_type or mimetypes.guess_type(path.name)[0] or "image/jpeg"
     encoded = base64.b64encode(path.read_bytes()).decode("ascii")
     return f"data:{media_type};base64,{encoded}"
+
+
+def _bounded_image_data_url(
+    path: Path,
+    mime_type: str | None,
+    *,
+    max_bytes: int,
+) -> tuple[str, int]:
+    """Read and encode one immutable payload snapshot with a hard byte ceiling."""
+    if max_bytes <= 0:
+        raise ValueError("诊断图片总量超过安全请求上限")
+    try:
+        with path.open("rb") as image_file:
+            raw = image_file.read(max_bytes + 1)
+    except OSError as exc:
+        raise ValueError("诊断图片不可读取") from exc
+    if not raw:
+        raise ValueError("诊断图片为空文件")
+    if len(raw) > max_bytes:
+        raise ValueError("诊断图片超过安全请求字节上限")
+    media_type = mime_type or mimetypes.guess_type(path.name)[0] or "image/jpeg"
+    encoded = base64.b64encode(raw).decode("ascii")
+    return f"data:{media_type};base64,{encoded}", len(raw)
 
 
 def _extract_message_text(payload: dict[str, Any]) -> str:
@@ -341,14 +365,36 @@ class DoubaoClient:
         output_budget: int | None = None,
         reasoning_effort: str | None = None,
         structured_output: bool | None = None,
+        max_image_count: int | None = None,
+        max_single_image_bytes: int | None = None,
+        max_total_image_bytes: int | None = None,
     ) -> DoubaoResponse:
+        if max_image_count is not None and len(samples) > max_image_count:
+            raise ValueError("诊断图片数量超过安全请求上限")
+        remaining_bytes = max_total_image_bytes
+        input_image_bytes = 0
         content: list[dict[str, Any]] = []
         for text, image_path, mime_type in samples:
+            limits = [
+                limit
+                for limit in (remaining_bytes, max_single_image_bytes)
+                if limit is not None
+            ]
+            image_url, image_bytes = _bounded_image_data_url(
+                image_path,
+                mime_type,
+                max_bytes=(
+                    min(limits) if limits else image_path.stat().st_size
+                ),
+            )
+            input_image_bytes += image_bytes
+            if remaining_bytes is not None:
+                remaining_bytes -= image_bytes
             content.append({"type": "text", "text": text})
             content.append(
                 {
                     "type": "image_url",
-                    "image_url": {"url": _image_data_url(image_path, mime_type), "detail": "high"},
+                    "image_url": {"url": image_url, "detail": "high"},
                 }
             )
         payload: dict[str, Any] = {
@@ -387,6 +433,7 @@ class DoubaoClient:
                     attempt_count=attempt + 1,
                     output_budget=actual_budget,
                     reasoning_effort=actual_reasoning_effort,
+                    input_image_bytes=input_image_bytes,
                 )
             except Exception as exc:
                 if isinstance(exc, DoubaoError):
