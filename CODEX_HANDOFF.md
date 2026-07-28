@@ -3,8 +3,9 @@
 > 更新时间：2026-07-28
 > 项目目录：`D:\3d66-label-system`
 > 当前分支：`main`
-> 功能基线提交：`85f41d8 feat: persist authenticated P0-E canary runs`
-> 当前工作树：P0-E E3 前端编排工作区已完成，按任务要求尚未提交或推送
+> 功能基线提交：`b7d1574 feat: secure macOS credentials with Keychain`
+> 当前工作树：macOS 首次安装、诊断、前台启动与脱敏灾备生命周期已完成，
+> 按任务要求尚未提交、推送或部署
 
 ## 0. 新对话应当如何接手
 
@@ -314,8 +315,8 @@ OpenAPI 路径核验均通过。E3 前端新增后，`npm run lint` 与
 
 ### 4.13 macOS Keychain 凭据安全层
 
-基线提交 `9c67118` 上的未提交工作树已完成跨平台凭据引用，决策记录见
-ADR-0012：
+基线提交 `9c67118` 上完成的跨平台凭据引用已进入提交 `b7d1574`，决策记录
+见 ADR-0012：
 
 - `backend/app/security.py` 使用标准库 `ctypes` 直接调用 macOS
   Security.framework 的 generic password API；没有使用 `security` CLI、
@@ -339,6 +340,42 @@ ADR-0012：
 边界：这代表代码与当前 Mac 的隔离 Keychain 验收完成，不代表目标 MacBook
 已安装部署。MacBook 页面保存凭据、Windows 研发机 DPAPI、真实数据与真实
 模型联调仍待目标环境验收。
+
+### 4.14 macOS 首次安装、诊断、前台启动与脱敏灾备
+
+基线提交 `b7d1574` 上的未提交工作树已完成 ADR-0013：
+
+- macOS 默认 `DATA_DIR` 改为
+  `~/Library/Application Support/3d66-label-system`；Windows
+  `%LOCALAPPDATA%` 逻辑与显式 `DATA_DIR` 优先不变。
+- `scripts/macos/` 提供 `install.sh`、`doctor.sh`、`start.sh`、
+  `backup.sh`、`restore.sh`。均 `set -euo pipefail`、支持任意 cwd 和空格
+  路径，拒绝非 macOS；不使用远程脚本、sudo、Homebrew、shell rc、
+  launchd、系统设置或防火墙修改。
+- 安装门禁：Python 3.11/3.12、Node.js 20～26、npm 10/11。
+  `--check/--dry-run` 完全离线且不修改；实际安装只创建仓库 `.venv`、
+  安装已有 requirements、`npm ci` 和生产构建，不处理用户数据。
+- start 必须先 doctor，复用现有 launcher 前台运行并保留 `Ctrl-C` 清理；
+  默认 `127.0.0.1`，仅接受调用时用户显式 `APP_HOST` 覆盖，不创建 daemon。
+- `backend/app/macos_deploy.py` 用标准库承载 doctor/backup/restore。正式
+  备份用 SQLite backup API，并复制普通图片文件；v1 manifest 保存 UTC
+  时间、迁移版本、可得 Git commit、相对路径、大小与 SHA-256。
+- 备份副本清空 `session_tokens`、主模型和优化模型
+  `encrypted_api_key`，`VACUUM` 后才计算哈希；不含 logs、`.env`、API Key、
+  Keychain/DPAPI 内容或引用。目录 700、文件 600。
+- restore 实际写入前自动先 dry-run，校验 manifest、路径穿越、文件清单、
+  hash、SQLite integrity、迁移上界及脱敏状态；服务端口占用即拒绝。通过后
+  创建临时 rollback snapshot，以同文件系统 staging 原子替换
+  database/images，失败自动恢复原数据。
+
+验证：专项 `20 passed`；全后端隔离临时 `DATA_DIR`
+`348 passed, 1 skipped, 1 warning`；五脚本 `bash -n`、Python
+`compileall`、从仓库外 cwd 执行 `install.sh --check/--dry-run`、
+`git diff --check` 通过。所有新增测试只使用 `tmp_path` 明显假数据。
+
+边界：未在目标 MacBook 安装或启动，未登录或通过页面保存真实 Keychain
+凭据，未访问外网，未调用真实模型，未接 XLSX/图片冻结执行器，未形成 Gold
+或发布。Windows 部署与真实 DPAPI 回归仍待完成。
 
 ## 5. 美感维度和评分约束
 
@@ -435,10 +472,16 @@ ADR-0012：
 
 ### 数据
 
-默认数据目录：
+Windows 默认数据目录：
 
 ```text
 %LOCALAPPDATA%\3d66-label-system
+```
+
+macOS 默认数据目录：
+
+```text
+~/Library/Application Support/3d66-label-system
 ```
 
 其中保存：
@@ -448,18 +491,23 @@ ADR-0012：
 - `logs/`
 
 数据库、图片、日志、`.env`、`.venv`、`node_modules` 和构建产物都不进
-Git。Windows DPAPI 密文绑定当前用户；macOS 数据库只有当前用户 Keychain
-引用。复制数据库到另一台电脑、另一系统或另一用户后必须重新填写 API Key。
+Git。Windows DPAPI 密文绑定当前用户；macOS 运行数据库只有当前用户
+Keychain 引用。ADR-0013 正式备份会连引用一并清空，因此恢复后必须重新
+登录并填写 API Key；禁止跨平台迁移 Keychain 或 DPAPI。
 
 ### Git 状态
 
 - 当前是本地 Git 仓库，分支 `main`。
-- 截至编写本文件时没有配置 Git remote，代码还没有远程备份。
-- 如果用户要求上传 GitHub，需要先确认目标仓库和可见性，再配置 remote；不要擅自公开项目或密钥。
+- `origin` 已配置为私有项目既有远程；当前 `main` 相对 `origin/main`
+  领先 6 个提交。本阶段按任务要求不 commit、不 push。
+- 后续推送前仍必须确认工作树只包含本次相关文件，不得公开秘密或无关修改。
 
 ## 9. 最近完成的重要提交
 
 ```text
+b7d1574 feat: secure macOS credentials with Keychain
+9c67118 feat: add P0-E canary orchestration workspace
+85f41d8 feat: persist authenticated P0-E canary runs
 5cca790 feat: add intelligent review sampling
 48268e8 refactor: separate assets from evaluation runs
 9a946ff feat: add compact lite prompts and risk review
@@ -541,7 +589,6 @@ d6902bf fix: calibrate aesthetic grades and result states
 - 素材库接入；
 - 图片保留策略；
 - 搜索/推荐同步；
-- 数据跨电脑迁移和正式备份。
 
 除非用户重新授权，不要提前扩展这些范围。
 
@@ -553,21 +600,23 @@ d6902bf fix: calibrate aesthetic grades and result states
 4. 当前 63/69 必审比例不适合作为长期目标，后续应按活跃组合/任务批次收敛队列。
 5. 提示词发布尚未被回归结果真正阻断。
 6. 多人可同时打开页面，但还没有防冲突的任务认领或版本锁。
-7. 测试计数随里程碑变化；以当前命令结果为准。2026-07-28 Keychain 阶段
-   全后端为 `328 passed, 1 skipped`。
+7. 测试计数随里程碑变化；以当前命令结果为准。2026-07-28 macOS 部署
+   生命周期阶段全后端为 `348 passed, 1 skipped, 1 warning`。
 8. 测试有一条 FastAPI TestClient/httpx 兼容性弃用警告，不影响当前运行，但未来升级依赖时需处理。
 9. 本地 Git 暂无 remote，机器损坏会丢失未备份代码。
 10. 不要在输出、日志、截图、Git 或 Markdown 中展示真实 API Key。
 
 ## 12. 当前验证基线
 
-最近一次完整后端验证（macOS Keychain 阶段）：
+最近一次完整后端验证（macOS 部署生命周期阶段）：
 
-- 凭据专项：`15 passed, 1 skipped`；macOS 真实隔离 Keychain 用例已执行。
-- 全后端：`328 passed, 1 skipped, 1 warning`。
+- 部署专项：`20 passed`。
+- 全后端（隔离临时 `DATA_DIR`）：`348 passed, 1 skipped, 1 warning`。
+- 五个 shell 脚本 `bash -n`、Python `compileall`、
+  `install.sh --check/--dry-run` 与 `git diff --check` 通过。
 - 本阶段没有修改前端，未重新执行前端构建、服务启动或浏览器验收。
-- 未使用真实 API Key，未调用真实模型；目标 MacBook 与 Windows 部署均
-  尚未验收。
+- 未部署、未访问外网、未读取真实 Keychain、未使用真实 API Key 或调用
+  真实模型；目标 MacBook 与 Windows 部署均尚未验收。
 
 验证命令：
 

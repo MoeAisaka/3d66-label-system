@@ -5,7 +5,8 @@
 ## 当前能力
 
 - 生产目标仍是 Windows 主机运行、局域网审核员通过浏览器共同使用；当前
-  另有 macOS 工程验收环境，但 MacBook 安装部署尚未完成。
+  已增加离线可测的 macOS 安装、诊断、前台启动、备份和恢复工具，但目标
+  MacBook 的实际安装部署仍未执行。
 - 图片上传、去重、永久本地保存、任务排队和后台处理。
 - 豆包与提示词优化模型配置全部在后台管理。Windows 使用当前用户的
   DPAPI；macOS 使用当前登录用户的 Keychain。数据库只保存版本化密文或
@@ -64,6 +65,89 @@ macOS Keychain 工程接线已完成：
 这只代表安全层及隔离 Keychain 测试已经完成，不代表 MacBook 安装部署或
 真实模型联调已经完成。换系统或换用户后应在目标电脑重新填写 API Key。
 
+## macOS 首次安装与启动
+
+macOS 受控入口位于 `scripts/macos/`。所有脚本都可从任意工作目录运行，
+路径支持空格；不会使用 `sudo`、Homebrew、远程安装脚本、shell rc、
+launchd、系统配置或防火墙修改。
+
+版本门禁：
+
+- Python 3.11 或 3.12；
+- Node.js 20.x～26.x；
+- npm 10.x 或 11.x。
+
+先做完全离线的只读检查或演练：
+
+```bash
+./scripts/macos/install.sh --check
+./scripts/macos/install.sh --dry-run
+```
+
+首次安装：
+
+```bash
+./scripts/macos/install.sh
+```
+
+安装脚本只会在仓库内创建 `.venv`、按已有
+`backend/requirements.txt` 安装依赖、执行 `frontend/npm ci` 和生产构建；
+不会创建、删除或覆盖 `DATA_DIR`。
+
+启动前诊断与前台启动：
+
+```bash
+./scripts/macos/doctor.sh
+./scripts/macos/start.sh
+```
+
+`start.sh` 必须先通过 doctor，随后复用现有 Python launcher 并保持前台
+运行；按 `Ctrl-C` 由 launcher 清理 worker。macOS 脚本默认只监听
+`127.0.0.1`。只有用户在调用脚本时显式设置 `APP_HOST` 才会改变监听地址，
+例如 `APP_HOST=0.0.0.0 ./scripts/macos/start.sh`；暴露到局域网前应另行完成
+目标环境安全评估。脚本不安装 daemon，也不创建 launchd 服务。
+
+以上说明的是代码能力和离线测试结果，不代表目标 MacBook 已完成安装、登录、
+页面保存 Keychain 凭据或真实模型联调。
+
+## macOS 备份与恢复
+
+创建脱敏备份：
+
+```bash
+./scripts/macos/backup.sh
+```
+
+默认输出到 `~/Documents/3d66-label-system-backups`；也可显式指定仓库和数据
+目录之外的位置：
+
+```bash
+./scripts/macos/backup.sh --backup-dir "/Volumes/Safe Disk/3d66 backups"
+```
+
+备份使用 Python `sqlite3` backup API 生成一致数据库副本，复制 `images/`，
+并生成版本化 `manifest.json`（时间、数据库迁移版本、可用时的 Git commit、
+相对文件路径、大小与 SHA-256）。目录权限收紧为 `700`，文件为 `600`。
+
+正式备份不会包含 `logs/`、`.env`、API Key、Keychain/DPAPI 内容或登录会话。
+数据库副本会清空 `session_tokens`，同时清空主模型和优化模型的
+`encrypted_api_key` 字段，再执行 `VACUUM` 后计算哈希。因此恢复后会话不会
+恢复，API Key 必须在目标机重新填写；禁止跨平台复制 Keychain 或 DPAPI。
+
+恢复前可单独做只读校验：
+
+```bash
+./scripts/macos/restore.sh \
+  --backup "/path/to/3d66-backup-v1-YYYYMMDDTHHMMSSZ" \
+  --dry-run
+```
+
+实际恢复使用同一命令去掉 `--dry-run`。脚本仍会自动先完成一次 dry-run，
+校验 manifest schema、相对路径、SHA-256、SQLite `integrity_check` 和迁移
+版本，再检查服务端口必须停止。通过后先为当前 database/images 创建权限
+收紧的本地临时回滚快照，再做原子替换；失败时自动补偿恢复，成功或成功
+回滚后删除临时快照。
+
 ## 局域网访问
 
 启动窗口会显示两条地址：
@@ -112,15 +196,20 @@ macOS Keychain 工程接线已完成：
 
 ## 数据位置
 
-默认数据位于：
+Windows 默认数据位于：
 
 `%LOCALAPPDATA%\3d66-label-system`
+
+macOS 默认数据位于：
+
+`~/Library/Application Support/3d66-label-system`
 
 其中包含 SQLite 数据库、图片和日志。Windows 的 DPAPI 密文绑定当前用户；
 macOS 数据库只持有当前用户 Keychain 条目的稳定引用。复制数据库到另一台
 电脑、另一系统或另一用户后都不能直接取得原 API Key，必须重新填写。
 
-如需改变数据目录，把 `.env.example` 复制为 `.env`，取消 `DATA_DIR` 注释并填写绝对路径。`.env` 不会进入 Git。
+如需改变数据目录，把 `.env.example` 复制为 `.env`，取消 `DATA_DIR` 注释并
+填写仓库之外的绝对路径；显式 `DATA_DIR` 优先。`.env` 不会进入 Git。
 
 ## 开发验证
 
@@ -138,6 +227,9 @@ cd backend
 ..\.venv\Scripts\python.exe -X utf8 -m pytest -q
 ```
 
-当前凭据安全层基线：专项 `15 passed, 1 skipped`；macOS 真实隔离 Keychain
-测试已执行，Windows 真实 DPAPI 测试在 macOS 由测试自身跳过。全后端
-`328 passed, 1 skipped`。本阶段未触发真实模型调用，也未重新执行前端构建。
+当前 macOS 部署生命周期专项：`20 passed`；全后端
+`348 passed, 1 skipped, 1 warning`。五个 shell 脚本 `bash -n`、
+Python `compileall`、`install.sh --check/--dry-run` 与
+`git diff --check` 通过。本阶段只使用 `tmp_path` 明显假数据，未部署、
+未访问外网、未读取真实 Keychain、未调用真实模型，也未重新执行前端构建
+或浏览器验收。

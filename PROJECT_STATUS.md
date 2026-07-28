@@ -11,10 +11,56 @@
 - 远程仓库：`origin = https://github.com/chishiyu07-max/3d66-label-system.git`
 - 分支关系：每次交付以 `git status -sb` 的实时结果为准。
 
+## 最新完成：macOS 首次安装与脱敏灾备生命周期（2026-07-28）
+
+> 基线提交：`b7d1574 feat: secure macOS credentials with Keychain`。本次
+> 修改保留为未提交工作树，未提交、未推送、未部署；决策见 ADR-0013。
+
+已完成：
+
+- macOS 默认数据目录改为
+  `~/Library/Application Support/3d66-label-system`；Windows
+  `%LOCALAPPDATA%` 与显式 `DATA_DIR` 优先行为保持不变。
+- `scripts/macos/` 新增 `install.sh`、`doctor.sh`、`start.sh`、
+  `backup.sh`、`restore.sh`；全部从脚本位置解析仓库、支持路径空格、
+  `set -euo pipefail`，不使用远程脚本、sudo、Homebrew、shell rc、
+  launchd、系统设置或防火墙修改。
+- 安装门禁为 Python 3.11/3.12、Node.js 20～26、npm 10/11；
+  `--check/--dry-run` 不安装、不构建、不联网。实际安装只允许仓库内
+  `.venv`、已有 requirements、`npm ci` 和前端生产构建。
+- start 必须先 doctor，再以前台方式复用现有 launcher；默认仅监听
+  `127.0.0.1`，只接受调用脚本时用户显式 `APP_HOST` 覆盖，不创建常驻服务。
+- `backend/app/macos_deploy.py` 用标准库实现一致 SQLite backup、图片普通
+  文件复制、v1 manifest/hash、权限收紧、恢复 dry-run、迁移/完整性门禁、
+  服务运行拒绝、同文件系统 staging、原子替换与失败自动回滚。
+- 正式备份会清空 `session_tokens` 以及主模型/优化模型
+  `encrypted_api_key`，执行 `VACUUM` 后再哈希；不包含 logs、`.env`、
+  API Key、Keychain/DPAPI 内容或引用。恢复后会话和凭据不恢复，目标机必须
+  重新登录并填写 API Key。
+
+验证：
+
+- macOS 部署专项：`20 passed`。
+- 全后端在隔离临时 `DATA_DIR`：`348 passed, 1 skipped, 1 warning`。
+- 五个脚本 `bash -n`、Python `compileall`、
+  `install.sh --check/--dry-run`（从仓库外 cwd）与 `git diff --check`
+  通过。
+- 全部新增测试仅使用 `tmp_path` 和明显假数据；未部署、未访问外网、未读取
+  真实 Keychain、未调用真实模型，未改前端源码，因此未重跑浏览器验收。
+
+明确未完成：
+
+- 目标 MacBook 的真实安装、启动、登录、页面保存 Keychain 凭据、公司内网
+  可达性与备份恢复演练未执行。
+- 真实 API Key、真实模型、真实数据、XLSX/图片冻结执行器、Gold 形成与发布
+  均未完成。
+- Windows 研发机部署与真实 DPAPI 回归仍未完成。
+
 ## 最新完成：macOS Keychain 凭据安全层（2026-07-28）
 
-> 基线提交：`9c67118 feat: add P0-E canary orchestration workspace`。本次
-> 修改保留为未提交工作树，未提交、未推送、未部署；决策见 ADR-0012。
+> 基线提交：`9c67118 feat: add P0-E canary orchestration workspace`，成果
+> 已进入提交 `b7d1574 feat: secure macOS credentials with Keychain`；
+> 决策见 ADR-0012。
 
 已完成：
 
@@ -212,6 +258,7 @@
 | 智能抽样 v1 | 已完成 | 必审/抽审/暂缓/已审、稳定 10% 抽样、原因和优先级 |
 | 抽样策略配置 v1.1 | 已提交 | 自动测试和构建通过，待补一次真实浏览器验收 |
 | P0-E 金丝雀前端编排 | 工作树已完成 | 已接 E3 认证 API；只登记门禁证据，不执行导入、下载、模型、Gold 或发布 |
+| macOS 部署生命周期 | 离线能力已完成 | 安装/诊断/前台启动/脱敏备份恢复已测试；目标 MacBook 尚未实际部署 |
 
 ## 本地数据快照
 
@@ -227,14 +274,15 @@
 
 ### P0
 
-1. 为 P0-E 接入真实且受控的 XLSX/冻结执行器证据来源，并完成 MacBook
-   安装部署、Windows 部署和真实数据/模型联调；继续保持下载、模型、Gold
-   和发布的独立门禁。
-2. 补做抽样策略配置 v1.1 的真实浏览器验收。
-3. 让审核队列按当前模型×提示词组合、任务批次和时间范围组织，避免全部历史结果成为今日待办。
-4. 增加审核任务认领、占用状态和乐观锁，避免多人覆盖同一结果。
-5. 把提示词发布改为真正的回归门禁：先回归通过，再允许 published。
-6. 建立一等的模型×A×B×Rubric×Engine 发布组合实体。
+1. 在目标 MacBook 按 ADR-0013 做首次安装、启动、登录、Keychain 页面保存
+   和脱敏备份恢复演练，再接公司内网真实模型；同时继续推进 Windows 部署。
+2. 为 P0-E 接入真实且受控的 XLSX/冻结执行器证据来源；继续保持下载、模型、
+   Gold 和发布的独立门禁。
+3. 补做抽样策略配置 v1.1 的真实浏览器验收。
+4. 让审核队列按当前模型×提示词组合、任务批次和时间范围组织，避免全部历史结果成为今日待办。
+5. 增加审核任务认领、占用状态和乐观锁，避免多人覆盖同一结果。
+6. 把提示词发布改为真正的回归门禁：先回归通过，再允许 published。
+7. 建立一等的模型×A×B×Rubric×Engine 发布组合实体。
 
 ### P1
 
@@ -242,7 +290,6 @@
 2. 将评测列表改为服务端分页、筛选与聚合；当前前端最多加载 1000 条。
 3. 智能抽样决策改为增量计算或持久化，并记录每次审核采用的策略快照。
 4. 增加准确率、八维误差、L4/L5 精确率、画质/摄影误判率、空字段率和人工介入率报表。
-5. 提供不含 API Key 的数据备份/恢复工具，用于正式阶段换电脑。
 
 ## 当前暂不做
 
@@ -255,12 +302,19 @@
 
 ## 最近验证基线
 
-2026-07-19：
+2026-07-28：
 
 ```text
-后端 pytest：43 passed, 1 warning
-前端正式构建：通过
+macOS 部署专项：20 passed
+后端 pytest：348 passed, 1 skipped, 1 warning（隔离临时 DATA_DIR）
+shell bash -n：通过
+Python compileall：通过
+install.sh --check/--dry-run：通过，未联网
+git diff --check：通过
 ```
+
+本阶段未修改前端源码，未部署或启动服务，未进行浏览器、真实 Keychain 页面、
+真实模型、XLSX 执行器或 Gold 验收。
 
 标准命令：
 

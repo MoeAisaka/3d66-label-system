@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -12,7 +13,14 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 load_dotenv(PROJECT_ROOT / ".env")
 
 
-def _default_data_dir() -> Path:
+def _default_data_dir(
+    *,
+    platform_name: str | None = None,
+    home: Path | None = None,
+) -> Path:
+    effective_platform = platform_name or sys.platform
+    if effective_platform == "darwin":
+        return (home or Path.home()) / "Library" / "Application Support" / "3d66-label-system"
     local_app_data = os.getenv("LOCALAPPDATA")
     if local_app_data:
         return Path(local_app_data) / "3d66-label-system"

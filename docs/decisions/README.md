@@ -25,6 +25,7 @@
 | [0010](0010-p0e-e2-canary-run-state-machine.md) | Accepted | P0-E E2 金丝雀运行计划与状态机编排层 |
 | [0011](0011-p0e-e3-canary-persistence-api.md) | Accepted | P0-E E3 金丝雀持久化、认证 API、幂等与乐观锁 |
 | [0012](0012-macos-keychain-credentials.md) | Accepted | macOS Keychain 与跨平台版本化凭据引用 |
+| [0013](0013-macbook-deployment-lifecycle.md) | Accepted | MacBook 首次安装、诊断、前台启动与脱敏灾备生命周期 |
 
 ## 新增 ADR 的规则
 
