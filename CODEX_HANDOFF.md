@@ -237,11 +237,13 @@ API Key 使用当前 Windows 用户的 DPAPI 加密，前端不会再次读回�
 - 每次保存递增策略修订号；结果列表和详情返回 `smart-sampling-v1.1/policy-N`，便于定位当前队列采用的规则。
 - 当前策略仍是全局单例；按组合、任务批次和时间范围组织待办，以及审核完成时固化策略快照，仍属于后续 P0。
 
-### 4.12 P0-E 安全离线导入基础（仅 E0/E1，未提交）
+### 4.12 P0-E 安全离线导入基础与 E2 状态机编排（E0/E1/E2）
 
-本仓库为 P0-E 的独立隔离工作副本，当前只完成 **E0/E1 工程基础**：安全 XLSX 预检、受控图片获取/确定性冻结的骨架，以及 30～50 张离线确定性候选预览。**明确边界**：未真实联网下载图片、未调用任何模型、未写业务数据库、未形成任何 Gold 样本；代码保持未提交。
+本仓库为 P0-E 的独立隔离工作副本。**E0/E1 代码已由上游 OpenClaw 控制器提交为 `16cd2c75a5c39ddf94157e388860075cfaffcd4c`，并独立验证 39 项针对性测试及 228 项通用后端测试（macOS 上 1 项 Windows-only DPAPI 测试取消选择）。** E2 状态机编排层已于 2026-07-28 新增。
 
-新增文件（均在允许修改范围内）：
+**明确边界**：未真实联网下载图片、未调用任何模型、未写业务数据库、未形成任何 Gold 样本、未发布任何候选。
+
+**E0/E1 文件**（均已在上游控制器提交并验证）：
 
 - `backend/app/p0e_safe_import.py`：只读 XLSX 预检。仅 `.xlsx`；受限 ZIP/XML 解析并拒绝公式/宏/外部关系/异常 ZIP/超限/不安全 XML；重复表头 → 稳定内部名并原样保留 RAW；`farmat → format` 仅候选映射（需人工确认），从不静默覆盖；按文件字节 SHA-256 得幂等批次键；Gold 锁缺失/已锁即 fail-closed；不写业务库。
 - `backend/app/p0e_image_freeze.py`：默认拒绝任意 URL；仅显式精确域名 + HTTPS + 无 userinfo；逐跳校验 A/AAAA 公网属性并重校验重定向；默认传输 fail-closed 返回 `DNS_PINNING_UNAVAILABLE`（防 DNS rebinding）；Content-Type + 魔数 + Pillow 三重校验；流式临时落盘 + SHA-256 去重 + 原子替换 + 中断清理；来源 URL 去除 query/userinfo。
@@ -249,9 +251,15 @@ API Key 使用当前 Windows 用户的 DPAPI 加密，前端不会再次读回�
 - `backend/tests/test_p0e_safe_import.py`：覆盖上述全部安全与确定性用例（含 SSRF 参数化、重定向重校验、DNS 变更、MIME/长度欺骗、临时清理、SHA 去重、manifest 原子确定性、697 排除等）。
 - `backend/tests/conftest.py`：把 `backend/` 加入 `sys.path`，使 `import app` 在仓库根与 `backend/` 两种工作目录下都可用；从 `backend/` 运行为无操作。
 
-不可破坏约束（本次严格遵守）：未引入通用 `Pipeline`/`Candidate` 实体；未改动数据库 Schema、API、前端；未改变 `Asset 1:N EvaluationResult`、`evaluation_id` 审核、StrategyBundle、五类队列及 P0-A/B/C.1/D 既有合同。相邻 Sol 冻结产物在只读目录 `/Users/yukina/OpenClaw/p0e-sol-partial-frozen/` 中，本次仅逐行审查后选择性复用，未修改该目录。
+**E2 新增文件**：
 
-验证说明：本次会话执行环境未启用 Bash 工具，`pytest`/`compileall`/`git diff --check` 未能由 AI 实际执行；测试按 correct-by-construction 编写，最终运行验证需由用户执行。
+- `backend/app/p0e_canary_run.py`：纯函数状态机编排层。实现六态单调状态机（`draft → preflight_ready → approvals_ready → freeze_ready → candidate_ready → human_review_ready`）加终止态 `failed`/`cancelled`；所有转换为纯函数（无 I/O、无数据库、无模型），fail-closed，证据 URL 安全扫描，幂等 SHA-256 指纹，机器可读 `CanaryRunError`；五项不变量在所有快照中显式记录。
+- `backend/tests/test_p0e_canary_run.py`：确定性测试，覆盖完整快乐路径、所有跳跃门控、回退禁止、终止态无法继续、所有缺失/无效审批场景、静默映射尝试、空白名单、固定 IP 未证明、不完整/不匹配 manifest、不足候选预览、候选声称 Gold/下载/模型调用、证据 URL 含 query/fragment/userinfo 拒绝、幂等性、机器可读错误、不变量全链路验证。
+- `docs/decisions/0010-p0e-e2-canary-run-state-machine.md`：ADR-0010。
+
+不可破坏约束（本次严格遵守）：未引入通用 `Pipeline`/`Candidate` 实体；未改动数据库 Schema、API、前端；未改变 `Asset 1:N EvaluationResult`、`evaluation_id` 审核、StrategyBundle、五类队列及 P0-A/B/C.1/D 既有合同；未修改任何 E0/E1 已提交模块。
+
+验证说明：本次会话执行环境未启用 Bash 工具，`pytest` 无法由 AI 实际执行；测试按 correct-by-construction 编写，最终运行验证需由控制器执行。
 
 ## 5. 美感维度和评分约束
 
