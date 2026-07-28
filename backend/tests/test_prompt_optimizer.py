@@ -213,6 +213,27 @@ def test_diagnostic_records_are_bounded_and_role_stratified(tmp_path) -> None:
     assert "approved" in decisions
 
 
+def test_invalid_early_records_are_backfilled_from_full_role_pools(tmp_path) -> None:
+    corrected = [
+        _bounded_item(tmp_path, index, "corrected") for index in range(25)
+    ]
+    controls = [
+        _bounded_item(tmp_path, 100 + index, "approved") for index in range(9)
+    ]
+    for item, _ in corrected[:24] + controls[:8]:
+        (tmp_path / item.asset.stored_name).unlink()
+
+    bounded, _total_bytes, omitted_count = (
+        optimizer._bounded_diagnostic_records(corrected + controls, tmp_path)
+    )
+
+    assert omitted_count == 32
+    assert [record["decision"] for _, record, _ in bounded] == [
+        "corrected",
+        "approved",
+    ]
+
+
 def test_diagnostic_records_respect_aggregate_byte_limit(
     tmp_path,
     monkeypatch,
@@ -458,13 +479,15 @@ def test_diagnosis_and_audit_persist_when_synthesis_fails(
                 assert diagnosis["summary"] == "persisted diagnosis"
                 assert diagnostic_audit["status"] == "succeeded"
                 assert diagnostic_audit["attempt_count"] == 1
-            raise DoubaoHTTPError(
+            error = DoubaoHTTPError(
                 502,
                 {
                     "x-request-id": "synthesis-request-502",
                     "x-debug-body": "must-not-be-stored",
                 },
             )
+            error.attempt_count = 1
+            raise error
 
     _install_optimizer_dependencies(
         monkeypatch,

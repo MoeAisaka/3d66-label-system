@@ -239,7 +239,9 @@ def _select_records(items: list[Any]) -> tuple[list[tuple[Any, dict[str, Any]]],
 
     corrected.sort(key=stable_sample_key)
     controls.sort(key=stable_sample_key)
-    selected = corrected[:24] + controls[:8]
+    # Keep the complete deterministic role pools until file validity and request
+    # limits are applied, so invalid early records can be backfilled safely.
+    selected = corrected + controls
     for _, record in selected:
         record["sample_role"] = (
             "target_error"
@@ -411,7 +413,7 @@ async def run_prompt_optimization(run_id: int) -> None:
             error_type, error_message = _normalized_error(exc)
             run.diagnostic_audit_json = _stage_audit_json(
                 status="failed",
-                attempt_count=attempt_count or 1,
+                attempt_count=attempt_count,
                 upstream_status_code=status_code,
                 request_correlation_id=request_id,
                 elapsed_ms=_elapsed_ms(diagnostic_started),
@@ -552,7 +554,7 @@ async def run_prompt_optimization(run_id: int) -> None:
             error_type, error_message = _normalized_error(exc)
             run.synthesis_audit_json = _stage_audit_json(
                 status="failed",
-                attempt_count=attempt_count or 1,
+                attempt_count=attempt_count,
                 upstream_status_code=status_code,
                 request_correlation_id=request_id,
                 elapsed_ms=_elapsed_ms(synthesis_started),
