@@ -18,6 +18,8 @@ from .regression import latest_review_for_result
 DIAGNOSTIC_OUTPUT_BUDGET = 2048
 SYNTHESIS_OUTPUT_BUDGET = 4096
 OPTIMIZER_REASONING_EFFORT = "high"
+MAX_DIAGNOSTIC_IMAGES = 8
+MAX_DIAGNOSTIC_IMAGE_BYTES = 32 * 1024 * 1024
 STAGE_AUDIT_FIELDS = (
     "status",
     "attempt_count",
@@ -234,6 +236,37 @@ def _select_records(items: list[Any]) -> tuple[list[tuple[Any, dict[str, Any]]],
     return selected, holdout_ids, len(eligible)
 
 
+def _bounded_diagnostic_records(
+    selected: list[tuple[Any, dict[str, Any]]],
+    upload_dir: Any,
+) -> tuple[list[tuple[Any, dict[str, Any], Any]], int, int]:
+    """Bound one diagnostic request before any image is read or encoded."""
+    bounded: list[tuple[Any, dict[str, Any], Any]] = []
+    total_bytes = 0
+    omitted_count = 0
+    for item, record in selected:
+        image_path = upload_dir / item.asset.stored_name
+        try:
+            image_bytes = image_path.stat().st_size
+        except OSError as exc:
+            raise ValueError("诊断图片不可读取") from exc
+        if image_bytes <= 0:
+            raise ValueError("诊断图片为空文件")
+        if image_bytes > MAX_DIAGNOSTIC_IMAGE_BYTES:
+            raise ValueError("单张诊断图片超过请求总字节上限")
+        if (
+            len(bounded) >= MAX_DIAGNOSTIC_IMAGES
+            or total_bytes + image_bytes > MAX_DIAGNOSTIC_IMAGE_BYTES
+        ):
+            omitted_count += 1
+            continue
+        bounded.append((item, record, image_path))
+        total_bytes += image_bytes
+    if not bounded:
+        raise ValueError("诊断图片总量超过安全请求上限")
+    return bounded, total_bytes, omitted_count
+
+
 async def run_prompt_optimization(run_id: int) -> None:
     db = SessionLocal()
     run: PromptOptimizationRun | None = None
@@ -287,8 +320,19 @@ async def run_prompt_optimization(run_id: int) -> None:
             "只输出合法JSON，字段为 summary、cases、patterns、prompt_risks。"
         )
         settings = get_settings()
+        bounded_records, diagnostic_image_bytes, omitted_image_count = (
+            _bounded_diagnostic_records(selected, settings.upload_dir)
+        )
+        selected = [(item, record) for item, record, _ in bounded_records]
+        corrected_count = sum(
+            1 for _, record in selected if record["decision"] == "corrected"
+        )
+        if corrected_count == 0:
+            raise ValueError("安全限额内至少需要一张带有人工纠错的图片")
+        run.corrected_count = corrected_count
+        db.commit()
         samples = []
-        for item, record in selected:
+        for item, record, image_path in bounded_records:
             sample_text = json.dumps(
                 {
                     "task": "诊断这张图片的模型判断与人工纠错差异",
@@ -300,7 +344,7 @@ async def run_prompt_optimization(run_id: int) -> None:
             samples.append(
                 (
                     sample_text,
-                    settings.upload_dir / item.asset.stored_name,
+                    image_path,
                     item.asset.mime_type,
                 )
             )
@@ -341,6 +385,10 @@ async def run_prompt_optimization(run_id: int) -> None:
             "analysis_count": len(selected),
             "corrected_count": corrected_count,
             "control_count": len(selected) - corrected_count,
+            "diagnostic_image_bytes": diagnostic_image_bytes,
+            "diagnostic_image_limit": MAX_DIAGNOSTIC_IMAGES,
+            "diagnostic_byte_limit": MAX_DIAGNOSTIC_IMAGE_BYTES,
+            "omitted_image_count": omitted_image_count,
             "blind_holdout_count": len(holdout_ids),
             "blind_holdout_asset_ids": holdout_ids,
             "regression_roles": [

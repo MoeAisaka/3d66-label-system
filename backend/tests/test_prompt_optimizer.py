@@ -138,6 +138,48 @@ def test_diagnostic_image_call_attempt_override_is_exactly_one(
     assert calls[0]["response_format"] == {"type": "json_object"}
 
 
+def test_diagnostic_records_are_bounded_before_image_encoding(tmp_path) -> None:
+    selected = []
+    for index in range(optimizer.MAX_DIAGNOSTIC_IMAGES + 3):
+        image_path = tmp_path / f"sample-{index}.jpg"
+        image_path.write_bytes(b"image")
+        item = SimpleNamespace(
+            asset=SimpleNamespace(stored_name=image_path.name)
+        )
+        selected.append((item, {"decision": "corrected"}))
+
+    bounded, total_bytes, omitted_count = (
+        optimizer._bounded_diagnostic_records(selected, tmp_path)
+    )
+
+    assert len(bounded) == optimizer.MAX_DIAGNOSTIC_IMAGES
+    assert total_bytes == optimizer.MAX_DIAGNOSTIC_IMAGES * len(b"image")
+    assert omitted_count == 3
+
+
+def test_diagnostic_records_respect_aggregate_byte_limit(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(optimizer, "MAX_DIAGNOSTIC_IMAGE_BYTES", 10)
+    selected = []
+    for index in range(3):
+        image_path = tmp_path / f"bytes-{index}.jpg"
+        image_path.write_bytes(b"123456")
+        item = SimpleNamespace(
+            asset=SimpleNamespace(stored_name=image_path.name)
+        )
+        selected.append((item, {"decision": "corrected"}))
+
+    bounded, total_bytes, omitted_count = (
+        optimizer._bounded_diagnostic_records(selected, tmp_path)
+    )
+
+    assert len(bounded) == 1
+    assert total_bytes == 6
+    assert omitted_count == 2
+
+
 def _create_optimizer_run(tmp_path):
     engine = create_engine(
         f"sqlite:///{tmp_path / 'optimizer.db'}",
@@ -258,6 +300,48 @@ def _install_optimizer_dependencies(
         lambda: SimpleNamespace(upload_dir=tmp_path),
     )
     monkeypatch.setattr(optimizer, "DoubaoClient", fake_client_type)
+
+
+def test_oversized_diagnostic_image_fails_before_client_call(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    engine, session_factory, run_id = _create_optimizer_run(tmp_path)
+    image_path = tmp_path / "optimizer-sample.jpg"
+    image_path.write_bytes(
+        b"x" * (optimizer.MAX_DIAGNOSTIC_IMAGE_BYTES + 1)
+    )
+
+    class ClientMustNotRun:
+        calls = 0
+
+        def __init__(self, _config):
+            pass
+
+        async def chat_json_images(self, *_args, **_kwargs):
+            type(self).calls += 1
+            raise AssertionError("oversized input reached the HTTP client")
+
+    _install_optimizer_dependencies(
+        monkeypatch,
+        tmp_path,
+        session_factory,
+        ClientMustNotRun,
+    )
+    try:
+        asyncio.run(optimizer.run_prompt_optimization(run_id))
+        with session_factory() as db:
+            run = db.get(PromptOptimizationRun, run_id)
+            audit = json.loads(run.diagnostic_audit_json)
+            assert run.status == "failed"
+            assert run.candidate_system_prompt == ""
+            assert run.candidate_user_prompt == ""
+            assert audit["status"] == "failed"
+            assert audit["attempt_count"] == 0
+            assert audit["error_type"] == "invalid_stage_output"
+        assert ClientMustNotRun.calls == 0
+    finally:
+        engine.dispose()
 
 
 def test_diagnosis_and_audit_persist_when_synthesis_fails(
