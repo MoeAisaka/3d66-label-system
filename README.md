@@ -4,9 +4,12 @@
 
 ## 当前能力
 
-- Windows 本机运行，局域网审核员通过浏览器共同使用。
+- 生产目标仍是 Windows 主机运行、局域网审核员通过浏览器共同使用；当前
+  另有 macOS 工程验收环境，但 MacBook 安装部署尚未完成。
 - 图片上传、去重、永久本地保存、任务排队和后台处理。
-- 豆包模型配置全部在后台管理；API Key 使用当前 Windows 用户的 DPAPI 加密，前端不会再次读回完整密钥。
+- 豆包与提示词优化模型配置全部在后台管理。Windows 使用当前用户的
+  DPAPI；macOS 使用当前登录用户的 Keychain。数据库只保存版本化密文或
+  Keychain 引用，前端不会再次读回完整密钥。
 - 使用用户提供的 Doubao-Seed-2.0-Lite V2.1 提示词，按 A（分类/形态/画质）和 B（美感维度）两次调用。
 - 兼容只有一版完整提示词的单次调用模式；任务和结果明确记录为“单提示词”，不会伪装成 A/B 两个版本。
 - 总分和 L1～L5 由服务端固定评分引擎计算，模型不直接决定最终总分。
@@ -43,6 +46,23 @@
 6. 重新上传图片、创建评测任务。Demo 阶段不需要迁移家里电脑的数据。
 
 Git 只保存代码、提示词和配置结构；`.venv`、`node_modules`、构建产物、数据库、图片、日志和 `.env` 都已排除。
+
+## macOS 凭据安全层状态
+
+macOS Keychain 工程接线已完成：
+
+- 通过 `ctypes` 直接调用 Security.framework 的通用密码 API，不经过
+  `security` CLI、shell、命令行参数或临时文件；
+- 主模型与提示词优化模型使用不同的稳定 account；同一 account 再次保存时
+  原位覆盖；
+- SQLite 的 `encrypted_api_key` 只保存
+  `keychain:v1:model-config` 或 `keychain:v1:optimizer-config`，真实密钥只
+  存在当前登录用户的 Keychain；
+- Windows 新写入使用 `dpapi:v1:` 前缀，并继续兼容既有未加前缀的 DPAPI
+  密文；Keychain 与 DPAPI 引用不能跨平台读取。
+
+这只代表安全层及隔离 Keychain 测试已经完成，不代表 MacBook 安装部署或
+真实模型联调已经完成。换系统或换用户后应在目标电脑重新填写 API Key。
 
 ## 局域网访问
 
@@ -96,7 +116,9 @@ Git 只保存代码、提示词和配置结构；`.venv`、`node_modules`、构�
 
 `%LOCALAPPDATA%\3d66-label-system`
 
-其中包含 SQLite 数据库、图片和日志。API Key 由 Windows 当前用户加密，复制数据库到另一台电脑也无法直接解密，必须在新电脑重新填写。
+其中包含 SQLite 数据库、图片和日志。Windows 的 DPAPI 密文绑定当前用户；
+macOS 数据库只持有当前用户 Keychain 条目的稳定引用。复制数据库到另一台
+电脑、另一系统或另一用户后都不能直接取得原 API Key，必须重新填写。
 
 如需改变数据目录，把 `.env.example` 复制为 `.env`，取消 `DATA_DIR` 注释并填写绝对路径。`.env` 不会进入 Git。
 
@@ -116,4 +138,6 @@ cd backend
 ..\.venv\Scripts\python.exe -X utf8 -m pytest -q
 ```
 
-当前基线：前端生产构建通过，后端 43 项测试通过。
+当前凭据安全层基线：专项 `15 passed, 1 skipped`；macOS 真实隔离 Keychain
+测试已执行，Windows 真实 DPAPI 测试在 macOS 由测试自身跳过。全后端
+`328 passed, 1 skipped`。本阶段未触发真实模型调用，也未重新执行前端构建。

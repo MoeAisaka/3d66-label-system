@@ -18,6 +18,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    SecretStr,
     SkipValidation,
     WithJsonSchema,
     model_validator,
@@ -75,6 +76,9 @@ from .queue_scheduler import (
     QueuePolicy,
 )
 from .security import (
+    MODEL_CONFIG_KEYCHAIN_ACCOUNT,
+    OPTIMIZER_CONFIG_KEYCHAIN_ACCOUNT,
+    SecretStorageError,
     create_session_token,
     hash_session_token,
     protect_secret,
@@ -106,6 +110,24 @@ MAX_UPLOAD_BYTES = 25 * 1024 * 1024
 ALLOWED_MIME = {"image/jpeg", "image/png", "image/webp"}
 
 
+def _protected_api_key(
+    value: SecretStr | None,
+    *,
+    account: str,
+) -> str | None:
+    if value is None:
+        return None
+    secret = value.get_secret_value().strip()
+    if not secret:
+        raise HTTPException(status_code=422, detail="API Key 不能为空")
+    if len(secret) > 1000:
+        raise HTTPException(status_code=422, detail="API Key 长度不能超过 1000 个字符")
+    try:
+        return protect_secret(secret, account=account)
+    except SecretStorageError:
+        raise HTTPException(status_code=500, detail="API Key 安全存储失败") from None
+
+
 class LoginRequest(BaseModel):
     username: str = Field(min_length=1, max_length=80)
     password: str = Field(min_length=1, max_length=200)
@@ -116,7 +138,10 @@ class ModelConfigUpdate(BaseModel):
     base_url: str = Field(min_length=8, max_length=300)
     api_path: str = Field(min_length=1, max_length=120)
     model_id: str = Field(min_length=1, max_length=200)
-    api_key: str | None = Field(default=None, max_length=1000)
+    api_key: SecretStr | None = Field(
+        default=None,
+        json_schema_extra={"maxLength": 1000},
+    )
     temperature: float = Field(ge=0, le=2)
     max_tokens: int = Field(ge=128, le=65536)
     timeout_seconds: int = Field(ge=10, le=600)
@@ -131,7 +156,10 @@ class OptimizerConfigUpdate(BaseModel):
     base_url: str = Field(min_length=8, max_length=300)
     api_path: str = Field(min_length=1, max_length=120)
     model_id: str = Field(min_length=1, max_length=200)
-    api_key: str | None = Field(default=None, max_length=1000)
+    api_key: SecretStr | None = Field(
+        default=None,
+        json_schema_extra={"maxLength": 1000},
+    )
     temperature: float = Field(default=0.1, ge=0, le=2)
     max_tokens: int = Field(default=12000, ge=512, le=65536)
     timeout_seconds: int = Field(default=300, ge=10, le=900)
@@ -1898,8 +1926,12 @@ def update_model_config(
         "high_risk_review_enabled",
     ):
         setattr(config, field, getattr(payload, field))
-    if payload.api_key:
-        config.encrypted_api_key = protect_secret(payload.api_key.strip())
+    protected_api_key = _protected_api_key(
+        payload.api_key,
+        account=MODEL_CONFIG_KEYCHAIN_ACCOUNT,
+    )
+    if protected_api_key is not None:
+        config.encrypted_api_key = protected_api_key
     db.commit()
     return {"ok": True}
 
@@ -1972,8 +2004,12 @@ def update_optimizer_config(
         "structured_output",
     ):
         setattr(config, field, getattr(payload, field))
-    if payload.api_key:
-        config.encrypted_api_key = protect_secret(payload.api_key.strip())
+    protected_api_key = _protected_api_key(
+        payload.api_key,
+        account=OPTIMIZER_CONFIG_KEYCHAIN_ACCOUNT,
+    )
+    if protected_api_key is not None:
+        config.encrypted_api_key = protected_api_key
     db.commit()
     return {"ok": True}
 

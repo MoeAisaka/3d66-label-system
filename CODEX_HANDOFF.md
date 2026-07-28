@@ -146,7 +146,9 @@ git log --oneline -10
 - structured output；
 - 高风险自动复核开关。
 
-API Key 使用当前 Windows 用户的 DPAPI 加密，前端不会再次读回完整密钥。换电脑后必须重新填写。
+API Key 在 Windows 使用当前用户 DPAPI，在 macOS 使用当前登录用户
+Keychain；前端不会再次读回完整密钥。数据库在 macOS 只保存稳定 Keychain
+引用。换系统、换用户或换电脑后必须重新填写。
 
 ### 4.5 评测结果与人工纠错
 
@@ -305,9 +307,38 @@ OpenAPI 路径核验均通过。E3 前端新增后，`npm run lint` 与
 运行后列表刷新可能短暂回选旧运行，已用缓存预置与 pending selection
 保护修复，并在修复后重跑完整浏览器链通过。
 
-仍未完成：真实 XLSX/图片冻结执行器接线、macOS Keychain 凭据接线、
-Windows 研发部署、真实数据/模型联调、Gold 形成和发布门禁。后续阶段
-不得把前端登记动作当作这些真实效果已经发生。
+仍未完成：真实 XLSX/图片冻结执行器接线、MacBook 安装部署、Windows
+研发部署、真实数据/模型联调、Gold 形成和发布门禁。macOS Keychain
+代码与隔离测试已由后续安全层阶段完成；后续阶段不得把前端登记动作当作
+其他真实效果已经发生。
+
+### 4.13 macOS Keychain 凭据安全层
+
+基线提交 `9c67118` 上的未提交工作树已完成跨平台凭据引用，决策记录见
+ADR-0012：
+
+- `backend/app/security.py` 使用标准库 `ctypes` 直接调用 macOS
+  Security.framework 的 generic password API；没有使用 `security` CLI、
+  shell、命令行参数、临时文件或第三方依赖。
+- macOS 主模型固定使用 `model-config` account，提示词优化模型固定使用
+  `optimizer-config` account。SQLite 只保存
+  `keychain:v1:<account>`，保存同 account 时原位覆盖。
+- Windows 新写入为 `dpapi:v1:<base64 ciphertext>`，继续兼容旧的无前缀
+  DPAPI 密文。Keychain/DPAPI 引用不能跨平台读取，未知格式和不支持平台
+  fail-closed。
+- 配置 API 请求使用秘密类型，空密钥拒绝；API 响应、异常和 DTO 表示不
+  回显明文。
+- 平台无关测试模拟 Security.framework 与平台；macOS 真实隔离测试用随机
+  service 和明显假密钥完成新增、读取、覆盖、读取新值及 `finally` 删除。
+
+验证：安全专项 `15 passed, 1 skipped`；全后端
+`328 passed, 1 skipped, 1 warning`。Windows 真实 DPAPI 用例在 macOS
+由测试自身跳过；Python `compileall` 与 `git diff --check` 通过。未使用
+真实 API Key，未调用任何真实模型。
+
+边界：这代表代码与当前 Mac 的隔离 Keychain 验收完成，不代表目标 MacBook
+已安装部署。MacBook 页面保存凭据、Windows 研发机 DPAPI、真实数据与真实
+模型联调仍待目标环境验收。
 
 ## 5. 美感维度和评分约束
 
@@ -346,7 +377,8 @@ Windows 研发部署、真实数据/模型联调、Gold 形成和发布门禁。
 - 后端：Python、FastAPI、SQLAlchemy、SQLite、Uvicorn。
 - 前端：React 19、TypeScript、Vite、Tailwind CSS 4、TanStack Query、React Router、Radix、Phosphor Icons。
 - 模型接口：豆包 Ark OpenAI-compatible Chat Completions。
-- Windows 密钥保护：DPAPI。
+- 凭据保护：Windows DPAPI；macOS Security.framework Keychain。数据库只
+  保存版本化 DPAPI 密文或不可逆 Keychain account 引用。
 - 没有使用 PHP，这是用户确认后的技术选择。
 
 ### 关键后端文件
@@ -364,7 +396,7 @@ Windows 研发部署、真实数据/模型联调、Gold 形成和发布门禁。
 | `backend/app/regression.py` | 黄金真值与回归比较 |
 | `backend/app/migration.py` | 模型迁移比较 |
 | `backend/app/optimizer.py` | 使用高能力模型分析人工纠错并生成候选提示词 |
-| `backend/app/security.py` | 密码、会话、API Key 加密 |
+| `backend/app/security.py` | 密码、会话、Windows DPAPI 与 macOS Keychain 凭据引用 |
 | `backend/app/seed.py` | 默认账号、模型配置和提示词种子 |
 
 ### 关键前端文件
@@ -415,7 +447,9 @@ Windows 研发部署、真实数据/模型联调、Gold 形成和发布门禁。
 - `images/`
 - `logs/`
 
-数据库、图片、日志、`.env`、`.venv`、`node_modules` 和构建产物都不进 Git。复制数据库到另一台电脑时，API Key 因 DPAPI 用户绑定无法解密，必须重新填写。
+数据库、图片、日志、`.env`、`.venv`、`node_modules` 和构建产物都不进
+Git。Windows DPAPI 密文绑定当前用户；macOS 数据库只有当前用户 Keychain
+引用。复制数据库到另一台电脑、另一系统或另一用户后必须重新填写 API Key。
 
 ### Git 状态
 
@@ -519,20 +553,21 @@ d6902bf fix: calibrate aesthetic grades and result states
 4. 当前 63/69 必审比例不适合作为长期目标，后续应按活跃组合/任务批次收敛队列。
 5. 提示词发布尚未被回归结果真正阻断。
 6. 多人可同时打开页面，但还没有防冲突的任务认领或版本锁。
-7. `README.md` 中“后端 10 项测试”的文字已过期，实际当前为 42 项。
+7. 测试计数随里程碑变化；以当前命令结果为准。2026-07-28 Keychain 阶段
+   全后端为 `328 passed, 1 skipped`。
 8. 测试有一条 FastAPI TestClient/httpx 兼容性弃用警告，不影响当前运行，但未来升级依赖时需处理。
 9. 本地 Git 暂无 remote，机器损坏会丢失未备份代码。
 10. 不要在输出、日志、截图、Git 或 Markdown 中展示真实 API Key。
 
 ## 12. 当前验证基线
 
-最近一次完整验证：
+最近一次完整后端验证（macOS Keychain 阶段）：
 
-- 后端：`43 passed`。
-- 前端：TypeScript + Vite 正式构建通过。
-- 服务健康检查：`GET /api/health` 返回 `status=ok`。
-- 浏览器验收：智能抽样四类计数、抽样筛选、详情页完整入队原因和优先级均正常。
-- 本机服务在交接前运行于 `http://127.0.0.1:8080`；新对话开始时仍应重新检查，不要假设进程一直存在。
+- 凭据专项：`15 passed, 1 skipped`；macOS 真实隔离 Keychain 用例已执行。
+- 全后端：`328 passed, 1 skipped, 1 warning`。
+- 本阶段没有修改前端，未重新执行前端构建、服务启动或浏览器验收。
+- 未使用真实 API Key，未调用真实模型；目标 MacBook 与 Windows 部署均
+  尚未验收。
 
 验证命令：
 

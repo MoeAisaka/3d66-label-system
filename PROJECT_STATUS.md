@@ -11,6 +11,36 @@
 - 远程仓库：`origin = https://github.com/chishiyu07-max/3d66-label-system.git`
 - 分支关系：每次交付以 `git status -sb` 的实时结果为准。
 
+## 最新完成：macOS Keychain 凭据安全层（2026-07-28）
+
+> 基线提交：`9c67118 feat: add P0-E canary orchestration workspace`。本次
+> 修改保留为未提交工作树，未提交、未推送、未部署；决策见 ADR-0012。
+
+已完成：
+
+- `backend/app/security.py` 新增无第三方依赖的 macOS Security.framework
+  generic password 封装；通过 `ctypes` 直接调用
+  `SecItemAdd/CopyMatching/Update/Delete`，所有函数均设置
+  `argtypes/restype`，CoreFoundation 创建/复制对象在所有路径释放。
+- macOS 数据库只保存 `keychain:v1:model-config` 或
+  `keychain:v1:optimizer-config`；两个稳定 account 分离。真实密钥只进入
+  当前登录用户 Keychain，同 account 再次保存原位覆盖。
+- Windows 新写入增加 `dpapi:v1:` 前缀，仍兼容既有无前缀 DPAPI 密文；
+  未知引用、错平台引用和不支持平台全部 fail-closed。
+- 配置请求用秘密类型承载 API Key；空密钥拒绝，响应、异常和 DTO 表示不
+  回显明文。未新增依赖、数据库迁移、前端或模型行为。
+- 安全专项：`15 passed, 1 skipped`；macOS 真实隔离 Keychain 测试执行了
+  新增、读取、原位覆盖、读取新值、`finally` 删除与删除后不存在检查。
+- 全后端：`328 passed, 1 skipped, 1 warning`。Windows 真实 DPAPI 测试在
+  macOS 由用例自身跳过，不再由父级命令手工排除。
+- Python `compileall` 与 `git diff --check`：通过。
+
+明确未完成：
+
+- 目标 MacBook 的安装、启动、登录、页面保存凭据与运行部署验收未完成。
+- 未使用真实 API Key，未触发真实模型连接、评测或提示词优化。
+- Windows 研发机真实 DPAPI 回归与部署、真实数据联调仍未完成。
+
 ## 最新完成：P0-E E3 金丝雀前端编排工作区（2026-07-28）
 
 > 基线提交：`85f41d8 feat: persist authenticated P0-E canary runs`。本次按任务
@@ -42,8 +72,9 @@
   模型、写入 `Asset`/`EvaluationResult`、形成 Gold 或发布。
 - 真实 XLSX 导入器、图片冻结/下载执行器、模型执行器、业务库接线、
   Gold/发布流程尚未接入。
-- macOS Keychain 凭据接线、Windows 研发部署、真实数据与真实模型联调
-  均未完成；当前没有把表单登记描述为这些能力已经发生。
+- macOS Keychain 代码与隔离测试已在后续安全层阶段完成；Windows 研发
+  部署、MacBook 安装部署、真实数据与真实模型联调仍未完成。当前没有把
+  表单登记描述为这些能力已经发生。
 
 验证：
 
@@ -167,7 +198,7 @@
 | 素材上传 | 已完成 | JPG/PNG/WebP、SHA-256 去重、本地永久保存 |
 | 素材与结果分离 | 已完成 | 一张素材可产生多条模型/提示词评测记录 |
 | 任务队列 | 已完成 | 创建、暂停、继续、取消全部任务，展示提示词版本 |
-| 豆包配置 | 已完成 | 后台填写配置和密钥、DPAPI 加密、连接测试 |
+| 豆包配置 | 安全层已完成 | macOS Keychain、Windows DPAPI 与稳定引用已接线；目标机真实连接待验收 |
 | A/B 两阶段评测 | 已完成 | A 做预检，B 做美感；范围外不调用 B |
 | 服务端评分 | 已完成 | 固定权重、等级上限、版本快照 |
 | 高风险自动复核 | 已完成 | 只能保持或降级，不抬高结果 |
@@ -196,9 +227,9 @@
 
 ### P0
 
-1. 为 P0-E 接入真实且受控的 XLSX/冻结执行器证据来源，并完成 macOS
-   Keychain、Windows 部署和真实数据联调；继续保持下载、模型、Gold 和
-   发布的独立门禁。
+1. 为 P0-E 接入真实且受控的 XLSX/冻结执行器证据来源，并完成 MacBook
+   安装部署、Windows 部署和真实数据/模型联调；继续保持下载、模型、Gold
+   和发布的独立门禁。
 2. 补做抽样策略配置 v1.1 的真实浏览器验收。
 3. 让审核队列按当前模型×提示词组合、任务批次和时间范围组织，避免全部历史结果成为今日待办。
 4. 增加审核任务认领、占用状态和乐观锁，避免多人覆盖同一结果。
