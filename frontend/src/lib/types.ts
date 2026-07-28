@@ -4,6 +4,38 @@ export type User = {
   display_name: string
 }
 
+export type CanaryRunState =
+  | "draft"
+  | "preflight_ready"
+  | "approvals_ready"
+  | "freeze_ready"
+  | "candidate_ready"
+  | "human_review_ready"
+  | "failed"
+  | "cancelled"
+
+export type CanaryRun = {
+  run_id: string
+  display_name: string | null
+  state: CanaryRunState
+  plan: {
+    plan_version: string
+    domain: "3D"
+    target_size: number
+    seed: string
+  }
+  evidence: Record<string, unknown>
+  snapshot_fingerprint: string
+  writes_business_database: boolean
+  downloads_performed: boolean
+  model_runs_performed: boolean
+  forms_gold: boolean
+  publishes_release: boolean
+  created_by: string
+  created_at: string
+  updated_at: string
+}
+
 export type Dashboard = {
   asset_count: number
   queued: number

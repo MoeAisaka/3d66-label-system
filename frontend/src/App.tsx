@@ -20,6 +20,9 @@ const SampleSetsPage = lazy(() =>
 const ReviewPage = lazy(() =>
   import("@/pages/review-page").then((module) => ({ default: module.ReviewPage })),
 )
+const CanaryRunsPage = lazy(() =>
+  import("@/pages/canary-runs-page").then((module) => ({ default: module.CanaryRunsPage })),
+)
 
 export default function App() {
   const me = useQuery({
@@ -53,6 +56,7 @@ export default function App() {
             <Route path="model" element={<ModelPage />} />
             <Route path="sample-sets" element={<Suspense fallback={<RouteLoading />}><SampleSetsPage /></Suspense>} />
             <Route path="migrations" element={<MigrationsPage />} />
+            <Route path="canary-runs" element={<Suspense fallback={<RouteLoading />}><CanaryRunsPage /></Suspense>} />
           </Route>
         ) : (
           <Route path="*" element={<Navigate to="/login" replace />} />

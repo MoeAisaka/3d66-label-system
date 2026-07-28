@@ -1,9 +1,10 @@
 # 3d66 标签系统｜新对话开发交接
 
-> 更新时间：2026-07-19  
-> 项目目录：`D:\3d66-label-system`  
-> 当前分支：`main`  
-> 功能基线提交：`5cca790 feat: add intelligent review sampling`
+> 更新时间：2026-07-28
+> 项目目录：`D:\3d66-label-system`
+> 当前分支：`main`
+> 功能基线提交：`85f41d8 feat: persist authenticated P0-E canary runs`
+> 当前工作树：P0-E E3 前端编排工作区已完成，按任务要求尚未提交或推送
 
 ## 0. 新对话应当如何接手
 
@@ -239,9 +240,11 @@ API Key 使用当前 Windows 用户的 DPAPI 加密，前端不会再次读回�
 
 ### 4.12 P0-E 安全离线导入、E2 状态机与 E3 持久化 API（E0/E1/E2/E3）
 
-本仓库为 P0-E 的独立隔离工作副本。**E0/E1 代码已由上游 OpenClaw 控制器提交为 `16cd2c75a5c39ddf94157e388860075cfaffcd4c`，并独立验证 39 项针对性测试及 228 项通用后端测试（macOS 上 1 项 Windows-only DPAPI 测试取消选择）。** E2 状态机编排层与 E3 持久化/API 接线已于 2026-07-28 新增。
+本仓库为 P0-E 的独立隔离工作副本。**E0/E1 代码已由上游 OpenClaw 控制器提交为 `16cd2c75a5c39ddf94157e388860075cfaffcd4c`，并独立验证 39 项针对性测试及 228 项通用后端测试（macOS 上 1 项 Windows-only DPAPI 测试取消选择）。** E2 状态机编排层、E3 持久化/API 接线，以及 E3 前端安全编排工作区已于 2026-07-28 完成。
 
-**明确边界**：未真实联网下载图片、未调用任何模型、未写业务数据库、未形成任何 Gold 样本、未发布任何候选。
+**明确边界**：前端只登记外部流程已验证的门禁证据。当前仍未真实上传
+XLSX、联网下载图片、调用任何模型、写业务数据库、形成任何 Gold 样本或
+发布任何候选。
 
 **E0/E1 文件**（均已在上游控制器提交并验证）：
 
@@ -270,15 +273,41 @@ API Key 使用当前 Windows 用户的 DPAPI 加密，前端不会再次读回�
   冲突、终止、URL、不变量与无业务副作用测试。
 - `docs/decisions/0011-p0e-e3-canary-persistence-api.md`：ADR-0011。
 
+**E3 前端工作区（当前未提交工作树）**：
+
+- `frontend/src/App.tsx`、`frontend/src/components/app-shell.tsx`：新增
+  09“金丝雀运行”导航与 `/canary-runs` lazy 路由。
+- `frontend/src/lib/types.ts`：增加 `CanaryRun`、严格状态、计划和五项
+  不变量响应类型。
+- `frontend/src/lib/api.ts`：`ApiError` 向后兼容字符串 detail，并支持
+  结构化 code/message/current_state/attempted_transition/retryable；
+  不再把对象隐式变成 `[object Object]`。
+- `frontend/src/pages/canary-runs-page.tsx`：创建运行、列表/详情、手动
+  刷新、六态时间线、逐状态唯一下一门禁表单、当前指纹乐观锁、409/422
+  可读错误、取消/失败二次确认、累积证据摘要和五项不变量告警。
+- 页面始终醒目标明自己只是“安全编排与证据登记层”；预检表单明确是
+  导入器产物的人工接线占位，冻结表单明确不会执行下载，候选交接明确
+  `forms_gold/downloads_performed/model_runs_performed=false`。
+
 不可破坏约束（本次严格遵守）：未引入通用 `Pipeline`/`Candidate` 实体；
 未改变 `Asset 1:N EvaluationResult`、`evaluation_id` 审核、
 StrategyBundle、五类队列及 P0-A/B/C.1/D 既有合同；未修改任何 E0/E1/E2
-纯函数模块；E3 没有前端、真实数据、模型、Gold 或发布效果。
+纯函数模块；E3 前端没有真实上传/下载执行器、真实数据、模型、Gold 或
+发布效果。
 
 验证说明：E3 API 专项 `17 passed`；E0/E1/E2/E3 指定组合
 `124 passed`；迁移专项 `17 passed`；全后端排除 Windows-only DPAPI 后为
 `313 passed, 1 deselected`。Python `compileall`、`git diff --check`、E3
-OpenAPI 路径核验和既有前端生产构建均通过；本阶段未新增或接线 E3 页面。
+OpenAPI 路径核验均通过。E3 前端新增后，`npm run lint` 与
+`npm run build` 均通过，页面生成独立 lazy chunk。另以隔离 SQLite、临时
+测试账号和真实 headless Chrome 完成登录、09 导航、创建、五步顺序推进、
+终止态只读、五项 False 不变量与刷新后持久化恢复验收。首轮验收发现新建
+运行后列表刷新可能短暂回选旧运行，已用缓存预置与 pending selection
+保护修复，并在修复后重跑完整浏览器链通过。
+
+仍未完成：真实 XLSX/图片冻结执行器接线、macOS Keychain 凭据接线、
+Windows 研发部署、真实数据/模型联调、Gold 形成和发布门禁。后续阶段
+不得把前端登记动作当作这些真实效果已经发生。
 
 ## 5. 美感维度和评分约束
 

@@ -6,6 +6,7 @@ import {
   Images,
   ListChecks,
   List,
+  ShieldCheck,
   Stack,
   SignOut,
   SlidersHorizontal,
@@ -29,6 +30,7 @@ const navItems = [
   { to: "/model", index: "06", label: "模型配置", icon: SlidersHorizontal },
   { to: "/sample-sets", index: "07", label: "样本与回归", icon: Stack },
   { to: "/migrations", index: "08", label: "模型迁移", icon: ArrowsClockwise },
+  { to: "/canary-runs", index: "09", label: "金丝雀运行", icon: ShieldCheck },
 ]
 
 export function AppShell({ user }: { user: User }) {
@@ -99,7 +101,7 @@ export function AppShell({ user }: { user: User }) {
             <p className="font-editorial text-[1.65rem] font-bold leading-none">标签系统</p>
             <p className="mt-2 text-xs text-[var(--muted)]">图片分类与美感评测</p>
           </div>
-          <nav className="flex-1 py-3" aria-label="主导航">
+          <nav className="min-h-0 flex-1 overflow-y-auto py-3" aria-label="主导航">
             {navItems.map((item) => {
               const Icon = item.icon
               return (
