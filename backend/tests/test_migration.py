@@ -31,6 +31,7 @@ MIGRATION_NAMES = [
     "harden_loop_retry_and_scheduler",
     "finalize_retry_and_loop_guards",
     "add_canary_run_persistence",
+    "add_prompt_optimizer_stage_audit",
 ]
 
 
@@ -249,7 +250,7 @@ def test_schema_migrations_table_created_with_all_versions(tmp_path) -> None:
                     "SELECT version, name FROM schema_migrations ORDER BY version"
                 )
             )
-        assert [row[0] for row in rows] == list(range(1, 18))
+        assert [row[0] for row in rows] == list(range(1, 19))
         assert [row[1] for row in rows] == MIGRATION_NAMES
     finally:
         engine.dispose()
@@ -267,7 +268,7 @@ def test_repeated_migration_is_idempotent(tmp_path) -> None:
                     "SELECT version FROM schema_migrations ORDER BY version"
                 )
             )
-        assert [row[0] for row in versions] == list(range(1, 18))
+        assert [row[0] for row in versions] == list(range(1, 19))
     finally:
         engine.dispose()
 
@@ -376,7 +377,7 @@ def test_complete_v10_database_forward_migrates_versions_11_to_13(tmp_path) -> N
                     "SELECT version FROM schema_migrations ORDER BY version"
                 )
             )
-            assert [row[0] for row in versions] == list(range(1, 18))
+            assert [row[0] for row in versions] == list(range(1, 19))
             old_result = connection.exec_driver_sql(
                 """
                 SELECT model_id, prompt_a_version, strategy_bundle_id,
@@ -421,7 +422,7 @@ def test_complete_v10_database_forward_migrates_versions_11_to_13(tmp_path) -> N
                 connection.exec_driver_sql(
                     "SELECT COUNT(*) FROM schema_migrations"
                 ).scalar_one()
-                == 17
+                == 18
             )
     finally:
         engine.dispose()
@@ -569,7 +570,7 @@ def test_complete_v11_database_forward_migrates_paired_regression_contract(
                     "SELECT version FROM schema_migrations ORDER BY version"
                 )
             ]
-            assert versions == list(range(1, 18))
+            assert versions == list(range(1, 19))
 
             run_columns = {
                 row[1]
@@ -869,7 +870,7 @@ def test_complete_v12_database_forward_adds_frozen_strategy_snapshots(
                     "SELECT version FROM schema_migrations ORDER BY version"
                 )
             ]
-            assert versions == list(range(1, 18))
+            assert versions == list(range(1, 19))
     finally:
         engine.dispose()
 
@@ -950,7 +951,7 @@ def test_complete_v13_database_forward_adds_loop_queue_and_breaker_contract(
                 connection.exec_driver_sql(
                     "SELECT max(version) FROM schema_migrations"
                 ).scalar_one()
-                    == 17
+                    == 18
             )
 
             with pytest.raises(
@@ -1185,7 +1186,7 @@ def test_complete_v14_database_forward_hardens_retry_chain_and_scheduler(
                 connection.exec_driver_sql(
                     "SELECT max(version) FROM schema_migrations"
                 ).scalar_one()
-                == 17
+                == 18
             )
             assert (
                 connection.exec_driver_sql(
@@ -1422,7 +1423,7 @@ def test_complete_v15_database_replaces_root_index_and_hardens_payloads(
                 connection.exec_driver_sql(
                     "SELECT max(version) FROM schema_migrations"
                 ).scalar_one()
-                == 17
+                == 18
             )
             index_sql = connection.exec_driver_sql("""
                 SELECT sql
@@ -1571,5 +1572,99 @@ def test_complete_v15_database_replaces_root_index_and_hardens_payloads(
                         """,
                         (invalid_target,),
                     )
+    finally:
+        engine.dispose()
+
+
+def test_complete_v17_database_adds_optimizer_stage_audit(
+    tmp_path,
+) -> None:
+    engine = _engine(tmp_path, "v17-to-v18-optimizer-audit.db")
+    try:
+        with engine.begin() as connection:
+            connection.exec_driver_sql("""
+                CREATE TABLE prompt_optimization_runs (
+                    id INTEGER PRIMARY KEY,
+                    base_prompt_id INTEGER NOT NULL,
+                    sample_set_id INTEGER NOT NULL,
+                    optimizer_model_id VARCHAR(200) NOT NULL,
+                    status VARCHAR(30) NOT NULL DEFAULT 'queued',
+                    progress INTEGER NOT NULL DEFAULT 0,
+                    sample_count INTEGER NOT NULL DEFAULT 0,
+                    corrected_count INTEGER NOT NULL DEFAULT 0,
+                    diagnosis_json TEXT NOT NULL DEFAULT '{}',
+                    candidate_system_prompt TEXT NOT NULL DEFAULT '',
+                    candidate_user_prompt TEXT NOT NULL DEFAULT '',
+                    change_note TEXT NOT NULL DEFAULT '',
+                    error_message TEXT NOT NULL DEFAULT '',
+                    created_by VARCHAR(80) NOT NULL DEFAULT 'system',
+                    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    finished_at DATETIME
+                )
+            """)
+            connection.exec_driver_sql("""
+                CREATE TABLE schema_migrations (
+                    version INTEGER PRIMARY KEY,
+                    name VARCHAR(200) NOT NULL,
+                    applied_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            for version, name in enumerate(
+                MIGRATION_NAMES[:17], start=1
+            ):
+                connection.exec_driver_sql(
+                    "INSERT INTO schema_migrations (version, name) "
+                    "VALUES (?, ?)",
+                    (version, name),
+                )
+            connection.exec_driver_sql("""
+                INSERT INTO prompt_optimization_runs (
+                    id, base_prompt_id, sample_set_id, optimizer_model_id,
+                    status, diagnosis_json
+                ) VALUES (1, 11, 22, 'optimizer-v1', 'completed', '{}')
+            """)
+
+            run_migrations(connection)
+            run_migrations(connection)
+
+            columns = {
+                row[1]
+                for row in connection.exec_driver_sql(
+                    "PRAGMA table_info(prompt_optimization_runs)"
+                )
+            }
+            assert {
+                "diagnostic_audit_json",
+                "synthesis_audit_json",
+            }.issubset(columns)
+            row = connection.exec_driver_sql("""
+                SELECT diagnostic_audit_json, synthesis_audit_json
+                FROM prompt_optimization_runs
+                WHERE id = 1
+            """).one()
+            allowed_fields = {
+                "status",
+                "attempt_count",
+                "upstream_status_code",
+                "request_correlation_id",
+                "elapsed_ms",
+                "error_type",
+                "error_message",
+                "output_budget",
+                "reasoning_effort",
+            }
+            for raw_audit in row:
+                audit = json.loads(raw_audit)
+                assert set(audit) == allowed_fields
+                assert audit["status"] == "not_recorded"
+                assert audit["attempt_count"] == 0
+            versions = list(
+                connection.exec_driver_sql(
+                    "SELECT version, name FROM schema_migrations "
+                    "ORDER BY version"
+                )
+            )
+            assert [item[0] for item in versions] == list(range(1, 19))
+            assert [item[1] for item in versions] == MIGRATION_NAMES
     finally:
         engine.dispose()

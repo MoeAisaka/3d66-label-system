@@ -1819,6 +1819,63 @@ def _migration_017_add_canary_run_persistence(
     """)
 
 
+def _migration_018_add_prompt_optimizer_stage_audit(
+    connection: Connection,
+) -> None:
+    table_exists = connection.exec_driver_sql("""
+        SELECT 1
+        FROM sqlite_master
+        WHERE type = 'table' AND name = 'prompt_optimization_runs'
+    """).first()
+    if table_exists is None:
+        # 正式启动会先由 Base.metadata.create_all 创建完整表；旧版部分模式
+        # 测试和恢复探测可能没有该业务表，此时没有可回填的数据。
+        return
+    legacy_audit = (
+        '{"status":"not_recorded","attempt_count":0,'
+        '"upstream_status_code":null,"request_correlation_id":null,'
+        '"elapsed_ms":null,"error_type":null,"error_message":null,'
+        '"output_budget":null,"reasoning_effort":null}'
+    )
+    columns = {
+        row[1]
+        for row in connection.exec_driver_sql(
+            "PRAGMA table_info(prompt_optimization_runs)"
+        )
+    }
+    for column_name in (
+        "diagnostic_audit_json",
+        "synthesis_audit_json",
+    ):
+        if column_name not in columns:
+            connection.exec_driver_sql(
+                f"ALTER TABLE prompt_optimization_runs "
+                f"ADD COLUMN {column_name} TEXT NOT NULL "
+                f"DEFAULT '{legacy_audit}'"
+            )
+        connection.exec_driver_sql(
+            f"UPDATE prompt_optimization_runs "
+            f"SET {column_name} = ? "
+            f"WHERE {column_name} IS NULL "
+            f"OR trim({column_name}) = '' "
+            f"OR json_valid({column_name}) <> 1 "
+            f"OR CASE WHEN json_valid({column_name}) = 1 THEN ("
+            f"json_type({column_name}, '$') <> 'object' "
+            f"OR json_type({column_name}, '$.status') IS NULL "
+            f"OR json_extract({column_name}, '$.status') NOT IN ("
+            f"'not_recorded','pending','running','succeeded','failed'"
+            f") "
+            f"OR EXISTS ("
+            f"SELECT 1 FROM json_each({column_name}) AS audit_field "
+            f"WHERE audit_field.key NOT IN ("
+            f"'status','attempt_count','upstream_status_code',"
+            f"'request_correlation_id','elapsed_ms','error_type',"
+            f"'error_message','output_budget','reasoning_effort'"
+            f"))) ELSE 0 END",
+            (legacy_audit,),
+        )
+
+
 MIGRATIONS = [
     Migration(1, "add_sample_expected_level", _migration_001_add_sample_expected_level),
     Migration(2, "add_review_corrections", _migration_002_add_review_corrections),
@@ -1860,6 +1917,11 @@ MIGRATIONS = [
         17,
         "add_canary_run_persistence",
         _migration_017_add_canary_run_persistence,
+    ),
+    Migration(
+        18,
+        "add_prompt_optimizer_stage_audit",
+        _migration_018_add_prompt_optimizer_stage_audit,
     ),
 ]
 

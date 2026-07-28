@@ -27,6 +27,14 @@ def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+PROMPT_OPTIMIZATION_AUDIT_DEFAULT = (
+    '{"status":"not_recorded","attempt_count":0,'
+    '"upstream_status_code":null,"request_correlation_id":null,'
+    '"elapsed_ms":null,"error_type":null,"error_message":null,'
+    '"output_budget":null,"reasoning_effort":null}'
+)
+
+
 class User(Base):
     __tablename__ = "users"
 
@@ -1077,6 +1085,20 @@ class PromptOptimizationRun(Base):
     sample_count: Mapped[int] = mapped_column(Integer, default=0)
     corrected_count: Mapped[int] = mapped_column(Integer, default=0)
     diagnosis_json: Mapped[str] = mapped_column(Text, default="{}")
+    diagnostic_audit_json: Mapped[str] = mapped_column(
+        Text,
+        default=PROMPT_OPTIMIZATION_AUDIT_DEFAULT,
+        server_default=sql_text(
+            f"'{PROMPT_OPTIMIZATION_AUDIT_DEFAULT}'"
+        ),
+    )
+    synthesis_audit_json: Mapped[str] = mapped_column(
+        Text,
+        default=PROMPT_OPTIMIZATION_AUDIT_DEFAULT,
+        server_default=sql_text(
+            f"'{PROMPT_OPTIMIZATION_AUDIT_DEFAULT}'"
+        ),
+    )
     candidate_system_prompt: Mapped[str] = mapped_column(Text, default="")
     candidate_user_prompt: Mapped[str] = mapped_column(Text, default="")
     change_note: Mapped[str] = mapped_column(Text, default="")

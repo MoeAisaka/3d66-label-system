@@ -6,7 +6,7 @@ import mimetypes
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 import httpx
 
@@ -19,17 +19,34 @@ class DoubaoResponse:
     parsed: dict[str, Any]
     raw_text: str
     raw_payload: dict[str, Any]
+    upstream_status_code: int | None = None
+    request_correlation_id: str | None = None
+    attempt_count: int = 1
+    output_budget: int | None = None
+    reasoning_effort: str | None = None
+
+
+@dataclass(frozen=True)
+class _UpstreamResponse:
+    payload: dict[str, Any]
+    status_code: int
+    request_correlation_id: str | None
 
 
 class DoubaoError(RuntimeError):
     technical_error_type = "non_retryable"
     retryable = False
+    upstream_status_code: int | None = None
+    request_correlation_id: str | None = None
+    attempt_count = 0
 
 
 class DoubaoHTTPError(DoubaoError):
     def __init__(self, status_code: int, headers: dict[str, str]):
         super().__init__(f"模型 API HTTP {status_code}")
         self.status_code = status_code
+        self.upstream_status_code = status_code
+        self.request_correlation_id = _request_correlation_id(headers)
         self.headers = headers
         self.technical_error_type = (
             "429"
@@ -59,6 +76,25 @@ class DoubaoParseError(DoubaoError):
         self.retryable = True
 
 
+_REQUEST_ID_HEADERS = (
+    "x-request-id",
+    "request-id",
+    "x-trace-id",
+    "trace-id",
+    "x-tt-logid",
+)
+_SAFE_REQUEST_ID = re.compile(r"^[A-Za-z0-9._:/-]{1,200}$")
+
+
+def _request_correlation_id(headers: Mapping[str, str]) -> str | None:
+    normalized = {str(key).lower(): str(value).strip() for key, value in headers.items()}
+    for header_name in _REQUEST_ID_HEADERS:
+        value = normalized.get(header_name)
+        if value and _SAFE_REQUEST_ID.fullmatch(value):
+            return value
+    return None
+
+
 def _image_data_url(path: Path, mime_type: str | None = None) -> str:
     media_type = mime_type or mimetypes.guess_type(path.name)[0] or "image/jpeg"
     encoded = base64.b64encode(path.read_bytes()).decode("ascii")
@@ -82,7 +118,7 @@ def _extract_message_text(payload: dict[str, Any]) -> str:
         for content in item.get("content") or []:
             if isinstance(content, dict) and content.get("type") == "output_text":
                 return str(content.get("text", ""))
-    raise ValueError("模型响应中没有可读取的文本内容")
+    raise DoubaoParseError("模型响应中没有可读取的文本内容")
 
 
 def parse_json_text(text: str) -> dict[str, Any]:
@@ -121,7 +157,7 @@ class DoubaoClient:
     def url(self) -> str:
         return f"{self.config.base_url.rstrip('/')}/{self.config.api_path.lstrip('/')}"
 
-    async def _post(self, payload: dict[str, Any]) -> dict[str, Any]:
+    async def _post(self, payload: dict[str, Any]) -> _UpstreamResponse:
         timeout = httpx.Timeout(float(self.config.timeout_seconds))
         headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
         async with httpx.AsyncClient(timeout=timeout) as client:
@@ -141,13 +177,85 @@ class DoubaoClient:
             try:
                 data = response.json()
             except json.JSONDecodeError as exc:
-                raise DoubaoParseError(
+                error = DoubaoParseError(
                     "模型 API 返回无效 JSON",
                     truncated=exc.pos >= max(0, len(exc.doc) - 2),
-                ) from exc
+                )
+                error.upstream_status_code = response.status_code
+                error.request_correlation_id = _request_correlation_id(
+                    response.headers
+                )
+                raise error from exc
             if not isinstance(data, dict):
-                raise DoubaoParseError("豆包 API 返回了无法识别的数据结构")
-            return data
+                error = DoubaoParseError(
+                    "豆包 API 返回了无法识别的数据结构"
+                )
+                error.upstream_status_code = response.status_code
+                error.request_correlation_id = _request_correlation_id(
+                    response.headers
+                )
+                raise error
+            return _UpstreamResponse(
+                payload=data,
+                status_code=response.status_code,
+                request_correlation_id=_request_correlation_id(response.headers),
+            )
+
+    def _generation_options(
+        self,
+        payload: dict[str, Any],
+        *,
+        output_budget: int | None,
+        reasoning_effort: str | None,
+        structured_output: bool | None,
+    ) -> tuple[int, str | None]:
+        actual_budget = (
+            self.config.max_tokens if output_budget is None else output_budget
+        )
+        if actual_budget < 1:
+            raise ValueError("模型输出预算必须大于 0")
+        actual_reasoning_effort = reasoning_effort
+        if self.config.provider == "openai":
+            payload["max_completion_tokens"] = actual_budget
+            actual_reasoning_effort = actual_reasoning_effort or "high"
+            payload["reasoning_effort"] = actual_reasoning_effort
+        else:
+            payload["temperature"] = self.config.temperature
+            payload["max_tokens"] = actual_budget
+            if actual_reasoning_effort is not None:
+                payload["reasoning_effort"] = actual_reasoning_effort
+        use_structured_output = (
+            self.config.structured_output
+            if structured_output is None
+            else structured_output
+        )
+        if use_structured_output:
+            payload["response_format"] = {"type": "json_object"}
+        return actual_budget, actual_reasoning_effort
+
+    def _attempts(self, max_attempts: int | None) -> int:
+        if max_attempts is None:
+            return max(1, self.config.max_retries + 1)
+        if (
+            not isinstance(max_attempts, int)
+            or isinstance(max_attempts, bool)
+            or max_attempts < 1
+        ):
+            raise ValueError("模型调用次数必须大于 0")
+        return max_attempts
+
+    @staticmethod
+    def _unpack_upstream(
+        response: _UpstreamResponse | dict[str, Any],
+    ) -> tuple[dict[str, Any], int | None, str | None]:
+        # 保持测试替身和既有私有扩展返回 dict 时的兼容性。
+        if isinstance(response, _UpstreamResponse):
+            return (
+                response.payload,
+                response.status_code,
+                response.request_correlation_id,
+            )
+        return response, None, None
 
     async def chat_json(
         self,
@@ -155,6 +263,11 @@ class DoubaoClient:
         user_prompt: str,
         image_path: Path | None = None,
         mime_type: str | None = None,
+        *,
+        max_attempts: int | None = None,
+        output_budget: int | None = None,
+        reasoning_effort: str | None = None,
+        structured_output: bool | None = None,
     ) -> DoubaoResponse:
         content: str | list[dict[str, Any]]
         if image_path:
@@ -171,17 +284,15 @@ class DoubaoClient:
                 {"role": "user", "content": content},
             ],
         }
-        if self.config.provider == "openai":
-            payload["max_completion_tokens"] = self.config.max_tokens
-            payload["reasoning_effort"] = "high"
-        else:
-            payload["temperature"] = self.config.temperature
-            payload["max_tokens"] = self.config.max_tokens
-        if self.config.structured_output:
-            payload["response_format"] = {"type": "json_object"}
+        actual_budget, actual_reasoning_effort = self._generation_options(
+            payload,
+            output_budget=output_budget,
+            reasoning_effort=reasoning_effort,
+            structured_output=structured_output,
+        )
 
         last_error: Exception | None = None
-        attempts = max(1, self.config.max_retries + 1)
+        attempts = self._attempts(max_attempts)
         for attempt in range(attempts):
             current_payload = dict(payload)
             if attempt > 0:
@@ -194,10 +305,28 @@ class DoubaoClient:
                 )
                 current_payload["messages"] = retry_messages
             try:
-                raw = await self._post(current_payload)
-                raw_text = _extract_message_text(raw)
-                return DoubaoResponse(parsed=parse_json_text(raw_text), raw_text=raw_text, raw_payload=raw)
+                upstream = await self._post(current_payload)
+                raw, status_code, request_id = self._unpack_upstream(upstream)
+                try:
+                    raw_text = _extract_message_text(raw)
+                    parsed = parse_json_text(raw_text)
+                except DoubaoError as exc:
+                    exc.upstream_status_code = status_code
+                    exc.request_correlation_id = request_id
+                    raise
+                return DoubaoResponse(
+                    parsed=parsed,
+                    raw_text=raw_text,
+                    raw_payload=raw,
+                    upstream_status_code=status_code,
+                    request_correlation_id=request_id,
+                    attempt_count=attempt + 1,
+                    output_budget=actual_budget,
+                    reasoning_effort=actual_reasoning_effort,
+                )
             except Exception as exc:  # API 与 JSON 错误都按配置重试
+                if isinstance(exc, DoubaoError):
+                    exc.attempt_count = attempt + 1
                 last_error = exc
         if last_error is not None:
             raise last_error
@@ -207,6 +336,11 @@ class DoubaoClient:
         self,
         system_prompt: str,
         samples: list[tuple[str, Path, str | None]],
+        *,
+        max_attempts: int | None = None,
+        output_budget: int | None = None,
+        reasoning_effort: str | None = None,
+        structured_output: bool | None = None,
     ) -> DoubaoResponse:
         content: list[dict[str, Any]] = []
         for text, image_path, mime_type in samples:
@@ -224,24 +358,39 @@ class DoubaoClient:
                 {"role": "user", "content": content},
             ],
         }
-        if self.config.provider == "openai":
-            payload["max_completion_tokens"] = self.config.max_tokens
-            payload["reasoning_effort"] = "high"
-        else:
-            payload["temperature"] = self.config.temperature
-            payload["max_tokens"] = self.config.max_tokens
-        if self.config.structured_output:
-            payload["response_format"] = {"type": "json_object"}
+        actual_budget, actual_reasoning_effort = self._generation_options(
+            payload,
+            output_budget=output_budget,
+            reasoning_effort=reasoning_effort,
+            structured_output=structured_output,
+        )
 
         last_error: Exception | None = None
-        for _attempt in range(max(1, self.config.max_retries + 1)):
+        attempts = self._attempts(max_attempts)
+        for attempt in range(attempts):
             try:
-                raw = await self._post(payload)
-                raw_text = _extract_message_text(raw)
+                upstream = await self._post(payload)
+                raw, status_code, request_id = self._unpack_upstream(upstream)
+                try:
+                    raw_text = _extract_message_text(raw)
+                    parsed = parse_json_text(raw_text)
+                except DoubaoError as exc:
+                    exc.upstream_status_code = status_code
+                    exc.request_correlation_id = request_id
+                    raise
                 return DoubaoResponse(
-                    parsed=parse_json_text(raw_text), raw_text=raw_text, raw_payload=raw
+                    parsed=parsed,
+                    raw_text=raw_text,
+                    raw_payload=raw,
+                    upstream_status_code=status_code,
+                    request_correlation_id=request_id,
+                    attempt_count=attempt + 1,
+                    output_budget=actual_budget,
+                    reasoning_effort=actual_reasoning_effort,
                 )
             except Exception as exc:
+                if isinstance(exc, DoubaoError):
+                    exc.attempt_count = attempt + 1
                 last_error = exc
         if last_error is not None:
             raise last_error
@@ -258,5 +407,6 @@ class DoubaoClient:
         else:
             payload["temperature"] = 0
             payload["max_tokens"] = 16
-        raw = await self._post(payload)
+        upstream = await self._post(payload)
+        raw, _status_code, _request_id = self._unpack_upstream(upstream)
         return _extract_message_text(raw).strip()

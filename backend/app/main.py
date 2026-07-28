@@ -84,7 +84,7 @@ from .security import (
     protect_secret,
     verify_password,
 )
-from .optimizer import run_prompt_optimization
+from .optimizer import run_prompt_optimization, stage_audit_payload
 from .p0e_canary_api import build_canary_router
 from .seed import seed_defaults
 from .schema_adapter import repair_combined_aesthetic_results, rescore_stored_results
@@ -2157,6 +2157,7 @@ def _optimization_payload(run: PromptOptimizationRun) -> dict[str, Any]:
         "sample_count": run.sample_count,
         "corrected_count": run.corrected_count,
         "diagnosis": json.loads(run.diagnosis_json or "{}"),
+        "stage_audit": stage_audit_payload(run),
         "candidate_system_prompt": run.candidate_system_prompt,
         "candidate_user_prompt": run.candidate_user_prompt,
         "change_note": run.change_note,
