@@ -213,24 +213,49 @@ def test_diagnostic_records_are_bounded_and_role_stratified(tmp_path) -> None:
     assert "approved" in decisions
 
 
-def test_invalid_early_records_are_backfilled_from_full_role_pools(tmp_path) -> None:
+def test_invalid_early_records_are_backfilled_from_full_role_pools(
+    tmp_path,
+    monkeypatch,
+) -> None:
     corrected = [
-        _bounded_item(tmp_path, index, "corrected") for index in range(25)
+        _bounded_item(tmp_path, index, "corrected") for index in range(40)
     ]
     controls = [
-        _bounded_item(tmp_path, 100 + index, "approved") for index in range(9)
+        _bounded_item(tmp_path, 100 + index, "approved") for index in range(10)
     ]
-    for item, _ in corrected[:24] + controls[:8]:
+    records = {
+        item.asset_id: record for item, record in corrected + controls
+    }
+    monkeypatch.setattr(
+        optimizer,
+        "_review_record",
+        lambda item: dict(records[item.asset_id]),
+    )
+
+    selected, _holdout_ids, eligible_count = optimizer._select_records(
+        [item for item, _ in corrected + controls]
+    )
+    assert eligible_count == 50
+    assert len(selected) == 40
+    selected_corrected = [
+        pair for pair in selected if pair[1]["decision"] == "corrected"
+    ]
+    selected_controls = [
+        pair for pair in selected if pair[1]["decision"] == "approved"
+    ]
+    assert len(selected_corrected) == 32
+    assert len(selected_controls) == 8
+    for item, _ in selected_corrected[:-1] + selected_controls[:-1]:
         (tmp_path / item.asset.stored_name).unlink()
 
     bounded, _total_bytes, omitted_count = (
-        optimizer._bounded_diagnostic_records(corrected + controls, tmp_path)
+        optimizer._bounded_diagnostic_records(selected, tmp_path)
     )
 
-    assert omitted_count == 32
-    assert [record["decision"] for _, record, _ in bounded] == [
-        "corrected",
+    assert omitted_count == 38
+    assert sorted(record["decision"] for _, record, _ in bounded) == [
         "approved",
+        "corrected",
     ]
 
 
@@ -414,6 +439,59 @@ def test_oversized_diagnostic_image_fails_before_client_call(
             assert audit["attempt_count"] == 0
             assert audit["error_type"] == "invalid_stage_output"
         assert ClientMustNotRun.calls == 0
+    finally:
+        engine.dispose()
+
+
+def test_encoding_boundary_rejection_persists_zero_attempts(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    engine, session_factory, run_id = _create_optimizer_run(tmp_path)
+    original_bounded = optimizer._bounded_diagnostic_records
+
+    def mutate_after_metadata_check(selected, upload_dir):
+        bounded = original_bounded(selected, upload_dir)
+        image_path = bounded[0][0][2]
+        image_path.write_bytes(
+            b"x" * (optimizer.MAX_DIAGNOSTIC_SINGLE_IMAGE_BYTES + 1)
+        )
+        return bounded
+
+    class EncodingBoundaryClient(DoubaoClient):
+        post_calls = 0
+
+        def __init__(self, config):
+            self.config = config
+            self.api_key = "offline-test-key"
+
+        async def _post(self, _payload):
+            type(self).post_calls += 1
+            raise AssertionError("encoding-boundary rejection reached HTTP")
+
+    monkeypatch.setattr(
+        optimizer,
+        "_bounded_diagnostic_records",
+        mutate_after_metadata_check,
+    )
+    _install_optimizer_dependencies(
+        monkeypatch,
+        tmp_path,
+        session_factory,
+        EncodingBoundaryClient,
+    )
+    try:
+        asyncio.run(optimizer.run_prompt_optimization(run_id))
+        with session_factory() as db:
+            run = db.get(PromptOptimizationRun, run_id)
+            audit = json.loads(run.diagnostic_audit_json)
+            assert run.status == "failed"
+            assert audit["status"] == "failed"
+            assert audit["attempt_count"] == 0
+            assert audit["error_type"] == "invalid_stage_output"
+            assert run.candidate_system_prompt == ""
+            assert run.candidate_user_prompt == ""
+        assert EncodingBoundaryClient.post_calls == 0
     finally:
         engine.dispose()
 
