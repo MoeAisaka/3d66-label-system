@@ -11,6 +11,18 @@
 - 远程仓库：`origin = https://github.com/chishiyu07-max/3d66-label-system.git`
 - 分支关系：每次交付以 `git status -sb` 的实时结果为准。
 
+## 最新完成：P0-E 安全离线导入基础（仅 E0/E1）
+
+> 本次为独立隔离仓库中的 P0-E E0/E1 工程基础，**未真实下载图片、未形成 Gold、未跑模型、未写业务数据库**，代码保持未提交。决策记录见 ADR-0009。
+
+- 新增 `backend/app/p0e_safe_import.py`：XLSX 只读预检。仅接收 `.xlsx`，受限 ZIP/XML 解析，拒绝公式/宏/外部关系/异常 ZIP/超限/不安全 XML；重复表头生成稳定内部名（如 `status__col_3`）并原样保留 RAW；`farmat → format` 仅作需人工确认的候选映射，从不静默应用；按文件字节 SHA-256 生成幂等批次键；Gold 目标锁状态缺失/已锁即 fail-closed；`writes_business_database=False`。
+- 新增 `backend/app/p0e_image_freeze.py`：受控图片获取与确定性冻结。默认无白名单即拒绝任意 URL；仅允许显式精确域名 + HTTPS + 443 + 无 userinfo；每跳全量校验 A/AAAA 公网属性并逐跳重校验重定向；默认传输返回 `DNS_PINNING_UNAVAILABLE`（防 DNS rebinding，fail-closed），需固定 IP 契约的受控适配器才能真实获取；三重校验 Content-Type + 魔数 + Pillow 解码；流式临时落盘 + SHA-256 去重 + 原子替换 + 中断清理；来源 URL 仅保留 scheme/host/port/path，不落 query/userinfo。
+- 新增 `backend/app/p0e_candidate_package.py`：30～50 张离线、固定 seed 的确定性分层预览。排除非 3D、缺人工等级/分类（含 3Dreason 缺真值）、重复 URL 和冲突样本并保留可机读原因；始终返回 `forms_gold=false`、`downloads_performed=false`、`model_runs_performed=false`。
+- 新增 `backend/tests/test_p0e_safe_import.py`：覆盖重复表头、RAW 保真、farmat/format 预览与冲突、公式/扩展名/ZIP/宏拒绝、幂等批次键与 Gold-lock、全部 SSRF（IPv4/IPv6 参数化）、重定向重校验与固定 IP、DNS 变更、长度/MIME 欺骗、坏图、中断临时清理、SHA 去重、manifest 原子确定性与不完整判定、固定 seed 复现、697 3Dreason/重复/冲突排除、可机读错误。
+- 新增 `backend/tests/conftest.py`：仅把 `backend/` 加入 `sys.path`，使测试在仓库根与 `backend/` 两种工作目录下都可导入 `app`；从 `backend/` 运行时为无操作。
+- 未引入通用 `Pipeline`/`Candidate` 实体，未改动数据库 Schema、API、前端，也未改变既有 `Asset 1:N EvaluationResult`、`evaluation_id` 审核、StrategyBundle、五类队列或 P0-A/B/C.1/D 合同。
+- 验证：本次会话的执行环境未启用 Bash 工具，`pytest`/`compileall`/`git diff --check` 无法由我实际执行；测试按 correct-by-construction 编写，最终运行验证需由用户执行（命令见 `/Users/yukina/OpenClaw/p0e-claude-result.md`）。
+
 ## 最新完成：人工纠正与单提示词兼容
 
 - 人工纠正改为单维度切换编辑；每个维度的分数、原因和说明独立保留，切换后不会丢失。

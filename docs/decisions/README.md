@@ -21,6 +21,7 @@
 | [0006](0006-risk-based-stable-review-sampling.md) | Accepted | 风险优先、稳定可解释的审核抽样 |
 | [0007](0007-optional-single-prompt-and-server-scoring.md) | Accepted | 可选单提示词评测与服务端权威评分 |
 | [0008](0008-cap-casual-and-damaged-images-at-l2.md) | Accepted | 随拍图与画质受损图片最高 L2 |
+| [0009](0009-p0e-safe-offline-import-foundation.md) | Accepted | P0-E 安全离线导入、图片冻结与候选包基础（仅 E0/E1） |
 
 ## 新增 ADR 的规则
 
