@@ -123,12 +123,53 @@ class PromptVersion(Base):
     source_optimization_run_id: Mapped[int | None] = mapped_column(
         Integer, nullable=True, index=True
     )
+    rollback_prompt_id: Mapped[int | None] = mapped_column(
+        ForeignKey("prompt_versions.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    canary_status: Mapped[str] = mapped_column(
+        String(20), default="not_started", index=True
+    )
     change_note: Mapped[str] = mapped_column(Text, default="")
     created_by: Mapped[str] = mapped_column(String(80), default="system")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, onupdate=utcnow
     )
+
+
+class PromptMetricSnapshot(Base):
+    __tablename__ = "prompt_metric_snapshots"
+    __table_args__ = (
+        UniqueConstraint(
+            "prompt_id",
+            "task_set_hash",
+            name="uq_prompt_metric_snapshot_task_set",
+        ),
+        CheckConstraint(
+            "total_count >= 1 AND reviewed_count >= 0 "
+            "AND reviewed_count <= total_count",
+            name="ck_prompt_metric_snapshot_counts",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    prompt_id: Mapped[int] = mapped_column(
+        ForeignKey("prompt_versions.id", ondelete="CASCADE"), index=True
+    )
+    task_set_key: Mapped[str] = mapped_column(String(160), index=True)
+    task_set_hash: Mapped[str] = mapped_column(String(64), index=True)
+    evaluation_ids_json: Mapped[str] = mapped_column(Text)
+    metrics_json: Mapped[str] = mapped_column(Text)
+    total_count: Mapped[int] = mapped_column(Integer)
+    reviewed_count: Mapped[int] = mapped_column(Integer)
+    created_by: Mapped[str] = mapped_column(String(80), default="system")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow
+    )
+
+    prompt: Mapped[PromptVersion] = relationship()
 
 
 class Asset(Base):
@@ -144,6 +185,80 @@ class Asset(Base):
     sha256: Mapped[str] = mapped_column(String(64), index=True)
     status: Mapped[str] = mapped_column(String(30), default="uploaded", index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class MaterialPackage(Base):
+    __tablename__ = "material_packages"
+    __table_args__ = (
+        CheckConstraint(
+            "source IN ('manual_upload','production_import','legacy_backfill')",
+            name="ck_material_packages_source",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    package_key: Mapped[str] = mapped_column(String(80), unique=True, index=True)
+    name: Mapped[str] = mapped_column(String(200))
+    source: Mapped[str] = mapped_column(
+        String(30), default="manual_upload", index=True
+    )
+    created_by: Mapped[str] = mapped_column(String(80), default="system")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, index=True
+    )
+    items: Mapped[list["MaterialPackageItem"]] = relationship(
+        back_populates="package",
+        cascade="all, delete-orphan",
+        order_by="MaterialPackageItem.position",
+    )
+
+
+class MaterialPackageItem(Base):
+    __tablename__ = "material_package_items"
+    __table_args__ = (
+        UniqueConstraint(
+            "package_id", "position", name="uq_material_package_item_position"
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    package_id: Mapped[int] = mapped_column(
+        ForeignKey("material_packages.id", ondelete="CASCADE"), index=True
+    )
+    asset_id: Mapped[int] = mapped_column(
+        ForeignKey("assets.id", ondelete="RESTRICT"), index=True
+    )
+    original_name: Mapped[str] = mapped_column(String(500))
+    duplicate: Mapped[bool] = mapped_column(Boolean, default=False)
+    position: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow
+    )
+
+    package: Mapped[MaterialPackage] = relationship(back_populates="items")
+    asset: Mapped[Asset] = relationship()
+
+
+class AgentPlanVersion(Base):
+    __tablename__ = "agent_plan_versions"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('draft','published','archived')",
+            name="ck_agent_plan_versions_status",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(160))
+    version: Mapped[str] = mapped_column(String(80), unique=True, index=True)
+    plan_json: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(
+        String(20), default="draft", index=True
+    )
+    created_by: Mapped[str] = mapped_column(String(80), default="system")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow
+    )
 
 
 class EvaluationJob(Base):
@@ -274,6 +389,26 @@ class SamplingPolicy(Base):
     )
 
 
+class ReviewWorkflowPolicy(Base):
+    __tablename__ = "review_workflow_policies"
+    __table_args__ = (
+        CheckConstraint(
+            "initial_reviewers >= 1 "
+            "AND initial_reviewers <= 9 "
+            "AND initial_reviewers % 2 = 1",
+            name="ck_review_workflow_policies_odd_reviewers",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, default=1)
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+    initial_reviewers: Mapped[int] = mapped_column(Integer, default=1)
+    updated_by: Mapped[str] = mapped_column(String(80), default="system")
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+
 class CanaryRun(Base):
     __tablename__ = "canary_runs"
     __table_args__ = (
@@ -345,6 +480,12 @@ class StrategyBundle(Base):
     engine_version: Mapped[str] = mapped_column(String(40), index=True)
     sampling_policy_revision: Mapped[int | None] = mapped_column(Integer, nullable=True)
     risk_review_version: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    agent_plan_version: Mapped[str] = mapped_column(
+        String(80),
+        default="controlled-agent-plan-v1",
+        server_default="controlled-agent-plan-v1",
+        index=True,
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
@@ -598,6 +739,12 @@ class EvaluationResult(Base):
         back_populates="evaluation",
         cascade="all, delete-orphan",
         order_by="HumanReview.created_at",
+    )
+    review_panel: Mapped["ReviewPanel | None"] = relationship(
+        back_populates="evaluation",
+        uselist=False,
+        cascade="all, delete-orphan",
+        foreign_keys="ReviewPanel.evaluation_id",
     )
 
 
@@ -878,6 +1025,12 @@ class HumanReview(Base):
         ForeignKey("evaluation_results.id", ondelete="CASCADE"), index=True
     )
     reviewer_name: Mapped[str] = mapped_column(String(80))
+    panel_id: Mapped[int | None] = mapped_column(
+        ForeignKey("review_panels.id", ondelete="RESTRICT"),
+        nullable=True,
+        index=True,
+    )
+    panel_revision: Mapped[int | None] = mapped_column(Integer, nullable=True)
     stage: Mapped[str] = mapped_column(String(20), default="initial", index=True)
     decision: Mapped[str] = mapped_column(String(30))
     corrected_level: Mapped[str | None] = mapped_column(String(10), nullable=True)
@@ -886,6 +1039,363 @@ class HumanReview(Base):
     corrections_json: Mapped[str] = mapped_column(Text, default="[]")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     evaluation: Mapped[EvaluationResult] = relationship(back_populates="reviews")
+
+
+class ReviewPanel(Base):
+    __tablename__ = "review_panels"
+    __table_args__ = (
+        UniqueConstraint("evaluation_id", name="uq_review_panels_evaluation"),
+        CheckConstraint(
+            "required_reviewers >= 1 "
+            "AND required_reviewers <= 9 "
+            "AND required_reviewers % 2 = 1",
+            name="ck_review_panels_odd_reviewers",
+        ),
+        CheckConstraint(
+            "status IN ('collecting','lead_adjudication','completed')",
+            name="ck_review_panels_status",
+        ),
+        CheckConstraint("revision >= 0", name="ck_review_panels_revision"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    evaluation_id: Mapped[int] = mapped_column(
+        ForeignKey("evaluation_results.id", ondelete="CASCADE"),
+        unique=True,
+        index=True,
+    )
+    required_reviewers: Mapped[int] = mapped_column(Integer, default=1)
+    status: Mapped[str] = mapped_column(
+        String(30), default="collecting", index=True
+    )
+    revision: Mapped[int] = mapped_column(Integer, default=0)
+    final_review_id: Mapped[int | None] = mapped_column(
+        ForeignKey("human_reviews.id", ondelete="RESTRICT"), nullable=True
+    )
+    final_truth_json: Mapped[str] = mapped_column(Text, default="{}")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    evaluation: Mapped[EvaluationResult] = relationship(
+        back_populates="review_panel",
+        foreign_keys=[evaluation_id],
+    )
+
+
+class OptimizationCaseQueue(Base):
+    __tablename__ = "optimization_case_queue"
+    __table_args__ = (
+        UniqueConstraint("idempotency_key", name="uq_optimization_case_key"),
+        CheckConstraint(
+            "source_type IN ('human_review','production_feedback')",
+            name="ck_optimization_case_source_type",
+        ),
+        CheckConstraint(
+            "status IN ('pending','batched','processing','completed','failed')",
+            name="ck_optimization_case_status",
+        ),
+        CheckConstraint(
+            "severity IN ('P0','P1','P2','P3')",
+            name="ck_optimization_case_severity",
+        ),
+        CheckConstraint(
+            "attempt_count >= 0",
+            name="ck_optimization_case_attempt_count",
+        ),
+        CheckConstraint(
+            "(source_type = 'human_review' "
+            "AND evaluation_id IS NOT NULL "
+            "AND final_review_id IS NOT NULL "
+            "AND source_event_id IS NULL) "
+            "OR "
+            "(source_type = 'production_feedback' "
+            "AND evaluation_id IS NULL "
+            "AND final_review_id IS NULL "
+            "AND source_event_id IS NOT NULL)",
+            name="ck_optimization_case_source_refs",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    idempotency_key: Mapped[str] = mapped_column(
+        String(160), unique=True, index=True
+    )
+    evaluation_id: Mapped[int | None] = mapped_column(
+        ForeignKey("evaluation_results.id", ondelete="RESTRICT"),
+        nullable=True,
+        index=True,
+    )
+    final_review_id: Mapped[int | None] = mapped_column(
+        ForeignKey("human_reviews.id", ondelete="RESTRICT"),
+        nullable=True,
+        index=True,
+    )
+    source_type: Mapped[str] = mapped_column(
+        String(30), default="human_review", index=True
+    )
+    source_event_id: Mapped[int | None] = mapped_column(
+        ForeignKey("production_feedback_events.id", ondelete="RESTRICT"),
+        nullable=True,
+        unique=True,
+        index=True,
+    )
+    prompt_version: Mapped[str] = mapped_column(String(40), index=True)
+    severity: Mapped[str] = mapped_column(String(10), default="P2", index=True)
+    case_json: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(
+        String(30), default="pending", index=True
+    )
+    lease_owner: Mapped[str | None] = mapped_column(
+        String(120), nullable=True, index=True
+    )
+    lease_token: Mapped[str | None] = mapped_column(
+        String(80), nullable=True, index=True
+    )
+    lease_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0)
+    next_attempt_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
+    last_error: Mapped[str] = mapped_column(Text, default="")
+    automation_run_id: Mapped[int | None] = mapped_column(
+        ForeignKey("automation_optimization_runs.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+
+class AutomationPolicy(Base):
+    __tablename__ = "automation_policies"
+    __table_args__ = (
+        CheckConstraint("id = 1", name="ck_automation_policy_singleton"),
+        CheckConstraint(
+            "case_threshold >= 1 AND case_threshold <= 1000",
+            name="ck_automation_policy_case_threshold",
+        ),
+        CheckConstraint(
+            "daily_budget_micros >= 0",
+            name="ck_automation_policy_daily_budget",
+        ),
+        CheckConstraint(
+            "cooldown_seconds >= 0",
+            name="ck_automation_policy_cooldown",
+        ),
+        CheckConstraint(
+            "max_candidates >= 1 AND max_candidates <= 5",
+            name="ck_automation_policy_max_candidates",
+        ),
+        CheckConstraint(
+            "lease_seconds >= 30 AND lease_seconds <= 3600",
+            name="ck_automation_policy_lease_seconds",
+        ),
+        CheckConstraint(
+            "max_attempts >= 1 AND max_attempts <= 10",
+            name="ck_automation_policy_max_attempts",
+        ),
+        CheckConstraint(
+            "base_retry_seconds >= 1 AND base_retry_seconds <= 86400",
+            name="ck_automation_policy_retry_seconds",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, default=1)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    dry_run: Mapped[bool] = mapped_column(Boolean, default=True)
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+    case_threshold: Mapped[int] = mapped_column(Integer, default=10)
+    immediate_severities_json: Mapped[str] = mapped_column(
+        Text, default='["P0","P1"]'
+    )
+    daily_budget_micros: Mapped[int] = mapped_column(Integer, default=0)
+    cooldown_seconds: Mapped[int] = mapped_column(Integer, default=21600)
+    max_candidates: Mapped[int] = mapped_column(Integer, default=1)
+    lease_seconds: Mapped[int] = mapped_column(Integer, default=300)
+    max_attempts: Mapped[int] = mapped_column(Integer, default=3)
+    base_retry_seconds: Mapped[int] = mapped_column(Integer, default=60)
+    updated_by: Mapped[str] = mapped_column(String(80), default="system")
+    last_triggered_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+
+class AutomationOptimizationRun(Base):
+    __tablename__ = "automation_optimization_runs"
+    __table_args__ = (
+        UniqueConstraint("run_key", name="uq_automation_optimization_run_key"),
+        CheckConstraint(
+            "status IN ("
+            "'planned','awaiting_executor','running','awaiting_release_review',"
+            "'failed','cancelled'"
+            ")",
+            name="ck_automation_optimization_run_status",
+        ),
+        CheckConstraint(
+            "estimated_cost_micros >= 0 AND actual_cost_micros >= 0",
+            name="ck_automation_optimization_run_costs",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    run_key: Mapped[str] = mapped_column(String(160), unique=True, index=True)
+    base_prompt_version: Mapped[str] = mapped_column(String(40), index=True)
+    policy_revision: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(
+        String(40), default="planned", index=True
+    )
+    dry_run: Mapped[bool] = mapped_column(Boolean, default=True)
+    trigger_reason: Mapped[str] = mapped_column(String(80))
+    case_ids_json: Mapped[str] = mapped_column(Text)
+    frozen_input_json: Mapped[str] = mapped_column(Text)
+    result_json: Mapped[str] = mapped_column(Text, default="{}")
+    candidate_count: Mapped[int] = mapped_column(Integer, default=0)
+    estimated_cost_micros: Mapped[int] = mapped_column(Integer, default=0)
+    actual_cost_micros: Mapped[int] = mapped_column(Integer, default=0)
+    error_message: Mapped[str] = mapped_column(Text, default="")
+    created_by: Mapped[str] = mapped_column(String(80), default="automation")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, index=True
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+
+class ProductionFeedbackEvent(Base):
+    __tablename__ = "production_feedback_events"
+    __table_args__ = (
+        UniqueConstraint("event_id", name="uq_production_feedback_event_id"),
+        CheckConstraint(
+            "status IN ('accepted','mapped','rejected')",
+            name="ck_production_feedback_event_status",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    event_id: Mapped[str] = mapped_column(String(160), unique=True, index=True)
+    schema_version: Mapped[str] = mapped_column(String(40))
+    event_type: Mapped[str] = mapped_column(String(80), index=True)
+    source_system: Mapped[str] = mapped_column(String(120), index=True)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    payload_hash: Mapped[str] = mapped_column(String(64), index=True)
+    payload_json: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(
+        String(20), default="accepted", index=True
+    )
+    received_by: Mapped[str] = mapped_column(String(80), default="system")
+    received_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, index=True
+    )
+
+
+class AuditEvent(Base):
+    __tablename__ = "audit_events"
+    __table_args__ = (
+        UniqueConstraint("event_key", name="uq_audit_event_key"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    event_key: Mapped[str] = mapped_column(String(200), unique=True, index=True)
+    category: Mapped[str] = mapped_column(String(80), index=True)
+    action: Mapped[str] = mapped_column(String(120), index=True)
+    subject_type: Mapped[str] = mapped_column(String(80), index=True)
+    subject_id: Mapped[str] = mapped_column(String(160), index=True)
+    actor: Mapped[str] = mapped_column(String(80), default="system")
+    payload_json: Mapped[str] = mapped_column(Text, default="{}")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, index=True
+    )
+
+
+class ModelBenchmarkExperiment(Base):
+    __tablename__ = "model_benchmark_experiments"
+    __table_args__ = (
+        UniqueConstraint("experiment_key", name="uq_model_benchmark_key"),
+        CheckConstraint(
+            "status IN ('draft','running','completed','failed','cancelled')",
+            name="ck_model_benchmark_status",
+        ),
+        CheckConstraint(
+            "execution_mode IN ('disabled','test')",
+            name="ck_model_benchmark_execution_mode",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    experiment_key: Mapped[str] = mapped_column(
+        String(160), unique=True, index=True
+    )
+    name: Mapped[str] = mapped_column(String(200))
+    status: Mapped[str] = mapped_column(
+        String(20), default="draft", index=True
+    )
+    execution_mode: Mapped[str] = mapped_column(
+        String(20), default="disabled", index=True
+    )
+    cohort_hash: Mapped[str] = mapped_column(String(64), index=True)
+    snapshot_hash: Mapped[str] = mapped_column(String(64), index=True)
+    frozen_snapshot_json: Mapped[str] = mapped_column(Text)
+    quality_gate_json: Mapped[str] = mapped_column(Text)
+    decision_json: Mapped[str] = mapped_column(Text, default="{}")
+    created_by: Mapped[str] = mapped_column(String(80), default="system")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, index=True
+    )
+    started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+
+class ModelBenchmarkVariant(Base):
+    __tablename__ = "model_benchmark_variants"
+    __table_args__ = (
+        UniqueConstraint(
+            "experiment_id", "model_key", name="uq_model_benchmark_variant"
+        ),
+        CheckConstraint(
+            "status IN ('pending','running','completed','failed')",
+            name="ck_model_benchmark_variant_status",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    experiment_id: Mapped[int] = mapped_column(
+        ForeignKey("model_benchmark_experiments.id", ondelete="CASCADE"),
+        index=True,
+    )
+    model_key: Mapped[str] = mapped_column(String(80), index=True)
+    provider: Mapped[str] = mapped_column(String(80))
+    model_id: Mapped[str] = mapped_column(String(200))
+    pricing_json: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(
+        String(20), default="pending", index=True
+    )
+    metrics_json: Mapped[str] = mapped_column(Text, default="{}")
+    observations_json: Mapped[str] = mapped_column(Text, default="[]")
+    error_message: Mapped[str] = mapped_column(Text, default="")
+    started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
 
 class SampleSet(Base):

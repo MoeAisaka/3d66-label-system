@@ -2000,6 +2000,693 @@ def _migration_019_add_staged_human_review_and_candidate_gate(
         """)
 
 
+def _migration_020_add_material_packages_and_review_panels(
+    connection: Connection,
+) -> None:
+    tables = {
+        row[0]
+        for row in connection.exec_driver_sql(
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
+        )
+    }
+    if "assets" in tables:
+        asset_columns = {
+            row[1]
+            for row in connection.exec_driver_sql(
+                "PRAGMA table_info(assets)"
+            )
+        }
+        asset_created_at = (
+            "created_at"
+            if "created_at" in asset_columns
+            else "CURRENT_TIMESTAMP"
+        )
+        asset_order = (
+            "created_at, id"
+            if "created_at" in asset_columns
+            else "id"
+        )
+        connection.exec_driver_sql("""
+            CREATE TABLE IF NOT EXISTS material_packages (
+                id INTEGER PRIMARY KEY,
+                package_key VARCHAR(80) NOT NULL UNIQUE,
+                name VARCHAR(200) NOT NULL,
+                source VARCHAR(30) NOT NULL DEFAULT 'manual_upload'
+                    CHECK(source IN (
+                        'manual_upload','production_import','legacy_backfill'
+                    )),
+                created_by VARCHAR(80) NOT NULL DEFAULT 'system',
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        connection.exec_driver_sql("""
+            CREATE TABLE IF NOT EXISTS material_package_items (
+                id INTEGER PRIMARY KEY,
+                package_id INTEGER NOT NULL
+                    REFERENCES material_packages(id) ON DELETE CASCADE,
+                asset_id INTEGER NOT NULL
+                    REFERENCES assets(id) ON DELETE RESTRICT,
+                original_name VARCHAR(500) NOT NULL,
+                duplicate BOOLEAN NOT NULL DEFAULT 0,
+                position INTEGER NOT NULL,
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                CONSTRAINT uq_material_package_item_position
+                    UNIQUE(package_id, position)
+            )
+        """)
+        connection.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_material_packages_created_at "
+            "ON material_packages(created_at)"
+        )
+        connection.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_material_package_items_package_id "
+            "ON material_package_items(package_id)"
+        )
+        connection.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_material_package_items_asset_id "
+            "ON material_package_items(asset_id)"
+        )
+        if connection.exec_driver_sql(
+            "SELECT 1 FROM assets LIMIT 1"
+        ).first() is not None and connection.exec_driver_sql(
+            "SELECT 1 FROM material_packages LIMIT 1"
+        ).first() is None:
+            connection.exec_driver_sql(f"""
+                INSERT INTO material_packages(
+                    package_key, name, source, created_by, created_at
+                )
+                SELECT
+                    'legacy-backfill-v20',
+                    '历史素材',
+                    'legacy_backfill',
+                    'migration-v20',
+                    COALESCE(MIN({asset_created_at}), CURRENT_TIMESTAMP)
+                FROM assets
+            """)
+            connection.exec_driver_sql(f"""
+                INSERT INTO material_package_items(
+                    package_id, asset_id, original_name, duplicate,
+                    position, created_at
+                )
+                SELECT
+                    (SELECT id FROM material_packages
+                     WHERE package_key = 'legacy-backfill-v20'),
+                    id,
+                    original_name,
+                    0,
+                    ROW_NUMBER() OVER (ORDER BY {asset_order}),
+                    {asset_created_at}
+                FROM assets
+            """)
+
+    connection.exec_driver_sql("""
+        CREATE TABLE IF NOT EXISTS agent_plan_versions (
+            id INTEGER PRIMARY KEY,
+            name VARCHAR(160) NOT NULL,
+            version VARCHAR(80) NOT NULL UNIQUE,
+            plan_json TEXT NOT NULL,
+            status VARCHAR(20) NOT NULL DEFAULT 'draft'
+                CHECK(status IN ('draft','published','archived')),
+            created_by VARCHAR(80) NOT NULL DEFAULT 'system',
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    connection.exec_driver_sql(
+        "CREATE INDEX IF NOT EXISTS ix_agent_plan_versions_status "
+        "ON agent_plan_versions(status)"
+    )
+    connection.exec_driver_sql(
+        """
+        INSERT OR IGNORE INTO agent_plan_versions(
+            name, version, plan_json, status, created_by
+        ) VALUES (?, ?, ?, ?, ?)
+        """,
+        (
+            "A预检—B美感—高风险保守复核",
+            "controlled-agent-plan-v1",
+            '{"roles":["precheck","aesthetic","risk_review"],'
+            '"routing":"controlled","max_rounds":3}',
+            "published",
+            "migration-v20",
+        ),
+    )
+    connection.exec_driver_sql("""
+        CREATE TABLE IF NOT EXISTS review_workflow_policies (
+            id INTEGER PRIMARY KEY,
+            revision INTEGER NOT NULL DEFAULT 1,
+            initial_reviewers INTEGER NOT NULL DEFAULT 1
+                CHECK(
+                    initial_reviewers >= 1
+                    AND initial_reviewers <= 9
+                    AND initial_reviewers % 2 = 1
+                ),
+            updated_by VARCHAR(80) NOT NULL DEFAULT 'system',
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    connection.exec_driver_sql("""
+        INSERT OR IGNORE INTO review_workflow_policies(
+            id, revision, initial_reviewers, updated_by, updated_at
+        ) VALUES (1, 1, 1, 'migration-v20', CURRENT_TIMESTAMP)
+    """)
+    if "strategy_bundles" in tables:
+        columns = {
+            row[1]
+            for row in connection.exec_driver_sql(
+                "PRAGMA table_info(strategy_bundles)"
+            )
+        }
+        if "agent_plan_version" not in columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE strategy_bundles ADD COLUMN "
+                "agent_plan_version VARCHAR(80) NOT NULL "
+                "DEFAULT 'controlled-agent-plan-v1'"
+            )
+        connection.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_strategy_bundles_agent_plan_version "
+            "ON strategy_bundles(agent_plan_version)"
+        )
+
+    if "evaluation_results" in tables and "human_reviews" in tables:
+        connection.exec_driver_sql("""
+            CREATE TABLE IF NOT EXISTS review_panels (
+                id INTEGER PRIMARY KEY,
+                evaluation_id INTEGER NOT NULL UNIQUE
+                    REFERENCES evaluation_results(id) ON DELETE CASCADE,
+                required_reviewers INTEGER NOT NULL DEFAULT 1
+                    CHECK(
+                        required_reviewers >= 1
+                        AND required_reviewers <= 9
+                        AND required_reviewers % 2 = 1
+                    ),
+                status VARCHAR(30) NOT NULL DEFAULT 'collecting'
+                    CHECK(status IN (
+                        'collecting','lead_adjudication','completed'
+                    )),
+                revision INTEGER NOT NULL DEFAULT 0 CHECK(revision >= 0),
+                final_review_id INTEGER
+                    REFERENCES human_reviews(id) ON DELETE RESTRICT,
+                final_truth_json TEXT NOT NULL DEFAULT '{}',
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                completed_at DATETIME
+            )
+        """)
+        connection.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_review_panels_status "
+            "ON review_panels(status)"
+        )
+        review_columns = {
+            row[1]
+            for row in connection.exec_driver_sql(
+                "PRAGMA table_info(human_reviews)"
+            )
+        }
+        if "panel_id" not in review_columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE human_reviews ADD COLUMN panel_id INTEGER "
+                "REFERENCES review_panels(id) ON DELETE RESTRICT"
+            )
+        if "panel_revision" not in review_columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE human_reviews ADD COLUMN panel_revision INTEGER"
+            )
+        if "reviewer_name" in review_columns:
+            connection.exec_driver_sql("""
+                CREATE UNIQUE INDEX IF NOT EXISTS
+                    uq_human_review_panel_reviewer
+                ON human_reviews(panel_id, reviewer_name)
+                WHERE panel_id IS NOT NULL
+            """)
+        connection.exec_driver_sql("""
+            CREATE TABLE IF NOT EXISTS optimization_case_queue (
+                id INTEGER PRIMARY KEY,
+                idempotency_key VARCHAR(160) NOT NULL UNIQUE,
+                evaluation_id INTEGER NOT NULL
+                    REFERENCES evaluation_results(id) ON DELETE RESTRICT,
+                final_review_id INTEGER NOT NULL
+                    REFERENCES human_reviews(id) ON DELETE RESTRICT,
+                prompt_version VARCHAR(40) NOT NULL,
+                severity VARCHAR(10) NOT NULL DEFAULT 'P2'
+                    CHECK(severity IN ('P0','P1','P2','P3')),
+                case_json TEXT NOT NULL,
+                status VARCHAR(30) NOT NULL DEFAULT 'pending'
+                    CHECK(status IN (
+                        'pending','batched','processing','completed','failed'
+                    )),
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        connection.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_optimization_case_queue_status "
+            "ON optimization_case_queue(status)"
+        )
+
+    if "prompt_versions" in tables:
+        prompt_columns = {
+            row[1]
+            for row in connection.exec_driver_sql(
+                "PRAGMA table_info(prompt_versions)"
+            )
+        }
+        if "rollback_prompt_id" not in prompt_columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE prompt_versions ADD COLUMN rollback_prompt_id "
+                "INTEGER REFERENCES prompt_versions(id) ON DELETE SET NULL"
+            )
+        if "canary_status" not in prompt_columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE prompt_versions ADD COLUMN canary_status "
+                "VARCHAR(20) NOT NULL DEFAULT 'not_started'"
+            )
+        connection.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_prompt_versions_canary_status "
+            "ON prompt_versions(canary_status)"
+        )
+
+
+def _migration_021_add_prompt_metric_snapshots(
+    connection: Connection,
+) -> None:
+    tables = {
+        row[0]
+        for row in connection.exec_driver_sql(
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
+        )
+    }
+    if "prompt_versions" not in tables:
+        return
+    connection.exec_driver_sql("""
+        CREATE TABLE IF NOT EXISTS prompt_metric_snapshots (
+            id INTEGER PRIMARY KEY,
+            prompt_id INTEGER NOT NULL
+                REFERENCES prompt_versions(id) ON DELETE CASCADE,
+            task_set_key VARCHAR(160) NOT NULL,
+            task_set_hash VARCHAR(64) NOT NULL,
+            evaluation_ids_json TEXT NOT NULL,
+            metrics_json TEXT NOT NULL,
+            total_count INTEGER NOT NULL,
+            reviewed_count INTEGER NOT NULL,
+            created_by VARCHAR(80) NOT NULL DEFAULT 'system',
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            CONSTRAINT uq_prompt_metric_snapshot_task_set
+                UNIQUE(prompt_id, task_set_hash),
+            CONSTRAINT ck_prompt_metric_snapshot_counts
+                CHECK(
+                    total_count >= 1
+                    AND reviewed_count >= 0
+                    AND reviewed_count <= total_count
+                )
+        )
+    """)
+    connection.exec_driver_sql(
+        "CREATE INDEX IF NOT EXISTS ix_prompt_metric_snapshots_prompt_id "
+        "ON prompt_metric_snapshots(prompt_id)"
+    )
+    connection.exec_driver_sql(
+        "CREATE INDEX IF NOT EXISTS ix_prompt_metric_snapshots_task_set_key "
+        "ON prompt_metric_snapshots(task_set_key)"
+    )
+    connection.exec_driver_sql(
+        "CREATE INDEX IF NOT EXISTS ix_prompt_metric_snapshots_task_set_hash "
+        "ON prompt_metric_snapshots(task_set_hash)"
+    )
+
+
+def _migration_022_add_phase_b_automation_feedback_benchmarks(
+    connection: Connection,
+) -> None:
+    connection.exec_driver_sql("""
+        CREATE TABLE IF NOT EXISTS automation_policies (
+            id INTEGER PRIMARY KEY CHECK(id = 1),
+            enabled BOOLEAN NOT NULL DEFAULT 0,
+            dry_run BOOLEAN NOT NULL DEFAULT 1,
+            revision INTEGER NOT NULL DEFAULT 1,
+            case_threshold INTEGER NOT NULL DEFAULT 10
+                CHECK(case_threshold BETWEEN 1 AND 1000),
+            immediate_severities_json TEXT NOT NULL DEFAULT '["P0","P1"]',
+            daily_budget_micros INTEGER NOT NULL DEFAULT 0
+                CHECK(daily_budget_micros >= 0),
+            cooldown_seconds INTEGER NOT NULL DEFAULT 21600
+                CHECK(cooldown_seconds >= 0),
+            max_candidates INTEGER NOT NULL DEFAULT 1
+                CHECK(max_candidates BETWEEN 1 AND 5),
+            lease_seconds INTEGER NOT NULL DEFAULT 300
+                CHECK(lease_seconds BETWEEN 30 AND 3600),
+            max_attempts INTEGER NOT NULL DEFAULT 3
+                CHECK(max_attempts BETWEEN 1 AND 10),
+            base_retry_seconds INTEGER NOT NULL DEFAULT 60
+                CHECK(base_retry_seconds BETWEEN 1 AND 86400),
+            updated_by VARCHAR(80) NOT NULL DEFAULT 'system',
+            last_triggered_at DATETIME,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    connection.exec_driver_sql("""
+        INSERT OR IGNORE INTO automation_policies (
+            id, enabled, dry_run, revision
+        ) VALUES (1, 0, 1, 1)
+    """)
+    connection.exec_driver_sql("""
+        CREATE TABLE IF NOT EXISTS automation_optimization_runs (
+            id INTEGER PRIMARY KEY,
+            run_key VARCHAR(160) NOT NULL UNIQUE,
+            base_prompt_version VARCHAR(40) NOT NULL,
+            policy_revision INTEGER NOT NULL,
+            status VARCHAR(40) NOT NULL DEFAULT 'planned'
+                CHECK(status IN (
+                    'planned','awaiting_executor','running',
+                    'awaiting_release_review','failed','cancelled'
+                )),
+            dry_run BOOLEAN NOT NULL DEFAULT 1,
+            trigger_reason VARCHAR(80) NOT NULL,
+            case_ids_json TEXT NOT NULL,
+            frozen_input_json TEXT NOT NULL,
+            result_json TEXT NOT NULL DEFAULT '{}',
+            candidate_count INTEGER NOT NULL DEFAULT 0,
+            estimated_cost_micros INTEGER NOT NULL DEFAULT 0,
+            actual_cost_micros INTEGER NOT NULL DEFAULT 0,
+            error_message TEXT NOT NULL DEFAULT '',
+            created_by VARCHAR(80) NOT NULL DEFAULT 'automation',
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            finished_at DATETIME,
+            CHECK(
+                estimated_cost_micros >= 0
+                AND actual_cost_micros >= 0
+            )
+        )
+    """)
+    connection.exec_driver_sql(
+        "CREATE INDEX IF NOT EXISTS ix_automation_runs_status "
+        "ON automation_optimization_runs(status)"
+    )
+    connection.exec_driver_sql(
+        "CREATE INDEX IF NOT EXISTS ix_automation_runs_created_at "
+        "ON automation_optimization_runs(created_at)"
+    )
+
+    connection.exec_driver_sql("""
+        CREATE TABLE IF NOT EXISTS production_feedback_events (
+            id INTEGER PRIMARY KEY,
+            event_id VARCHAR(160) NOT NULL UNIQUE,
+            schema_version VARCHAR(40) NOT NULL,
+            event_type VARCHAR(80) NOT NULL,
+            source_system VARCHAR(120) NOT NULL,
+            occurred_at DATETIME NOT NULL,
+            payload_hash VARCHAR(64) NOT NULL,
+            payload_json TEXT NOT NULL,
+            status VARCHAR(20) NOT NULL DEFAULT 'accepted'
+                CHECK(status IN ('accepted','mapped','rejected')),
+            received_by VARCHAR(80) NOT NULL DEFAULT 'system',
+            received_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    connection.exec_driver_sql(
+        "CREATE INDEX IF NOT EXISTS ix_production_feedback_received_at "
+        "ON production_feedback_events(received_at)"
+    )
+    connection.exec_driver_sql(
+        "CREATE INDEX IF NOT EXISTS ix_production_feedback_source "
+        "ON production_feedback_events(source_system)"
+    )
+
+    tables = {
+        row[0]
+        for row in connection.exec_driver_sql(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )
+    }
+    if "optimization_case_queue" in tables:
+        columns = {
+            row[1]: row
+            for row in connection.exec_driver_sql(
+                "PRAGMA table_info(optimization_case_queue)"
+            )
+        }
+        needs_rebuild = (
+            "source_type" not in columns
+            or bool(columns["evaluation_id"][3])
+            or bool(columns["final_review_id"][3])
+        )
+        if needs_rebuild:
+            connection.exec_driver_sql(
+                "ALTER TABLE optimization_case_queue "
+                "RENAME TO optimization_case_queue_v21"
+            )
+            connection.exec_driver_sql("""
+                CREATE TABLE optimization_case_queue (
+                    id INTEGER PRIMARY KEY,
+                    idempotency_key VARCHAR(160) NOT NULL UNIQUE,
+                    evaluation_id INTEGER
+                        REFERENCES evaluation_results(id) ON DELETE RESTRICT,
+                    final_review_id INTEGER
+                        REFERENCES human_reviews(id) ON DELETE RESTRICT,
+                    source_type VARCHAR(30) NOT NULL DEFAULT 'human_review',
+                    source_event_id INTEGER UNIQUE
+                        REFERENCES production_feedback_events(id)
+                        ON DELETE RESTRICT,
+                    prompt_version VARCHAR(40) NOT NULL,
+                    severity VARCHAR(10) NOT NULL DEFAULT 'P2'
+                        CHECK(severity IN ('P0','P1','P2','P3')),
+                    case_json TEXT NOT NULL,
+                    status VARCHAR(30) NOT NULL DEFAULT 'pending'
+                        CHECK(status IN (
+                            'pending','batched','processing',
+                            'completed','failed'
+                        )),
+                    lease_owner VARCHAR(120),
+                    lease_token VARCHAR(80),
+                    lease_expires_at DATETIME,
+                    attempt_count INTEGER NOT NULL DEFAULT 0,
+                    next_attempt_at DATETIME,
+                    last_error TEXT NOT NULL DEFAULT '',
+                    automation_run_id INTEGER
+                        REFERENCES automation_optimization_runs(id)
+                        ON DELETE SET NULL,
+                    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    CHECK(
+                        (source_type = 'human_review'
+                         AND evaluation_id IS NOT NULL
+                         AND final_review_id IS NOT NULL
+                         AND source_event_id IS NULL)
+                        OR
+                        (source_type = 'production_feedback'
+                         AND evaluation_id IS NULL
+                         AND final_review_id IS NULL
+                         AND source_event_id IS NOT NULL)
+                    )
+                )
+            """)
+            connection.exec_driver_sql("""
+                INSERT INTO optimization_case_queue (
+                    id, idempotency_key, evaluation_id, final_review_id,
+                    source_type, source_event_id, prompt_version, severity,
+                    case_json, status, lease_owner, lease_token,
+                    lease_expires_at, attempt_count, next_attempt_at,
+                    last_error, automation_run_id, created_at, updated_at
+                )
+                SELECT
+                    id, idempotency_key, evaluation_id, final_review_id,
+                    'human_review', NULL, prompt_version, severity,
+                    case_json, status, NULL, NULL, NULL, 0, NULL, '', NULL,
+                    created_at, updated_at
+                FROM optimization_case_queue_v21
+            """)
+            connection.exec_driver_sql(
+                "DROP TABLE optimization_case_queue_v21"
+            )
+    else:
+        connection.exec_driver_sql("""
+            CREATE TABLE optimization_case_queue (
+                id INTEGER PRIMARY KEY,
+                idempotency_key VARCHAR(160) NOT NULL UNIQUE,
+                evaluation_id INTEGER
+                    REFERENCES evaluation_results(id) ON DELETE RESTRICT,
+                final_review_id INTEGER
+                    REFERENCES human_reviews(id) ON DELETE RESTRICT,
+                source_type VARCHAR(30) NOT NULL DEFAULT 'human_review',
+                source_event_id INTEGER UNIQUE
+                    REFERENCES production_feedback_events(id)
+                    ON DELETE RESTRICT,
+                prompt_version VARCHAR(40) NOT NULL,
+                severity VARCHAR(10) NOT NULL DEFAULT 'P2'
+                    CHECK(severity IN ('P0','P1','P2','P3')),
+                case_json TEXT NOT NULL,
+                status VARCHAR(30) NOT NULL DEFAULT 'pending'
+                    CHECK(status IN (
+                        'pending','batched','processing',
+                        'completed','failed'
+                    )),
+                lease_owner VARCHAR(120),
+                lease_token VARCHAR(80),
+                lease_expires_at DATETIME,
+                attempt_count INTEGER NOT NULL DEFAULT 0,
+                next_attempt_at DATETIME,
+                last_error TEXT NOT NULL DEFAULT '',
+                automation_run_id INTEGER
+                    REFERENCES automation_optimization_runs(id)
+                    ON DELETE SET NULL,
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                CHECK(
+                    (source_type = 'human_review'
+                     AND evaluation_id IS NOT NULL
+                     AND final_review_id IS NOT NULL
+                     AND source_event_id IS NULL)
+                    OR
+                    (source_type = 'production_feedback'
+                     AND evaluation_id IS NULL
+                     AND final_review_id IS NULL
+                     AND source_event_id IS NOT NULL)
+                )
+            )
+        """)
+    for statement in (
+        "CREATE INDEX IF NOT EXISTS ix_optimization_case_queue_status "
+        "ON optimization_case_queue(status)",
+        "CREATE INDEX IF NOT EXISTS ix_optimization_case_queue_source_type "
+        "ON optimization_case_queue(source_type)",
+        "CREATE INDEX IF NOT EXISTS ix_optimization_case_queue_prompt "
+        "ON optimization_case_queue(prompt_version)",
+        "CREATE INDEX IF NOT EXISTS ix_optimization_case_queue_lease "
+        "ON optimization_case_queue(lease_expires_at)",
+        "CREATE INDEX IF NOT EXISTS ix_optimization_case_queue_lease_token "
+        "ON optimization_case_queue(lease_token)",
+        "CREATE INDEX IF NOT EXISTS ix_optimization_case_queue_next_attempt "
+        "ON optimization_case_queue(next_attempt_at)",
+        "CREATE INDEX IF NOT EXISTS ix_optimization_case_queue_run "
+        "ON optimization_case_queue(automation_run_id)",
+    ):
+        connection.exec_driver_sql(statement)
+
+    connection.exec_driver_sql("""
+        CREATE TABLE IF NOT EXISTS audit_events (
+            id INTEGER PRIMARY KEY,
+            event_key VARCHAR(200) NOT NULL UNIQUE,
+            category VARCHAR(80) NOT NULL,
+            action VARCHAR(120) NOT NULL,
+            subject_type VARCHAR(80) NOT NULL,
+            subject_id VARCHAR(160) NOT NULL,
+            actor VARCHAR(80) NOT NULL DEFAULT 'system',
+            payload_json TEXT NOT NULL DEFAULT '{}',
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    connection.exec_driver_sql(
+        "CREATE INDEX IF NOT EXISTS ix_audit_events_created_at "
+        "ON audit_events(created_at)"
+    )
+    connection.exec_driver_sql("""
+        CREATE TABLE IF NOT EXISTS model_benchmark_experiments (
+            id INTEGER PRIMARY KEY,
+            experiment_key VARCHAR(160) NOT NULL UNIQUE,
+            name VARCHAR(200) NOT NULL,
+            status VARCHAR(20) NOT NULL DEFAULT 'draft'
+                CHECK(status IN (
+                    'draft','running','completed','failed','cancelled'
+                )),
+            execution_mode VARCHAR(20) NOT NULL DEFAULT 'disabled'
+                CHECK(execution_mode IN ('disabled','test')),
+            cohort_hash VARCHAR(64) NOT NULL,
+            snapshot_hash VARCHAR(64) NOT NULL,
+            frozen_snapshot_json TEXT NOT NULL,
+            quality_gate_json TEXT NOT NULL,
+            decision_json TEXT NOT NULL DEFAULT '{}',
+            created_by VARCHAR(80) NOT NULL DEFAULT 'system',
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            started_at DATETIME,
+            finished_at DATETIME
+        )
+    """)
+    connection.exec_driver_sql("""
+        CREATE TABLE IF NOT EXISTS model_benchmark_variants (
+            id INTEGER PRIMARY KEY,
+            experiment_id INTEGER NOT NULL
+                REFERENCES model_benchmark_experiments(id)
+                ON DELETE CASCADE,
+            model_key VARCHAR(80) NOT NULL,
+            provider VARCHAR(80) NOT NULL,
+            model_id VARCHAR(200) NOT NULL,
+            pricing_json TEXT NOT NULL,
+            status VARCHAR(20) NOT NULL DEFAULT 'pending'
+                CHECK(status IN ('pending','running','completed','failed')),
+            metrics_json TEXT NOT NULL DEFAULT '{}',
+            observations_json TEXT NOT NULL DEFAULT '[]',
+            error_message TEXT NOT NULL DEFAULT '',
+            started_at DATETIME,
+            finished_at DATETIME,
+            UNIQUE(experiment_id, model_key)
+        )
+    """)
+    connection.exec_driver_sql(
+        "CREATE INDEX IF NOT EXISTS ix_model_benchmark_experiments_status "
+        "ON model_benchmark_experiments(status)"
+    )
+    connection.exec_driver_sql(
+        "CREATE INDEX IF NOT EXISTS ix_model_benchmark_variants_experiment "
+        "ON model_benchmark_variants(experiment_id)"
+    )
+
+    for table in ("production_feedback_events", "audit_events"):
+        connection.exec_driver_sql(f"""
+            CREATE TRIGGER IF NOT EXISTS trg_{table}_no_update
+            BEFORE UPDATE ON {table}
+            BEGIN
+                SELECT RAISE(ABORT, '{table} is immutable');
+            END
+        """)
+        connection.exec_driver_sql(f"""
+            CREATE TRIGGER IF NOT EXISTS trg_{table}_no_delete
+            BEFORE DELETE ON {table}
+            BEGIN
+                SELECT RAISE(ABORT, '{table} cannot be deleted');
+            END
+        """)
+    connection.exec_driver_sql("""
+        CREATE TRIGGER IF NOT EXISTS trg_benchmark_snapshot_no_update
+        BEFORE UPDATE OF
+            experiment_key, cohort_hash, snapshot_hash,
+            frozen_snapshot_json, quality_gate_json
+        ON model_benchmark_experiments
+        BEGIN
+            SELECT RAISE(ABORT, 'benchmark snapshot is immutable');
+        END
+    """)
+
+
+def _migration_023_enforce_material_package_immutability(
+    connection: Connection,
+) -> None:
+    tables = {
+        row[0]
+        for row in connection.exec_driver_sql(
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
+        )
+    }
+    immutable_tables = {
+        "material_packages": "MaterialPackage",
+        "material_package_items": "MaterialPackageItem",
+    }
+    for table, entity in immutable_tables.items():
+        if table not in tables:
+            continue
+        connection.exec_driver_sql(f"""
+            CREATE TRIGGER IF NOT EXISTS trg_{table}_no_update
+            BEFORE UPDATE ON {table}
+            BEGIN
+                SELECT RAISE(ABORT, '{entity} is immutable');
+            END
+        """)
+        connection.exec_driver_sql(f"""
+            CREATE TRIGGER IF NOT EXISTS trg_{table}_no_delete
+            BEFORE DELETE ON {table}
+            BEGIN
+                SELECT RAISE(ABORT, '{entity} cannot be deleted');
+            END
+        """)
+
+
 MIGRATIONS = [
     Migration(1, "add_sample_expected_level", _migration_001_add_sample_expected_level),
     Migration(2, "add_review_corrections", _migration_002_add_review_corrections),
@@ -2051,6 +2738,26 @@ MIGRATIONS = [
         19,
         "add_staged_human_review_and_candidate_gate",
         _migration_019_add_staged_human_review_and_candidate_gate,
+    ),
+    Migration(
+        20,
+        "add_material_packages_and_review_panels",
+        _migration_020_add_material_packages_and_review_panels,
+    ),
+    Migration(
+        21,
+        "add_prompt_metric_snapshots",
+        _migration_021_add_prompt_metric_snapshots,
+    ),
+    Migration(
+        22,
+        "add_phase_b_automation_feedback_benchmarks",
+        _migration_022_add_phase_b_automation_feedback_benchmarks,
+    ),
+    Migration(
+        23,
+        "enforce_material_package_immutability",
+        _migration_023_enforce_material_package_immutability,
     ),
 ]
 

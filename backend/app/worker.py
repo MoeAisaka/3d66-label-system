@@ -38,6 +38,8 @@ from .models import (
     PromptRegressionItem,
     PromptVersion,
     QueueSchedulerState,
+    ReviewPanel,
+    ReviewWorkflowPolicy,
     SamplingPolicy,
     StrategyBundle,
 )
@@ -52,6 +54,7 @@ from .queue_scheduler import (
     record_breaker_failure,
     retry_delay_seconds,
 )
+from .optimization_automation import optimization_worker_tick
 from .scoring import ENGINE_VERSION, calculate_score
 from .schema_adapter import (
     adapt_combined_aesthetic_response,
@@ -735,6 +738,24 @@ async def evaluate_job(job_id: int) -> None:
         )
         db.add(result)
         db.flush()
+        low_confidence_threshold = (
+            sampling_policy.low_confidence_threshold
+            if sampling_policy is not None
+            else 0.7
+        )
+        if result.confidence is None or result.confidence < low_confidence_threshold:
+            review_policy = db.get(ReviewWorkflowPolicy, 1)
+            db.add(
+                ReviewPanel(
+                    evaluation_id=result.id,
+                    required_reviewers=(
+                        review_policy.initial_reviewers
+                        if review_policy is not None
+                        else 1
+                    ),
+                    status="collecting",
+                )
+            )
         db.execute(
             update(Asset).where(Asset.id == asset.id).values(status="evaluated")
         )
@@ -1063,6 +1084,15 @@ def run_forever(
     logger.info("Worker 已启动：%s", WORKER_ID)
     while should_continue is None or should_continue():
         worked = asyncio.run(process_one())
+        automation = optimization_worker_tick(WORKER_ID)
+        if automation["status"] not in {
+            "disabled",
+            "idle",
+            "threshold_wait",
+            "cooldown",
+            "budget_blocked",
+        }:
+            logger.info("自动优化队列状态：%s", automation["status"])
         if not worked:
             time.sleep(poll_seconds)
     logger.info("Worker 检测到主服务已退出，正在停止：%s", WORKER_ID)

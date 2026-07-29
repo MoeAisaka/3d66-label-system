@@ -33,6 +33,10 @@ MIGRATION_NAMES = [
     "add_canary_run_persistence",
     "add_prompt_optimizer_stage_audit",
     "add_staged_human_review_and_candidate_gate",
+    "add_material_packages_and_review_panels",
+    "add_prompt_metric_snapshots",
+    "add_phase_b_automation_feedback_benchmarks",
+    "enforce_material_package_immutability",
 ]
 
 
@@ -251,7 +255,9 @@ def test_schema_migrations_table_created_with_all_versions(tmp_path) -> None:
                     "SELECT version, name FROM schema_migrations ORDER BY version"
                 )
             )
-        assert [row[0] for row in rows] == list(range(1, 20))
+        assert [row[0] for row in rows] == list(
+            range(1, len(MIGRATION_NAMES) + 1)
+        )
         assert [row[1] for row in rows] == MIGRATION_NAMES
     finally:
         engine.dispose()
@@ -269,7 +275,9 @@ def test_repeated_migration_is_idempotent(tmp_path) -> None:
                     "SELECT version FROM schema_migrations ORDER BY version"
                 )
             )
-        assert [row[0] for row in versions] == list(range(1, 20))
+        assert [row[0] for row in versions] == list(
+            range(1, len(MIGRATION_NAMES) + 1)
+        )
     finally:
         engine.dispose()
 
@@ -378,7 +386,9 @@ def test_complete_v10_database_forward_migrates_versions_11_to_13(tmp_path) -> N
                     "SELECT version FROM schema_migrations ORDER BY version"
                 )
             )
-            assert [row[0] for row in versions] == list(range(1, 20))
+            assert [row[0] for row in versions] == list(
+                range(1, len(MIGRATION_NAMES) + 1)
+            )
             old_result = connection.exec_driver_sql(
                 """
                 SELECT model_id, prompt_a_version, strategy_bundle_id,
@@ -423,7 +433,7 @@ def test_complete_v10_database_forward_migrates_versions_11_to_13(tmp_path) -> N
                 connection.exec_driver_sql(
                     "SELECT COUNT(*) FROM schema_migrations"
                 ).scalar_one()
-                == 19
+                == len(MIGRATION_NAMES)
             )
     finally:
         engine.dispose()
@@ -571,7 +581,7 @@ def test_complete_v11_database_forward_migrates_paired_regression_contract(
                     "SELECT version FROM schema_migrations ORDER BY version"
                 )
             ]
-            assert versions == list(range(1, 20))
+            assert versions == list(range(1, len(MIGRATION_NAMES) + 1))
 
             run_columns = {
                 row[1]
@@ -871,7 +881,7 @@ def test_complete_v12_database_forward_adds_frozen_strategy_snapshots(
                     "SELECT version FROM schema_migrations ORDER BY version"
                 )
             ]
-            assert versions == list(range(1, 20))
+            assert versions == list(range(1, len(MIGRATION_NAMES) + 1))
     finally:
         engine.dispose()
 
@@ -952,7 +962,7 @@ def test_complete_v13_database_forward_adds_loop_queue_and_breaker_contract(
                 connection.exec_driver_sql(
                     "SELECT max(version) FROM schema_migrations"
                 ).scalar_one()
-                    == 19
+                    == len(MIGRATION_NAMES)
             )
 
             with pytest.raises(
@@ -1187,7 +1197,7 @@ def test_complete_v14_database_forward_hardens_retry_chain_and_scheduler(
                 connection.exec_driver_sql(
                     "SELECT max(version) FROM schema_migrations"
                 ).scalar_one()
-                == 19
+                == len(MIGRATION_NAMES)
             )
             assert (
                 connection.exec_driver_sql(
@@ -1424,7 +1434,7 @@ def test_complete_v15_database_replaces_root_index_and_hardens_payloads(
                 connection.exec_driver_sql(
                     "SELECT max(version) FROM schema_migrations"
                 ).scalar_one()
-                == 19
+                == len(MIGRATION_NAMES)
             )
             index_sql = connection.exec_driver_sql("""
                 SELECT sql
@@ -1665,7 +1675,9 @@ def test_complete_v17_database_adds_optimizer_stage_audit(
                     "ORDER BY version"
                 )
             )
-            assert [item[0] for item in versions] == list(range(1, 20))
+            assert [item[0] for item in versions] == list(
+                range(1, len(MIGRATION_NAMES) + 1)
+            )
             assert [item[1] for item in versions] == MIGRATION_NAMES
     finally:
         engine.dispose()
@@ -1753,5 +1765,87 @@ def test_v19_backfills_staged_review_state_and_keeps_history_append_only(
                 connection.exec_driver_sql(
                     "UPDATE human_reviews SET decision = 'approved' WHERE id = 3"
                 )
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.parametrize(
+    ("statement", "message"),
+    [
+        (
+            "UPDATE material_packages SET name = 'changed' WHERE id = 1",
+            "MaterialPackage is immutable",
+        ),
+        (
+            "DELETE FROM material_packages WHERE id = 1",
+            "MaterialPackage cannot be deleted",
+        ),
+        (
+            "UPDATE material_package_items "
+            "SET original_name = 'changed.jpg' WHERE id = 1",
+            "MaterialPackageItem is immutable",
+        ),
+        (
+            "DELETE FROM material_package_items WHERE id = 1",
+            "MaterialPackageItem cannot be deleted",
+        ),
+    ],
+    ids=[
+        "package-update",
+        "package-delete",
+        "package-item-update",
+        "package-item-delete",
+    ],
+)
+def test_material_package_database_guards_reject_mutation(
+    tmp_path,
+    statement: str,
+    message: str,
+) -> None:
+    engine = _engine(tmp_path, f"{message.split()[0]}-{statement.split()[0]}.db")
+    _create_latest_and_run_migrations(engine)
+    try:
+        with Session(engine) as db:
+            asset = models.Asset(
+                original_name="source.jpg",
+                stored_name="source.jpg",
+                mime_type="image/jpeg",
+                size_bytes=10,
+                sha256="f" * 64,
+            )
+            package = models.MaterialPackage(
+                id=1,
+                package_key="immutable-package",
+                name="不可变素材包",
+                source="manual_upload",
+                created_by="test",
+            )
+            db.add_all([asset, package])
+            db.flush()
+            db.add(
+                models.MaterialPackageItem(
+                    id=1,
+                    package_id=package.id,
+                    asset_id=asset.id,
+                    original_name=asset.original_name,
+                    duplicate=False,
+                    position=1,
+                )
+            )
+            db.commit()
+
+        with pytest.raises(IntegrityError, match=message):
+            with engine.begin() as connection:
+                connection.exec_driver_sql(statement)
+
+        with engine.connect() as connection:
+            package_row = connection.exec_driver_sql(
+                "SELECT name FROM material_packages WHERE id = 1"
+            ).one()
+            item_row = connection.exec_driver_sql(
+                "SELECT original_name FROM material_package_items WHERE id = 1"
+            ).one()
+            assert package_row[0] == "不可变素材包"
+            assert item_row[0] == "source.jpg"
     finally:
         engine.dispose()

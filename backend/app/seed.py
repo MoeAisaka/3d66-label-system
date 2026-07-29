@@ -5,10 +5,13 @@ from sqlalchemy.orm import Session
 
 from .config import get_settings
 from .models import (
+    AgentPlanVersion,
+    AutomationPolicy,
     EvaluationControl,
     ModelConfig,
     OptimizerConfig,
     PromptVersion,
+    ReviewWorkflowPolicy,
     SamplingPolicy,
     User,
 )
@@ -38,6 +41,33 @@ def seed_defaults(db: Session) -> None:
 
     if db.get(SamplingPolicy, 1) is None:
         db.add(SamplingPolicy(id=1))
+
+    if db.get(ReviewWorkflowPolicy, 1) is None:
+        db.add(ReviewWorkflowPolicy(id=1, initial_reviewers=1))
+
+    if db.get(AutomationPolicy, 1) is None:
+        db.add(
+            AutomationPolicy(
+                id=1,
+                enabled=False,
+                dry_run=True,
+                daily_budget_micros=0,
+            )
+        )
+
+    if db.scalar(select(AgentPlanVersion).limit(1)) is None:
+        db.add(
+            AgentPlanVersion(
+                name="A预检—B美感—高风险保守复核",
+                version="controlled-agent-plan-v1",
+                plan_json=(
+                    '{"roles":["precheck","aesthetic","risk_review"],'
+                    '"routing":"controlled","max_rounds":3}'
+                ),
+                status="published",
+                created_by="system",
+            )
+        )
 
     if db.scalar(select(PromptVersion).limit(1)) is None:
         pairs = load_prompt_pairs(settings.prompt_source)

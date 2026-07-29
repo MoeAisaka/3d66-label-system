@@ -593,6 +593,7 @@ def _build_canonical_definition(
     engine_version: str,
     sampling_policy: SamplingPolicy | None,
     risk_review_version: str | None,
+    agent_plan_version: str,
 ) -> dict[str, Any]:
     return _redact_secrets({
         "schema_version": STRATEGY_SCHEMA_VERSION,
@@ -604,6 +605,7 @@ def _build_canonical_definition(
         "engine_version": engine_version,
         "sampling_policy": _build_sampling_policy_definition(sampling_policy),
         "risk_review_version": risk_review_version,
+        "agent_plan_version": agent_plan_version,
     })
 
 
@@ -620,6 +622,7 @@ def _assert_strategy_identity_is_safe(
     rubric_version: str,
     engine_version: str,
     risk_review_version: str | None,
+    agent_plan_version: str,
 ) -> None:
     prompt_a_definition = definition["prompt_a"]
     prompt_b_definition = definition["prompt_b"]
@@ -630,6 +633,7 @@ def _assert_strategy_identity_is_safe(
         rubric_version,
         engine_version,
         risk_review_version,
+        agent_plan_version,
     )
     sanitized = (
         definition["model_id"],
@@ -638,6 +642,7 @@ def _assert_strategy_identity_is_safe(
         definition["rubric_version"],
         definition["engine_version"],
         definition["risk_review_version"],
+        definition["agent_plan_version"],
     )
     if sanitized != expected:
         raise StrategySecretError(
@@ -656,6 +661,7 @@ def _bundle_values(
     engine_version: str,
     risk_review_version: str | None,
     sampling_policy: SamplingPolicy | None,
+    agent_plan_version: str,
 ) -> dict[str, Any]:
     return {
         "canonical_hash": canonical_hash,
@@ -669,6 +675,7 @@ def _bundle_values(
             sampling_policy.revision if sampling_policy else None
         ),
         "risk_review_version": risk_review_version,
+        "agent_plan_version": agent_plan_version,
     }
 
 
@@ -704,6 +711,7 @@ def get_or_create_bundle(
     engine_version: str,
     risk_review_version: str | None,
     sampling_policy: SamplingPolicy | None,
+    agent_plan_version: str = "controlled-agent-plan-v1",
 ) -> StrategyBundle:
     """Reuse an identical immutable definition or persist a new bundle."""
     model_config_snapshot = _build_model_config_snapshot(model_config)
@@ -716,6 +724,7 @@ def get_or_create_bundle(
         engine_version=engine_version,
         sampling_policy=sampling_policy,
         risk_review_version=risk_review_version,
+        agent_plan_version=agent_plan_version,
     )
     _assert_strategy_identity_is_safe(
         definition,
@@ -725,6 +734,7 @@ def get_or_create_bundle(
         rubric_version=rubric_version,
         engine_version=engine_version,
         risk_review_version=risk_review_version,
+        agent_plan_version=agent_plan_version,
     )
     _assert_no_sensitive_material(definition)
     canonical_hash = _compute_canonical_hash(definition)
@@ -745,6 +755,7 @@ def get_or_create_bundle(
         engine_version=engine_version,
         risk_review_version=risk_review_version,
         sampling_policy=sampling_policy,
+        agent_plan_version=agent_plan_version,
     )
     _assert_no_sensitive_material(values)
     if db.get_bind().dialect.name == "sqlite":
@@ -788,6 +799,7 @@ def build_strategy_snapshot(
         engine_version=bundle.engine_version,
         sampling_policy=sampling_policy,
         risk_review_version=bundle.risk_review_version,
+        agent_plan_version=bundle.agent_plan_version,
     )
     if _compute_canonical_hash(definition) != bundle.canonical_hash:
         raise ValueError(

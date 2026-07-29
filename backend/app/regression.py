@@ -183,7 +183,14 @@ def latest_review_for_result(
         return None
     latest = max(
         result.reviews,
-        key=lambda review: (review.created_at, review.id or 0),
+        key=lambda review: (
+            (
+                review.created_at
+                if review.created_at.tzinfo
+                else review.created_at.replace(tzinfo=timezone.utc)
+            ),
+            review.id or 0,
+        ),
     )
     if result.review_stage == "completed":
         return latest
