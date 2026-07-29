@@ -8,6 +8,36 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import type { EvaluationRecord, ReviewStage } from "@/lib/types"
 
+export type ReviewWorkspaceView =
+  | "model-evaluation"
+  | "low-confidence"
+  | "consensus"
+  | "adjudication"
+  | "completed"
+
+export const reviewWorkspaceMeta: Record<ReviewWorkspaceView, { title: string; description: string }> = {
+  "model-evaluation": {
+    title: "模型初评",
+    description: "查看全部模型评测运行及其策略快照；这里是运行证据，不等于最终人工真值。",
+  },
+  "low-confidence": {
+    title: "低置信度待审",
+    description: "低于当前策略阈值的新结果进入初审组；审核员提交前后都看不到其他人的具体答案。",
+  },
+  consensus: {
+    title: "初审组共识",
+    description: "查看正在收集的独立盲审票数；收齐后按维度和关键字段分别计算严格多数。",
+  },
+  adjudication: {
+    title: "主审裁决",
+    description: "只处理收齐奇数票后仍无严格多数的字段；裁决仍在初审工作台内形成最终真值。",
+  },
+  completed: {
+    title: "已完成",
+    description: "查看初审最终真值和兼容历史审核记录；旧二审/仲裁数据不再成为新任务主流程。",
+  },
+}
+
 export const reviewStageMeta: Record<ReviewStage, { label: string; title: string; description: string }> = {
   initial: {
     label: "初审纠偏",
@@ -102,7 +132,7 @@ function normalizedQuality(value: string | undefined) {
   return value || ""
 }
 
-export function filterReviewAssets(items: EvaluationRecord[], params: URLSearchParams, stage?: ReviewStage) {
+export function filterReviewAssets(items: EvaluationRecord[], params: URLSearchParams, stage?: ReviewStage, view?: ReviewWorkspaceView) {
   const query = (params.get("q") || "").trim().toLowerCase()
   const status = params.get("status") || ""
   const level = params.get("level") || ""
@@ -120,6 +150,16 @@ export function filterReviewAssets(items: EvaluationRecord[], params: URLSearchP
   const filtered = items.filter((asset) => {
     const evaluation = asset.evaluation
     if (stage && evaluation.review_stage !== stage) return false
+    if (view === "low-confidence" && (
+      evaluation.review_panel?.status !== "collecting"
+      || evaluation.review_panel.submitted_count !== 0
+    )) return false
+    if (view === "consensus" && (
+      evaluation.review_panel?.status !== "collecting"
+      || evaluation.review_panel.submitted_count === 0
+    )) return false
+    if (view === "adjudication" && evaluation.review_panel?.status !== "lead_adjudication") return false
+    if (view === "completed" && evaluation.review_stage !== "completed") return false
     const finalLevel = evaluation?.final_level || evaluation?.level || ""
     const primaryCategory = evaluation?.precheck?.classification?.primary_category || "无法判断"
     const confidenceValue = evaluation?.confidence
@@ -188,17 +228,18 @@ function samplingTone(tier: EvaluationRecord["sampling"]["tier"]) {
   return "neutral" as const
 }
 
-function detailUrl(evaluationId: number, params: URLSearchParams, stage: ReviewStage) {
+function detailUrl(evaluationId: number, params: URLSearchParams, stage?: ReviewStage, view?: ReviewWorkspaceView) {
   const next = new URLSearchParams(params)
   next.delete("asset")
   next.set("evaluation", String(evaluationId))
-  return `/review/${stage}?${next.toString()}`
+  const path = view ? `/workflow/review/${view}` : `/review/${stage ?? "initial"}`
+  return `${path}?${next.toString()}`
 }
 
-export function ReviewList({ items, loading, searchParams, setSearchParams, stage }: { items: EvaluationRecord[]; loading: boolean; searchParams: URLSearchParams; setSearchParams: SetURLSearchParams; stage: ReviewStage }) {
+export function ReviewList({ items, loading, searchParams, setSearchParams, stage, view }: { items: EvaluationRecord[]; loading: boolean; searchParams: URLSearchParams; setSearchParams: SetURLSearchParams; stage?: ReviewStage; view?: ReviewWorkspaceView }) {
   const [filtersOpen, setFiltersOpen] = useState(false)
-  const stageItems = items.filter((item) => item.evaluation.review_stage === stage)
-  const filtered = filterReviewAssets(items, searchParams, stage)
+  const stageItems = filterReviewAssets(items, new URLSearchParams(), stage, view)
+  const filtered = filterReviewAssets(items, searchParams, stage, view)
   const options = filterOptions(stageItems)
   const stageCounts = items.reduce<Record<ReviewStage, number>>((counts, item) => {
     counts[item.evaluation.review_stage] += 1
@@ -226,14 +267,14 @@ export function ReviewList({ items, loading, searchParams, setSearchParams, stag
   }
 
   return <>
-    <PageHeader index="04" title={reviewStageMeta[stage].title} description={reviewStageMeta[stage].description} />
+    <PageHeader index={view ? "02" : "04"} title={view ? reviewWorkspaceMeta[view].title : reviewStageMeta[stage ?? "initial"].title} description={view ? reviewWorkspaceMeta[view].description : reviewStageMeta[stage ?? "initial"].description} />
     <div className="mx-auto max-w-[1720px] px-5 py-7 md:px-8 lg:px-10 lg:py-9">
-      <nav className="mb-5 grid border-y border-[var(--line-strong)] bg-white sm:grid-cols-4" aria-label="人工审核工作台">
+      {!view && <nav className="mb-5 grid border-y border-[var(--line-strong)] bg-white sm:grid-cols-4" aria-label="兼容历史人工审核工作台">
         {(Object.keys(reviewStageMeta) as ReviewStage[]).map((itemStage) => {
           const active = itemStage === stage
           return <Link key={itemStage} to={`/review/${itemStage}`} className={`border-b border-r border-[var(--line)] px-4 py-4 last:border-r-0 sm:border-b-0 ${active ? "bg-primary text-primary-foreground" : "hover:bg-[#fafbf8]"}`}><span className="block text-xs font-semibold">{reviewStageMeta[itemStage].label}</span><span className="font-data mt-1 block text-xl font-bold">{stageCounts[itemStage]}</span></Link>
         })}
-      </nav>
+      </nav>}
       <section className="mb-5 grid border-y border-[var(--line-strong)] bg-white lg:grid-cols-[minmax(280px,1fr)_auto] lg:items-stretch" aria-label="智能抽样队列">
         <div className="px-4 py-4 lg:border-r lg:border-[var(--line)]">
           <div className="flex flex-wrap items-center gap-2"><h2 className="text-sm font-bold">智能抽样审核</h2><Badge>规则 {items[0]?.sampling.version || "smart-sampling-v1.0"}</Badge></div>
@@ -270,7 +311,7 @@ export function ReviewList({ items, loading, searchParams, setSearchParams, stag
       </section>
 
       <div className="mt-7 flex flex-wrap items-end justify-between gap-4">
-        <div><h2 className="font-editorial text-2xl font-bold">{reviewStageMeta[stage].label}队列</h2><p className="mt-1 text-sm text-[var(--muted)]">显示 {filtered.length} 条，本工作台共 {stageItems.length} 条{activeFilters ? `，已启用 ${activeFilters} 项筛选` : ""}</p></div>
+        <div><h2 className="font-editorial text-2xl font-bold">{view ? reviewWorkspaceMeta[view].title : reviewStageMeta[stage ?? "initial"].label}队列</h2><p className="mt-1 text-sm text-[var(--muted)]">显示 {filtered.length} 条，本工作台共 {stageItems.length} 条{activeFilters ? `，已启用 ${activeFilters} 项筛选` : ""}</p></div>
         <div className="flex items-center gap-2 text-xs text-[var(--muted)]"><Funnel />筛选条件会保留到大图详情</div>
       </div>
 
@@ -297,7 +338,7 @@ export function ReviewList({ items, loading, searchParams, setSearchParams, stag
                 <td className="px-3 py-3"><Badge tone={statusTone(status)}>{statusNames[status]}</Badge>{evaluation?.human_review && <p className="mt-2 max-w-32 truncate text-xs text-[var(--muted)]">{evaluation.human_review.reviewer_name}</p>}</td>
                 <td className="px-3 py-3"><p className="font-data max-w-44 truncate text-xs" title={evaluation?.versions.model || ""}>{evaluation?.versions.model || "—"}</p><p className="font-data mt-2 text-[0.68rem] text-[var(--muted)]">{evaluation?.versions.prompt ? `单提示词 ${evaluation.versions.prompt}` : `A ${evaluation?.versions.prompt_a || "—"}${evaluation?.versions.prompt_b ? ` · B ${evaluation.versions.prompt_b}` : ""}`}</p></td>
                 <td className="font-data whitespace-nowrap px-3 py-3 text-xs text-[var(--muted)]">{new Date(evaluation.updated_at).toLocaleString("zh-CN")}</td>
-                <td className="w-28 px-4 py-3 text-right"><Button asChild size="sm" variant="secondary"><Link to={detailUrl(evaluation.id, searchParams, stage)}><span>{stage === "completed" ? "查看" : "审核"}</span><ArrowRight /></Link></Button></td>
+                <td className="w-28 px-4 py-3 text-right"><Button asChild size="sm" variant="secondary"><Link to={detailUrl(evaluation.id, searchParams, stage, view)}><span>{evaluation.review_stage === "completed" || view === "model-evaluation" ? "查看" : "审核"}</span><ArrowRight /></Link></Button></td>
               </tr>
             })}</tbody>
           </table>

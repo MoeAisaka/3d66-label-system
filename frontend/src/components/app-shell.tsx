@@ -2,15 +2,12 @@ import { useState, type ReactNode } from "react"
 import {
   ArrowsClockwise,
   Brain,
-  ChartBar,
   Images,
   ListChecks,
   List,
-  ShieldCheck,
-  Stack,
   SignOut,
   SlidersHorizontal,
-  Sparkle,
+  SquaresFour,
   X,
 } from "@phosphor-icons/react"
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom"
@@ -21,17 +18,84 @@ import { api } from "@/lib/api"
 import type { User } from "@/lib/types"
 import { cn } from "@/lib/utils"
 
-const navItems = [
-  { to: "/", index: "01", label: "总览", icon: ChartBar },
-  { to: "/assets", index: "02", label: "素材", icon: Images },
-  { to: "/jobs", index: "03", label: "评测任务", icon: ListChecks },
-  { to: "/review", index: "04", label: "人工审核", icon: Sparkle },
-  { to: "/prompts", index: "05", label: "提示词", icon: Brain },
-  { to: "/model", index: "06", label: "模型配置", icon: SlidersHorizontal },
-  { to: "/sample-sets", index: "07", label: "样本与回归", icon: Stack },
-  { to: "/migrations", index: "08", label: "模型迁移", icon: ArrowsClockwise },
-  { to: "/canary-runs", index: "09", label: "金丝雀运行", icon: ShieldCheck },
-]
+export const workflowDomains = [
+  {
+    to: "/workflow/materials/packages",
+    match: "/workflow/materials",
+    index: "01",
+    label: "素材与任务",
+    icon: Images,
+    tabs: [
+      { to: "/workflow/materials/packages", label: "素材包" },
+      { to: "/workflow/materials/assets", label: "素材选择" },
+      { to: "/workflow/materials/jobs", label: "评测任务" },
+    ],
+  },
+  {
+    to: "/workflow/review/model-evaluation",
+    match: "/workflow/review",
+    index: "02",
+    label: "初评与初审",
+    icon: ListChecks,
+    tabs: [
+      { to: "/workflow/review/model-evaluation", label: "模型初评" },
+      { to: "/workflow/review/low-confidence", label: "低置信度待审" },
+      { to: "/workflow/review/consensus", label: "初审组共识" },
+      { to: "/workflow/review/adjudication", label: "主审裁决" },
+      { to: "/workflow/review/completed", label: "已完成" },
+    ],
+  },
+  {
+    to: "/workflow/optimization/cases",
+    match: "/workflow/optimization",
+    index: "03",
+    label: "优化与回归",
+    icon: Brain,
+    tabs: [
+      { to: "/workflow/optimization/cases", label: "纠偏案例队列" },
+      { to: "/workflow/optimization/automation", label: "自动优化编排" },
+      { to: "/workflow/optimization/feedback", label: "生产案例回流" },
+      { to: "/workflow/optimization/candidates", label: "候选提示词" },
+      { to: "/workflow/optimization/paired-regression", label: "小样本配对回归" },
+    ],
+  },
+  {
+    to: "/workflow/releases/decisions",
+    match: "/workflow/releases",
+    index: "04",
+    label: "二审与版本",
+    icon: SquaresFour,
+    tabs: [
+      { to: "/workflow/releases/decisions", label: "待发布决策" },
+      { to: "/workflow/releases/metrics", label: "版本指标" },
+      { to: "/workflow/releases/history", label: "版本历史与回滚" },
+    ],
+  },
+  {
+    to: "/workflow/models/benchmark",
+    match: "/workflow/models",
+    index: "05",
+    label: "模型实验",
+    icon: ArrowsClockwise,
+    tabs: [
+      { to: "/workflow/models/benchmark", label: "Sol/Terra/Luna 横评" },
+      { to: "/workflow/models/migration", label: "迁移证据" },
+      { to: "/workflow/models/candidates", label: "生产候选" },
+    ],
+  },
+  {
+    to: "/workflow/governance/model-config",
+    match: "/workflow/governance",
+    index: "06",
+    label: "系统治理",
+    icon: SlidersHorizontal,
+    tabs: [
+      { to: "/workflow/governance/model-config", label: "模型配置" },
+      { to: "/workflow/governance/canary", label: "金丝雀" },
+      { to: "/workflow/governance/audit", label: "审计" },
+    ],
+  },
+] as const
 
 export function AppShell({ user }: { user: User }) {
   const [open, setOpen] = useState(false)
@@ -45,9 +109,7 @@ export function AppShell({ user }: { user: User }) {
       navigate("/login")
     },
   })
-  const active = navItems.find(
-    (item) => item.to === location.pathname || (item.to !== "/" && location.pathname.startsWith(item.to)),
-  )
+  const active = workflowDomains.find((item) => location.pathname.startsWith(item.match))
 
   return (
     <div className="min-h-[100dvh] bg-background text-foreground">
@@ -102,30 +164,32 @@ export function AppShell({ user }: { user: User }) {
             <p className="mt-2 text-xs text-[var(--muted)]">图片分类与美感评测</p>
           </div>
           <nav className="min-h-0 flex-1 overflow-y-auto py-3" aria-label="主导航">
-            {navItems.map((item) => {
+            {workflowDomains.map((item) => {
               const Icon = item.icon
               return (
                 <NavLink
                   key={item.to}
                   to={item.to}
-                  end={item.to === "/"}
                   onClick={() => setOpen(false)}
                   className={({ isActive }) =>
                     cn(
                       "group flex min-h-12 items-center gap-3 border-y border-transparent px-4 text-sm font-semibold text-[#4e544c] transition-colors",
-                      isActive
+                      location.pathname.startsWith(item.match) || isActive
                         ? "border-[var(--line)] bg-[#f7f9f3] text-foreground"
                         : "hover:bg-[#f8f9f6] hover:text-foreground",
                     )
                   }
                 >
-                  {({ isActive }) => (
+                  {() => {
+                    const isDomainActive = location.pathname.startsWith(item.match)
+                    return (
                     <>
-                      <Icon size={19} weight={isActive ? "fill" : "regular"} />
+                      <Icon size={19} weight={isDomainActive ? "fill" : "regular"} />
                       <span className="min-w-0 flex-1 truncate">{item.label}</span>
                       <span className="font-data text-[0.65rem] text-[#858c81]">{item.index}</span>
                     </>
-                  )}
+                    )
+                  }}
                 </NavLink>
               )
             })}
@@ -154,6 +218,29 @@ export function AppShell({ user }: { user: User }) {
       </aside>
 
       <main className="min-h-[100dvh] lg:pl-[252px]">
+        {active && (
+          <nav
+            className="sticky top-16 z-20 flex min-h-12 overflow-x-auto border-b border-[var(--line)] bg-white lg:top-0"
+            aria-label={`${active.label}二级导航`}
+          >
+            {active.tabs.map((tab) => (
+              <NavLink
+                key={tab.to}
+                to={tab.to}
+                className={({ isActive }) =>
+                  cn(
+                    "flex shrink-0 items-center border-r border-[var(--line)] px-5 py-3 text-xs font-bold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-primary",
+                    isActive
+                      ? "bg-primary text-primary-foreground"
+                      : "text-[#555b53] hover:bg-[#f7f9f3] hover:text-foreground",
+                  )
+                }
+              >
+                {tab.label}
+              </NavLink>
+            ))}
+          </nav>
+        )}
         <Outlet />
       </main>
     </div>

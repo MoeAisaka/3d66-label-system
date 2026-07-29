@@ -77,6 +77,8 @@ export type Evaluation = {
   needs_review: boolean
   review_stage: ReviewStage
   review_revision: number
+  review_truth_status: "provisional" | "completed"
+  review_panel: ReviewPanelSummary | null
   review_history: HumanReview[]
   human_review: HumanReview | null
   risk_review: {
@@ -112,6 +114,36 @@ export type Asset = {
   created_at: string
   image_url: string
   duplicate?: boolean
+  evaluation_status?:
+    | "not_evaluated"
+    | "evaluated_old"
+    | "evaluated_current"
+    | "queued"
+    | "running"
+    | "failed"
+}
+
+export type MaterialPackage = {
+  id: number
+  package_key: string
+  name: string
+  source: "manual_upload" | "production_import" | "legacy_backfill"
+  item_count: number
+  unique_asset_count: number
+  duplicate_count: number
+  status_summary: Record<NonNullable<Asset["evaluation_status"]>, number>
+  created_by: string
+  created_at: string
+}
+
+export type ReviewPanelSummary = {
+  id: number
+  evaluation_id?: number
+  required_reviewers: 1 | 3 | 5 | 7 | 9
+  submitted_count: number
+  status: "collecting" | "lead_adjudication" | "completed"
+  revision: number
+  blind_answers_hidden: boolean
 }
 
 export type EvaluationRecord = Asset & {
@@ -186,6 +218,16 @@ export type SamplingPolicy = {
   updated_at: string
 }
 
+export type ReviewWorkflowPolicy = {
+  id: number
+  version: string
+  revision: number
+  initial_reviewers: 1 | 3 | 5 | 7 | 9
+  supported_reviewer_counts: Array<1 | 3 | 5 | 7 | 9>
+  updated_by: string
+  updated_at: string
+}
+
 export type PromptVersion = {
   id: number
   stage: "A" | "B"
@@ -197,10 +239,195 @@ export type PromptVersion = {
   status: "draft" | "published" | "archived"
   source: string
   source_optimization_run_id?: number | null
+  rollback_prompt_id?: number | null
+  canary_status?: "not_started" | "planned" | "running" | "passed" | "failed"
+  metrics?: PromptVersionMetrics
   change_note: string
   created_by: string
   created_at: string
   updated_at: string
+}
+
+export type PromptVersionMetrics = {
+  sample_accuracy: number | null
+  dimension_accuracy: Record<string, number>
+  grade_accuracy: number | null
+  review_coverage: number
+  sample_size_n: number
+  total_evaluations: number
+  corrected_sample_count: number
+  unreviewed_not_counted_as_correct: true
+}
+
+export type PromptMetricSnapshot = {
+  id: number
+  prompt_id: number
+  task_set_key: string
+  task_set_hash: string
+  evaluation_ids: number[]
+  metrics: {
+    schema_version: "prompt-accuracy-v1"
+    N: number
+    reviewed_sample_count: number
+    corrected_sample_count: number
+    sample_accuracy: number | null
+    dimension_accuracy: Record<string, number>
+    grade_accuracy: number | null
+    review_coverage: number
+    unreviewed_count: number
+    denominator_policy: "completed_human_initial_review_only"
+  }
+  total_count: number
+  reviewed_count: number
+  created_by: string
+  created_at: string
+}
+
+export type OptimizationCase = {
+  id: number
+  evaluation_id: number | null
+  final_review_id: number | null
+  source_type: "human_review" | "production_feedback"
+  source_event_id: number | null
+  prompt_version: string
+  severity: "P0" | "P1" | "P2" | "P3"
+  status: "pending" | "batched" | "processing" | "completed" | "failed"
+  case: Record<string, unknown>
+  attempt_count: number
+  next_attempt_at: string | null
+  last_error: string
+  automation_run_id: number | null
+  created_at: string
+  updated_at: string
+}
+
+export type AutomationPolicy = {
+  id: 1
+  enabled: boolean
+  dry_run: boolean
+  revision: number
+  case_threshold: number
+  immediate_severities: Array<"P0" | "P1" | "P2" | "P3">
+  daily_budget_micros: number
+  cooldown_seconds: number
+  max_candidates: number
+  lease_seconds: number
+  max_attempts: number
+  base_retry_seconds: number
+  last_triggered_at: string | null
+  updated_by: string
+  updated_at: string
+  real_model_calls_enabled: false
+  auto_publish_enabled: false
+}
+
+export type AutomationRun = {
+  id: number
+  run_key: string
+  base_prompt_version: string
+  policy_revision: number
+  status:
+    | "planned"
+    | "awaiting_executor"
+    | "running"
+    | "awaiting_release_review"
+    | "failed"
+    | "cancelled"
+  dry_run: boolean
+  trigger_reason: string
+  case_ids: number[]
+  frozen_input: Record<string, unknown>
+  result: Record<string, unknown>
+  candidate_count: number
+  estimated_cost_micros: number
+  actual_cost_micros: number
+  error_message: string
+  created_by: string
+  created_at: string
+  finished_at: string | null
+  publishes_automatically: false
+}
+
+export type ProductionFeedbackEvent = {
+  id: number
+  event_id: string
+  schema_version: "production-feedback-v1"
+  event_type: "human_correction_finalized"
+  source_system: string
+  occurred_at: string
+  payload_hash: string
+  payload: Record<string, unknown>
+  status: "accepted" | "mapped" | "rejected"
+  optimization_case_id: number | null
+  received_by: string
+  received_at: string
+  writes_production_database: false
+}
+
+export type BenchmarkVariant = {
+  id: number
+  model_key: "sol" | "terra" | "luna"
+  provider: string
+  model_id: string
+  pricing: {
+    input_micros_per_million_tokens: number
+    output_micros_per_million_tokens: number
+    human_review_cost_micros: number
+  }
+  status: "pending" | "running" | "completed" | "failed"
+  metrics: {
+    sample_size?: number
+    quality_accuracy?: number
+    p0_p1_error_count?: number
+    low_confidence_rate?: number
+    human_review_rate?: number
+    latency_p50_ms?: number
+    latency_p95_ms?: number
+    model_cost_micros?: number
+    total_cost_with_human_micros?: number
+    retry_stability?: number
+  }
+  error_message: string
+}
+
+export type ModelBenchmark = {
+  id: number
+  experiment_key: string
+  name: string
+  status: "draft" | "running" | "completed" | "failed" | "cancelled"
+  execution_mode: "disabled" | "test"
+  cohort_hash: string
+  snapshot_hash: string
+  frozen_snapshot: {
+    cohort_asset_ids: number[]
+    strategy_bundle: Record<string, unknown>
+    agent_plan: Record<string, unknown>
+  }
+  quality_gate: Record<string, unknown>
+  decision: {
+    recommendation?: "sol" | "terra" | "luna" | "none"
+    reason?: string
+    pareto_model_keys?: string[]
+    requires_human_decision?: true
+  }
+  created_by: string
+  created_at: string
+  started_at: string | null
+  finished_at: string | null
+  real_model_calls_enabled: false
+  variants: BenchmarkVariant[]
+}
+
+export type AuditEvent = {
+  id: number
+  event_key: string
+  category: string
+  action: string
+  subject_type: string
+  subject_id: string
+  actor: string
+  payload: Record<string, unknown>
+  created_at: string
 }
 
 export type PromptOptimizationRun = {
@@ -370,6 +597,7 @@ export type StrategyBundleSummary = {
   rubric_version: string
   engine_version: string
   risk_review_version: string | null
+  agent_plan_version: string
   sampling_policy_revision: number | null
   created_at: string
 }

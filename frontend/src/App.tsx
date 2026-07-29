@@ -1,13 +1,12 @@
 import { lazy, Suspense } from "react"
 import { useQuery } from "@tanstack/react-query"
-import { Navigate, Route, Routes } from "react-router-dom"
+import { Navigate, Route, Routes, useParams } from "react-router-dom"
 import { Toaster } from "sonner"
 
 import { AppShell } from "@/components/app-shell"
 import { api, ApiError } from "@/lib/api"
 import type { User } from "@/lib/types"
 import { AssetsPage } from "@/pages/assets-page"
-import { DashboardPage } from "@/pages/dashboard-page"
 import { JobsPage } from "@/pages/jobs-page"
 import { LoginPage } from "@/pages/login-page"
 import { ModelPage } from "@/pages/model-page"
@@ -16,8 +15,11 @@ import { MigrationsPage } from "@/pages/migrations-page"
 const SampleSetsPage = lazy(() =>
   import("@/pages/sample-sets-page").then((module) => ({ default: module.SampleSetsPage })),
 )
-const PromptsPage = lazy(() =>
-  import("@/pages/prompts-page").then((module) => ({ default: module.PromptsPage })),
+const PromptCandidatesPage = lazy(() =>
+  import("@/pages/prompts-page").then((module) => ({ default: module.PromptCandidatesPage })),
+)
+const PairedRegressionPage = lazy(() =>
+  import("@/pages/paired-regression-page").then((module) => ({ default: module.PairedRegressionPage })),
 )
 const ReviewPage = lazy(() =>
   import("@/pages/review-page").then((module) => ({ default: module.ReviewPage })),
@@ -27,6 +29,27 @@ const CanaryRunsPage = lazy(() =>
 )
 const HistoricalCorrectionsPage = lazy(() =>
   import("@/pages/historical-corrections-page").then((module) => ({ default: module.HistoricalCorrectionsPage })),
+)
+const OptimizationCasesPage = lazy(() =>
+  import("@/pages/workflow-pages").then((module) => ({ default: module.OptimizationCasesPage })),
+)
+const AutomationControlPage = lazy(() =>
+  import("@/pages/workflow-pages").then((module) => ({ default: module.AutomationControlPage })),
+)
+const ProductionFeedbackPage = lazy(() =>
+  import("@/pages/workflow-pages").then((module) => ({ default: module.ProductionFeedbackPage })),
+)
+const BenchmarkPage = lazy(() =>
+  import("@/pages/workflow-pages").then((module) => ({ default: module.BenchmarkPage })),
+)
+const AuditEventsPage = lazy(() =>
+  import("@/pages/workflow-pages").then((module) => ({ default: module.AuditEventsPage })),
+)
+const ReleaseWorkspacePage = lazy(() =>
+  import("@/pages/workflow-pages").then((module) => ({ default: module.ReleaseWorkspacePage })),
+)
+const CapabilityStatusPage = lazy(() =>
+  import("@/pages/workflow-pages").then((module) => ({ default: module.CapabilityStatusPage })),
 )
 
 export default function App() {
@@ -53,17 +76,39 @@ export default function App() {
         <Route path="/login" element={<LoginPage user={user} />} />
         {user ? (
           <Route element={<AppShell user={user} />}>
-            <Route index element={<DashboardPage />} />
-            <Route path="assets" element={<AssetsPage />} />
-            <Route path="jobs" element={<JobsPage />} />
-            <Route path="review" element={<Navigate to="/review/initial" replace />} />
-            <Route path="review/:reviewStage" element={<Suspense fallback={<RouteLoading />}><ReviewPage /></Suspense>} />
-            <Route path="prompts" element={<Suspense fallback={<RouteLoading />}><PromptsPage /></Suspense>} />
-            <Route path="model" element={<ModelPage />} />
-            <Route path="sample-sets" element={<Suspense fallback={<RouteLoading />}><SampleSetsPage /></Suspense>} />
-            <Route path="historical-corrections" element={<Suspense fallback={<RouteLoading />}><HistoricalCorrectionsPage /></Suspense>} />
-            <Route path="migrations" element={<MigrationsPage />} />
-            <Route path="canary-runs" element={<Suspense fallback={<RouteLoading />}><CanaryRunsPage /></Suspense>} />
+            <Route index element={<Navigate to="/workflow/materials/packages" replace />} />
+            <Route path="workflow/materials/packages" element={<AssetsPage view="packages" />} />
+            <Route path="workflow/materials/assets" element={<AssetsPage view="assets" />} />
+            <Route path="workflow/materials/jobs" element={<JobsPage />} />
+            <Route path="workflow/review/:reviewView" element={<Suspense fallback={<RouteLoading />}><ReviewPage /></Suspense>} />
+            <Route path="workflow/optimization/cases" element={<Suspense fallback={<RouteLoading />}><OptimizationCasesPage /></Suspense>} />
+            <Route path="workflow/optimization/automation" element={<Suspense fallback={<RouteLoading />}><AutomationControlPage /></Suspense>} />
+            <Route path="workflow/optimization/feedback" element={<Suspense fallback={<RouteLoading />}><ProductionFeedbackPage /></Suspense>} />
+            <Route path="workflow/optimization/candidates" element={<Suspense fallback={<RouteLoading />}><PromptCandidatesPage /></Suspense>} />
+            <Route path="workflow/optimization/paired-regression" element={<Suspense fallback={<RouteLoading />}><PairedRegressionPage /></Suspense>} />
+            <Route path="workflow/releases/decisions" element={<Suspense fallback={<RouteLoading />}><ReleaseWorkspacePage view="decisions" /></Suspense>} />
+            <Route path="workflow/releases/metrics" element={<Suspense fallback={<RouteLoading />}><ReleaseWorkspacePage view="metrics" /></Suspense>} />
+            <Route path="workflow/releases/history" element={<Suspense fallback={<RouteLoading />}><ReleaseWorkspacePage view="history" /></Suspense>} />
+            <Route path="workflow/models/benchmark" element={<Suspense fallback={<RouteLoading />}><BenchmarkPage /></Suspense>} />
+            <Route path="workflow/models/migration" element={<MigrationsPage />} />
+            <Route path="workflow/models/candidates" element={<Suspense fallback={<RouteLoading />}><CapabilityStatusPage kind="candidates" /></Suspense>} />
+            <Route path="workflow/governance/model-config" element={<ModelPage />} />
+            <Route path="workflow/governance/canary" element={<Suspense fallback={<RouteLoading />}><CanaryRunsPage /></Suspense>} />
+            <Route path="workflow/governance/audit" element={<Suspense fallback={<RouteLoading />}><AuditEventsPage /></Suspense>} />
+
+            <Route path="assets" element={<Navigate to="/workflow/materials/assets" replace />} />
+            <Route path="jobs" element={<Navigate to="/workflow/materials/jobs" replace />} />
+            <Route path="review" element={<Navigate to="/workflow/review/low-confidence" replace />} />
+            <Route path="review/:reviewStage" element={<LegacyReviewRedirect />} />
+            <Route path="prompts" element={<Navigate to="/workflow/optimization/candidates" replace />} />
+            <Route path="model" element={<Navigate to="/workflow/governance/model-config" replace />} />
+            <Route path="sample-sets" element={<Navigate to="/legacy/sample-sets" replace />} />
+            <Route path="historical-corrections" element={<Navigate to="/legacy/historical-corrections" replace />} />
+            <Route path="migrations" element={<Navigate to="/workflow/models/migration" replace />} />
+            <Route path="canary-runs" element={<Navigate to="/workflow/governance/canary" replace />} />
+            <Route path="legacy/review/:reviewStage" element={<Suspense fallback={<RouteLoading />}><ReviewPage /></Suspense>} />
+            <Route path="legacy/sample-sets" element={<Suspense fallback={<RouteLoading />}><SampleSetsPage /></Suspense>} />
+            <Route path="legacy/historical-corrections" element={<Suspense fallback={<RouteLoading />}><HistoricalCorrectionsPage /></Suspense>} />
           </Route>
         ) : (
           <Route path="*" element={<Navigate to="/login" replace />} />
@@ -73,6 +118,14 @@ export default function App() {
       <Toaster position="top-right" richColors closeButton />
     </>
   )
+}
+
+function LegacyReviewRedirect() {
+  const { reviewStage } = useParams()
+  if (reviewStage === "secondary" || reviewStage === "arbitration") {
+    return <Navigate to={`/legacy/review/${reviewStage}`} replace />
+  }
+  return <Navigate to={`/workflow/review/${reviewStage === "completed" ? "completed" : "low-confidence"}`} replace />
 }
 
 function RouteLoading() {

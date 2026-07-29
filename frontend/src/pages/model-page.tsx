@@ -8,7 +8,7 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { api, jsonBody } from "@/lib/api"
-import type { ModelConfig, OptimizerConfig, SamplingPolicy } from "@/lib/types"
+import type { ModelConfig, OptimizerConfig, ReviewWorkflowPolicy, SamplingPolicy } from "@/lib/types"
 
 type FormState = Omit<ModelConfig, "id" | "provider" | "api_key_mask" | "updated_at" | "has_api_key"> & { api_key: string }
 type OptimizerFormState = Omit<OptimizerConfig, "id" | "provider" | "api_key_mask" | "updated_at" | "has_api_key"> & { api_key: string }
@@ -18,9 +18,11 @@ export function ModelPage() {
   const config = useQuery({ queryKey: ["model-config"], queryFn: () => api<ModelConfig>("/api/model-config") })
   const optimizerConfig = useQuery({ queryKey: ["optimizer-config"], queryFn: () => api<OptimizerConfig>("/api/optimizer-config") })
   const samplingPolicy = useQuery({ queryKey: ["sampling-policy"], queryFn: () => api<SamplingPolicy>("/api/sampling-policy") })
+  const reviewWorkflowPolicy = useQuery({ queryKey: ["review-workflow-policy"], queryFn: () => api<ReviewWorkflowPolicy>("/api/review-workflow-policy") })
   const [form, setForm] = useState<FormState | null>(null)
   const [optimizerForm, setOptimizerForm] = useState<OptimizerFormState | null>(null)
   const [samplingForm, setSamplingForm] = useState<SamplingPolicy | null>(null)
+  const [reviewWorkflowForm, setReviewWorkflowForm] = useState<ReviewWorkflowPolicy | null>(null)
   useEffect(() => {
     if (!config.data) return
     const { id: _id, provider: _provider, api_key_mask: _mask, updated_at: _updated, has_api_key: _hasApiKey, ...rest } = config.data
@@ -34,6 +36,9 @@ export function ModelPage() {
   useEffect(() => {
     if (samplingPolicy.data) setSamplingForm(samplingPolicy.data)
   }, [samplingPolicy.data])
+  useEffect(() => {
+    if (reviewWorkflowPolicy.data) setReviewWorkflowForm(reviewWorkflowPolicy.data)
+  }, [reviewWorkflowPolicy.data])
 
   const save = useMutation({
     mutationFn: () => api("/api/model-config", { method: "PUT", ...jsonBody(form) }),
@@ -78,6 +83,18 @@ export function ModelPage() {
     },
     onError: (error) => toast.error(error.message),
   })
+  const saveReviewWorkflow = useMutation({
+    mutationFn: () => api<ReviewWorkflowPolicy>("/api/review-workflow-policy", {
+      method: "PUT",
+      ...jsonBody({ initial_reviewers: reviewWorkflowForm?.initial_reviewers }),
+    }),
+    onSuccess: async (data) => {
+      setReviewWorkflowForm(data)
+      await queryClient.invalidateQueries({ queryKey: ["review-workflow-policy"] })
+      toast.success(`初审工作流已保存为 ${data.version}`)
+    },
+    onError: (error) => toast.error(error.message),
+  })
 
   function update<K extends keyof FormState>(key: K, value: FormState[K]) {
     setForm((current) => current ? { ...current, [key]: value } : current)
@@ -89,6 +106,10 @@ export function ModelPage() {
 
   function updateSampling<K extends keyof SamplingPolicy>(key: K, value: SamplingPolicy[K]) {
     setSamplingForm((current) => current ? { ...current, [key]: value } : current)
+  }
+
+  function updateReviewWorkflow(initialReviewers: 1 | 3 | 5 | 7 | 9) {
+    setReviewWorkflowForm((current) => current ? { ...current, initial_reviewers: initialReviewers } : current)
   }
 
   return (
@@ -197,6 +218,43 @@ export function ModelPage() {
               {samplingForm.medium_confidence_threshold < samplingForm.low_confidence_threshold && <p role="alert" className="mt-3 text-sm font-semibold text-[var(--danger)]">中置信度抽样上限不能低于低置信度必审阈值。</p>}
             </div>
           ) : <div className="h-44 animate-pulse bg-[#f1f3ef]" />}
+        </section>
+
+        <section className="mt-10 grid gap-7 border-y border-[var(--line-strong)] bg-white px-5 py-6 lg:grid-cols-[230px_1fr] lg:px-7">
+          <div>
+            <div className="flex size-10 items-center justify-center rounded-[4px] border border-[var(--line-strong)]"><SlidersHorizontal size={21} /></div>
+            <h2 className="font-editorial mt-5 text-2xl font-bold">初审工作流</h2>
+            <p className="mt-2 text-sm leading-6 text-[var(--muted)]">初期可由 1 位人员完成全流水线；团队扩容后切换为 3、5、7 或 9 人盲审多数共识。人数在初审组创建时冻结，修改配置不会改变已开始的任务。</p>
+            {reviewWorkflowForm && <Badge>{reviewWorkflowForm.version}</Badge>}
+          </div>
+          {reviewWorkflowForm ? (
+            <div>
+              <div className="grid gap-5 sm:grid-cols-2">
+                <Field label="每个初审组审核员人数">
+                  <select
+                    className="flex h-11 w-full rounded-[4px] border border-input bg-transparent px-3 text-sm"
+                    value={reviewWorkflowForm.initial_reviewers}
+                    onChange={(event) => updateReviewWorkflow(Number(event.target.value) as 1 | 3 | 5 | 7 | 9)}
+                  >
+                    {reviewWorkflowForm.supported_reviewer_counts.map((count) => (
+                      <option key={count} value={count}>
+                        {count === 1 ? "1 人（单人即时定案）" : `${count} 人（严格多数共识）`}
+                      </option>
+                    ))}
+                  </select>
+                </Field>
+                <div className="rounded-[4px] border border-[var(--line)] bg-[#f7f8f5] px-4 py-3 text-sm leading-6 text-[var(--muted)]">
+                  {reviewWorkflowForm.initial_reviewers === 1
+                    ? "首位审核员提交后即形成最终人工真值，并进入提示词优化队列。"
+                    : "审核答案在组内完成前保持盲审；逐字段无严格多数时进入初审主审裁决。"}
+                </div>
+              </div>
+              <div className="mt-6 flex flex-wrap items-center justify-between gap-3 border-t border-[var(--line)] pt-4">
+                <p className="text-xs text-[var(--muted)]">最后更新：{reviewWorkflowForm.updated_by} · {new Date(reviewWorkflowForm.updated_at).toLocaleString("zh-CN")}</p>
+                <Button onClick={() => saveReviewWorkflow.mutate()} disabled={saveReviewWorkflow.isPending}><FloppyDisk />保存初审工作流</Button>
+              </div>
+            </div>
+          ) : <div className="h-36 animate-pulse bg-[#f1f3ef]" />}
         </section>
 
         <div className="mt-8 flex justify-end"><Button onClick={() => save.mutate()} disabled={!form || save.isPending}><FloppyDisk />保存豆包配置</Button></div>

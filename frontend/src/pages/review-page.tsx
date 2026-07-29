@@ -18,9 +18,15 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { api, jsonBody } from "@/lib/api"
-import type { EvaluationRecord, ReviewCorrection, ReviewStage } from "@/lib/types"
+import type { EvaluationRecord, ReviewCorrection, ReviewPanelSummary, ReviewStage } from "@/lib/types"
 import { dimensionLabels, ReviewCorrectionForm } from "@/pages/review-correction-form"
-import { filterReviewAssets, ReviewList, reviewStageMeta } from "@/pages/review-list"
+import {
+  filterReviewAssets,
+  ReviewList,
+  reviewStageMeta,
+  reviewWorkspaceMeta,
+  type ReviewWorkspaceView,
+} from "@/pages/review-list"
 
 const requiredDimensionKeys = Object.keys(dimensionLabels)
 
@@ -39,8 +45,13 @@ function samplingTone(tier: EvaluationRecord["sampling"]["tier"]) {
 }
 
 export function ReviewPage() {
-  const { reviewStage: requestedStage } = useParams()
-  const reviewStage = normalizeReviewStage(requestedStage)
+  const { reviewStage: requestedStage, reviewView: requestedView } = useParams()
+  const reviewView = normalizeReviewView(requestedView)
+  const reviewStage = reviewView === "completed"
+    ? "completed"
+    : requestedView
+      ? undefined
+      : normalizeReviewStage(requestedStage)
   const [searchParams, setSearchParams] = useSearchParams()
   const requestedEvaluationId = Number(searchParams.get("evaluation") || 0)
   const legacyAssetId = Number(searchParams.get("asset") || 0)
@@ -56,8 +67,8 @@ export function ReviewPage() {
   const legacyEvaluationId = evaluations.data?.items.find((item) => item.id === legacyAssetId)?.evaluation.id ?? 0
   const currentId = requestedEvaluationId || legacyEvaluationId
   const filteredAssets = useMemo(
-    () => filterReviewAssets(evaluations.data?.items ?? [], searchParams, reviewStage),
-    [evaluations.data?.items, reviewStage, searchParams],
+    () => filterReviewAssets(evaluations.data?.items ?? [], searchParams, reviewStage, reviewView),
+    [evaluations.data?.items, reviewStage, reviewView, searchParams],
   )
   const detail = useQuery({
     queryKey: ["evaluation", currentId],
@@ -98,19 +109,49 @@ export function ReviewPage() {
     onError: (error) => toast.error(error.message),
   })
   const review = useMutation({
-    mutationFn: ({ decision, corrected_level, reviewNote, corrections = [] }: { decision: "approved" | "corrected" | "rejected"; corrected_level: string | null; reviewNote: string; corrections?: ReviewCorrection[] }) =>
-      api(`/api/evaluations/${evaluation?.id}/review`, {
-        method: "POST",
-        ...jsonBody({
-          reviewer_name: reviewer,
-          decision,
-          corrected_level,
-          note: reviewNote,
-          corrections,
-          expected_stage: evaluation?.review_stage,
-          expected_review_revision: evaluation?.review_revision,
-        }),
-      }),
+    mutationFn: async ({ decision, corrected_level, reviewNote, corrections = [] }: { decision: "approved" | "corrected" | "rejected"; corrected_level: string | null; reviewNote: string; corrections?: ReviewCorrection[] }) => {
+      if (!evaluation) throw new Error("评测结果尚未加载")
+      const submitPanelReview = (panel: ReviewPanelSummary) => {
+        const adjudicating = panel.status === "lead_adjudication"
+        return api(
+          `/api/evaluations/${evaluation.id}/review-panel/${adjudicating ? "lead-adjudication" : "votes"}`,
+          {
+            method: "POST",
+            ...jsonBody({
+              ...(adjudicating
+                ? { lead_reviewer_name: reviewer }
+                : { reviewer_name: reviewer }),
+              decision,
+              note: reviewNote || (adjudicating ? "主审在初审工作台裁决" : ""),
+              corrections,
+              expected_panel_revision: panel.revision,
+            }),
+          },
+        )
+      }
+      if (evaluation.review_panel) {
+        return submitPanelReview(evaluation.review_panel)
+      }
+      if (evaluation.review_stage === "initial") {
+        const openedPanel = await api<ReviewPanelSummary>(
+          `/api/evaluations/${evaluation.id}/review-panel/open`,
+          { method: "POST", ...jsonBody({}) },
+        )
+        return submitPanelReview(openedPanel)
+      }
+      return api(`/api/evaluations/${evaluation?.id}/review`, {
+          method: "POST",
+          ...jsonBody({
+            reviewer_name: reviewer,
+            decision,
+            corrected_level,
+            note: reviewNote,
+            corrections,
+            expected_stage: evaluation?.review_stage,
+            expected_review_revision: evaluation?.review_revision,
+          }),
+        })
+    },
     onSuccess: async (_data, variables) => {
       const nextEvaluation =
         filteredAssets[currentIndex + 1]?.evaluation ??
@@ -144,20 +185,26 @@ export function ReviewPage() {
   }
 
   if (!requestedEvaluationId && !legacyAssetId) {
-    return <ReviewList items={evaluations.data?.items ?? []} loading={evaluations.isLoading} searchParams={searchParams} setSearchParams={setSearchParams} stage={reviewStage} />
+    return <ReviewList items={evaluations.data?.items ?? []} loading={evaluations.isLoading} searchParams={searchParams} setSearchParams={setSearchParams} stage={reviewStage} view={reviewView} />
   }
 
   const listParams = new URLSearchParams(searchParams)
   listParams.delete("asset")
   listParams.delete("evaluation")
-  const listUrl = `/review/${reviewStage}${listParams.toString() ? `?${listParams.toString()}` : ""}`
+  const listPath = reviewView
+    ? `/workflow/review/${reviewView}`
+    : `/review/${reviewStage ?? "initial"}`
+  const listUrl = `${listPath}${listParams.toString() ? `?${listParams.toString()}` : ""}`
+  const pageMeta = reviewView
+    ? reviewWorkspaceMeta[reviewView]
+    : reviewStageMeta[reviewStage ?? "initial"]
 
   return (
     <>
       <PageHeader
         index="04"
-        title={reviewStageMeta[reviewStage].title}
-        description={`在原图旁核对模型证据并完成${reviewStageMeta[reviewStage].label}；每轮记录独立留档。`}
+        title={pageMeta.title}
+        description={reviewView ? pageMeta.description : `在原图旁核对模型证据并完成${reviewStageMeta[reviewStage ?? "initial"].label}；每轮记录独立留档。`}
         actions={
           <div className="flex flex-wrap items-center gap-2">
             <Button asChild variant="secondary"><Link to={listUrl}><ArrowLeft />返回审核列表</Link></Button>
@@ -326,6 +373,16 @@ function riskFieldLabel(field: string) {
 
 function normalizeReviewStage(value: string | undefined): ReviewStage {
   return value === "secondary" || value === "arbitration" || value === "completed" ? value : "initial"
+}
+
+function normalizeReviewView(value: string | undefined): ReviewWorkspaceView | undefined {
+  return value === "model-evaluation"
+    || value === "low-confidence"
+    || value === "consensus"
+    || value === "adjudication"
+    || value === "completed"
+    ? value
+    : undefined
 }
 
 function reviewDecisionLabel(value: "approved" | "corrected" | "rejected") {

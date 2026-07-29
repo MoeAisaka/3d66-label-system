@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react"
-import { ArrowClockwise, Check, MagicWand, Plus, ShieldCheck, Sparkle, UploadSimple, WarningCircle } from "@phosphor-icons/react"
+import { ArrowClockwise, ArrowRight, Check, MagicWand, Plus, ShieldCheck, Sparkle, UploadSimple, WarningCircle } from "@phosphor-icons/react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
+import { Link } from "react-router-dom"
 import { toast } from "sonner"
 
 import { PageHeader } from "@/components/app-shell"
@@ -27,7 +28,7 @@ const regressionRoleNames: Record<RegressionRole, string> = {
   blind_holdout: "锁定盲测",
 }
 
-export function PromptsPage() {
+export function PromptCandidatesPage() {
   const queryClient = useQueryClient()
   const prompts = useQuery({
     queryKey: ["prompts"],
@@ -60,8 +61,6 @@ export function PromptsPage() {
   const [baselineBundleId, setBaselineBundleId] = useState<number | null>(null)
   const [metricRulesVersion, setMetricRulesVersion] = useState("paired-metric-rules-v1")
   const [roleAssignments, setRoleAssignments] = useState<Record<number, RegressionRole | "">>({})
-  const [approvalReviewer, setApprovalReviewer] = useState(() => localStorage.getItem("3d66-reviewer") || "")
-  const [approvalNote, setApprovalNote] = useState("")
 
   useEffect(() => {
     if (!selected) return
@@ -201,19 +200,6 @@ export function PromptsPage() {
     roleSet.has("stable_control") &&
     roleSet.has("blind_holdout"),
   )
-  const approveRegression = useMutation({
-    mutationFn: (status: "approved" | "rejected") => api(`/api/paired-regressions/${latestPairedRegression?.id}/approval`, {
-      method: "POST",
-      ...jsonBody({ status, reviewer_name: approvalReviewer.trim(), note: approvalNote.trim() }),
-    }),
-    onSuccess: async (_data, status) => {
-      localStorage.setItem("3d66-reviewer", approvalReviewer.trim())
-      await queryClient.invalidateQueries({ queryKey: ["prompt-regressions"] })
-      toast.success(status === "approved" ? "发布前回归已人工批准；候选仍未发布" : "候选已人工驳回")
-    },
-    onError: (error) => toast.error(error.message),
-  })
-
   function loadCandidate(run: PromptOptimizationRun) {
     setSystemPrompt(run.candidate_system_prompt)
     setUserPrompt(run.candidate_user_prompt)
@@ -231,9 +217,9 @@ export function PromptsPage() {
   return (
     <>
       <PageHeader
-        index="05"
-        title="提示词工作室"
-        description="使用人工维度纠错样本定位高频误判，生成候选提示词。候选版本必须回测、另存并由人工发布。"
+        index="03.4"
+        title="候选提示词"
+        description="使用人工纠偏样本生成和编辑候选；本页负责候选物化与回归交接，配对证据和人工结论在下一流水线节点处理。"
         actions={
           <>
             <Button variant="secondary" onClick={() => prompts.refetch()}><ArrowClockwise />刷新</Button>
@@ -294,8 +280,8 @@ export function PromptsPage() {
               {latestOptimization?.status === "completed" && (
                 <div className="border-t border-[var(--line-strong)] px-5 py-5">
                   <div className="flex flex-wrap items-start justify-between gap-3">
-                    <div><div className="flex items-center gap-2"><ShieldCheck /><h3 className="font-semibold">发布前小样本配对回归</h3></div><p className="mt-2 max-w-[78ch] text-xs leading-5 text-[var(--muted)]">候选会先保存为不可变草稿，并以同一模型、A提示词、评分规则和样本快照与基线配对比较。三类样本缺一不可，盲测在全部结束前不展示答案。</p></div>
-                    {latestPairedRegression && <Badge tone={latestPairedRegression.approval_status === "approved" ? "success" : latestPairedRegression.recommendation === "fail" ? "danger" : "active"}>{latestPairedRegression.status} · {latestPairedRegression.recommendation || "pending"} · {latestPairedRegression.approval_status || "pending"}</Badge>}
+                    <div><div className="flex items-center gap-2"><ShieldCheck /><h3 className="font-semibold">候选物化与回归交接</h3></div><p className="mt-2 max-w-[78ch] text-xs leading-5 text-[var(--muted)]">候选会先保存为不可变草稿，并以同一模型、A 提示词、评分规则和样本快照与基线配对比较。三类样本缺一不可；创建后请前往“小样本配对回归”查看证据。</p></div>
+                    {candidatePrompt && <Badge tone="success">候选草稿已冻结</Badge>}
                   </div>
 
                   {!candidatePrompt && <div className="mt-5 grid gap-4 lg:grid-cols-3">
@@ -311,11 +297,10 @@ export function PromptsPage() {
                   </div>}
                   {!candidatePrompt && <div className="mt-4 flex flex-wrap items-center justify-between gap-3"><p className="text-xs text-[var(--muted)]">已选择：目标错例 {Object.values(roleAssignments).filter((role) => role === "target_error").length} · 稳定对照 {Object.values(roleAssignments).filter((role) => role === "stable_control").length} · 锁定盲测 {Object.values(roleAssignments).filter((role) => role === "blind_holdout").length}</p><Button onClick={() => materialize.mutate()} disabled={!validationReady || materialize.isPending}>创建候选并启动配对回归<ShieldCheck /></Button></div>}
 
-                  {candidatePrompt && !latestPairedRegression && <p className="mt-4 text-xs text-[var(--muted)]">候选草稿已创建，正在读取配对回归状态。</p>}
-                  {latestPairedRegression && <div className="mt-5 border-y border-[var(--line)] bg-[#fafbf8] p-4">
-                    <div className="flex flex-wrap items-center justify-between gap-3"><div><p className="font-semibold">{latestPairedRegression.name}</p><p className="font-data mt-1 text-xs text-[var(--muted)]">{latestPairedRegression.completed}/{latestPairedRegression.total} 已完成 · 通过率 {Math.round(latestPairedRegression.pass_rate * 100)}%</p></div><Badge tone={latestPairedRegression.recommendation === "pass" ? "success" : latestPairedRegression.recommendation === "fail" ? "danger" : "active"}>{latestPairedRegression.recommendation === "pass" ? "系统建议通过" : latestPairedRegression.recommendation === "fail" ? "系统建议不通过" : "回归进行中"}</Badge></div>
-                    {latestPairedRegression.recommendation !== "pending" && latestPairedRegression.approval_status === "pending" && <div className="mt-4 grid gap-3 lg:grid-cols-[200px_minmax(0,1fr)_auto_auto] lg:items-end"><label><span className="mb-2 block text-xs font-semibold">批准人</span><Input value={approvalReviewer} onChange={(event) => setApprovalReviewer(event.target.value)} /></label><label><span className="mb-2 block text-xs font-semibold">人工结论说明（必填）</span><Input value={approvalNote} onChange={(event) => setApprovalNote(event.target.value)} placeholder="说明是否接受系统回归结论" /></label><Button variant="secondary" onClick={() => approveRegression.mutate("rejected")} disabled={!approvalReviewer.trim() || !approvalNote.trim() || approveRegression.isPending}>驳回候选</Button><Button onClick={() => approveRegression.mutate("approved")} disabled={latestPairedRegression.recommendation !== "pass" || !approvalReviewer.trim() || !approvalNote.trim() || approveRegression.isPending}>批准候选</Button></div>}
-                    {latestPairedRegression.approval_status !== "pending" && <p className="mt-3 text-xs text-[var(--muted)]">人工结论：{latestPairedRegression.approval_status === "approved" ? "已批准" : "已驳回"} · {latestPairedRegression.approved_by || "—"}。批准本身不会自动发布。</p>}
+                  {candidatePrompt && !latestPairedRegression && <p className="mt-4 text-xs text-[var(--muted)]">候选草稿已创建，正在读取配对回归任务。</p>}
+                  {latestPairedRegression && <div className="mt-5 flex flex-wrap items-center justify-between gap-4 border-y border-[var(--line)] bg-[#fafbf8] p-4">
+                    <div><p className="font-semibold">{latestPairedRegression.name}</p><p className="font-data mt-1 text-xs text-[var(--muted)]">回归 #{latestPairedRegression.id} · {latestPairedRegression.completed}/{latestPairedRegression.total} 已完成 · 候选提示词 #{candidatePrompt?.id}</p></div>
+                    <Button asChild><Link to={`/workflow/optimization/paired-regression?run=${latestPairedRegression.id}`}>查看配对回归证据<ArrowRight /></Link></Button>
                   </div>}
                 </div>
               )}
