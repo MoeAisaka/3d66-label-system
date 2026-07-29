@@ -6,6 +6,7 @@ import io
 import json
 import mimetypes
 import uuid
+from collections import Counter
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -33,19 +34,28 @@ from .database import SessionLocal, get_db, init_database
 from .doubao import DoubaoClient
 from .migration import compare_results
 from .models import (
+    AgentPlanVersion,
     Asset,
+    AuditEvent,
+    AutomationOptimizationRun,
+    AutomationPolicy,
     CircuitBreaker,
     EvaluationControl,
     EvaluationJob,
     EvaluationResult,
     HumanReview,
+    MaterialPackage,
+    MaterialPackageItem,
     MigrationItem,
     MigrationRun,
     ModelConfig,
+    ModelBenchmarkExperiment,
+    ModelBenchmarkVariant,
     LoopAttempt,
     LoopRun,
     OptimizerConfig,
     PromptOptimizationRun,
+    PromptMetricSnapshot,
     PromptRegressionItem,
     PromptRegressionRun,
     PromptVersion,
@@ -56,7 +66,18 @@ from .models import (
     SamplingPolicy,
     SessionToken,
     StrategyBundle,
+    ReviewPanel,
+    ReviewWorkflowPolicy,
+    OptimizationCaseQueue,
+    ProductionFeedbackEvent,
     User,
+)
+from .audit import canonical_json
+from .benchmarking import (
+    MODEL_KEYS,
+    DeterministicBenchmarkAdapter,
+    run_benchmark_experiment,
+    snapshot_hash as benchmark_snapshot_hash,
 )
 from .loop_engine import (
     LoopContractError,
@@ -87,6 +108,7 @@ from .security import (
     verify_password,
 )
 from .optimizer import run_prompt_optimization, stage_audit_payload
+from .optimization_automation import consume_optimization_queue_once
 from .p0e_canary_api import build_canary_router
 from .seed import seed_defaults
 from .schema_adapter import repair_combined_aesthetic_results, rescore_stored_results
@@ -97,6 +119,22 @@ from .regression import (
     refresh_paired_regression_run,
     reviewed_truth_snapshot,
     truth_from_result,
+)
+from .prompt_metrics import (
+    calculate_prompt_metrics,
+    final_review as final_human_review,
+    frozen_task_set_hash,
+)
+from .production_feedback import (
+    FeedbackConflict,
+    ingest_production_feedback,
+)
+from .review_panel import (
+    KEY_FIELD_PATHS,
+    ReviewPanelRevisionConflict,
+    claim_review_panel_revision,
+    resolve_panel_consensus,
+    review_truth,
 )
 from .review_sampling import build_review_sampling
 from .scoring import ENGINE_VERSION, calculate_corrected_score
@@ -184,6 +222,94 @@ class SamplingPolicyUpdate(BaseModel):
         return self
 
 
+class ReviewWorkflowPolicyUpdate(BaseModel):
+    initial_reviewers: int = Field(ge=1, le=9)
+
+    @model_validator(mode="after")
+    def validate_odd_reviewers(self) -> "ReviewWorkflowPolicyUpdate":
+        if self.initial_reviewers % 2 != 1:
+            raise ValueError("初审审核员人数必须为 1 或不大于 9 的奇数")
+        return self
+
+
+class AutomationPolicyUpdate(BaseModel):
+    enabled: bool = False
+    dry_run: bool = True
+    case_threshold: int = Field(default=10, ge=1, le=1000)
+    immediate_severities: list[Literal["P0", "P1", "P2", "P3"]] = Field(
+        default_factory=lambda: ["P0", "P1"], min_length=1, max_length=4
+    )
+    daily_budget_micros: int = Field(default=0, ge=0, le=1_000_000_000)
+    cooldown_seconds: int = Field(default=21600, ge=0, le=2_592_000)
+    max_candidates: int = Field(default=1, ge=1, le=5)
+    lease_seconds: int = Field(default=300, ge=30, le=3600)
+    max_attempts: int = Field(default=3, ge=1, le=10)
+    base_retry_seconds: int = Field(default=60, ge=1, le=86400)
+
+    @model_validator(mode="after")
+    def validate_safety_contract(self) -> "AutomationPolicyUpdate":
+        if len(self.immediate_severities) != len(
+            set(self.immediate_severities)
+        ):
+            raise ValueError("即时触发严重度不能重复")
+        if self.enabled and not self.dry_run and self.daily_budget_micros <= 0:
+            raise ValueError("非 dry-run 自动优化必须配置正数日预算")
+        return self
+
+
+class ProductionFeedbackRequest(BaseModel):
+    event_id: str = Field(min_length=1, max_length=160)
+    schema_version: Literal["production-feedback-v1"]
+    event_type: Literal["human_correction_finalized"]
+    source_system: str = Field(min_length=1, max_length=120)
+    occurred_at: datetime
+    payload: dict[str, Any]
+
+
+class BenchmarkVariantRequest(BaseModel):
+    model_key: Literal["sol", "terra", "luna"]
+    provider: str = Field(min_length=1, max_length=80)
+    model_id: str = Field(min_length=1, max_length=200)
+    input_micros_per_million_tokens: int = Field(ge=0, le=1_000_000_000)
+    output_micros_per_million_tokens: int = Field(ge=0, le=1_000_000_000)
+    human_review_cost_micros: int = Field(ge=0, le=100_000_000)
+
+
+class BenchmarkCreateRequest(BaseModel):
+    experiment_key: str = Field(min_length=1, max_length=160)
+    name: str = Field(min_length=1, max_length=200)
+    execution_mode: Literal["disabled", "test"] = "disabled"
+    cohort_asset_ids: list[int] = Field(min_length=1, max_length=5000)
+    strategy_bundle_id: int = Field(ge=1)
+    variants: list[BenchmarkVariantRequest] = Field(
+        min_length=3, max_length=3
+    )
+    min_quality_accuracy: float = Field(default=0.9, ge=0, le=1)
+    max_p0_p1_errors: int = Field(default=0, ge=0, le=1000)
+    min_retry_stability: float = Field(default=0.95, ge=0, le=1)
+    low_confidence_threshold: float = Field(default=0.7, ge=0, le=1)
+
+    @model_validator(mode="after")
+    def validate_frozen_cohort(self) -> "BenchmarkCreateRequest":
+        if len(self.cohort_asset_ids) != len(set(self.cohort_asset_ids)):
+            raise ValueError("横评 cohort 不能包含重复素材")
+        if {item.model_key for item in self.variants} != set(MODEL_KEYS):
+            raise ValueError("横评必须同时冻结 Sol、Terra、Luna")
+        return self
+
+
+class BenchmarkRunRequest(BaseModel):
+    test_observations: dict[
+        Literal["sol", "terra", "luna"], list[dict[str, Any]]
+    ]
+
+    @model_validator(mode="after")
+    def validate_test_models(self) -> "BenchmarkRunRequest":
+        if set(self.test_observations) != set(MODEL_KEYS):
+            raise ValueError("测试观测必须覆盖 Sol、Terra、Luna")
+        return self
+
+
 class EnqueueRequest(BaseModel):
     asset_ids: list[int] = Field(min_length=1, max_length=1000)
     prompt_id: int | None = Field(default=None, ge=1)
@@ -225,7 +351,7 @@ class PromptAiReviseRequest(BaseModel):
 
 
 class ReviewCorrection(BaseModel):
-    target_type: str = Field(pattern="^dimension$")
+    target_type: str = Field(pattern="^(dimension|key_field)$")
     field_key: str = Field(min_length=1, max_length=80)
     model_value: int | str | None = None
     human_value: int | str | None = None
@@ -239,6 +365,10 @@ class ReviewCorrection(BaseModel):
                 raise ValueError("维度纠错必须填写 1 至 5 的人工分数")
             if self.human_value == self.model_value:
                 raise ValueError("人工维度分数必须与模型分数不同")
+        elif self.field_key not in KEY_FIELD_PATHS:
+            raise ValueError("关键字段不在允许纠偏的字段清单中")
+        elif self.human_value == self.model_value:
+            raise ValueError("人工关键字段值必须与模型值不同")
         return self
 
 
@@ -260,6 +390,71 @@ class ReviewRequest(BaseModel):
                 raise ValueError("修改结果时必须填写至少一个维度纠正")
         elif self.corrected_level is not None or self.corrections:
             raise ValueError("只有修改结果时才能填写修正等级或维度纠错")
+        return self
+
+
+class ReviewPanelVoteRequest(BaseModel):
+    reviewer_name: str = Field(min_length=1, max_length=80)
+    decision: str = Field(pattern="^(approved|corrected|rejected)$")
+    expected_panel_revision: int = Field(ge=0)
+    note: str = Field(default="", max_length=2000)
+    corrections: list[ReviewCorrection] = Field(
+        default_factory=list, max_length=16
+    )
+
+    @model_validator(mode="after")
+    def validate_vote(self) -> "ReviewPanelVoteRequest":
+        if self.decision == "corrected" and not self.corrections:
+            raise ValueError("修改结果时必须填写至少一个纠偏字段")
+        if self.decision != "corrected" and self.corrections:
+            raise ValueError("只有修改结果时才能填写纠偏字段")
+        return self
+
+
+class ReviewPanelAdjudicationRequest(BaseModel):
+    lead_reviewer_name: str = Field(min_length=1, max_length=80)
+    decision: str = Field(pattern="^(approved|corrected|rejected)$")
+    expected_panel_revision: int = Field(ge=0)
+    note: str = Field(min_length=1, max_length=2000)
+    corrections: list[ReviewCorrection] = Field(
+        default_factory=list, max_length=16
+    )
+
+    @model_validator(mode="after")
+    def validate_adjudication(self) -> "ReviewPanelAdjudicationRequest":
+        if self.decision == "corrected" and not self.corrections:
+            raise ValueError("主审修改结果时必须填写至少一个纠偏字段")
+        if self.decision != "corrected" and self.corrections:
+            raise ValueError("只有修改结果时才能填写纠偏字段")
+        return self
+
+
+class PromptMetricSnapshotRequest(BaseModel):
+    task_set_key: str = Field(min_length=1, max_length=160)
+    batch_key: str | None = Field(default=None, min_length=1, max_length=120)
+    evaluation_ids: list[int] = Field(
+        default_factory=list, max_length=5000
+    )
+
+    @model_validator(mode="after")
+    def validate_task_set(self) -> "PromptMetricSnapshotRequest":
+        if bool(self.batch_key) == bool(self.evaluation_ids):
+            raise ValueError("必须且只能通过批次键或评测结果 ID 冻结任务集")
+        if len(self.evaluation_ids) != len(set(self.evaluation_ids)):
+            raise ValueError("冻结任务集不能包含重复评测结果")
+        return self
+
+
+class ReviewPanelOpenRequest(BaseModel):
+    required_reviewers: int | None = Field(default=None, ge=1, le=9)
+
+    @model_validator(mode="after")
+    def validate_odd_reviewers(self) -> "ReviewPanelOpenRequest":
+        if (
+            self.required_reviewers is not None
+            and self.required_reviewers % 2 != 1
+        ):
+            raise ValueError("初审组审核员人数必须为 1 或不大于 9 的奇数")
         return self
 
 
@@ -695,9 +890,15 @@ def _result_payload(result: EvaluationResult | None) -> dict[str, Any] | None:
         return None
     ordered_reviews = sorted(
         result.reviews,
-        key=lambda review: (review.created_at, review.id or 0),
+        key=lambda review: (_aware(review.created_at), review.id or 0),
     )
-    latest_review = ordered_reviews[-1] if ordered_reviews else None
+    panel = result.review_panel
+    visible_reviews = (
+        ordered_reviews
+        if panel is None or panel.status == "completed"
+        else [review for review in ordered_reviews if review.panel_id is None]
+    )
+    latest_review = visible_reviews[-1] if visible_reviews else None
     completed_review = (
         latest_review if result.review_stage == "completed" else None
     )
@@ -727,7 +928,7 @@ def _result_payload(result: EvaluationResult | None) -> dict[str, Any] | None:
             "corrections": json.loads(review.corrections_json or "[]"),
             "created_at": review.created_at,
         }
-        for review in ordered_reviews
+        for review in visible_reviews
     ]
     return {
         "id": result.id,
@@ -751,6 +952,22 @@ def _result_payload(result: EvaluationResult | None) -> dict[str, Any] | None:
             "completed" if completed_review is not None else "provisional"
         ),
         "review_history": review_history,
+        "review_panel": (
+            {
+                "id": panel.id,
+                "required_reviewers": panel.required_reviewers,
+                "submitted_count": sum(
+                    1
+                    for review in ordered_reviews
+                    if review.panel_id == panel.id
+                ),
+                "status": panel.status,
+                "revision": panel.revision,
+                "blind_answers_hidden": panel.status != "completed",
+            }
+            if panel
+            else None
+        ),
         "human_review": (
             {
                 "id": latest_review.id,
@@ -1553,13 +1770,21 @@ def dashboard(_user: User = Depends(current_user), db: Session = Depends(get_db)
 @app.post("/api/assets/upload")
 async def upload_assets(
     files: list[UploadFile] = File(...),
-    _user: User = Depends(current_user),
+    user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     if len(files) > 100:
         raise HTTPException(status_code=400, detail="单次最多上传 100 张图片")
+    package = MaterialPackage(
+        package_key=f"upload:{uuid.uuid4().hex}",
+        name=f"素材包 {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')}",
+        source="manual_upload",
+        created_by=user.username,
+    )
+    db.add(package)
+    db.flush()
     uploaded: list[dict[str, Any]] = []
-    for upload in files:
+    for position, upload in enumerate(files, start=1):
         data = await upload.read()
         if not data or len(data) > MAX_UPLOAD_BYTES:
             raise HTTPException(status_code=400, detail=f"{upload.filename} 为空或超过 25MB")
@@ -1577,6 +1802,15 @@ async def upload_assets(
         digest = hashlib.sha256(data).hexdigest()
         existing = db.scalar(select(Asset).where(Asset.sha256 == digest).order_by(Asset.id.desc()))
         if existing:
+            db.add(
+                MaterialPackageItem(
+                    package_id=package.id,
+                    asset_id=existing.id,
+                    original_name=upload.filename or existing.original_name,
+                    duplicate=True,
+                    position=position,
+                )
+            )
             uploaded.append({**_asset_payload(existing), "duplicate": True})
             continue
         extension = mimetypes.guess_extension(mime_type) or Path(upload.filename or "image").suffix or ".jpg"
@@ -1593,23 +1827,182 @@ async def upload_assets(
         )
         db.add(asset)
         db.flush()
+        db.add(
+            MaterialPackageItem(
+                package_id=package.id,
+                asset_id=asset.id,
+                original_name=upload.filename or stored_name,
+                duplicate=False,
+                position=position,
+            )
+        )
         uploaded.append({**_asset_payload(asset), "duplicate": False})
     db.commit()
-    return {"items": uploaded}
+    return {
+        "items": uploaded,
+        "package": {
+            "id": package.id,
+            "package_key": package.package_key,
+            "name": package.name,
+            "source": package.source,
+            "item_count": len(uploaded),
+            "duplicate_count": sum(1 for item in uploaded if item["duplicate"]),
+            "created_by": package.created_by,
+            "created_at": package.created_at,
+        },
+    }
+
+
+def _asset_evaluation_status(
+    db: Session,
+    asset: Asset,
+    *,
+    prompt_id: int | None,
+    prompt_a_id: int | None,
+    prompt_b_id: int | None,
+) -> str:
+    jobs = db.scalars(
+        select(EvaluationJob)
+        .where(EvaluationJob.asset_id == asset.id)
+        .order_by(EvaluationJob.created_at.desc(), EvaluationJob.id.desc())
+    ).all()
+
+    def is_current(job: EvaluationJob) -> bool:
+        if prompt_id is not None:
+            return job.prompt_a_id == prompt_id and job.prompt_b_id is None
+        if prompt_a_id is not None or prompt_b_id is not None:
+            return (
+                job.prompt_a_id == prompt_a_id
+                and job.prompt_b_id == prompt_b_id
+            )
+        return False
+
+    current_jobs = [job for job in jobs if is_current(job)]
+    if any(job.status == "processing" for job in current_jobs):
+        return "running"
+    if any(job.status in {"queued", "paused"} for job in current_jobs):
+        return "queued"
+    if any(job.status == "completed" for job in current_jobs):
+        return "evaluated_current"
+    if any(job.status in {"failed", "cancelled"} for job in current_jobs):
+        return "failed"
+    if jobs:
+        return "evaluated_old"
+    return "not_evaluated"
+
+
+@app.get("/api/material-packages")
+def list_material_packages(
+    created_from: datetime | None = None,
+    created_to: datetime | None = None,
+    prompt_id: int | None = None,
+    prompt_a_id: int | None = None,
+    prompt_b_id: int | None = None,
+    limit: int = 100,
+    _user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    statement = select(MaterialPackage).order_by(
+        MaterialPackage.created_at.desc(), MaterialPackage.id.desc()
+    )
+    if created_from is not None:
+        statement = statement.where(MaterialPackage.created_at >= created_from)
+    if created_to is not None:
+        statement = statement.where(MaterialPackage.created_at <= created_to)
+    packages = db.scalars(statement.limit(min(max(limit, 1), 500))).all()
+    items = []
+    for package in packages:
+        status_summary: Counter[str] = Counter()
+        for package_item in package.items:
+            status_summary[
+                _asset_evaluation_status(
+                    db,
+                    package_item.asset,
+                    prompt_id=prompt_id,
+                    prompt_a_id=prompt_a_id,
+                    prompt_b_id=prompt_b_id,
+                )
+            ] += 1
+        items.append(
+            {
+                "id": package.id,
+                "package_key": package.package_key,
+                "name": package.name,
+                "source": package.source,
+                "item_count": len(package.items),
+                "unique_asset_count": len(
+                    {item.asset_id for item in package.items}
+                ),
+                "duplicate_count": sum(
+                    1 for item in package.items if item.duplicate
+                ),
+                "created_by": package.created_by,
+                "created_at": package.created_at,
+                "status_summary": {
+                    status: status_summary.get(status, 0)
+                    for status in (
+                        "not_evaluated",
+                        "evaluated_old",
+                        "evaluated_current",
+                        "queued",
+                        "running",
+                        "failed",
+                    )
+                },
+            }
+        )
+    return {"items": items}
 
 
 @app.get("/api/assets")
 def list_assets(
     limit: int = 100,
     offset: int = 0,
+    package_id: int | None = None,
+    created_from: datetime | None = None,
+    created_to: datetime | None = None,
+    prompt_id: int | None = None,
+    prompt_a_id: int | None = None,
+    prompt_b_id: int | None = None,
+    exclude_evaluated_current: bool = False,
     _user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
+    statement = select(Asset)
+    if package_id is not None:
+        statement = statement.join(
+            MaterialPackageItem,
+            MaterialPackageItem.asset_id == Asset.id,
+        ).where(MaterialPackageItem.package_id == package_id)
+    if created_from is not None:
+        statement = statement.where(Asset.created_at >= created_from)
+    if created_to is not None:
+        statement = statement.where(Asset.created_at <= created_to)
     assets = db.scalars(
-        select(Asset).order_by(Asset.created_at.desc()).offset(max(0, offset)).limit(min(1000, limit))
-    ).all()
-    total = db.scalar(select(func.count()).select_from(Asset)) or 0
-    return {"items": [_asset_payload(asset) for asset in assets], "total": total}
+        statement.order_by(Asset.created_at.desc(), Asset.id.desc())
+    ).unique().all()
+    payloads = []
+    for asset in assets:
+        evaluation_status = _asset_evaluation_status(
+            db,
+            asset,
+            prompt_id=prompt_id,
+            prompt_a_id=prompt_a_id,
+            prompt_b_id=prompt_b_id,
+        )
+        if exclude_evaluated_current and evaluation_status == "evaluated_current":
+            continue
+        payloads.append(
+            {
+                **_asset_payload(asset),
+                "evaluation_status": evaluation_status,
+            }
+        )
+    total = len(payloads)
+    return {
+        "items": payloads[max(0, offset):max(0, offset) + min(1000, limit)],
+        "total": total,
+    }
 
 
 @app.get("/api/assets/{asset_id}/file")
@@ -1923,6 +2316,20 @@ def _sampling_policy_payload(policy: SamplingPolicy) -> dict[str, Any]:
     }
 
 
+def _review_workflow_policy_payload(
+    policy: ReviewWorkflowPolicy,
+) -> dict[str, Any]:
+    return {
+        "id": policy.id,
+        "version": f"review-workflow-v1/policy-{policy.revision}",
+        "revision": policy.revision,
+        "initial_reviewers": policy.initial_reviewers,
+        "supported_reviewer_counts": [1, 3, 5, 7, 9],
+        "updated_by": policy.updated_by,
+        "updated_at": policy.updated_at,
+    }
+
+
 @app.get("/api/sampling-policy")
 def get_sampling_policy(
     _user: User = Depends(current_user), db: Session = Depends(get_db)
@@ -1934,6 +2341,37 @@ def get_sampling_policy(
         db.commit()
         db.refresh(policy)
     return _sampling_policy_payload(policy)
+
+
+@app.get("/api/review-workflow-policy")
+def get_review_workflow_policy(
+    _user: User = Depends(current_user), db: Session = Depends(get_db)
+) -> dict[str, Any]:
+    policy = db.get(ReviewWorkflowPolicy, 1)
+    if not policy:
+        policy = ReviewWorkflowPolicy(id=1, initial_reviewers=1)
+        db.add(policy)
+        db.commit()
+        db.refresh(policy)
+    return _review_workflow_policy_payload(policy)
+
+
+@app.put("/api/review-workflow-policy")
+def update_review_workflow_policy(
+    payload: ReviewWorkflowPolicyUpdate,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    policy = db.get(ReviewWorkflowPolicy, 1)
+    if not policy:
+        policy = ReviewWorkflowPolicy(id=1)
+        db.add(policy)
+    policy.initial_reviewers = payload.initial_reviewers
+    policy.revision = (policy.revision or 0) + 1
+    policy.updated_by = user.display_name
+    db.commit()
+    db.refresh(policy)
+    return _review_workflow_policy_payload(policy)
 
 
 @app.put("/api/sampling-policy")
@@ -2133,12 +2571,293 @@ def list_prompts(
                 "status": prompt.status,
                 "source": prompt.source,
                 "source_optimization_run_id": prompt.source_optimization_run_id,
+                "rollback_prompt_id": prompt.rollback_prompt_id,
+                "canary_status": prompt.canary_status,
+                "metrics": _prompt_version_metrics(db, prompt),
                 "change_note": prompt.change_note,
                 "created_by": prompt.created_by,
                 "created_at": prompt.created_at,
                 "updated_at": prompt.updated_at,
             }
             for prompt in prompts
+        ]
+    }
+
+
+def _prompt_version_metrics(
+    db: Session,
+    prompt: PromptVersion,
+    *,
+    batch_key: str | None = None,
+) -> dict[str, Any]:
+    statement = select(EvaluationResult).join(
+        EvaluationJob, EvaluationJob.id == EvaluationResult.job_id
+    )
+    if prompt.stage == "A":
+        statement = statement.where(
+            EvaluationResult.prompt_a_version == prompt.version
+        )
+    else:
+        statement = statement.where(
+            EvaluationResult.prompt_b_version == prompt.version
+        )
+    if batch_key:
+        statement = statement.where(EvaluationJob.batch_key == batch_key)
+    results = db.scalars(statement).all()
+    reviewed: list[tuple[EvaluationResult, HumanReview]] = []
+    for result in results:
+        final_review = None
+        if (
+            result.review_panel is not None
+            and result.review_panel.status == "completed"
+            and result.review_panel.final_review_id is not None
+        ):
+            final_review = db.get(
+                HumanReview, result.review_panel.final_review_id
+            )
+        elif result.review_stage == "completed" and result.reviews:
+            final_review = sorted(
+                result.reviews,
+                key=lambda review: (
+                    _aware(review.created_at),
+                    review.id or 0,
+                ),
+            )[-1]
+        if final_review is not None:
+            reviewed.append((result, final_review))
+
+    reviewed_count = len(reviewed)
+    corrected_sample_count = sum(
+        1 for _, review in reviewed if review.decision != "approved"
+    )
+    dimension_totals: Counter[str] = Counter()
+    dimension_correct: Counter[str] = Counter()
+    grade_correct = 0
+    for result, review in reviewed:
+        model_scores = _model_dimension_scores(result)
+        correction_by_key = {
+            str(item.get("field_key")): item
+            for item in json.loads(review.corrections_json or "[]")
+            if item.get("target_type") == "dimension"
+        }
+        for key in model_scores:
+            dimension_totals[key] += 1
+            correction = correction_by_key.get(key)
+            if (
+                correction is None
+                or correction.get("human_value") == model_scores[key]
+            ):
+                dimension_correct[key] += 1
+        final_level = (
+            review.corrected_level
+            if review.decision == "corrected" and review.corrected_level
+            else result.level
+        )
+        if review.decision != "rejected" and final_level == result.level:
+            grade_correct += 1
+
+    total = len(results)
+    return {
+        "schema_version": "prompt-version-metrics-v1",
+        "prompt_id": prompt.id,
+        "prompt_version": prompt.version,
+        "frozen_task_set": {
+            "batch_key": batch_key,
+            "scope": "explicit_batch" if batch_key else "all_version_runs",
+        },
+        "sample_accuracy": (
+            1 - corrected_sample_count / reviewed_count
+            if reviewed_count
+            else None
+        ),
+        "dimension_accuracy": {
+            key: dimension_correct[key] / total_count
+            for key, total_count in sorted(dimension_totals.items())
+            if total_count
+        },
+        "grade_accuracy": (
+            grade_correct / reviewed_count if reviewed_count else None
+        ),
+        "review_coverage": reviewed_count / total if total else 0,
+        "sample_size_n": reviewed_count,
+        "total_evaluations": total,
+        "corrected_sample_count": corrected_sample_count,
+        "unreviewed_not_counted_as_correct": True,
+    }
+
+
+@app.get("/api/prompts/{prompt_id}/metrics")
+def get_prompt_version_metrics(
+    prompt_id: int,
+    batch_key: str | None = None,
+    _user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    prompt = db.get(PromptVersion, prompt_id)
+    if not prompt:
+        raise HTTPException(status_code=404, detail="提示词版本不存在")
+    return _prompt_version_metrics(db, prompt, batch_key=batch_key)
+
+
+def _prompt_metric_snapshot_payload(
+    snapshot: PromptMetricSnapshot,
+) -> dict[str, Any]:
+    return {
+        "id": snapshot.id,
+        "prompt_id": snapshot.prompt_id,
+        "task_set_key": snapshot.task_set_key,
+        "task_set_hash": snapshot.task_set_hash,
+        "evaluation_ids": json.loads(snapshot.evaluation_ids_json),
+        "metrics": json.loads(snapshot.metrics_json),
+        "total_count": snapshot.total_count,
+        "reviewed_count": snapshot.reviewed_count,
+        "created_by": snapshot.created_by,
+        "created_at": snapshot.created_at,
+    }
+
+
+@app.get("/api/prompts/{prompt_id}/metric-snapshots")
+def list_prompt_metric_snapshots(
+    prompt_id: int,
+    _user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    if db.get(PromptVersion, prompt_id) is None:
+        raise HTTPException(status_code=404, detail="提示词版本不存在")
+    snapshots = db.scalars(
+        select(PromptMetricSnapshot)
+        .where(PromptMetricSnapshot.prompt_id == prompt_id)
+        .order_by(
+            PromptMetricSnapshot.created_at.desc(),
+            PromptMetricSnapshot.id.desc(),
+        )
+    ).all()
+    return {
+        "items": [
+            _prompt_metric_snapshot_payload(snapshot)
+            for snapshot in snapshots
+        ]
+    }
+
+
+@app.post("/api/prompts/{prompt_id}/metric-snapshots")
+def create_prompt_metric_snapshot(
+    prompt_id: int,
+    payload: PromptMetricSnapshotRequest,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    prompt = db.get(PromptVersion, prompt_id)
+    if prompt is None:
+        raise HTTPException(status_code=404, detail="提示词版本不存在")
+    statement = select(EvaluationResult).join(
+        EvaluationJob, EvaluationJob.id == EvaluationResult.job_id
+    )
+    if prompt.stage == "A":
+        statement = statement.where(
+            EvaluationResult.prompt_a_version == prompt.version
+        )
+    else:
+        statement = statement.where(
+            EvaluationResult.prompt_b_version == prompt.version
+        )
+    if payload.batch_key:
+        statement = statement.where(
+            EvaluationJob.batch_key == payload.batch_key
+        )
+    else:
+        statement = statement.where(
+            EvaluationResult.id.in_(payload.evaluation_ids)
+        )
+    results = list(db.scalars(statement).all())
+    expected_count = (
+        len(payload.evaluation_ids)
+        if payload.evaluation_ids
+        else len(results)
+    )
+    if not results or len(results) != expected_count:
+        raise HTTPException(
+            status_code=409,
+            detail="冻结任务集包含不存在或不属于该提示词版本的评测结果",
+        )
+    evaluation_ids = sorted(result.id for result in results)
+    task_hash = frozen_task_set_hash(evaluation_ids)
+    existing = db.scalar(
+        select(PromptMetricSnapshot).where(
+            PromptMetricSnapshot.prompt_id == prompt.id,
+            PromptMetricSnapshot.task_set_hash == task_hash,
+        )
+    )
+    if existing is not None:
+        if existing.task_set_key != payload.task_set_key:
+            raise HTTPException(
+                status_code=409,
+                detail="相同冻结任务集已使用其他业务键登记",
+            )
+        return _prompt_metric_snapshot_payload(existing)
+    panels = {
+        panel.evaluation_id: panel
+        for panel in db.scalars(
+            select(ReviewPanel).where(
+                ReviewPanel.evaluation_id.in_(evaluation_ids)
+            )
+        ).all()
+    }
+    review_ids = [
+        panel.final_review_id
+        for panel in panels.values()
+        if panel.final_review_id is not None
+    ]
+    reviews = {
+        review.id: review
+        for review in db.scalars(
+            select(HumanReview).where(HumanReview.id.in_(review_ids))
+        ).all()
+    }
+    metrics = calculate_prompt_metrics(
+        results,
+        panels_by_evaluation=panels,
+        reviews_by_id=reviews,
+    )
+    snapshot = PromptMetricSnapshot(
+        prompt_id=prompt.id,
+        task_set_key=payload.task_set_key,
+        task_set_hash=task_hash,
+        evaluation_ids_json=json.dumps(evaluation_ids),
+        metrics_json=json.dumps(metrics, ensure_ascii=False),
+        total_count=len(results),
+        reviewed_count=int(metrics["reviewed_sample_count"]),
+        created_by=user.username,
+    )
+    db.add(snapshot)
+    db.commit()
+    db.refresh(snapshot)
+    return _prompt_metric_snapshot_payload(snapshot)
+
+
+@app.get("/api/agent-plans")
+def list_agent_plans(
+    _user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    plans = db.scalars(
+        select(AgentPlanVersion).order_by(
+            AgentPlanVersion.created_at.desc(),
+            AgentPlanVersion.id.desc(),
+        )
+    ).all()
+    return {
+        "items": [
+            {
+                "id": plan.id,
+                "name": plan.name,
+                "version": plan.version,
+                "plan": json.loads(plan.plan_json),
+                "status": plan.status,
+                "created_by": plan.created_by,
+                "created_at": plan.created_at,
+            }
+            for plan in plans
         ]
     }
 
@@ -2187,10 +2906,23 @@ def publish_prompt(
                     "优化候选尚未通过配对回归并获得人工批准，不能发布"
                 ),
             )
+    previous_published = db.scalar(
+        select(PromptVersion)
+        .where(
+            PromptVersion.stage == prompt.stage,
+            PromptVersion.status == "published",
+            PromptVersion.id != prompt.id,
+        )
+        .order_by(PromptVersion.updated_at.desc(), PromptVersion.id.desc())
+        .limit(1)
+    )
     db.execute(
         update(PromptVersion)
         .where(PromptVersion.stage == prompt.stage, PromptVersion.status == "published")
         .values(status="archived")
+    )
+    prompt.rollback_prompt_id = (
+        previous_published.id if previous_published is not None else None
     )
     prompt.status = "published"
     db.flush()
@@ -2215,6 +2947,40 @@ def publish_prompt(
         )
     db.commit()
     return {"ok": True, "regression_run_ids": regression_ids}
+
+
+@app.post("/api/prompts/{prompt_id}/rollback")
+def rollback_prompt(
+    prompt_id: int,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    current = db.get(PromptVersion, prompt_id)
+    if current is None:
+        raise HTTPException(status_code=404, detail="提示词版本不存在")
+    if current.status != "published":
+        raise HTTPException(status_code=409, detail="只能回滚当前已发布版本")
+    target = (
+        db.get(PromptVersion, current.rollback_prompt_id)
+        if current.rollback_prompt_id is not None
+        else None
+    )
+    if target is None or target.stage != current.stage:
+        raise HTTPException(status_code=409, detail="当前版本没有可验证的回滚指针")
+    current.status = "archived"
+    target.status = "published"
+    target.rollback_prompt_id = current.id
+    target.change_note = (
+        f"{target.change_note}\n由 {user.username} 从 {current.version} 人工回滚"
+    ).strip()
+    db.commit()
+    return {
+        "ok": True,
+        "published_prompt_id": target.id,
+        "published_version": target.version,
+        "rolled_back_from_id": current.id,
+        "canary_status": target.canary_status,
+    }
 
 
 @app.post("/api/prompts/ai-revise")
@@ -2525,7 +3291,1044 @@ def _requires_secondary_review(evaluation: EvaluationResult, decision: str) -> b
     )
 
 
-@app.post("/api/evaluations/{evaluation_id}/review")
+def _model_dimension_scores(evaluation: EvaluationResult) -> dict[str, int]:
+    aesthetic = json.loads(evaluation.aesthetic_json or "{}")
+    dimensions = aesthetic.get("dimensions") or {}
+    return {
+        str(key): int(value["grade"])
+        for key, value in dimensions.items()
+        if isinstance(value, dict)
+        and isinstance(value.get("grade"), (int, float))
+        and 1 <= int(value["grade"]) <= 5
+    }
+
+
+def _vote_dimension_scores(
+    evaluation: EvaluationResult,
+    review: HumanReview,
+) -> dict[str, int]:
+    scores = _model_dimension_scores(evaluation)
+    for correction in json.loads(review.corrections_json or "[]"):
+        if correction.get("target_type") != "dimension":
+            continue
+        value = correction.get("human_value")
+        if isinstance(value, int) and 1 <= value <= 5:
+            scores[str(correction.get("field_key"))] = value
+    return scores
+
+
+def _strict_majority(values: list[Any]) -> Any | None:
+    if not values:
+        return None
+    value, count = Counter(values).most_common(1)[0]
+    return value if count > len(values) // 2 else None
+
+
+def _panel_payload(
+    panel: ReviewPanel,
+    *,
+    reviewer_name: str | None = None,
+) -> dict[str, Any]:
+    panel_votes = [
+        review
+        for review in panel.evaluation.reviews
+        if review.panel_id == panel.id
+    ]
+    my_vote = next(
+        (
+            review
+            for review in panel_votes
+            if reviewer_name and review.reviewer_name == reviewer_name
+        ),
+        None,
+    )
+    reveal_votes = panel.status == "completed"
+    return {
+        "id": panel.id,
+        "evaluation_id": panel.evaluation_id,
+        "required_reviewers": panel.required_reviewers,
+        "submitted_count": len(panel_votes),
+        "status": panel.status,
+        "revision": panel.revision,
+        "my_vote": (
+            {
+                "id": my_vote.id,
+                "decision": my_vote.decision,
+                "note": my_vote.note,
+                "corrections": json.loads(my_vote.corrections_json or "[]"),
+                "created_at": my_vote.created_at,
+            }
+            if my_vote
+            else None
+        ),
+        "votes": (
+            [
+                {
+                    "id": review.id,
+                    "reviewer_name": review.reviewer_name,
+                    "decision": review.decision,
+                    "note": review.note,
+                    "corrections": json.loads(
+                        review.corrections_json or "[]"
+                    ),
+                    "created_at": review.created_at,
+                }
+                for review in panel_votes
+            ]
+            if reveal_votes
+            else []
+        ),
+        "final_truth": (
+            json.loads(panel.final_truth_json or "{}")
+            if reveal_votes
+            else None
+        ),
+        "blind_answers_hidden": not reveal_votes,
+        "completed_at": panel.completed_at,
+    }
+
+
+def _claim_review_panel_revision_or_409(
+    db: Session,
+    *,
+    panel: ReviewPanel,
+    expected_revision: int,
+) -> int:
+    try:
+        return claim_review_panel_revision(
+            db,
+            panel_id=panel.id,
+            expected_revision=expected_revision,
+        )
+    except ReviewPanelRevisionConflict:
+        db.rollback()
+        current_revision = db.scalar(
+            select(ReviewPanel.revision).where(ReviewPanel.id == panel.id)
+        )
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "STALE_REVIEW_PANEL",
+                "message": "初审组修订号已变化，请刷新后重试",
+                "revision": current_revision,
+            },
+        ) from None
+
+
+def _finalize_review_panel(
+    db: Session,
+    *,
+    evaluation: EvaluationResult,
+    panel: ReviewPanel,
+    expected_panel_revision: int,
+    decision: str,
+    corrections: list[dict[str, Any]],
+    reviewer_name: str,
+    note: str,
+    final_stage: Literal["initial"],
+    resolution_mode: Literal[
+        "single_reviewer", "majority_consensus", "lead_adjudication"
+    ],
+    resolved_dimensions: dict[str, Any] | None = None,
+    resolved_key_fields: dict[str, Any] | None = None,
+) -> HumanReview:
+    corrected_score = None
+    corrected_level = None
+    if decision == "corrected":
+        recalculated = calculate_corrected_score(
+            json.loads(evaluation.precheck_json),
+            (
+                json.loads(evaluation.aesthetic_json)
+                if evaluation.aesthetic_json
+                else None
+            ),
+            [
+                correction
+                for correction in corrections
+                if correction.get("target_type") == "dimension"
+            ],
+        )
+        corrected_score = recalculated.get("score")
+        corrected_level = recalculated.get("level")
+        if corrected_score is None or corrected_level is None:
+            raise HTTPException(
+                status_code=400, detail="初审共识无法计算正式等级"
+            )
+    _claim_review_panel_revision_or_409(
+        db,
+        panel=panel,
+        expected_revision=expected_panel_revision,
+    )
+    final_review = HumanReview(
+        evaluation_id=evaluation.id,
+        reviewer_name=reviewer_name,
+        stage=final_stage,
+        decision=decision,
+        corrected_level=corrected_level,
+        corrected_score=corrected_score,
+        note=note,
+        corrections_json=json.dumps(corrections, ensure_ascii=False),
+    )
+    db.add(final_review)
+    db.flush()
+    truth = {
+        "schema_version": "review-panel-truth-v1",
+        "decision": decision,
+        "corrected_level": corrected_level,
+        "corrected_score": corrected_score,
+        "corrections": corrections,
+        "dimensions": resolved_dimensions or {},
+        "key_fields": resolved_key_fields or {},
+        "panel_id": panel.id,
+        "required_reviewers": panel.required_reviewers,
+        "resolution_mode": resolution_mode,
+    }
+    panel.final_review_id = final_review.id
+    panel.final_truth_json = json.dumps(truth, ensure_ascii=False)
+    panel.status = "completed"
+    panel.completed_at = datetime.now(timezone.utc)
+    evaluation.review_stage = "completed"
+    evaluation.review_revision += 1
+    evaluation.needs_review = decision == "rejected"
+    evaluation.updated_at = datetime.now(timezone.utc)
+    if decision == "corrected":
+        severity = (
+            "P1"
+            if any(
+                isinstance(item.get("model_value"), int)
+                and isinstance(item.get("human_value"), int)
+                and abs(item["human_value"] - item["model_value"]) >= 2
+                for item in corrections
+            )
+            else "P2"
+        )
+        db.add(
+            OptimizationCaseQueue(
+                idempotency_key=f"review-panel:{panel.id}:final:{final_review.id}",
+                evaluation_id=evaluation.id,
+                final_review_id=final_review.id,
+                prompt_version=(
+                    evaluation.prompt_b_version
+                    or evaluation.prompt_a_version
+                ),
+                severity=severity,
+                case_json=json.dumps(
+                    {
+                        "schema_version": "optimization-case-v1",
+                        "source": "review_panel",
+                        "evaluation_id": evaluation.id,
+                        "prompt_version": (
+                            evaluation.prompt_b_version
+                            or evaluation.prompt_a_version
+                        ),
+                        "truth": truth,
+                    },
+                    ensure_ascii=False,
+                ),
+            )
+        )
+    return final_review
+
+
+@app.post("/api/evaluations/{evaluation_id}/review-panel/open")
+def open_review_panel(
+    evaluation_id: int,
+    payload: ReviewPanelOpenRequest,
+    _user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    evaluation = db.get(EvaluationResult, evaluation_id)
+    if not evaluation:
+        raise HTTPException(status_code=404, detail="评测结果不存在")
+    policy = db.get(ReviewWorkflowPolicy, 1)
+    required_reviewers = (
+        payload.required_reviewers
+        if payload.required_reviewers is not None
+        else policy.initial_reviewers
+        if policy is not None
+        else 1
+    )
+    existing_panel = db.scalar(
+        select(ReviewPanel).where(
+            ReviewPanel.evaluation_id == evaluation.id
+        )
+    )
+    if existing_panel is not None:
+        if (
+            payload.required_reviewers is not None
+            and existing_panel.required_reviewers != required_reviewers
+        ):
+            raise HTTPException(
+                status_code=409, detail="初审组已经按其他人数冻结"
+            )
+        return _panel_payload(existing_panel)
+    if evaluation.review_stage == "completed":
+        raise HTTPException(status_code=409, detail="该结果已经形成最终真值")
+    panel = ReviewPanel(
+        evaluation_id=evaluation.id,
+        required_reviewers=required_reviewers,
+        status="collecting",
+    )
+    db.add(panel)
+    db.commit()
+    db.refresh(panel)
+    return _panel_payload(panel)
+
+
+@app.get("/api/evaluations/{evaluation_id}/review-panel")
+def get_review_panel(
+    evaluation_id: int,
+    reviewer_name: str | None = None,
+    _user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    panel = db.scalar(
+        select(ReviewPanel).where(
+            ReviewPanel.evaluation_id == evaluation_id
+        )
+    )
+    if not panel:
+        raise HTTPException(status_code=404, detail="该结果没有初审组")
+    return _panel_payload(panel, reviewer_name=reviewer_name)
+
+
+@app.get("/api/review-panels")
+def list_review_panels(
+    status: Literal["collecting", "lead_adjudication", "completed"] | None = None,
+    limit: int = 200,
+    _user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    statement = select(ReviewPanel).order_by(
+        ReviewPanel.created_at.desc(), ReviewPanel.id.desc()
+    )
+    if status is not None:
+        statement = statement.where(ReviewPanel.status == status)
+    panels = db.scalars(statement.limit(min(max(limit, 1), 500))).all()
+    return {
+        "items": [
+            {
+                **_panel_payload(panel),
+                "asset": _asset_payload(panel.evaluation.asset),
+                "evaluation": _result_payload(panel.evaluation),
+            }
+            for panel in panels
+        ]
+    }
+
+
+@app.post("/api/evaluations/{evaluation_id}/review-panel/votes")
+def submit_review_panel_vote(
+    evaluation_id: int,
+    payload: ReviewPanelVoteRequest,
+    _user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    evaluation = db.get(EvaluationResult, evaluation_id)
+    panel = (
+        db.scalar(
+            select(ReviewPanel).where(
+                ReviewPanel.evaluation_id == evaluation_id
+            )
+        )
+        if evaluation
+        else None
+    )
+    if not evaluation or not panel:
+        raise HTTPException(status_code=404, detail="初审组不存在")
+    if panel.status != "collecting":
+        raise HTTPException(status_code=409, detail="初审组当前不接受普通投票")
+    if db.scalar(
+        select(HumanReview).where(
+            HumanReview.panel_id == panel.id,
+            HumanReview.reviewer_name == payload.reviewer_name,
+        )
+    ):
+        raise HTTPException(status_code=409, detail="当前审核员已经提交盲审")
+    correction_data = [item.model_dump() for item in payload.corrections]
+    if payload.decision == "corrected":
+        try:
+            recalculated = calculate_corrected_score(
+                json.loads(evaluation.precheck_json),
+                (
+                    json.loads(evaluation.aesthetic_json)
+                    if evaluation.aesthetic_json
+                    else None
+                ),
+                correction_data,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        corrected_score = recalculated.get("score")
+        corrected_level = recalculated.get("level")
+    else:
+        corrected_score = None
+        corrected_level = None
+    claimed_revision = _claim_review_panel_revision_or_409(
+        db,
+        panel=panel,
+        expected_revision=payload.expected_panel_revision,
+    )
+    vote = HumanReview(
+        evaluation_id=evaluation.id,
+        panel_id=panel.id,
+        panel_revision=payload.expected_panel_revision,
+        reviewer_name=payload.reviewer_name,
+        stage="initial",
+        decision=payload.decision,
+        corrected_level=corrected_level,
+        corrected_score=corrected_score,
+        note=payload.note,
+        corrections_json=json.dumps(correction_data, ensure_ascii=False),
+    )
+    db.add(vote)
+    evaluation.review_revision += 1
+    db.flush()
+    votes = list(
+        db.scalars(
+            select(HumanReview)
+            .where(HumanReview.panel_id == panel.id)
+            .order_by(HumanReview.id.asc())
+        ).all()
+    )
+    resolution = resolve_panel_consensus(
+        evaluation,
+        votes,
+        required_reviewers=panel.required_reviewers,
+    )
+    if resolution["status"] == "lead_adjudication":
+        panel.status = "lead_adjudication"
+        # 主审裁决仍属于初审工作台，不复用历史 arbitration 状态。
+        evaluation.review_stage = "initial"
+    elif resolution["status"] == "completed":
+        corrections = list(resolution["corrections"])
+        final_decision = (
+            "rejected"
+            if resolution["decision"] == "rejected"
+            else "corrected"
+            if corrections
+            else "approved"
+        )
+        _finalize_review_panel(
+            db,
+            evaluation=evaluation,
+            panel=panel,
+            expected_panel_revision=claimed_revision,
+            decision=final_decision,
+            corrections=corrections,
+            reviewer_name=(
+                "初审单人定案"
+                if panel.required_reviewers == 1
+                else "初审组共识"
+            ),
+            note=(
+                "单人初审提交后形成最终人工真值"
+                if panel.required_reviewers == 1
+                else (
+                    f"{panel.required_reviewers} 人独立盲审后"
+                    "形成逐字段严格多数共识"
+                )
+            ),
+            final_stage="initial",
+            resolution_mode=(
+                "single_reviewer"
+                if panel.required_reviewers == 1
+                else "majority_consensus"
+            ),
+            resolved_dimensions=resolution["dimensions"],
+            resolved_key_fields=resolution["key_fields"],
+        )
+    db.commit()
+    db.expire(evaluation, ["reviews"])
+    db.refresh(panel)
+    return _panel_payload(panel, reviewer_name=payload.reviewer_name)
+
+
+@app.post("/api/evaluations/{evaluation_id}/review-panel/lead-adjudication")
+def adjudicate_review_panel(
+    evaluation_id: int,
+    payload: ReviewPanelAdjudicationRequest,
+    _user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    evaluation = db.get(EvaluationResult, evaluation_id)
+    panel = (
+        db.scalar(
+            select(ReviewPanel).where(
+                ReviewPanel.evaluation_id == evaluation_id
+            )
+        )
+        if evaluation
+        else None
+    )
+    if not evaluation or not panel:
+        raise HTTPException(status_code=404, detail="初审组不存在")
+    if panel.status != "lead_adjudication":
+        raise HTTPException(status_code=409, detail="当前不需要主审裁决")
+    _finalize_review_panel(
+        db,
+        evaluation=evaluation,
+        panel=panel,
+        expected_panel_revision=payload.expected_panel_revision,
+        decision=payload.decision,
+        corrections=[item.model_dump() for item in payload.corrections],
+        reviewer_name=payload.lead_reviewer_name,
+        note=payload.note or "初审工作台主审裁决",
+        final_stage="initial",
+        resolution_mode="lead_adjudication",
+        resolved_dimensions=review_truth(
+            evaluation,
+            decision=payload.decision,
+            corrected_level=None,
+            corrected_score=None,
+            corrections=[item.model_dump() for item in payload.corrections],
+        )["dimensions"],
+        resolved_key_fields=review_truth(
+            evaluation,
+            decision=payload.decision,
+            corrected_level=None,
+            corrected_score=None,
+            corrections=[item.model_dump() for item in payload.corrections],
+        )["key_fields"],
+    )
+    db.commit()
+    db.refresh(panel)
+    return _panel_payload(panel, reviewer_name=payload.lead_reviewer_name)
+
+
+@app.get("/api/optimization-cases")
+def list_optimization_cases(
+    status: Literal[
+        "pending", "batched", "processing", "completed", "failed"
+    ] | None = None,
+    limit: int = 200,
+    _user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    statement = select(OptimizationCaseQueue).order_by(
+        OptimizationCaseQueue.created_at.desc(),
+        OptimizationCaseQueue.id.desc(),
+    )
+    if status is not None:
+        statement = statement.where(
+            OptimizationCaseQueue.status == status
+        )
+    cases = db.scalars(statement.limit(min(max(limit, 1), 500))).all()
+    return {
+        "items": [
+            {
+                "id": case.id,
+                "idempotency_key": case.idempotency_key,
+                "evaluation_id": case.evaluation_id,
+                "final_review_id": case.final_review_id,
+                "source_type": case.source_type,
+                "source_event_id": case.source_event_id,
+                "prompt_version": case.prompt_version,
+                "severity": case.severity,
+                "case": json.loads(case.case_json),
+                "status": case.status,
+                "attempt_count": case.attempt_count,
+                "next_attempt_at": case.next_attempt_at,
+                "last_error": case.last_error,
+                "automation_run_id": case.automation_run_id,
+                "created_at": case.created_at,
+                "updated_at": case.updated_at,
+            }
+            for case in cases
+        ]
+    }
+
+
+def _automation_policy_payload(policy: AutomationPolicy) -> dict[str, Any]:
+    return {
+        "id": policy.id,
+        "enabled": policy.enabled,
+        "dry_run": policy.dry_run,
+        "revision": policy.revision,
+        "case_threshold": policy.case_threshold,
+        "immediate_severities": json.loads(
+            policy.immediate_severities_json or "[]"
+        ),
+        "daily_budget_micros": policy.daily_budget_micros,
+        "cooldown_seconds": policy.cooldown_seconds,
+        "max_candidates": policy.max_candidates,
+        "lease_seconds": policy.lease_seconds,
+        "max_attempts": policy.max_attempts,
+        "base_retry_seconds": policy.base_retry_seconds,
+        "last_triggered_at": policy.last_triggered_at,
+        "updated_by": policy.updated_by,
+        "updated_at": policy.updated_at,
+        "real_model_calls_enabled": False,
+        "auto_publish_enabled": False,
+    }
+
+
+@app.get("/api/automation-policy")
+def get_automation_policy(
+    _user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    policy = db.get(AutomationPolicy, 1)
+    if policy is None:
+        policy = AutomationPolicy(id=1)
+        db.add(policy)
+        db.commit()
+        db.refresh(policy)
+    return _automation_policy_payload(policy)
+
+
+@app.put("/api/automation-policy")
+def update_automation_policy(
+    payload: AutomationPolicyUpdate,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    policy = db.get(AutomationPolicy, 1)
+    if policy is None:
+        policy = AutomationPolicy(id=1)
+        db.add(policy)
+    for key, value in payload.model_dump(
+        exclude={"immediate_severities"}
+    ).items():
+        setattr(policy, key, value)
+    policy.immediate_severities_json = canonical_json(
+        payload.immediate_severities
+    )
+    policy.revision += 1
+    policy.updated_by = user.username
+    db.commit()
+    db.refresh(policy)
+    return _automation_policy_payload(policy)
+
+
+def _automation_run_payload(
+    run: AutomationOptimizationRun,
+) -> dict[str, Any]:
+    return {
+        "id": run.id,
+        "run_key": run.run_key,
+        "base_prompt_version": run.base_prompt_version,
+        "policy_revision": run.policy_revision,
+        "status": run.status,
+        "dry_run": run.dry_run,
+        "trigger_reason": run.trigger_reason,
+        "case_ids": json.loads(run.case_ids_json),
+        "frozen_input": json.loads(run.frozen_input_json),
+        "result": json.loads(run.result_json or "{}"),
+        "candidate_count": run.candidate_count,
+        "estimated_cost_micros": run.estimated_cost_micros,
+        "actual_cost_micros": run.actual_cost_micros,
+        "error_message": run.error_message,
+        "created_by": run.created_by,
+        "created_at": run.created_at,
+        "finished_at": run.finished_at,
+        "publishes_automatically": False,
+    }
+
+
+@app.get("/api/automation-runs")
+def list_automation_runs(
+    limit: int = 200,
+    _user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    runs = db.scalars(
+        select(AutomationOptimizationRun)
+        .order_by(
+            AutomationOptimizationRun.created_at.desc(),
+            AutomationOptimizationRun.id.desc(),
+        )
+        .limit(min(max(limit, 1), 500))
+    ).all()
+    return {"items": [_automation_run_payload(run) for run in runs]}
+
+
+@app.post("/api/automation-runs/consume")
+def consume_automation_runs(
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    result = consume_optimization_queue_once(
+        db,
+        worker_id=f"manual:{user.username}",
+        adapter=None,
+    )
+    db.commit()
+    return result
+
+
+def _production_feedback_payload(
+    event: ProductionFeedbackEvent,
+    case: OptimizationCaseQueue | None,
+) -> dict[str, Any]:
+    return {
+        "id": event.id,
+        "event_id": event.event_id,
+        "schema_version": event.schema_version,
+        "event_type": event.event_type,
+        "source_system": event.source_system,
+        "occurred_at": event.occurred_at,
+        "payload_hash": event.payload_hash,
+        "payload": json.loads(event.payload_json),
+        "status": event.status,
+        "optimization_case_id": case.id if case else None,
+        "received_by": event.received_by,
+        "received_at": event.received_at,
+        "writes_production_database": False,
+    }
+
+
+@app.post("/api/production-feedback-events")
+def create_production_feedback_event(
+    payload: ProductionFeedbackRequest,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    try:
+        event, case, duplicate = ingest_production_feedback(
+            db,
+            event_id=payload.event_id,
+            schema_version=payload.schema_version,
+            event_type=payload.event_type,
+            source_system=payload.source_system,
+            occurred_at=payload.occurred_at,
+            payload=payload.payload,
+            received_by=user.username,
+        )
+    except FeedbackConflict as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail=str(exc)) from None
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(status_code=422, detail=str(exc)) from None
+    db.commit()
+    db.refresh(event)
+    db.refresh(case)
+    result = _production_feedback_payload(event, case)
+    result["duplicate"] = duplicate
+    return result
+
+
+@app.get("/api/production-feedback-events")
+def list_production_feedback_events(
+    limit: int = 200,
+    _user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    events = db.scalars(
+        select(ProductionFeedbackEvent)
+        .order_by(
+            ProductionFeedbackEvent.received_at.desc(),
+            ProductionFeedbackEvent.id.desc(),
+        )
+        .limit(min(max(limit, 1), 500))
+    ).all()
+    case_by_event = {
+        case.source_event_id: case
+        for case in db.scalars(
+            select(OptimizationCaseQueue).where(
+                OptimizationCaseQueue.source_event_id.in_(
+                    [event.id for event in events]
+                )
+            )
+        ).all()
+    } if events else {}
+    return {
+        "items": [
+            _production_feedback_payload(
+                event, case_by_event.get(event.id)
+            )
+            for event in events
+        ]
+    }
+
+
+def _benchmark_payload(
+    experiment: ModelBenchmarkExperiment,
+    variants: list[ModelBenchmarkVariant],
+) -> dict[str, Any]:
+    return {
+        "id": experiment.id,
+        "experiment_key": experiment.experiment_key,
+        "name": experiment.name,
+        "status": experiment.status,
+        "execution_mode": experiment.execution_mode,
+        "cohort_hash": experiment.cohort_hash,
+        "snapshot_hash": experiment.snapshot_hash,
+        "frozen_snapshot": json.loads(experiment.frozen_snapshot_json),
+        "quality_gate": json.loads(experiment.quality_gate_json),
+        "decision": json.loads(experiment.decision_json or "{}"),
+        "created_by": experiment.created_by,
+        "created_at": experiment.created_at,
+        "started_at": experiment.started_at,
+        "finished_at": experiment.finished_at,
+        "real_model_calls_enabled": False,
+        "variants": [
+            {
+                "id": variant.id,
+                "model_key": variant.model_key,
+                "provider": variant.provider,
+                "model_id": variant.model_id,
+                "pricing": json.loads(variant.pricing_json),
+                "status": variant.status,
+                "metrics": json.loads(variant.metrics_json or "{}"),
+                "error_message": variant.error_message,
+            }
+            for variant in variants
+        ],
+    }
+
+
+@app.post("/api/model-benchmarks")
+def create_model_benchmark(
+    payload: BenchmarkCreateRequest,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    existing = db.scalar(
+        select(ModelBenchmarkExperiment).where(
+            ModelBenchmarkExperiment.experiment_key
+            == payload.experiment_key
+        )
+    )
+    assets_found = set(
+        db.scalars(
+            select(Asset.id).where(
+                Asset.id.in_(payload.cohort_asset_ids)
+            )
+        ).all()
+    )
+    if assets_found != set(payload.cohort_asset_ids):
+        raise HTTPException(status_code=422, detail="冻结 cohort 含不存在素材")
+    bundle = db.get(StrategyBundle, payload.strategy_bundle_id)
+    if bundle is None:
+        raise HTTPException(status_code=404, detail="StrategyBundle 不存在")
+    plan = db.scalar(
+        select(AgentPlanVersion).where(
+            AgentPlanVersion.version == bundle.agent_plan_version
+        )
+    )
+    if plan is None:
+        raise HTTPException(status_code=422, detail="AgentPlan 快照不存在")
+    frozen = {
+        "schema_version": "model-benchmark-v1",
+        "cohort_asset_ids": sorted(payload.cohort_asset_ids),
+        "strategy_bundle": {
+            "id": bundle.id,
+            "canonical_hash": bundle.canonical_hash,
+            "model_id": bundle.model_id,
+            "model_config": json.loads(bundle.model_config_snapshot),
+            "prompt_a_version": bundle.prompt_a_version,
+            "prompt_b_version": bundle.prompt_b_version,
+            "rubric_version": bundle.rubric_version,
+            "engine_version": bundle.engine_version,
+            "risk_review_version": bundle.risk_review_version,
+            "agent_plan_version": bundle.agent_plan_version,
+        },
+        "agent_plan": {
+            "version": plan.version,
+            "plan": json.loads(plan.plan_json),
+        },
+        "variants": [
+            {
+                "model_key": item.model_key,
+                "provider": item.provider,
+                "model_id": item.model_id,
+                "pricing": {
+                    "input_micros_per_million_tokens":
+                        item.input_micros_per_million_tokens,
+                    "output_micros_per_million_tokens":
+                        item.output_micros_per_million_tokens,
+                    "human_review_cost_micros":
+                        item.human_review_cost_micros,
+                },
+            }
+            for item in sorted(
+                payload.variants, key=lambda value: value.model_key
+            )
+        ],
+    }
+    quality_gate = {
+        "min_quality_accuracy": payload.min_quality_accuracy,
+        "max_p0_p1_errors": payload.max_p0_p1_errors,
+        "min_retry_stability": payload.min_retry_stability,
+        "low_confidence_threshold": payload.low_confidence_threshold,
+        "selection": "quality_gate_then_pareto_composite_cost",
+    }
+    frozen_hash = benchmark_snapshot_hash(frozen)
+    if existing is not None:
+        if (
+            existing.snapshot_hash != frozen_hash
+            or json.loads(existing.quality_gate_json) != quality_gate
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="同一 experiment_key 的冻结快照不一致",
+            )
+        variants = db.scalars(
+            select(ModelBenchmarkVariant).where(
+                ModelBenchmarkVariant.experiment_id == existing.id
+            )
+        ).all()
+        return _benchmark_payload(existing, variants)
+
+    experiment = ModelBenchmarkExperiment(
+        experiment_key=payload.experiment_key,
+        name=payload.name,
+        status="draft",
+        execution_mode=payload.execution_mode,
+        cohort_hash=hashlib.sha256(
+            canonical_json(sorted(payload.cohort_asset_ids)).encode("utf-8")
+        ).hexdigest(),
+        snapshot_hash=frozen_hash,
+        frozen_snapshot_json=canonical_json(frozen),
+        quality_gate_json=canonical_json(quality_gate),
+        created_by=user.username,
+    )
+    db.add(experiment)
+    db.flush()
+    for item in payload.variants:
+        db.add(
+            ModelBenchmarkVariant(
+                experiment_id=experiment.id,
+                model_key=item.model_key,
+                provider=item.provider,
+                model_id=item.model_id,
+                pricing_json=canonical_json(
+                    {
+                        "input_micros_per_million_tokens":
+                            item.input_micros_per_million_tokens,
+                        "output_micros_per_million_tokens":
+                            item.output_micros_per_million_tokens,
+                        "human_review_cost_micros":
+                            item.human_review_cost_micros,
+                    }
+                ),
+            )
+        )
+    db.commit()
+    variants = db.scalars(
+        select(ModelBenchmarkVariant).where(
+            ModelBenchmarkVariant.experiment_id == experiment.id
+        )
+    ).all()
+    return _benchmark_payload(experiment, variants)
+
+
+@app.get("/api/model-benchmarks")
+def list_model_benchmarks(
+    limit: int = 100,
+    _user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    experiments = db.scalars(
+        select(ModelBenchmarkExperiment)
+        .order_by(
+            ModelBenchmarkExperiment.created_at.desc(),
+            ModelBenchmarkExperiment.id.desc(),
+        )
+        .limit(min(max(limit, 1), 500))
+    ).all()
+    items = []
+    for experiment in experiments:
+        variants = db.scalars(
+            select(ModelBenchmarkVariant).where(
+                ModelBenchmarkVariant.experiment_id == experiment.id
+            )
+        ).all()
+        items.append(_benchmark_payload(experiment, variants))
+    return {"items": items}
+
+
+@app.get("/api/model-benchmarks/{experiment_id}")
+def get_model_benchmark(
+    experiment_id: int,
+    _user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    experiment = db.get(ModelBenchmarkExperiment, experiment_id)
+    if experiment is None:
+        raise HTTPException(status_code=404, detail="横评实验不存在")
+    variants = db.scalars(
+        select(ModelBenchmarkVariant).where(
+            ModelBenchmarkVariant.experiment_id == experiment.id
+        )
+    ).all()
+    return _benchmark_payload(experiment, variants)
+
+
+@app.post("/api/model-benchmarks/{experiment_id}/run-test")
+def run_model_benchmark_test(
+    experiment_id: int,
+    payload: BenchmarkRunRequest,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    experiment = db.get(ModelBenchmarkExperiment, experiment_id)
+    if experiment is None:
+        raise HTTPException(status_code=404, detail="横评实验不存在")
+    if experiment.execution_mode != "test":
+        raise HTTPException(
+            status_code=409,
+            detail="执行器未启用；只有显式测试模式可运行测试替身",
+        )
+    try:
+        run_benchmark_experiment(
+            db,
+            experiment=experiment,
+            adapter=DeterministicBenchmarkAdapter(
+                observations=dict(payload.test_observations)
+            ),
+            actor=user.username,
+        )
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(status_code=422, detail=str(exc)) from None
+    db.commit()
+    variants = db.scalars(
+        select(ModelBenchmarkVariant).where(
+            ModelBenchmarkVariant.experiment_id == experiment.id
+        )
+    ).all()
+    return _benchmark_payload(experiment, variants)
+
+
+@app.get("/api/audit-events")
+def list_audit_events(
+    category: str | None = None,
+    limit: int = 200,
+    _user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    statement = select(AuditEvent).order_by(
+        AuditEvent.created_at.desc(), AuditEvent.id.desc()
+    )
+    if category:
+        statement = statement.where(AuditEvent.category == category)
+    events = db.scalars(statement.limit(min(max(limit, 1), 500))).all()
+    return {
+        "items": [
+            {
+                "id": event.id,
+                "event_key": event.event_key,
+                "category": event.category,
+                "action": event.action,
+                "subject_type": event.subject_type,
+                "subject_id": event.subject_id,
+                "actor": event.actor,
+                "payload": json.loads(event.payload_json),
+                "created_at": event.created_at,
+            }
+            for event in events
+        ]
+    }
+
+
+@app.post(
+    "/api/evaluations/{evaluation_id}/review",
+    deprecated=True,
+    summary="兼容历史样本二审与仲裁",
+)
 def create_review(
     evaluation_id: int,
     payload: ReviewRequest,
@@ -2535,6 +4338,23 @@ def create_review(
     evaluation = db.get(EvaluationResult, evaluation_id)
     if not evaluation:
         raise HTTPException(status_code=404, detail="评测结果不存在")
+    if evaluation.review_panel is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="该结果由初审组处理，请使用盲审投票或主审裁决接口",
+        )
+    if payload.expected_stage == "initial":
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "REVIEW_PANEL_REQUIRED",
+                "message": (
+                    "新图片初审必须在初审组内完成；请先创建初审组并提交盲审投票"
+                ),
+                "review_stage": evaluation.review_stage,
+                "review_revision": evaluation.review_revision,
+            },
+        )
     if (
         evaluation.review_stage != payload.expected_stage
         or evaluation.review_revision != payload.expected_review_revision
@@ -2597,6 +4417,27 @@ def create_review(
             "completed" if current_answer == initial_answer else "arbitration"
         )
     else:
+        initial_review = next(
+            (
+                review
+                for review in reversed(evaluation.reviews)
+                if review.stage == "initial"
+            ),
+            None,
+        )
+        secondary_review = next(
+            (
+                review
+                for review in reversed(evaluation.reviews)
+                if review.stage == "secondary"
+            ),
+            None,
+        )
+        if initial_review is None or secondary_review is None:
+            raise HTTPException(
+                status_code=409,
+                detail="缺少历史初审或二审记录，不能执行兼容仲裁",
+            )
         next_stage = "completed"
 
     next_revision = evaluation.review_revision + 1
@@ -3122,6 +4963,7 @@ def list_strategy_bundles(
                 "rubric_version": bundle.rubric_version,
                 "engine_version": bundle.engine_version,
                 "risk_review_version": bundle.risk_review_version,
+                "agent_plan_version": bundle.agent_plan_version,
                 "sampling_policy_revision": bundle.sampling_policy_revision,
                 "created_at": bundle.created_at,
             }

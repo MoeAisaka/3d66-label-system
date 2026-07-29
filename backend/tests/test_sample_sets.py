@@ -7,7 +7,7 @@ from sqlalchemy.pool import StaticPool
 
 from app.database import Base, get_db
 from app.main import app, current_user
-from app.models import Asset, EvaluationJob, EvaluationResult, HumanReview, User
+from app.models import Asset, EvaluationJob, EvaluationResult, User
 
 
 def test_sample_set_captures_human_final_level() -> None:
@@ -82,16 +82,6 @@ def test_sample_set_captures_human_final_level() -> None:
         engine_version="E1",
     )
     db.add(result)
-    db.flush()
-    db.add(
-        HumanReview(
-            evaluation_id=result.id,
-            reviewer_name="审核员",
-            decision="corrected",
-            corrected_level="L4",
-            note="人工修正",
-        )
-    )
     db.commit()
 
     def test_db():
@@ -101,14 +91,17 @@ def test_sample_set_captures_human_final_level() -> None:
     app.dependency_overrides[current_user] = lambda: user
     client = TestClient(app)
     try:
+        opened = client.post(
+            f"/api/evaluations/{result.id}/review-panel/open",
+            json={},
+        )
+        assert opened.status_code == 200
         reviewed = client.post(
-            f"/api/evaluations/{result.id}/review",
+            f"/api/evaluations/{result.id}/review-panel/votes",
             json={
                 "reviewer_name": "审核员",
                 "decision": "corrected",
-                "expected_stage": "initial",
-                "expected_review_revision": 0,
-                "corrected_level": None,
+                "expected_panel_revision": opened.json()["revision"],
                 "note": "色彩与材质评分偏高",
                 "corrections": [
                     {

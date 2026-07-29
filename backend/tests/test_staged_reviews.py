@@ -154,35 +154,56 @@ def _review_payload(
     }
 
 
-def test_ordinary_approval_completes_and_exposes_append_only_history() -> None:
+def _seed_legacy_initial_review(
+    db: Session,
+    result: EvaluationResult,
+    *,
+    decision: str = "approved",
+) -> HumanReview:
+    review = HumanReview(
+        evaluation_id=result.id,
+        stage="initial",
+        reviewer_name="legacy-initial-reviewer",
+        decision=decision,
+        note="legacy initial conclusion",
+        corrections_json="[]",
+    )
+    db.add(review)
+    result.review_stage = "secondary"
+    result.review_revision = 1
+    db.commit()
+    return review
+
+
+def test_new_initial_review_requires_panel_and_keeps_legacy_history_empty() -> None:
     engine, db, client, result = _client_with_result()
     try:
         response = client.post(
             f"/api/evaluations/{result.id}/review",
             json=_review_payload(stage="initial", revision=0),
         )
-        assert response.status_code == 200, response.text
-        assert response.json()["review_stage"] == "completed"
-        assert response.json()["review_revision"] == 1
+        assert response.status_code == 409
+        assert response.json()["detail"]["code"] == "REVIEW_PANEL_REQUIRED"
         detail = client.get(f"/api/evaluations/{result.id}").json()["evaluation"]
-        assert detail["review_stage"] == "completed"
-        assert detail["review_truth_status"] == "completed"
-        assert [item["stage"] for item in detail["review_history"]] == ["initial"]
+        assert detail["review_stage"] == "initial"
+        assert detail["review_revision"] == 0
+        assert detail["review_truth_status"] == "provisional"
+        assert detail["review_history"] == []
+        legacy_operation = client.get("/openapi.json").json()["paths"][
+            "/api/evaluations/{evaluation_id}/review"
+        ]["post"]
+        assert legacy_operation["deprecated"] is True
+        assert legacy_operation["summary"] == "兼容历史样本二审与仲裁"
     finally:
         _close(engine, db)
 
 
-def test_high_risk_agreement_needs_secondary_then_completes_and_stale_is_409() -> None:
+def test_legacy_secondary_agreement_completes_and_stale_is_409() -> None:
     engine, db, client, result = _client_with_result(
         level="L4", needs_review=True
     )
     try:
-        initial = client.post(
-            f"/api/evaluations/{result.id}/review",
-            json=_review_payload(stage="initial", revision=0),
-        )
-        assert initial.status_code == 200
-        assert initial.json()["review_stage"] == "secondary"
+        _seed_legacy_initial_review(db, result)
         provisional = client.get(
             f"/api/evaluations/{result.id}"
         ).json()["evaluation"]
@@ -193,7 +214,7 @@ def test_high_risk_agreement_needs_secondary_then_completes_and_stale_is_409() -
 
         stale = client.post(
             f"/api/evaluations/{result.id}/review",
-            json=_review_payload(stage="initial", revision=0),
+            json=_review_payload(stage="secondary", revision=0),
         )
         assert stale.status_code == 409
         secondary = client.post(
@@ -212,10 +233,7 @@ def test_disagreement_routes_to_arbitration_and_arbitration_completes() -> None:
         level="L5", needs_review=True
     )
     try:
-        client.post(
-            f"/api/evaluations/{result.id}/review",
-            json=_review_payload(stage="initial", revision=0),
-        )
+        _seed_legacy_initial_review(db, result)
         second = client.post(
             f"/api/evaluations/{result.id}/review",
             json=_review_payload(
@@ -239,5 +257,31 @@ def test_disagreement_routes_to_arbitration_and_arbitration_completes() -> None:
             "secondary",
             "arbitration",
         ]
+    finally:
+        _close(engine, db)
+
+
+def test_legacy_arbitration_rejects_missing_historical_chain() -> None:
+    engine, db, client, result = _client_with_result(
+        level="L5", needs_review=True
+    )
+    try:
+        result.review_stage = "arbitration"
+        result.review_revision = 2
+        db.commit()
+        response = client.post(
+            f"/api/evaluations/{result.id}/review",
+            json=_review_payload(stage="arbitration", revision=2),
+        )
+        assert response.status_code == 409
+        assert response.json()["detail"] == (
+            "缺少历史初审或二审记录，不能执行兼容仲裁"
+        )
+        db.refresh(result)
+        assert result.review_stage == "arbitration"
+        assert result.review_revision == 2
+        assert db.query(HumanReview).filter_by(
+            evaluation_id=result.id
+        ).count() == 0
     finally:
         _close(engine, db)
