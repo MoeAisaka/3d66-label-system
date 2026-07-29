@@ -1876,6 +1876,130 @@ def _migration_018_add_prompt_optimizer_stage_audit(
         )
 
 
+def _migration_019_add_staged_human_review_and_candidate_gate(
+    connection: Connection,
+) -> None:
+    tables = {
+        row[0]
+        for row in connection.exec_driver_sql(
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
+        )
+    }
+    if "evaluation_results" in tables:
+        result_columns = {
+            row[1]
+            for row in connection.exec_driver_sql(
+                "PRAGMA table_info(evaluation_results)"
+            )
+        }
+        if "review_stage" not in result_columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE evaluation_results "
+                "ADD COLUMN review_stage VARCHAR(20) NOT NULL DEFAULT 'initial'"
+            )
+        if "review_revision" not in result_columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE evaluation_results "
+                "ADD COLUMN review_revision INTEGER NOT NULL DEFAULT 0"
+            )
+        if "human_reviews" in tables:
+            connection.exec_driver_sql("""
+                UPDATE evaluation_results
+                SET review_revision = (
+                    SELECT COUNT(*)
+                    FROM human_reviews
+                    WHERE human_reviews.evaluation_id = evaluation_results.id
+                )
+            """)
+            connection.exec_driver_sql("""
+                UPDATE evaluation_results
+                SET review_stage = CASE
+                    WHEN EXISTS (
+                        SELECT 1
+                        FROM human_reviews
+                        WHERE human_reviews.evaluation_id = evaluation_results.id
+                          AND human_reviews.decision IN ('approved', 'corrected')
+                    ) THEN 'completed'
+                    ELSE 'initial'
+                END
+            """)
+        connection.exec_driver_sql("""
+            CREATE INDEX IF NOT EXISTS ix_evaluation_results_review_stage
+            ON evaluation_results(review_stage)
+        """)
+        connection.exec_driver_sql("""
+            CREATE TRIGGER IF NOT EXISTS trg_evaluation_review_contract_insert
+            BEFORE INSERT ON evaluation_results
+            WHEN NEW.review_stage NOT IN (
+                'initial','secondary','arbitration','completed'
+            ) OR NEW.review_revision < 0
+            BEGIN
+                SELECT RAISE(ABORT, 'Invalid evaluation review contract');
+            END
+        """)
+        connection.exec_driver_sql("""
+            CREATE TRIGGER IF NOT EXISTS trg_evaluation_review_contract_update
+            BEFORE UPDATE OF review_stage, review_revision ON evaluation_results
+            WHEN NEW.review_stage NOT IN (
+                'initial','secondary','arbitration','completed'
+            ) OR NEW.review_revision < OLD.review_revision
+            BEGIN
+                SELECT RAISE(ABORT, 'Invalid evaluation review transition');
+            END
+        """)
+
+    if "human_reviews" in tables:
+        review_columns = {
+            row[1]
+            for row in connection.exec_driver_sql(
+                "PRAGMA table_info(human_reviews)"
+            )
+        }
+        if "stage" not in review_columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE human_reviews "
+                "ADD COLUMN stage VARCHAR(20) NOT NULL DEFAULT 'initial'"
+            )
+        connection.exec_driver_sql("""
+            CREATE INDEX IF NOT EXISTS ix_human_reviews_stage
+            ON human_reviews(stage)
+        """)
+        connection.exec_driver_sql("""
+            CREATE TRIGGER IF NOT EXISTS trg_human_review_stage_insert
+            BEFORE INSERT ON human_reviews
+            WHEN NEW.stage NOT IN ('initial','secondary','arbitration')
+            BEGIN
+                SELECT RAISE(ABORT, 'Invalid human review stage');
+            END
+        """)
+        connection.exec_driver_sql("""
+            CREATE TRIGGER IF NOT EXISTS trg_human_review_immutable
+            BEFORE UPDATE ON human_reviews
+            BEGIN
+                SELECT RAISE(ABORT, 'Human review history is append-only');
+            END
+        """)
+
+    if "prompt_versions" in tables:
+        prompt_columns = {
+            row[1]
+            for row in connection.exec_driver_sql(
+                "PRAGMA table_info(prompt_versions)"
+            )
+        }
+        if "source_optimization_run_id" not in prompt_columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE prompt_versions "
+                "ADD COLUMN source_optimization_run_id INTEGER"
+            )
+        connection.exec_driver_sql("""
+            CREATE UNIQUE INDEX IF NOT EXISTS
+                uq_prompt_versions_source_optimization_run
+            ON prompt_versions(source_optimization_run_id)
+            WHERE source_optimization_run_id IS NOT NULL
+        """)
+
+
 MIGRATIONS = [
     Migration(1, "add_sample_expected_level", _migration_001_add_sample_expected_level),
     Migration(2, "add_review_corrections", _migration_002_add_review_corrections),
@@ -1922,6 +2046,11 @@ MIGRATIONS = [
         18,
         "add_prompt_optimizer_stage_audit",
         _migration_018_add_prompt_optimizer_stage_audit,
+    ),
+    Migration(
+        19,
+        "add_staged_human_review_and_candidate_gate",
+        _migration_019_add_staged_human_review_and_candidate_gate,
     ),
 ]
 

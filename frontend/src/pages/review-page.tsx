@@ -7,11 +7,10 @@ import {
   ImageSquare,
   MagnifyingGlassMinus,
   MagnifyingGlassPlus,
-  PencilSimple,
   WarningCircle,
 } from "@phosphor-icons/react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
-import { Link, useSearchParams } from "react-router-dom"
+import { Link, useParams, useSearchParams } from "react-router-dom"
 import { toast } from "sonner"
 
 import { PageHeader } from "@/components/app-shell"
@@ -19,9 +18,9 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { api, jsonBody } from "@/lib/api"
-import type { EvaluationRecord, ReviewCorrection } from "@/lib/types"
+import type { EvaluationRecord, ReviewCorrection, ReviewStage } from "@/lib/types"
 import { dimensionLabels, ReviewCorrectionForm } from "@/pages/review-correction-form"
-import { filterReviewAssets, ReviewList } from "@/pages/review-list"
+import { filterReviewAssets, ReviewList, reviewStageMeta } from "@/pages/review-list"
 
 const requiredDimensionKeys = Object.keys(dimensionLabels)
 
@@ -40,13 +39,14 @@ function samplingTone(tier: EvaluationRecord["sampling"]["tier"]) {
 }
 
 export function ReviewPage() {
+  const { reviewStage: requestedStage } = useParams()
+  const reviewStage = normalizeReviewStage(requestedStage)
   const [searchParams, setSearchParams] = useSearchParams()
   const requestedEvaluationId = Number(searchParams.get("evaluation") || 0)
   const legacyAssetId = Number(searchParams.get("asset") || 0)
   const [zoom, setZoom] = useState(100)
   const [reviewer, setReviewer] = useState(() => localStorage.getItem("3d66-reviewer") || "")
   const [note, setNote] = useState("")
-  const [correctionOpen, setCorrectionOpen] = useState(false)
   const queryClient = useQueryClient()
   const evaluations = useQuery({
     queryKey: ["evaluations", "review-list"],
@@ -56,8 +56,8 @@ export function ReviewPage() {
   const legacyEvaluationId = evaluations.data?.items.find((item) => item.id === legacyAssetId)?.evaluation.id ?? 0
   const currentId = requestedEvaluationId || legacyEvaluationId
   const filteredAssets = useMemo(
-    () => filterReviewAssets(evaluations.data?.items ?? [], searchParams),
-    [evaluations.data?.items, searchParams],
+    () => filterReviewAssets(evaluations.data?.items ?? [], searchParams, reviewStage),
+    [evaluations.data?.items, reviewStage, searchParams],
   )
   const detail = useQuery({
     queryKey: ["evaluation", currentId],
@@ -76,7 +76,6 @@ export function ReviewPage() {
   useEffect(() => {
     setZoom(100)
     setNote("")
-    setCorrectionOpen(false)
   }, [currentId])
 
   const mediaLabels = useMemo(() => {
@@ -102,11 +101,21 @@ export function ReviewPage() {
     mutationFn: ({ decision, corrected_level, reviewNote, corrections = [] }: { decision: "approved" | "corrected" | "rejected"; corrected_level: string | null; reviewNote: string; corrections?: ReviewCorrection[] }) =>
       api(`/api/evaluations/${evaluation?.id}/review`, {
         method: "POST",
-        ...jsonBody({ reviewer_name: reviewer, decision, corrected_level, note: reviewNote, corrections }),
+        ...jsonBody({
+          reviewer_name: reviewer,
+          decision,
+          corrected_level,
+          note: reviewNote,
+          corrections,
+          expected_stage: evaluation?.review_stage,
+          expected_review_revision: evaluation?.review_revision,
+        }),
       }),
     onSuccess: async (_data, variables) => {
+      const nextEvaluation =
+        filteredAssets[currentIndex + 1]?.evaluation ??
+        filteredAssets[currentIndex - 1]?.evaluation
       localStorage.setItem("3d66-reviewer", reviewer)
-      setCorrectionOpen(false)
       setNote("")
       toast.success(variables.decision === "corrected" ? "人工维度纠错和最终结果已保存" : variables.decision === "approved" ? "已确认模型结果" : "已退回复核")
       await Promise.all([
@@ -114,6 +123,11 @@ export function ReviewPage() {
         queryClient.invalidateQueries({ queryKey: ["evaluations"] }),
         queryClient.invalidateQueries({ queryKey: ["dashboard"] }),
       ])
+      const params = new URLSearchParams(searchParams)
+      params.delete("asset")
+      if (nextEvaluation) params.set("evaluation", String(nextEvaluation.id))
+      else params.delete("evaluation")
+      setSearchParams(params, { replace: true })
     },
     onError: (error) => toast.error(error.message),
   })
@@ -130,20 +144,20 @@ export function ReviewPage() {
   }
 
   if (!requestedEvaluationId && !legacyAssetId) {
-    return <ReviewList items={evaluations.data?.items ?? []} loading={evaluations.isLoading} searchParams={searchParams} setSearchParams={setSearchParams} />
+    return <ReviewList items={evaluations.data?.items ?? []} loading={evaluations.isLoading} searchParams={searchParams} setSearchParams={setSearchParams} stage={reviewStage} />
   }
 
   const listParams = new URLSearchParams(searchParams)
   listParams.delete("asset")
   listParams.delete("evaluation")
-  const listUrl = `/review${listParams.toString() ? `?${listParams.toString()}` : ""}`
+  const listUrl = `/review/${reviewStage}${listParams.toString() ? `?${listParams.toString()}` : ""}`
 
   return (
     <>
       <PageHeader
         index="04"
-        title="美感评测"
-        description="在原图旁核对模型证据、等级限制和版本快照。"
+        title={reviewStageMeta[reviewStage].title}
+        description={`在原图旁核对模型证据并完成${reviewStageMeta[reviewStage].label}；每轮记录独立留档。`}
         actions={
           <div className="flex flex-wrap items-center gap-2">
             <Button asChild variant="secondary"><Link to={listUrl}><ArrowLeft />返回审核列表</Link></Button>
@@ -268,60 +282,33 @@ export function ReviewPage() {
                   </div>
                 )}
                 <div className="max-h-[calc(100dvh-330px)] overflow-y-auto scrollbar-thin">
-                  {Object.entries(dimensionLabels).map(([key, label], index) => {
-                    const item = dimensions[key] ?? {}
-                    const grade = Number(item.grade || 0)
-                    return (
-                      <details key={key} className="group border-b border-[var(--line)]" open={index === 0}>
-                        <summary className="grid cursor-pointer list-none grid-cols-[28px_1fr_42px] items-center gap-3 px-5 py-4 hover:bg-[#fafbf8]">
-                          <span className="font-data text-xs text-[var(--muted)]">{String(index + 1).padStart(2, "0")}</span>
-                          <div><p className="text-sm font-semibold">{label}</p><div className="mt-2 flex h-1.5 gap-px">{[1,2,3,4,5].map((step) => <span key={step} className={`flex-1 ${step <= grade ? "bg-primary" : "bg-[#eef1eb]"}`} />)}</div></div>
-                          <span className="font-data text-right text-xl font-semibold">{grade || "—"}</span>
-                        </summary>
-                        <div className="bg-[#fbfcfa] px-5 pb-5 pt-1">
-                          <p className="text-xs font-semibold text-[var(--muted)]">视觉证据</p>
-                          <ul className="mt-2 space-y-2 text-sm leading-6">{(item.evidence ?? []).map((text: string, evidenceIndex: number) => <li key={evidenceIndex} className="grid grid-cols-[12px_1fr] gap-2"><span className="mt-[0.65rem] size-1.5 bg-primary" /><span>{text}</span></li>)}</ul>
-                          {(item.defects ?? []).length > 0 && <><p className="mt-4 text-xs font-semibold text-[#8d2924]">明显缺陷</p><ul className="mt-2 space-y-1 text-sm leading-6 text-[#74302b]">{item.defects.map((text: string, defectIndex: number) => <li key={defectIndex}>{text}</li>)}</ul></>}
-                        </div>
-                      </details>
-                    )
-                  })}
-                  {(scoring?.caps?.length ?? 0) > 0 && (
-                    <div className="border-b border-[var(--line)] bg-[#fff9ef] px-5 py-4">
-                      <p className="flex items-center gap-2 text-sm font-semibold text-[#7d4308]"><WarningCircle />等级限制</p>
-                      {(scoring?.caps ?? []).map((cap: any, index: number) => <p key={index} className="mt-2 text-xs leading-5 text-[#7d4308]">最高 {cap.cap}：{cap.reason}</p>)}
+                  <div className="border-b border-[var(--line-strong)] bg-[#fafbf8] px-5 py-4">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div><p className="text-sm font-bold">{reviewStageMeta[evaluation.review_stage].label}</p><p className="font-data mt-1 text-[0.68rem] text-[var(--muted)]">审核版本 {evaluation.review_revision}</p></div>
+                      <Badge tone={evaluation.review_stage === "completed" ? "success" : evaluation.review_stage === "arbitration" ? "danger" : "active"}>{reviewStageMeta[evaluation.review_stage].label}</Badge>
                     </div>
-                  )}
-                </div>
-
-                <div className="border-t border-[var(--line-strong)] p-5">
-                  {evaluation.human_review && (
-                    <div className="mb-4 border-y border-[var(--line)] bg-[#fafbf8] px-3 py-3">
-                      <div className="flex flex-wrap items-center justify-between gap-2">
-                        <Badge tone={evaluation.human_review.decision === "rejected" ? "warning" : "success"}>
-                          {evaluation.human_review.decision === "corrected" ? `已人工纠正 · 自动计算 ${evaluation.human_review.corrected_level} / ${evaluation.human_review.corrected_score?.toFixed(1)}` : evaluation.human_review.decision === "approved" ? "已确认模型结果" : "已退回复核"}
-                        </Badge>
-                        <span className="font-data text-[0.68rem] text-[var(--muted)]">{evaluation.human_review.reviewer_name} · {new Date(evaluation.human_review.created_at).toLocaleString("zh-CN")}</span>
+                  </div>
+                  {(evaluation.review_history?.length ?? 0) > 0 && (
+                    <details className="border-b border-[var(--line)] bg-white">
+                      <summary className="cursor-pointer px-5 py-4 text-sm font-semibold">查看完整人工审核记录（{evaluation.review_history.length}）</summary>
+                      <div className="divide-y divide-[var(--line)] border-t border-[var(--line)]">
+                        {evaluation.review_history.map((item) => <div key={item.id} className="px-5 py-3"><div className="flex flex-wrap items-center justify-between gap-2"><Badge>{reviewStageMeta[item.stage].label} · {reviewDecisionLabel(item.decision)}</Badge><span className="font-data text-[0.68rem] text-[var(--muted)]">{item.reviewer_name} · {new Date(item.created_at).toLocaleString("zh-CN")}</span></div>{item.note && <p className="mt-2 text-xs leading-5 text-[var(--muted)]">{item.note}</p>}</div>)}
                       </div>
-                      {evaluation.human_review.note && <p className="mt-2 text-xs leading-5 text-[var(--muted)]">{evaluation.human_review.note}</p>}
-                      {(evaluation.human_review.corrections?.length ?? 0) > 0 && <div className="mt-3 flex flex-wrap gap-1.5">{evaluation.human_review.corrections.map((correction, index) => <Badge key={`${correction.field_key}-${index}`} tone="active">{dimensionLabels[correction.field_key] || correction.field_key} {correction.model_value}→{correction.human_value}</Badge>)}</div>}
-                    </div>
+                    </details>
                   )}
-                  <div className="grid grid-cols-2 gap-3">
+                  <div className="grid grid-cols-2 gap-3 px-5 pt-5">
                     <label><span className="mb-2 block text-xs font-semibold">审核姓名</span><Input value={reviewer} onChange={(event) => setReviewer(event.target.value)} placeholder="例如：小陈" /></label>
                     <label><span className="mb-2 block text-xs font-semibold">模型置信度</span><div className="font-data flex h-11 items-center border border-[var(--line)] bg-[#fafbf8] px-3">{evaluation.confidence != null ? `${Math.round(evaluation.confidence * 100)}%` : "—"}</div></label>
                   </div>
-                  <label className="mt-3 block"><span className="mb-2 block text-xs font-semibold">审核说明（确认或退回时可选）</span><Input value={note} onChange={(event) => setNote(event.target.value)} placeholder="补充判断依据" /></label>
-                  <div className="mt-3 grid grid-cols-3 gap-2">
+                  {evaluation.review_stage !== "completed" && <div className="px-5 pb-5"><label className="mt-3 block"><span className="mb-2 block text-xs font-semibold">审核说明（确认或退回时可选）</span><Input value={note} onChange={(event) => setNote(event.target.value)} placeholder="补充判断依据" /></label>
+                  <div className="mt-3 grid grid-cols-2 gap-2">
                     <Button variant="secondary" onClick={() => review.mutate({ decision: "rejected", corrected_level: null, reviewNote: note.trim() })} disabled={!reviewer || review.isPending}>退回复核</Button>
-                    <Button variant="secondary" onClick={() => setCorrectionOpen((value) => !value)} disabled={review.isPending}><PencilSimple />纠正结果</Button>
                     <Button onClick={() => review.mutate({ decision: "approved", corrected_level: null, reviewNote: note.trim() })} disabled={!reviewer || review.isPending}><Check weight="bold" />确认结果</Button>
-                  </div>
-
-                  {correctionOpen && <ReviewCorrectionForm dimensions={dimensions} precheck={evaluation?.precheck ?? {}} scoring={scoring ?? {}} pending={review.isPending} onCancel={() => setCorrectionOpen(false)} onSubmit={({ note: correctionNote, corrections }) => {
+                  </div></div>}
+                  <ReviewCorrectionForm key={`${evaluation.id}-${evaluation.review_revision}`} dimensions={dimensions} precheck={evaluation?.precheck ?? {}} scoring={scoring ?? {}} pending={review.isPending} editable={evaluation.review_stage !== "completed"} reviewerReady={Boolean(reviewer.trim())} onSubmit={({ note: correctionNote, corrections }) => {
                     if (!reviewer.trim()) { toast.error("请先填写审核姓名"); return }
                     review.mutate({ decision: "corrected", corrected_level: null, reviewNote: correctionNote, corrections })
-                  }} />}
+                  }} />
                 </div>
               </>
             )}
@@ -335,4 +322,14 @@ export function ReviewPage() {
 function riskFieldLabel(field: string) {
   if (field.startsWith("dimensions.")) return dimensionLabels[field.replace("dimensions.", "")] || field
   return ({ professional_photography: "专业摄影", documentary_record: "现场记录", quality_severity: "画质", level_cap: "等级上限" } as Record<string, string>)[field] || field
+}
+
+function normalizeReviewStage(value: string | undefined): ReviewStage {
+  return value === "secondary" || value === "arbitration" || value === "completed" ? value : "initial"
+}
+
+function reviewDecisionLabel(value: "approved" | "corrected" | "rejected") {
+  if (value === "approved") return "确认"
+  if (value === "corrected") return "纠偏"
+  return "退回"
 }

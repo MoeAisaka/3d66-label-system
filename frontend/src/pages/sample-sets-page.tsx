@@ -5,6 +5,7 @@ import {
   CheckCircle,
   CheckSquare,
   ClockCounterClockwise,
+  FileXls,
   FolderSimplePlus,
   Lock,
   MagnifyingGlass,
@@ -189,6 +190,7 @@ export function SampleSetsPage() {
       title="样本与回归"
       description="黄金样本守住发布质量，测试样本验证泛化；每一次模型、提示词与人工修改都保留历史。"
       actions={<>
+        <Button asChild variant="secondary"><Link to="/historical-corrections"><FileXls />历史纠偏预览</Link></Button>
         <Button variant="secondary" onClick={() => refresh()}><ArrowClockwise />刷新状态</Button>
         {workspace === "samples" && <Button onClick={() => setCreating((value) => !value)}><FolderSimplePlus />创建样本集</Button>}
       </>}
@@ -293,7 +295,7 @@ function SampleInspector({ data, loading, sampleSetId, onSaved }: { data?: Sampl
   const updateDimension = (key: string, value: number) => setTruth((current) => ({ ...current, dimensions: { ...current.dimensions, [key]: value } }))
   const updateMedia = (key: string, value: "yes" | "no" | "uncertain") => setTruth((current) => ({ ...current, media_form: { ...current.media_form, [key]: value } }))
   return <section className="mt-7 border-y border-[var(--line-strong)] bg-white">
-    <div className="flex flex-wrap items-start justify-between gap-4 border-b border-[var(--line)] p-5"><div><p className="file-name text-sm">{data.item.asset_name}</p><h3 className="mt-2 text-2xl font-bold">标准答案与完整历史</h3><p className="mt-1 text-xs text-[var(--muted)]">当前标准 V{data.item.truth_revision} · 模型运行 {data.evaluations.length} 次 · 人工记录 {data.evaluations.reduce((sum, item) => sum + item.reviews.length, 0)} 条</p></div><Button asChild size="sm" variant="secondary"><Link to={`/review?asset=${data.item.asset_id}`}>查看大图<ArrowRight /></Link></Button></div>
+    <div className="flex flex-wrap items-start justify-between gap-4 border-b border-[var(--line)] p-5"><div><p className="file-name text-sm">{data.item.asset_name}</p><h3 className="mt-2 text-2xl font-bold">标准答案与完整历史</h3><p className="mt-1 text-xs text-[var(--muted)]">当前标准 V{data.item.truth_revision} · 模型运行 {data.evaluations.length} 次 · 人工记录 {data.evaluations.reduce((sum, item) => sum + item.reviews.length, 0)} 条</p></div><Button asChild size="sm" variant="secondary"><Link to={`/review/completed?asset=${data.item.asset_id}`}>查看大图<ArrowRight /></Link></Button></div>
     <div className="flex gap-6 border-b border-[var(--line)] px-5 pt-4"><WorkspaceTab active={tab === "truth"} onClick={() => setTab("truth")}>黄金标准</WorkspaceTab><WorkspaceTab active={tab === "runs"} onClick={() => setTab("runs")}>模型与回归历史</WorkspaceTab><WorkspaceTab active={tab === "reviews"} onClick={() => setTab("reviews")}>人工修改历史</WorkspaceTab></div>
     {tab === "truth" && <div className="p-5"><div className="grid gap-5 xl:grid-cols-[220px_1fr]">
       <div className="space-y-4"><label><FieldLabel>最终等级</FieldLabel><select className="h-11 w-full rounded-[4px] border border-[var(--line-strong)] bg-white px-3" value={truth.level || ""} onChange={(event) => setTruth({ ...truth, level: event.target.value })}><option value="">未定级</option>{["L1", "L2", "L3", "L4", "L5"].map((level) => <option key={level}>{level}</option>)}</select></label><label><FieldLabel>主分类</FieldLabel><Input value={truth.category || ""} onChange={(event) => setTruth({ ...truth, category: event.target.value })} /></label><label><FieldLabel>画质问题</FieldLabel><select className="h-11 w-full rounded-[4px] border border-[var(--line-strong)] bg-white px-3" value={truth.quality_severity || "uncertain"} onChange={(event) => setTruth({ ...truth, quality_severity: event.target.value })}>{[["normal", "画质正常"], ["slight", "轻微"], ["moderate", "中度"], ["severe", "严重"], ["unusable", "不可用"], ["uncertain", "不确定"]].map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label></div>

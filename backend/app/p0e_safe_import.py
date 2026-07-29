@@ -237,6 +237,35 @@ def _read_entry(
     return payload
 
 
+def _has_referenced_macro_content_type(
+    payload: bytes,
+    members: dict[str, zipfile.ZipInfo],
+) -> bool:
+    """Reject active content types only when they reference an actual part.
+
+    Some WPS/Excel exports retain an unused ``Default Extension="bin"``
+    declaration even though the archive contains no BIN member and the
+    workbook itself is ordinary XLSX. Treating that orphan declaration as a
+    macro makes safe, macro-free workbooks impossible to preview.
+    """
+
+    root = _parse_xml(payload, location="[Content_Types].xml")
+    member_names = {name.casefold() for name in members}
+    for child in root:
+        content_type = str(child.attrib.get("ContentType") or "").casefold()
+        if "macroenabled" not in content_type:
+            continue
+        if _local_name(child.tag) == "Override":
+            part_name = str(child.attrib.get("PartName") or "").lstrip("/").casefold()
+            if part_name in member_names:
+                return True
+        elif _local_name(child.tag) == "Default":
+            extension = str(child.attrib.get("Extension") or "").lstrip(".").casefold()
+            if extension and any(name.endswith(f".{extension}") for name in member_names):
+                return True
+    return False
+
+
 def _parse_xml(payload: bytes, *, location: str) -> ElementTree.Element:
     try:
         return ElementTree.fromstring(payload)
@@ -609,8 +638,8 @@ def preflight_xlsx(
             archive,
             members,
             "[Content_Types].xml",
-        ).lower()
-        if b"macroenabled" in content_types:
+        )
+        if _has_referenced_macro_content_type(content_types, members):
             _reject("XLSX_ACTIVE_CONTENT", "XLSX 不允许宏启用内容。")
         worksheets = _worksheet_parts(archive, members)
         shared = _shared_strings(archive, members)

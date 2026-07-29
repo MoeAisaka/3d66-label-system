@@ -45,6 +45,20 @@ export type Dashboard = {
   model: { name: string; model_id: string; has_api_key: boolean }
 }
 
+export type ReviewStage = "initial" | "secondary" | "arbitration" | "completed"
+
+export type HumanReview = {
+  id: number
+  stage: Exclude<ReviewStage, "completed">
+  reviewer_name: string
+  decision: "approved" | "corrected" | "rejected"
+  corrected_level: string | null
+  corrected_score: number | null
+  note: string
+  corrections: ReviewCorrection[]
+  created_at: string
+}
+
 export type Evaluation = {
   id: number
   asset_id: number
@@ -61,16 +75,10 @@ export type Evaluation = {
   final_score: number | null
   confidence: number | null
   needs_review: boolean
-  human_review: {
-    id: number
-    reviewer_name: string
-    decision: "approved" | "corrected" | "rejected"
-    corrected_level: string | null
-    corrected_score: number | null
-    note: string
-    corrections: ReviewCorrection[]
-    created_at: string
-  } | null
+  review_stage: ReviewStage
+  review_revision: number
+  review_history: HumanReview[]
+  human_review: HumanReview | null
   risk_review: {
     version: string
     triggered: boolean
@@ -188,6 +196,7 @@ export type PromptVersion = {
   rubric_version: string
   status: "draft" | "published" | "archived"
   source: string
+  source_optimization_run_id?: number | null
   change_note: string
   created_by: string
   created_at: string
@@ -210,9 +219,55 @@ export type PromptOptimizationRun = {
   candidate_user_prompt: string
   change_note: string
   error_message: string
+  materialized_prompt_id?: number | null
+  paired_regression_ids?: number[]
   created_by: string
   created_at: string
   finished_at: string | null
+}
+
+export type HistoricalCorrectionPreviewItem = {
+  schema_version: string
+  dedupe_key: string
+  sample_role: "target_error" | "stable_control" | "blind_holdout" | "reason_only"
+  correction_candidate: {
+    scope: "overall"
+    human_level: string | number | null
+    model_level: string | number | null
+    reason: string | null
+    reason_only: boolean
+  }
+  provenance: {
+    source_file: string
+    sheet: string
+    source_row: number
+    source_file_sha256: string
+    source_row_sha256: string
+    owner_confirmed: true
+  }
+  forms_gold: false
+}
+
+export type HistoricalCorrectionPreview = {
+  files: Array<{
+    source_file: string
+    content_sha256: string
+    sheet: Record<string, any>
+    batch_key: string
+    preview_item_count: number
+  }>
+  summary: {
+    uploaded_file_count: number
+    unique_item_count: number
+    duplicate_count: number
+    blind_holdout_ratio: number
+    role_counts: Record<HistoricalCorrectionPreviewItem["sample_role"], number>
+  }
+  items: HistoricalCorrectionPreviewItem[]
+  writes_business_database: false
+  downloads_performed: false
+  model_runs_performed: false
+  forms_gold: false
 }
 
 export type SampleSetSummary = {
@@ -279,6 +334,8 @@ export type SampleItemHistory = {
 export type RegressionSummary = {
   id: number
   name: string
+  regression_mode?: "standard" | "paired"
+  trigger_prompt_id?: number | null
   sample_set_id: number
   sample_set_name: string
   prompt_a_id: number
@@ -293,9 +350,28 @@ export type RegressionSummary = {
   failed: number
   pass_rate: number
   release_gate_passed: boolean
+  baseline_strategy_bundle_id?: number | null
+  candidate_strategy_bundle_id?: number | null
+  metric_rules_version?: string | null
+  recommendation?: "pass" | "fail" | "pending" | null
+  approval_status?: "pending" | "approved" | "rejected" | null
+  approved_by?: string | null
+  approval_note?: string
   created_by: string
   created_at: string
   finished_at: string | null
+}
+
+export type StrategyBundleSummary = {
+  id: number
+  model_id: string
+  prompt_a_version: string
+  prompt_b_version: string | null
+  rubric_version: string
+  engine_version: string
+  risk_review_version: string | null
+  sampling_policy_revision: number | null
+  created_at: string
 }
 
 export type RegressionDetail = {

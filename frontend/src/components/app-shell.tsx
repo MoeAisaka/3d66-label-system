@@ -25,7 +25,7 @@ const navItems = [
   { to: "/", index: "01", label: "总览", icon: ChartBar },
   { to: "/assets", index: "02", label: "素材", icon: Images },
   { to: "/jobs", index: "03", label: "评测任务", icon: ListChecks },
-  { to: "/review", index: "04", label: "评测结果", icon: Sparkle },
+  { to: "/review", index: "04", label: "人工审核", icon: Sparkle },
   { to: "/prompts", index: "05", label: "提示词", icon: Brain },
   { to: "/model", index: "06", label: "模型配置", icon: SlidersHorizontal },
   { to: "/sample-sets", index: "07", label: "样本与回归", icon: Stack },

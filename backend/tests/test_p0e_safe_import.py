@@ -252,6 +252,34 @@ def test_xlsx_unsafe_zip_member_and_active_content_are_rejected(
     assert _error_code(macro_exc) == "XLSX_ACTIVE_CONTENT"
 
 
+def test_xlsx_unused_macro_default_without_bin_member_is_safe(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "orphan-bin-default.xlsx"
+    content_types = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<Types xmlns="http://schemas.openxmlformats.org/'
+        'package/2006/content-types">'
+        '<Default Extension="bin" '
+        'ContentType="application/vnd.ms-excel.sheet.binary.macroEnabled.main"/>'
+        '<Override PartName="/xl/workbook.xml" '
+        'ContentType="application/vnd.openxmlformats-officedocument.'
+        'spreadsheetml.sheet.main+xml"/>'
+        '<Override PartName="/xl/worksheets/sheet1.xml" '
+        'ContentType="application/vnd.openxmlformats-officedocument.'
+        'spreadsheetml.worksheet+xml"/></Types>'
+    ).encode()
+    _write_xlsx(
+        path,
+        [["status"], ["ok"]],
+        extra_entries={"[Content_Types].xml": content_types},
+    )
+
+    plan = preflight_xlsx(path)
+
+    assert plan["raw_preview"][0]["values_by_internal_name"]["status"] == "ok"
+
+
 def test_xlsx_limits_and_idempotent_batch_key(tmp_path: Path) -> None:
     path = tmp_path / "idempotent.xlsx"
     _write_xlsx(path, [["status"], ["ok"]])

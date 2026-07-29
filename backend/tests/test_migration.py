@@ -32,6 +32,7 @@ MIGRATION_NAMES = [
     "finalize_retry_and_loop_guards",
     "add_canary_run_persistence",
     "add_prompt_optimizer_stage_audit",
+    "add_staged_human_review_and_candidate_gate",
 ]
 
 
@@ -250,7 +251,7 @@ def test_schema_migrations_table_created_with_all_versions(tmp_path) -> None:
                     "SELECT version, name FROM schema_migrations ORDER BY version"
                 )
             )
-        assert [row[0] for row in rows] == list(range(1, 19))
+        assert [row[0] for row in rows] == list(range(1, 20))
         assert [row[1] for row in rows] == MIGRATION_NAMES
     finally:
         engine.dispose()
@@ -268,7 +269,7 @@ def test_repeated_migration_is_idempotent(tmp_path) -> None:
                     "SELECT version FROM schema_migrations ORDER BY version"
                 )
             )
-        assert [row[0] for row in versions] == list(range(1, 19))
+        assert [row[0] for row in versions] == list(range(1, 20))
     finally:
         engine.dispose()
 
@@ -377,7 +378,7 @@ def test_complete_v10_database_forward_migrates_versions_11_to_13(tmp_path) -> N
                     "SELECT version FROM schema_migrations ORDER BY version"
                 )
             )
-            assert [row[0] for row in versions] == list(range(1, 19))
+            assert [row[0] for row in versions] == list(range(1, 20))
             old_result = connection.exec_driver_sql(
                 """
                 SELECT model_id, prompt_a_version, strategy_bundle_id,
@@ -422,7 +423,7 @@ def test_complete_v10_database_forward_migrates_versions_11_to_13(tmp_path) -> N
                 connection.exec_driver_sql(
                     "SELECT COUNT(*) FROM schema_migrations"
                 ).scalar_one()
-                == 18
+                == 19
             )
     finally:
         engine.dispose()
@@ -570,7 +571,7 @@ def test_complete_v11_database_forward_migrates_paired_regression_contract(
                     "SELECT version FROM schema_migrations ORDER BY version"
                 )
             ]
-            assert versions == list(range(1, 19))
+            assert versions == list(range(1, 20))
 
             run_columns = {
                 row[1]
@@ -870,7 +871,7 @@ def test_complete_v12_database_forward_adds_frozen_strategy_snapshots(
                     "SELECT version FROM schema_migrations ORDER BY version"
                 )
             ]
-            assert versions == list(range(1, 19))
+            assert versions == list(range(1, 20))
     finally:
         engine.dispose()
 
@@ -951,7 +952,7 @@ def test_complete_v13_database_forward_adds_loop_queue_and_breaker_contract(
                 connection.exec_driver_sql(
                     "SELECT max(version) FROM schema_migrations"
                 ).scalar_one()
-                    == 18
+                    == 19
             )
 
             with pytest.raises(
@@ -1186,7 +1187,7 @@ def test_complete_v14_database_forward_hardens_retry_chain_and_scheduler(
                 connection.exec_driver_sql(
                     "SELECT max(version) FROM schema_migrations"
                 ).scalar_one()
-                == 18
+                == 19
             )
             assert (
                 connection.exec_driver_sql(
@@ -1423,7 +1424,7 @@ def test_complete_v15_database_replaces_root_index_and_hardens_payloads(
                 connection.exec_driver_sql(
                     "SELECT max(version) FROM schema_migrations"
                 ).scalar_one()
-                == 18
+                == 19
             )
             index_sql = connection.exec_driver_sql("""
                 SELECT sql
@@ -1664,7 +1665,93 @@ def test_complete_v17_database_adds_optimizer_stage_audit(
                     "ORDER BY version"
                 )
             )
-            assert [item[0] for item in versions] == list(range(1, 19))
+            assert [item[0] for item in versions] == list(range(1, 20))
             assert [item[1] for item in versions] == MIGRATION_NAMES
+    finally:
+        engine.dispose()
+
+
+def test_v19_backfills_staged_review_state_and_keeps_history_append_only(
+    tmp_path,
+) -> None:
+    engine = _engine(tmp_path, "v18-to-v19-staged-review.db")
+    try:
+        with engine.begin() as connection:
+            connection.exec_driver_sql("""
+                CREATE TABLE evaluation_results (
+                    id INTEGER PRIMARY KEY,
+                    needs_review BOOLEAN NOT NULL DEFAULT 0
+                )
+            """)
+            connection.exec_driver_sql("""
+                CREATE TABLE human_reviews (
+                    id INTEGER PRIMARY KEY,
+                    evaluation_id INTEGER NOT NULL,
+                    reviewer_name VARCHAR(80) NOT NULL,
+                    decision VARCHAR(30) NOT NULL
+                )
+            """)
+            connection.exec_driver_sql("""
+                CREATE TABLE prompt_versions (
+                    id INTEGER PRIMARY KEY,
+                    version VARCHAR(40) NOT NULL
+                )
+            """)
+            connection.exec_driver_sql("""
+                CREATE TABLE schema_migrations (
+                    version INTEGER PRIMARY KEY,
+                    name VARCHAR(200) NOT NULL,
+                    applied_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            for version, name in enumerate(MIGRATION_NAMES[:18], start=1):
+                connection.exec_driver_sql(
+                    "INSERT INTO schema_migrations(version, name) VALUES (?, ?)",
+                    (version, name),
+                )
+            connection.exec_driver_sql(
+                "INSERT INTO evaluation_results(id) VALUES (1), (2)"
+            )
+            connection.exec_driver_sql("""
+                INSERT INTO human_reviews(
+                    id, evaluation_id, reviewer_name, decision
+                ) VALUES
+                    (1, 1, 'legacy', 'approved'),
+                    (2, 1, 'legacy', 'corrected'),
+                    (3, 2, 'legacy', 'rejected')
+            """)
+            run_migrations(connection)
+            states = list(
+                connection.exec_driver_sql("""
+                    SELECT id, review_stage, review_revision
+                    FROM evaluation_results
+                    ORDER BY id
+                """)
+            )
+            assert [tuple(row) for row in states] == [
+                (1, "completed", 2),
+                (2, "initial", 1),
+            ]
+            review_stages = list(
+                connection.exec_driver_sql(
+                    "SELECT stage FROM human_reviews ORDER BY id"
+                )
+            )
+            assert [row[0] for row in review_stages] == [
+                "initial",
+                "initial",
+                "initial",
+            ]
+            prompt_columns = {
+                row[1]
+                for row in connection.exec_driver_sql(
+                    "PRAGMA table_info(prompt_versions)"
+                )
+            }
+            assert "source_optimization_run_id" in prompt_columns
+            with pytest.raises(IntegrityError, match="append-only"):
+                connection.exec_driver_sql(
+                    "UPDATE human_reviews SET decision = 'approved' WHERE id = 3"
+                )
     finally:
         engine.dispose()

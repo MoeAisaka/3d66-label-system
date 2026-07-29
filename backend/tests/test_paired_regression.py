@@ -19,6 +19,7 @@ from app.models import (
     EvaluationResult,
     HumanReview,
     ModelConfig,
+    PromptOptimizationRun,
     PromptRegressionRun,
     PromptRegressionItem,
     PromptVersion,
@@ -601,6 +602,120 @@ def test_paired_regression_passes_then_requires_separate_human_approval() -> Non
         assert seed.db.get(PromptRegressionRun, run_id).approval_status == "approved"
         assert seed.db.get(PromptVersion, seed.prompts["candidate_a"].id).status == "draft"
         assert seed.db.get(PromptVersion, seed.prompts["candidate_b"].id).status == "draft"
+    finally:
+        _close(seed)
+
+
+def test_optimizer_candidate_materialization_is_idempotent_and_publish_is_gated() -> None:
+    seed = _seed_pair()
+    try:
+        optimization = PromptOptimizationRun(
+            base_prompt_id=seed.prompts["baseline_b"].id,
+            sample_set_id=seed.sample_set.id,
+            optimizer_model_id="gpt-test",
+            status="completed",
+            progress=100,
+            candidate_system_prompt="optimized system prompt with complete contract",
+            candidate_user_prompt="optimized user prompt",
+            change_note="materialized only after explicit request",
+            created_by=seed.user.username,
+        )
+        seed.db.add(optimization)
+        seed.db.commit()
+        payload = {
+            "version": "paired-B-optimizer-v1",
+            "name": "优化候选B",
+            "baseline_strategy_bundle_id": seed.baseline_bundle.id,
+            "samples": [
+                {
+                    "sample_item_id": seed.sample_items[role].id,
+                    "role": role,
+                }
+                for role in (
+                    "target_error",
+                    "stable_control",
+                    "blind_holdout",
+                )
+            ],
+            "metric_rules_version": "optimizer-paired-gate-v1",
+        }
+        created = seed.client.post(
+            f"/api/prompt-optimizations/{optimization.id}/materialize-and-validate",
+            json=payload,
+        )
+        assert created.status_code == 200, created.text
+        body = created.json()
+        assert body["prompt_id"]
+        assert len(body["paired_regression_ids"]) == 1
+        prompt = seed.db.get(PromptVersion, body["prompt_id"])
+        assert prompt is not None
+        assert prompt.status == "draft"
+        assert prompt.source_optimization_run_id == optimization.id
+        regression = seed.db.get(
+            PromptRegressionRun, body["paired_regression_ids"][0]
+        )
+        assert regression is not None
+        assert regression.trigger_prompt_id == prompt.id
+        assert regression.regression_mode == "paired"
+
+        replayed = seed.client.post(
+            f"/api/prompt-optimizations/{optimization.id}/materialize-and-validate",
+            json=payload,
+        )
+        assert replayed.status_code == 200
+        assert replayed.json() == body
+
+        blocked = seed.client.post(f"/api/prompts/{prompt.id}/publish")
+        assert blocked.status_code == 409
+        assert seed.db.get(PromptVersion, prompt.id).status == "draft"
+
+        candidate_bundle = seed.db.get(
+            StrategyBundle, regression.candidate_strategy_bundle_id
+        )
+        candidate_results = {}
+        for role in ("target_error", "stable_control", "blind_holdout"):
+            candidate_results[role] = _add_result(
+                seed.db,
+                asset=seed.sample_items[role].asset,
+                bundle=candidate_bundle,
+                prompt_a=seed.prompts["baseline_a"],
+                prompt_b=prompt,
+                policy=seed.policy,
+                level="L3",
+                color_grade=3,
+            )
+        seed.db.commit()
+        for item in regression.items:
+            role = str(item.sample_role)
+            attached = seed.client.post(
+                f"/api/paired-regressions/{regression.id}/items/{item.id}/results",
+                json={
+                    "baseline_evaluation_id": seed.baseline_results[role].id,
+                    "candidate_evaluation_id": candidate_results[role].id,
+                },
+            )
+            assert attached.status_code == 200, attached.text
+        approved = seed.client.post(
+            f"/api/paired-regressions/{regression.id}/approval",
+            json={
+                "status": "approved",
+                "reviewer_name": "发布审批人",
+                "note": "配对回归通过，批准候选进入人工发布",
+            },
+        )
+        assert approved.status_code == 200, approved.text
+        published = seed.client.post(f"/api/prompts/{prompt.id}/publish")
+        assert published.status_code == 200, published.text
+        assert published.json()["regression_run_ids"] == []
+        assert seed.db.get(PromptVersion, prompt.id).status == "published"
+
+        discover = seed.client.get(
+            f"/api/strategy-bundles?prompt_b_id={seed.prompts['baseline_b'].id}"
+        )
+        assert discover.status_code == 200
+        assert seed.baseline_bundle.id in {
+            item["id"] for item in discover.json()["items"]
+        }
     finally:
         _close(seed)
 

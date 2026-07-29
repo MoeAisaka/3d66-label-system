@@ -104,6 +104,12 @@ class OptimizerConfig(Base):
 
 class PromptVersion(Base):
     __tablename__ = "prompt_versions"
+    __table_args__ = (
+        UniqueConstraint(
+            "source_optimization_run_id",
+            name="uq_prompt_versions_source_optimization_run",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     stage: Mapped[str] = mapped_column(String(10), index=True)
@@ -114,6 +120,9 @@ class PromptVersion(Base):
     rubric_version: Mapped[str] = mapped_column(String(40), default="rubric-v2.1")
     status: Mapped[str] = mapped_column(String(20), default="draft", index=True)
     source: Mapped[str] = mapped_column(String(20), default="manual")
+    source_optimization_run_id: Mapped[int | None] = mapped_column(
+        Integer, nullable=True, index=True
+    )
     change_note: Mapped[str] = mapped_column(Text, default="")
     created_by: Mapped[str] = mapped_column(String(80), default="system")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
@@ -539,6 +548,16 @@ class QueueSchedulerState(Base):
 
 class EvaluationResult(Base):
     __tablename__ = "evaluation_results"
+    __table_args__ = (
+        CheckConstraint(
+            "review_stage IN ('initial','secondary','arbitration','completed')",
+            name="ck_evaluation_results_review_stage",
+        ),
+        CheckConstraint(
+            "review_revision >= 0",
+            name="ck_evaluation_results_review_revision",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     asset_id: Mapped[int] = mapped_column(ForeignKey("assets.id", ondelete="CASCADE"), index=True)
@@ -558,6 +577,10 @@ class EvaluationResult(Base):
     level: Mapped[str | None] = mapped_column(String(10), nullable=True, index=True)
     confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
     needs_review: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    review_stage: Mapped[str] = mapped_column(
+        String(20), default="initial", index=True
+    )
+    review_revision: Mapped[int] = mapped_column(Integer, default=0)
     model_id: Mapped[str] = mapped_column(String(200))
     prompt_a_version: Mapped[str] = mapped_column(String(40))
     prompt_b_version: Mapped[str | None] = mapped_column(String(40), nullable=True)
@@ -843,12 +866,19 @@ def _require_strategy_snapshot_for_new_result(
 
 class HumanReview(Base):
     __tablename__ = "human_reviews"
+    __table_args__ = (
+        CheckConstraint(
+            "stage IN ('initial','secondary','arbitration')",
+            name="ck_human_reviews_stage",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     evaluation_id: Mapped[int] = mapped_column(
         ForeignKey("evaluation_results.id", ondelete="CASCADE"), index=True
     )
     reviewer_name: Mapped[str] = mapped_column(String(80))
+    stage: Mapped[str] = mapped_column(String(20), default="initial", index=True)
     decision: Mapped[str] = mapped_column(String(30))
     corrected_level: Mapped[str | None] = mapped_column(String(10), nullable=True)
     corrected_score: Mapped[float | None] = mapped_column(Float, nullable=True)

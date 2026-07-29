@@ -106,6 +106,8 @@ def test_sample_set_captures_human_final_level() -> None:
             json={
                 "reviewer_name": "审核员",
                 "decision": "corrected",
+                "expected_stage": "initial",
+                "expected_review_revision": 0,
                 "corrected_level": None,
                 "note": "色彩与材质评分偏高",
                 "corrections": [

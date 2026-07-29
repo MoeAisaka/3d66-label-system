@@ -6,7 +6,30 @@ import { PageHeader } from "@/components/app-shell"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
-import type { EvaluationRecord } from "@/lib/types"
+import type { EvaluationRecord, ReviewStage } from "@/lib/types"
+
+export const reviewStageMeta: Record<ReviewStage, { label: string; title: string; description: string }> = {
+  initial: {
+    label: "初审纠偏",
+    title: "初审纠偏工作台",
+    description: "在模型评分原位完成首次确认或逐维纠偏，保存后按风险规则进入二审或完成。",
+  },
+  secondary: {
+    label: "二审确认",
+    title: "二审确认工作台",
+    description: "独立复核高风险、高等级、重大纠偏与抽样任务，不覆盖初审记录。",
+  },
+  arbitration: {
+    label: "冲突仲裁",
+    title: "冲突仲裁工作台",
+    description: "只处理初审与二审结论不一致的样本，形成最终人工真值。",
+  },
+  completed: {
+    label: "已完成",
+    title: "已完成审核",
+    description: "查看完整审核事件链和最终真值；已完成记录不再直接编辑。",
+  },
+}
 
 const mediaNames: Record<string, string> = {
   real_photo: "实景图",
@@ -79,7 +102,7 @@ function normalizedQuality(value: string | undefined) {
   return value || ""
 }
 
-export function filterReviewAssets(items: EvaluationRecord[], params: URLSearchParams) {
+export function filterReviewAssets(items: EvaluationRecord[], params: URLSearchParams, stage?: ReviewStage) {
   const query = (params.get("q") || "").trim().toLowerCase()
   const status = params.get("status") || ""
   const level = params.get("level") || ""
@@ -96,6 +119,7 @@ export function filterReviewAssets(items: EvaluationRecord[], params: URLSearchP
 
   const filtered = items.filter((asset) => {
     const evaluation = asset.evaluation
+    if (stage && evaluation.review_stage !== stage) return false
     const finalLevel = evaluation?.final_level || evaluation?.level || ""
     const primaryCategory = evaluation?.precheck?.classification?.primary_category || "无法判断"
     const confidenceValue = evaluation?.confidence
@@ -164,18 +188,23 @@ function samplingTone(tier: EvaluationRecord["sampling"]["tier"]) {
   return "neutral" as const
 }
 
-function detailUrl(evaluationId: number, params: URLSearchParams) {
+function detailUrl(evaluationId: number, params: URLSearchParams, stage: ReviewStage) {
   const next = new URLSearchParams(params)
   next.delete("asset")
   next.set("evaluation", String(evaluationId))
-  return `/review?${next.toString()}`
+  return `/review/${stage}?${next.toString()}`
 }
 
-export function ReviewList({ items, loading, searchParams, setSearchParams }: { items: EvaluationRecord[]; loading: boolean; searchParams: URLSearchParams; setSearchParams: SetURLSearchParams }) {
+export function ReviewList({ items, loading, searchParams, setSearchParams, stage }: { items: EvaluationRecord[]; loading: boolean; searchParams: URLSearchParams; setSearchParams: SetURLSearchParams; stage: ReviewStage }) {
   const [filtersOpen, setFiltersOpen] = useState(false)
-  const filtered = filterReviewAssets(items, searchParams)
-  const options = filterOptions(items)
-  const samplingCounts = items.reduce<Record<EvaluationRecord["sampling"]["tier"], number>>((counts, item) => {
+  const stageItems = items.filter((item) => item.evaluation.review_stage === stage)
+  const filtered = filterReviewAssets(items, searchParams, stage)
+  const options = filterOptions(stageItems)
+  const stageCounts = items.reduce<Record<ReviewStage, number>>((counts, item) => {
+    counts[item.evaluation.review_stage] += 1
+    return counts
+  }, { initial: 0, secondary: 0, arbitration: 0, completed: 0 })
+  const samplingCounts = stageItems.reduce<Record<EvaluationRecord["sampling"]["tier"], number>>((counts, item) => {
     counts[item.sampling.tier] += 1
     return counts
   }, { required: 0, sampled: 0, deferred: 0, reviewed: 0 })
@@ -197,8 +226,14 @@ export function ReviewList({ items, loading, searchParams, setSearchParams }: { 
   }
 
   return <>
-    <PageHeader index="04" title="评测结果" description="智能抽样优先安排高风险与黄金样本，常规稳定结果按固定比例抽查。" />
+    <PageHeader index="04" title={reviewStageMeta[stage].title} description={reviewStageMeta[stage].description} />
     <div className="mx-auto max-w-[1720px] px-5 py-7 md:px-8 lg:px-10 lg:py-9">
+      <nav className="mb-5 grid border-y border-[var(--line-strong)] bg-white sm:grid-cols-4" aria-label="人工审核工作台">
+        {(Object.keys(reviewStageMeta) as ReviewStage[]).map((itemStage) => {
+          const active = itemStage === stage
+          return <Link key={itemStage} to={`/review/${itemStage}`} className={`border-b border-r border-[var(--line)] px-4 py-4 last:border-r-0 sm:border-b-0 ${active ? "bg-primary text-primary-foreground" : "hover:bg-[#fafbf8]"}`}><span className="block text-xs font-semibold">{reviewStageMeta[itemStage].label}</span><span className="font-data mt-1 block text-xl font-bold">{stageCounts[itemStage]}</span></Link>
+        })}
+      </nav>
       <section className="mb-5 grid border-y border-[var(--line-strong)] bg-white lg:grid-cols-[minmax(280px,1fr)_auto] lg:items-stretch" aria-label="智能抽样队列">
         <div className="px-4 py-4 lg:border-r lg:border-[var(--line)]">
           <div className="flex flex-wrap items-center gap-2"><h2 className="text-sm font-bold">智能抽样审核</h2><Badge>规则 {items[0]?.sampling.version || "smart-sampling-v1.0"}</Badge></div>
@@ -235,7 +270,7 @@ export function ReviewList({ items, loading, searchParams, setSearchParams }: { 
       </section>
 
       <div className="mt-7 flex flex-wrap items-end justify-between gap-4">
-        <div><h2 className="font-editorial text-2xl font-bold">审核队列</h2><p className="mt-1 text-sm text-[var(--muted)]">显示 {filtered.length} 条，共 {items.length} 条评测结果{activeFilters ? `，已启用 ${activeFilters} 项筛选` : ""}</p></div>
+        <div><h2 className="font-editorial text-2xl font-bold">{reviewStageMeta[stage].label}队列</h2><p className="mt-1 text-sm text-[var(--muted)]">显示 {filtered.length} 条，本工作台共 {stageItems.length} 条{activeFilters ? `，已启用 ${activeFilters} 项筛选` : ""}</p></div>
         <div className="flex items-center gap-2 text-xs text-[var(--muted)]"><Funnel />筛选条件会保留到大图详情</div>
       </div>
 
@@ -262,7 +297,7 @@ export function ReviewList({ items, loading, searchParams, setSearchParams }: { 
                 <td className="px-3 py-3"><Badge tone={statusTone(status)}>{statusNames[status]}</Badge>{evaluation?.human_review && <p className="mt-2 max-w-32 truncate text-xs text-[var(--muted)]">{evaluation.human_review.reviewer_name}</p>}</td>
                 <td className="px-3 py-3"><p className="font-data max-w-44 truncate text-xs" title={evaluation?.versions.model || ""}>{evaluation?.versions.model || "—"}</p><p className="font-data mt-2 text-[0.68rem] text-[var(--muted)]">{evaluation?.versions.prompt ? `单提示词 ${evaluation.versions.prompt}` : `A ${evaluation?.versions.prompt_a || "—"}${evaluation?.versions.prompt_b ? ` · B ${evaluation.versions.prompt_b}` : ""}`}</p></td>
                 <td className="font-data whitespace-nowrap px-3 py-3 text-xs text-[var(--muted)]">{new Date(evaluation.updated_at).toLocaleString("zh-CN")}</td>
-                <td className="w-28 px-4 py-3 text-right"><Button asChild size="sm" variant="secondary"><Link to={detailUrl(evaluation.id, searchParams)}><span>审核</span><ArrowRight /></Link></Button></td>
+                <td className="w-28 px-4 py-3 text-right"><Button asChild size="sm" variant="secondary"><Link to={detailUrl(evaluation.id, searchParams, stage)}><span>{stage === "completed" ? "查看" : "审核"}</span><ArrowRight /></Link></Button></td>
               </tr>
             })}</tbody>
           </table>

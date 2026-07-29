@@ -181,10 +181,21 @@ def latest_review_for_result(
 ) -> HumanReview | None:
     if not result.reviews:
         return None
-    return max(
+    latest = max(
         result.reviews,
         key=lambda review: (review.created_at, review.id or 0),
     )
+    if result.review_stage == "completed":
+        return latest
+    # Migration 19 marks persisted legacy approved/corrected reviews completed.
+    # This narrow fallback keeps detached legacy/test objects readable without
+    # allowing a new in-progress staged chain (revision > 0) to form Gold.
+    if (
+        result.review_revision == 0
+        and latest.decision in {"approved", "corrected"}
+    ):
+        return latest
+    return None
 
 
 def truth_from_result(result: EvaluationResult, expected_level: str | None = None) -> dict[str, Any]:

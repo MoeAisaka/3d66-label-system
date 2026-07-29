@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react"
-import { ArrowClockwise, Check, MagicWand, Plus, Sparkle, UploadSimple, WarningCircle } from "@phosphor-icons/react"
+import { ArrowClockwise, Check, MagicWand, Plus, ShieldCheck, Sparkle, UploadSimple, WarningCircle } from "@phosphor-icons/react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { toast } from "sonner"
 
@@ -9,7 +9,23 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
 import { api, jsonBody } from "@/lib/api"
-import type { OptimizerConfig, PromptOptimizationRun, PromptVersion, SampleSetSummary } from "@/lib/types"
+import type {
+  OptimizerConfig,
+  PromptOptimizationRun,
+  PromptVersion,
+  RegressionSummary,
+  SampleSetDetail,
+  SampleSetSummary,
+  StrategyBundleSummary,
+} from "@/lib/types"
+
+type RegressionRole = "target_error" | "stable_control" | "blind_holdout"
+
+const regressionRoleNames: Record<RegressionRole, string> = {
+  target_error: "目标错例",
+  stable_control: "稳定对照",
+  blind_holdout: "锁定盲测",
+}
 
 export function PromptsPage() {
   const queryClient = useQueryClient()
@@ -24,6 +40,11 @@ export function PromptsPage() {
     queryFn: () => api<{ items: PromptOptimizationRun[] }>("/api/prompt-optimizations"),
     refetchInterval: (query) => query.state.data?.items.some((item) => ["queued", "running"].includes(item.status)) ? 2500 : false,
   })
+  const regressions = useQuery({
+    queryKey: ["prompt-regressions"],
+    queryFn: () => api<{ items: RegressionSummary[] }>("/api/prompt-regressions"),
+    refetchInterval: (query) => query.state.data?.items.some((item) => ["queued", "running"].includes(item.status)) ? 3000 : false,
+  })
   const [selectedId, setSelectedId] = useState<number | null>(null)
   const selected = useMemo(
     () => prompts.data?.items.find((item) => item.id === selectedId) ?? prompts.data?.items[0],
@@ -35,6 +56,12 @@ export function PromptsPage() {
   const [changeNote, setChangeNote] = useState("")
   const [aiInstruction, setAiInstruction] = useState("")
   const [sampleSetId, setSampleSetId] = useState<number | null>(null)
+  const [validationVersion, setValidationVersion] = useState("")
+  const [baselineBundleId, setBaselineBundleId] = useState<number | null>(null)
+  const [metricRulesVersion, setMetricRulesVersion] = useState("paired-metric-rules-v1")
+  const [roleAssignments, setRoleAssignments] = useState<Record<number, RegressionRole | "">>({})
+  const [approvalReviewer, setApprovalReviewer] = useState(() => localStorage.getItem("3d66-reviewer") || "")
+  const [approvalNote, setApprovalNote] = useState("")
 
   useEffect(() => {
     if (!selected) return
@@ -98,7 +125,94 @@ export function PromptsPage() {
     onError: (error) => toast.error(error.message),
   })
 
-  const latestOptimization = optimizations.data?.items.find((item) => item.base_prompt_id === selected?.id) ?? optimizations.data?.items[0]
+  const latestOptimization =
+    optimizations.data?.items.find((item) => item.id === selected?.source_optimization_run_id) ??
+    optimizations.data?.items.find((item) => item.base_prompt_id === selected?.id) ??
+    optimizations.data?.items[0]
+  const optimizationSampleSet = useQuery({
+    queryKey: ["sample-set", latestOptimization?.sample_set_id],
+    queryFn: () => api<SampleSetDetail>(`/api/sample-sets/${latestOptimization?.sample_set_id}`),
+    enabled: Boolean(latestOptimization?.id && latestOptimization.status === "completed"),
+  })
+  const strategyBundles = useQuery({
+    queryKey: ["strategy-bundles", latestOptimization?.base_prompt_id],
+    queryFn: () => api<{ items: StrategyBundleSummary[] }>(`/api/strategy-bundles?prompt_b_id=${latestOptimization?.base_prompt_id}`),
+    enabled: Boolean(latestOptimization?.id && latestOptimization.status === "completed"),
+  })
+  const materialize = useMutation({
+    mutationFn: () => api<{ prompt_id: number; paired_regression_ids: number[] }>(`/api/prompt-optimizations/${latestOptimization?.id}/materialize-and-validate`, {
+      method: "POST",
+      ...jsonBody({
+        version: validationVersion,
+        baseline_strategy_bundle_id: baselineBundleId,
+        samples: Object.entries(roleAssignments).filter(([, role]) => role).map(([sampleItemId, role]) => ({ sample_item_id: Number(sampleItemId), role })),
+        metric_rules_version: metricRulesVersion,
+      }),
+    }),
+    onSuccess: async (data) => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["prompts"] }),
+        queryClient.invalidateQueries({ queryKey: ["prompt-regressions"] }),
+      ])
+      setSelectedId(data.prompt_id)
+      toast.success(`候选草稿已创建，并启动 ${data.paired_regression_ids.length} 组发布前配对回归`)
+    },
+    onError: (error) => toast.error(error.message),
+  })
+  useEffect(() => {
+    if (!latestOptimization || latestOptimization.status !== "completed") return
+    setValidationVersion(`${latestOptimization.base_prompt_version}-candidate-${latestOptimization.id}`)
+    setBaselineBundleId(null)
+    setRoleAssignments({})
+  }, [latestOptimization?.id, latestOptimization?.status])
+  useEffect(() => {
+    const firstBundle = strategyBundles.data?.items[0]
+    if (firstBundle) setBaselineBundleId((current) => current ?? firstBundle.id)
+  }, [strategyBundles.data?.items])
+  useEffect(() => {
+    const items = optimizationSampleSet.data?.items
+    if (!items || !latestOptimization) return
+    const plannedItems = Array.isArray(latestOptimization.diagnosis?.sample_policy?.sample_items)
+      ? latestOptimization.diagnosis.sample_policy.sample_items as Array<{ sample_item_id: number; role: RegressionRole }>
+      : []
+    const plannedById = new Map(plannedItems.map((item) => [Number(item.sample_item_id), item.role]))
+    const holdoutIds = new Set<number>((latestOptimization.diagnosis?.sample_policy?.blind_holdout_asset_ids ?? []).map(Number))
+    setRoleAssignments((current) => {
+      const next = { ...current }
+      items.forEach((item) => {
+        if (plannedById.has(item.id)) next[item.id] = plannedById.get(item.id)!
+        else if (holdoutIds.has(item.asset_id)) next[item.id] = "blind_holdout"
+        else if (!(item.id in next)) next[item.id] = ""
+      })
+      return next
+    })
+  }, [latestOptimization?.id, optimizationSampleSet.data?.items])
+
+  const candidatePrompt = prompts.data?.items.find((item) => item.source_optimization_run_id === latestOptimization?.id)
+  const latestPairedRegression = regressions.data?.items.find((item) => item.regression_mode === "paired" && item.trigger_prompt_id === candidatePrompt?.id)
+  const selectedPairedRegression = regressions.data?.items.find((item) => item.regression_mode === "paired" && item.trigger_prompt_id === selected?.id)
+  const selectedPublishReady = !selected?.source_optimization_run_id || selectedPairedRegression?.approval_status === "approved"
+  const roleSet = new Set(Object.values(roleAssignments).filter(Boolean))
+  const validationReady = Boolean(
+    validationVersion.trim() &&
+    baselineBundleId &&
+    metricRulesVersion.trim() &&
+    roleSet.has("target_error") &&
+    roleSet.has("stable_control") &&
+    roleSet.has("blind_holdout"),
+  )
+  const approveRegression = useMutation({
+    mutationFn: (status: "approved" | "rejected") => api(`/api/paired-regressions/${latestPairedRegression?.id}/approval`, {
+      method: "POST",
+      ...jsonBody({ status, reviewer_name: approvalReviewer.trim(), note: approvalNote.trim() }),
+    }),
+    onSuccess: async (_data, status) => {
+      localStorage.setItem("3d66-reviewer", approvalReviewer.trim())
+      await queryClient.invalidateQueries({ queryKey: ["prompt-regressions"] })
+      toast.success(status === "approved" ? "发布前回归已人工批准；候选仍未发布" : "候选已人工驳回")
+    },
+    onError: (error) => toast.error(error.message),
+  })
 
   function loadCandidate(run: PromptOptimizationRun) {
     setSystemPrompt(run.candidate_system_prompt)
@@ -150,7 +264,7 @@ export function PromptsPage() {
           <main className="min-w-0 px-5 py-7 md:px-8 lg:px-10 lg:py-9">
             <div className="flex flex-wrap items-start justify-between gap-5 border-b border-[var(--line-strong)] pb-6">
               <div><p className="font-data text-xs text-[var(--muted)]">调用 {selected.stage} · {selected.rubric_version}</p><h2 className="font-editorial mt-2 text-3xl font-bold">{selected.name}</h2><p className="mt-2 text-sm text-[var(--muted)]">当前选择：{selected.version}，创建者 {selected.created_by}</p><p className="font-data mt-1 text-xs text-[var(--muted)]">最新更新时间：{new Date(selected.updated_at).toLocaleString("zh-CN")}</p></div>
-              {selected.status !== "published" && <Button onClick={() => publish.mutate()} disabled={publish.isPending}><UploadSimple />发布此版本</Button>}
+              {selected.status !== "published" && <div className="text-right"><Button onClick={() => publish.mutate()} disabled={publish.isPending || !selectedPublishReady}><UploadSimple />发布此版本</Button>{selected.source_optimization_run_id && <p className="mt-2 max-w-64 text-xs text-[var(--muted)]">{selectedPublishReady ? "配对回归与人工批准已通过，可以发布。" : "需先通过发布前配对回归并完成人工批准。"}</p>}</div>}
             </div>
 
             <section className="mt-7 border-y border-[var(--line-strong)] bg-white">
@@ -177,6 +291,34 @@ export function PromptsPage() {
                   <Button onClick={() => loadCandidate(latestOptimization)}>载入候选内容</Button>
                 </div>}
               </div>}
+              {latestOptimization?.status === "completed" && (
+                <div className="border-t border-[var(--line-strong)] px-5 py-5">
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div><div className="flex items-center gap-2"><ShieldCheck /><h3 className="font-semibold">发布前小样本配对回归</h3></div><p className="mt-2 max-w-[78ch] text-xs leading-5 text-[var(--muted)]">候选会先保存为不可变草稿，并以同一模型、A提示词、评分规则和样本快照与基线配对比较。三类样本缺一不可，盲测在全部结束前不展示答案。</p></div>
+                    {latestPairedRegression && <Badge tone={latestPairedRegression.approval_status === "approved" ? "success" : latestPairedRegression.recommendation === "fail" ? "danger" : "active"}>{latestPairedRegression.status} · {latestPairedRegression.recommendation || "pending"} · {latestPairedRegression.approval_status || "pending"}</Badge>}
+                  </div>
+
+                  {!candidatePrompt && <div className="mt-5 grid gap-4 lg:grid-cols-3">
+                    <label><span className="mb-2 block text-xs font-semibold">候选版本号</span><Input value={validationVersion} onChange={(event) => setValidationVersion(event.target.value)} /></label>
+                    <label><span className="mb-2 block text-xs font-semibold">基线策略快照</span><select className="h-11 w-full rounded-[4px] border border-[var(--line-strong)] bg-white px-3 text-sm" value={baselineBundleId ?? ""} onChange={(event) => setBaselineBundleId(event.target.value ? Number(event.target.value) : null)}><option value="">请选择基线</option>{strategyBundles.data?.items.map((bundle) => <option key={bundle.id} value={bundle.id}>#{bundle.id} · {bundle.model_id} · A {bundle.prompt_a_version} · B {bundle.prompt_b_version}</option>)}</select></label>
+                    <label><span className="mb-2 block text-xs font-semibold">指标规则版本</span><Input value={metricRulesVersion} onChange={(event) => setMetricRulesVersion(event.target.value)} /></label>
+                  </div>}
+                  {!candidatePrompt && strategyBundles.isSuccess && !strategyBundles.data.items.length && <p className="mt-3 text-xs text-[#8d2924]">没有找到与原提示词一致的可复现基线策略。请先用当前发布版本完成至少一次正式评测。</p>}
+
+                  {!candidatePrompt && <div className="mt-5 border-y border-[var(--line)]">
+                    <div className="grid grid-cols-[64px_minmax(0,1fr)_190px] gap-3 bg-[#fafbf8] px-3 py-2 text-xs font-semibold text-[var(--muted)]"><span>图片</span><span>冻结样本</span><span>回归角色</span></div>
+                    <div className="max-h-80 overflow-y-auto">{optimizationSampleSet.data?.items.map((item) => <div key={item.id} className="grid grid-cols-[64px_minmax(0,1fr)_190px] items-center gap-3 border-t border-[var(--line)] px-3 py-2"><img src={item.image_url} alt="" className="size-14 rounded-[4px] border border-[var(--line)] object-cover" /><div className="min-w-0"><p className="file-name truncate text-sm">{item.asset_name}</p><p className="font-data mt-1 text-[0.68rem] text-[var(--muted)]">样本 #{item.id} · 标准 V{item.truth_revision}</p></div><select aria-label={`${item.asset_name}回归角色`} className="h-9 rounded-[4px] border border-[var(--line-strong)] bg-white px-2 text-xs" value={roleAssignments[item.id] || ""} onChange={(event) => setRoleAssignments((current) => ({ ...current, [item.id]: event.target.value as RegressionRole | "" }))}><option value="">不纳入本轮</option>{(Object.keys(regressionRoleNames) as RegressionRole[]).map((role) => <option key={role} value={role}>{regressionRoleNames[role]}</option>)}</select></div>)}</div>
+                  </div>}
+                  {!candidatePrompt && <div className="mt-4 flex flex-wrap items-center justify-between gap-3"><p className="text-xs text-[var(--muted)]">已选择：目标错例 {Object.values(roleAssignments).filter((role) => role === "target_error").length} · 稳定对照 {Object.values(roleAssignments).filter((role) => role === "stable_control").length} · 锁定盲测 {Object.values(roleAssignments).filter((role) => role === "blind_holdout").length}</p><Button onClick={() => materialize.mutate()} disabled={!validationReady || materialize.isPending}>创建候选并启动配对回归<ShieldCheck /></Button></div>}
+
+                  {candidatePrompt && !latestPairedRegression && <p className="mt-4 text-xs text-[var(--muted)]">候选草稿已创建，正在读取配对回归状态。</p>}
+                  {latestPairedRegression && <div className="mt-5 border-y border-[var(--line)] bg-[#fafbf8] p-4">
+                    <div className="flex flex-wrap items-center justify-between gap-3"><div><p className="font-semibold">{latestPairedRegression.name}</p><p className="font-data mt-1 text-xs text-[var(--muted)]">{latestPairedRegression.completed}/{latestPairedRegression.total} 已完成 · 通过率 {Math.round(latestPairedRegression.pass_rate * 100)}%</p></div><Badge tone={latestPairedRegression.recommendation === "pass" ? "success" : latestPairedRegression.recommendation === "fail" ? "danger" : "active"}>{latestPairedRegression.recommendation === "pass" ? "系统建议通过" : latestPairedRegression.recommendation === "fail" ? "系统建议不通过" : "回归进行中"}</Badge></div>
+                    {latestPairedRegression.recommendation !== "pending" && latestPairedRegression.approval_status === "pending" && <div className="mt-4 grid gap-3 lg:grid-cols-[200px_minmax(0,1fr)_auto_auto] lg:items-end"><label><span className="mb-2 block text-xs font-semibold">批准人</span><Input value={approvalReviewer} onChange={(event) => setApprovalReviewer(event.target.value)} /></label><label><span className="mb-2 block text-xs font-semibold">人工结论说明（必填）</span><Input value={approvalNote} onChange={(event) => setApprovalNote(event.target.value)} placeholder="说明是否接受系统回归结论" /></label><Button variant="secondary" onClick={() => approveRegression.mutate("rejected")} disabled={!approvalReviewer.trim() || !approvalNote.trim() || approveRegression.isPending}>驳回候选</Button><Button onClick={() => approveRegression.mutate("approved")} disabled={latestPairedRegression.recommendation !== "pass" || !approvalReviewer.trim() || !approvalNote.trim() || approveRegression.isPending}>批准候选</Button></div>}
+                    {latestPairedRegression.approval_status !== "pending" && <p className="mt-3 text-xs text-[var(--muted)]">人工结论：{latestPairedRegression.approval_status === "approved" ? "已批准" : "已驳回"} · {latestPairedRegression.approved_by || "—"}。批准本身不会自动发布。</p>}
+                  </div>}
+                </div>
+              )}
             </section>
 
             <section className="mt-7 grid gap-4 border-y border-[var(--line-strong)] bg-white p-4 xl:grid-cols-[minmax(0,1fr)_280px] xl:p-5">

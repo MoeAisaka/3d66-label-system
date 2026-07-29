@@ -690,6 +690,12 @@ def test_success_stores_candidate_without_creating_prompt_version(
             assert diagnosis["prompt_changes"] == [
                 "tighten composition anchor"
             ]
+            assert diagnosis["sample_policy"]["sample_items"] == [
+                {
+                    "sample_item_id": run.sample_set.items[0].id,
+                    "role": "target_error",
+                }
+            ]
             assert diagnostic_audit["output_budget"] == 2048
             assert synthesis_audit["output_budget"] == 4096
             assert diagnostic_audit["reasoning_effort"] == "high"

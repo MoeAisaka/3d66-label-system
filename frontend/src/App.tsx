@@ -12,16 +12,21 @@ import { JobsPage } from "@/pages/jobs-page"
 import { LoginPage } from "@/pages/login-page"
 import { ModelPage } from "@/pages/model-page"
 import { MigrationsPage } from "@/pages/migrations-page"
-import { PromptsPage } from "@/pages/prompts-page"
 
 const SampleSetsPage = lazy(() =>
   import("@/pages/sample-sets-page").then((module) => ({ default: module.SampleSetsPage })),
+)
+const PromptsPage = lazy(() =>
+  import("@/pages/prompts-page").then((module) => ({ default: module.PromptsPage })),
 )
 const ReviewPage = lazy(() =>
   import("@/pages/review-page").then((module) => ({ default: module.ReviewPage })),
 )
 const CanaryRunsPage = lazy(() =>
   import("@/pages/canary-runs-page").then((module) => ({ default: module.CanaryRunsPage })),
+)
+const HistoricalCorrectionsPage = lazy(() =>
+  import("@/pages/historical-corrections-page").then((module) => ({ default: module.HistoricalCorrectionsPage })),
 )
 
 export default function App() {
@@ -51,10 +56,12 @@ export default function App() {
             <Route index element={<DashboardPage />} />
             <Route path="assets" element={<AssetsPage />} />
             <Route path="jobs" element={<JobsPage />} />
-            <Route path="review" element={<Suspense fallback={<RouteLoading />}><ReviewPage /></Suspense>} />
-            <Route path="prompts" element={<PromptsPage />} />
+            <Route path="review" element={<Navigate to="/review/initial" replace />} />
+            <Route path="review/:reviewStage" element={<Suspense fallback={<RouteLoading />}><ReviewPage /></Suspense>} />
+            <Route path="prompts" element={<Suspense fallback={<RouteLoading />}><PromptsPage /></Suspense>} />
             <Route path="model" element={<ModelPage />} />
             <Route path="sample-sets" element={<Suspense fallback={<RouteLoading />}><SampleSetsPage /></Suspense>} />
+            <Route path="historical-corrections" element={<Suspense fallback={<RouteLoading />}><HistoricalCorrectionsPage /></Suspense>} />
             <Route path="migrations" element={<MigrationsPage />} />
             <Route path="canary-runs" element={<Suspense fallback={<RouteLoading />}><CanaryRunsPage /></Suspense>} />
           </Route>

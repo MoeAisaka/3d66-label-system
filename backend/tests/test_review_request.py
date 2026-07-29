@@ -6,12 +6,19 @@ from app.main import ReviewCorrection, ReviewRequest
 
 def test_corrected_review_requires_dimension_correction() -> None:
     with pytest.raises(ValidationError):
-        ReviewRequest(reviewer_name="审核员", decision="corrected")
+        ReviewRequest(
+            reviewer_name="审核员",
+            decision="corrected",
+            expected_stage="initial",
+            expected_review_revision=0,
+        )
 
     with pytest.raises(ValidationError):
         ReviewRequest(
             reviewer_name="审核员",
             decision="corrected",
+            expected_stage="initial",
+            expected_review_revision=0,
             corrected_level="L4",
             note="   ",
         )
@@ -22,6 +29,8 @@ def test_corrected_review_rejects_manually_selected_level() -> None:
         ReviewRequest(
             reviewer_name="审核员",
             decision="corrected",
+            expected_stage="initial",
+            expected_review_revision=0,
             corrected_level="L4",
             corrections=[
                 ReviewCorrection(
@@ -40,6 +49,8 @@ def test_non_corrected_review_rejects_corrected_level() -> None:
         ReviewRequest(
             reviewer_name="审核员",
             decision="approved",
+            expected_stage="initial",
+            expected_review_revision=0,
             corrected_level="L4",
         )
 
@@ -48,6 +59,8 @@ def test_dimension_correction_can_keep_final_level() -> None:
     review = ReviewRequest(
         reviewer_name="审核员",
         decision="corrected",
+        expected_stage="initial",
+        expected_review_revision=0,
         corrections=[
             ReviewCorrection(
                 target_type="dimension",

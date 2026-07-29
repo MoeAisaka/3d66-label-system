@@ -70,6 +70,8 @@ from .loop_engine import (
     validate_result_scope,
     validate_submission_scope,
 )
+from .historical_corrections import preview_historical_workbooks
+from .p0e_safe_import import ImportPreflightError
 from .queue_scheduler import (
     QUEUE_CLASSES,
     DeterministicQueueScheduler,
@@ -97,9 +99,10 @@ from .regression import (
     truth_from_result,
 )
 from .review_sampling import build_review_sampling
-from .scoring import calculate_corrected_score
+from .scoring import ENGINE_VERSION, calculate_corrected_score
 from .strategy_bundle import (
     build_strategy_snapshot,
+    get_or_create_bundle,
     safe_strategy_snapshot_payload,
 )
 
@@ -242,6 +245,8 @@ class ReviewCorrection(BaseModel):
 class ReviewRequest(BaseModel):
     reviewer_name: str = Field(min_length=1, max_length=80)
     decision: str = Field(pattern="^(approved|corrected|rejected)$")
+    expected_stage: Literal["initial", "secondary", "arbitration"]
+    expected_review_revision: int = Field(ge=0)
     corrected_level: str | None = Field(default=None, pattern="^L[1-5]$")
     note: str = Field(default="", max_length=2000)
     corrections: list[ReviewCorrection] = Field(default_factory=list, max_length=12)
@@ -297,11 +302,36 @@ class PairedRegressionSampleRequest(BaseModel):
     role: str = Field(pattern="^(target_error|stable_control|blind_holdout)$")
 
 
+class PromptOptimizationMaterializeRequest(BaseModel):
+    version: str = Field(min_length=1, max_length=40)
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    baseline_strategy_bundle_id: int = Field(ge=1)
+    samples: list[PairedRegressionSampleRequest] = Field(
+        min_length=3, max_length=1000
+    )
+    metric_rules_version: str = Field(min_length=1, max_length=80)
+    aesthetic_accuracy_max_drop: float = Field(default=0, ge=0, le=1)
+    whole_image_accuracy_max_drop: float = Field(default=0, ge=0, le=1)
+    level_consistency_max_drop: float = Field(default=0, ge=0, le=1)
+
+    @model_validator(mode="after")
+    def validate_roles(self) -> "PromptOptimizationMaterializeRequest":
+        ids = [sample.sample_item_id for sample in self.samples]
+        if len(ids) != len(set(ids)):
+            raise ValueError("同一冻结样本不能重复")
+        if {sample.role for sample in self.samples} != set(SAMPLE_ROLES):
+            raise ValueError(
+                "候选验证必须同时包含 target_error、stable_control、blind_holdout"
+            )
+        return self
+
+
 class PairedRegressionCreateRequest(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     sample_set_id: int = Field(ge=1)
     baseline_strategy_bundle_id: int = Field(ge=1)
     candidate_strategy_bundle_id: int = Field(ge=1)
+    trigger_prompt_id: int | None = Field(default=None, ge=1)
     samples: list[PairedRegressionSampleRequest] = Field(
         min_length=3, max_length=1000
     )
@@ -663,20 +693,42 @@ def _review_sampling_decisions(db: Session) -> dict[int, dict[str, Any]]:
 def _result_payload(result: EvaluationResult | None) -> dict[str, Any] | None:
     if not result:
         return None
-    latest_review = result.reviews[-1] if result.reviews else None
+    ordered_reviews = sorted(
+        result.reviews,
+        key=lambda review: (review.created_at, review.id or 0),
+    )
+    latest_review = ordered_reviews[-1] if ordered_reviews else None
+    completed_review = (
+        latest_review if result.review_stage == "completed" else None
+    )
+    display_review = completed_review or latest_review
     final_level = (
-        latest_review.corrected_level or result.level
-        if latest_review and latest_review.decision == "corrected"
+        display_review.corrected_level or result.level
+        if display_review and display_review.decision == "corrected"
         else result.level
     )
     final_score = (
-        latest_review.corrected_score
-        if latest_review
-        and latest_review.decision == "corrected"
-        and latest_review.corrected_score is not None
+        display_review.corrected_score
+        if display_review
+        and display_review.decision == "corrected"
+        and display_review.corrected_score is not None
         else result.score
     )
     single_prompt = result.job.prompt_b_id is None and result.prompt_b_version is None
+    review_history = [
+        {
+            "id": review.id,
+            "stage": review.stage,
+            "reviewer_name": review.reviewer_name,
+            "decision": review.decision,
+            "corrected_level": review.corrected_level,
+            "corrected_score": review.corrected_score,
+            "note": review.note,
+            "corrections": json.loads(review.corrections_json or "[]"),
+            "created_at": review.created_at,
+        }
+        for review in ordered_reviews
+    ]
     return {
         "id": result.id,
         "asset_id": result.asset_id,
@@ -693,9 +745,16 @@ def _result_payload(result: EvaluationResult | None) -> dict[str, Any] | None:
         "final_score": final_score,
         "confidence": result.confidence,
         "needs_review": result.needs_review,
+        "review_stage": result.review_stage,
+        "review_revision": result.review_revision,
+        "review_truth_status": (
+            "completed" if completed_review is not None else "provisional"
+        ),
+        "review_history": review_history,
         "human_review": (
             {
                 "id": latest_review.id,
+                "stage": latest_review.stage,
                 "reviewer_name": latest_review.reviewer_name,
                 "decision": latest_review.decision,
                 "corrected_level": latest_review.corrected_level,
@@ -2028,6 +2087,34 @@ async def test_optimizer_config(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+@app.post("/api/historical-corrections/preview")
+async def preview_historical_corrections(
+    files: list[UploadFile] = File(...),
+    _user: User = Depends(current_user),
+) -> dict[str, Any]:
+    if not files or len(files) > 10:
+        raise HTTPException(status_code=422, detail="每次仅允许预览 1 至 10 个 XLSX")
+    uploads: list[tuple[str, bytes]] = []
+    total_bytes = 0
+    for upload in files:
+        filename = Path(upload.filename or "").name
+        if not filename or Path(filename).suffix.casefold() != ".xlsx":
+            raise HTTPException(status_code=422, detail="仅允许上传 .xlsx 文件")
+        content = await upload.read(25 * 1024 * 1024 + 1)
+        if len(content) > 25 * 1024 * 1024:
+            raise HTTPException(status_code=413, detail=f"{filename} 超过 25 MB")
+        total_bytes += len(content)
+        if total_bytes > 64 * 1024 * 1024:
+            raise HTTPException(status_code=413, detail="本次 XLSX 总大小超过 64 MB")
+        uploads.append((filename, content))
+    try:
+        return preview_historical_workbooks(uploads)
+    except ImportPreflightError as exc:
+        raise HTTPException(status_code=422, detail=exc.as_dict()) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
 @app.get("/api/prompts")
 def list_prompts(
     _user: User = Depends(current_user), db: Session = Depends(get_db)
@@ -2045,6 +2132,7 @@ def list_prompts(
                 "rubric_version": prompt.rubric_version,
                 "status": prompt.status,
                 "source": prompt.source,
+                "source_optimization_run_id": prompt.source_optimization_run_id,
                 "change_note": prompt.change_note,
                 "created_by": prompt.created_by,
                 "created_at": prompt.created_at,
@@ -2080,6 +2168,25 @@ def publish_prompt(
     prompt = db.get(PromptVersion, prompt_id)
     if not prompt:
         raise HTTPException(status_code=404, detail="提示词版本不存在")
+    if prompt.source_optimization_run_id is not None:
+        approved_gate = db.scalar(
+            select(PromptRegressionRun)
+            .where(
+                PromptRegressionRun.trigger_prompt_id == prompt.id,
+                PromptRegressionRun.regression_mode == "paired",
+                PromptRegressionRun.recommendation == "pass",
+                PromptRegressionRun.approval_status == "approved",
+            )
+            .order_by(PromptRegressionRun.id.desc())
+            .limit(1)
+        )
+        if approved_gate is None:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "优化候选尚未通过配对回归并获得人工批准，不能发布"
+                ),
+            )
     db.execute(
         update(PromptVersion)
         .where(PromptVersion.stage == prompt.stage, PromptVersion.status == "published")
@@ -2098,7 +2205,7 @@ def publish_prompt(
         .order_by(PromptVersion.created_at.desc())
     )
     regression_ids: list[int] = []
-    if prompt_a and prompt_b:
+    if prompt_a and prompt_b and prompt.source_optimization_run_id is None:
         regression_ids = _create_regression_runs(
             db,
             prompt_a=prompt_a,
@@ -2194,6 +2301,152 @@ def get_prompt_optimization(
     return _optimization_payload(run)
 
 
+@app.post(
+    "/api/prompt-optimizations/{run_id}/materialize-and-validate"
+)
+def materialize_prompt_optimization_and_validate(
+    run_id: int,
+    payload: PromptOptimizationMaterializeRequest,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    run = db.get(PromptOptimizationRun, run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="提示词优化任务不存在")
+    if run.status != "completed":
+        raise HTTPException(status_code=409, detail="提示词优化任务尚未成功完成")
+    if not run.candidate_system_prompt.strip() or not run.candidate_user_prompt.strip():
+        raise HTTPException(status_code=409, detail="优化任务没有可物化的候选提示词")
+    if run.base_prompt.stage != "B":
+        raise HTTPException(status_code=409, detail="当前只支持物化 B 阶段优化候选")
+    if run.sample_set.kind != "golden" or run.sample_set.status != "locked":
+        raise HTTPException(
+            status_code=409, detail="候选验证必须使用已锁定黄金样本集"
+        )
+
+    existing = db.scalar(
+        select(PromptVersion).where(
+            PromptVersion.source_optimization_run_id == run.id
+        )
+    )
+    if existing is not None:
+        if existing.version != payload.version:
+            raise HTTPException(
+                status_code=409, detail="该优化任务已物化为其他不可变版本"
+            )
+        regression_ids = list(
+            db.scalars(
+                select(PromptRegressionRun.id)
+                .where(
+                    PromptRegressionRun.trigger_prompt_id == existing.id,
+                    PromptRegressionRun.regression_mode == "paired",
+                )
+                .order_by(PromptRegressionRun.id.asc())
+            ).all()
+        )
+        if regression_ids:
+            return {
+                "prompt_id": existing.id,
+                "paired_regression_ids": regression_ids,
+            }
+
+    version_conflict = db.scalar(
+        select(PromptVersion).where(PromptVersion.version == payload.version)
+    )
+    if version_conflict and version_conflict is not existing:
+        raise HTTPException(status_code=409, detail="提示词版本号已存在")
+    baseline = db.get(StrategyBundle, payload.baseline_strategy_bundle_id)
+    if not baseline:
+        raise HTTPException(status_code=404, detail="基线 StrategyBundle 不存在")
+    if baseline.prompt_b_version != run.base_prompt.version:
+        raise HTTPException(
+            status_code=409, detail="基线策略与优化任务的原始提示词不一致"
+        )
+
+    prompt_a_matches = db.scalars(
+        select(PromptVersion).where(
+            PromptVersion.stage == "A",
+            PromptVersion.version == baseline.prompt_a_version,
+        )
+    ).all()
+    if len(prompt_a_matches) != 1:
+        raise HTTPException(status_code=409, detail="基线 A 提示词无法唯一解析")
+    model_matches = db.scalars(
+        select(ModelConfig).where(
+            ModelConfig.model_id == baseline.model_id,
+            ModelConfig.active.is_(True),
+        )
+    ).all()
+    if len(model_matches) != 1:
+        raise HTTPException(status_code=409, detail="基线模型配置无法唯一解析")
+    if baseline.sampling_policy_revision is None:
+        policy = None
+    else:
+        policy = db.scalar(
+            select(SamplingPolicy).where(
+                SamplingPolicy.revision == baseline.sampling_policy_revision
+            )
+        )
+        if policy is None:
+            raise HTTPException(status_code=409, detail="基线抽样策略无法解析")
+
+    candidate = existing or PromptVersion(
+        stage="B",
+        name=payload.name or f"{run.base_prompt.name} 优化候选 #{run.id}",
+        version=payload.version,
+        system_prompt=run.candidate_system_prompt,
+        user_prompt=run.candidate_user_prompt,
+        rubric_version=baseline.rubric_version,
+        status="draft",
+        source="optimizer",
+        source_optimization_run_id=run.id,
+        change_note=run.change_note,
+        created_by=user.username,
+    )
+    if existing is None:
+        db.add(candidate)
+        db.flush()
+    candidate_bundle = get_or_create_bundle(
+        db=db,
+        model_config=model_matches[0],
+        prompt_a=prompt_a_matches[0],
+        prompt_b=candidate,
+        rubric_version=baseline.rubric_version,
+        engine_version=baseline.engine_version,
+        risk_review_version=baseline.risk_review_version,
+        sampling_policy=policy,
+    )
+    if candidate_bundle.model_config_snapshot != baseline.model_config_snapshot:
+        raise HTTPException(
+            status_code=409,
+            detail="当前模型配置已漂移，不能把提示词差异伪装成单变量回归",
+        )
+
+    regression = create_paired_regression(
+        PairedRegressionCreateRequest(
+            name=f"优化候选 #{run.id} 发布前配对回归",
+            sample_set_id=run.sample_set_id,
+            baseline_strategy_bundle_id=baseline.id,
+            candidate_strategy_bundle_id=candidate_bundle.id,
+            trigger_prompt_id=candidate.id,
+            samples=payload.samples,
+            metric_rules_version=payload.metric_rules_version,
+            aesthetic_accuracy_max_drop=payload.aesthetic_accuracy_max_drop,
+            whole_image_accuracy_max_drop=payload.whole_image_accuracy_max_drop,
+            level_consistency_max_drop=payload.level_consistency_max_drop,
+        ),
+        user=user,
+        db=db,
+    )
+    regression_run = db.get(PromptRegressionRun, int(regression["id"]))
+    if regression_run is None:
+        raise HTTPException(status_code=500, detail="候选配对回归创建后无法回查")
+    return {
+        "prompt_id": candidate.id,
+        "paired_regression_ids": [regression_run.id],
+    }
+
+
 @app.post("/api/prompt-optimizations")
 def create_prompt_optimization(
     payload: PromptOptimizationCreateRequest,
@@ -2232,16 +2485,69 @@ def create_prompt_optimization(
     return {"id": run.id}
 
 
+def _review_standard_answer(
+    *,
+    decision: str,
+    corrected_level: str | None,
+    corrected_score: float | None,
+    corrections: list[dict[str, Any]],
+) -> str:
+    normalized_corrections = sorted(
+        corrections,
+        key=lambda item: (
+            str(item.get("target_type") or ""),
+            str(item.get("field_key") or ""),
+            json.dumps(item, ensure_ascii=False, sort_keys=True),
+        ),
+    )
+    return json.dumps(
+        {
+            "decision": decision,
+            "corrected_level": corrected_level,
+            "corrected_score": corrected_score,
+            "corrections": normalized_corrections,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def _requires_secondary_review(evaluation: EvaluationResult, decision: str) -> bool:
+    if decision in {"corrected", "rejected"}:
+        return True
+    if evaluation.level in {"L4", "L5"} or evaluation.needs_review:
+        return True
+    risk_review = json.loads(evaluation.risk_review_json or "{}")
+    return bool(
+        risk_review.get("triggered")
+        or risk_review.get("verdict") in {"uncertain", "error", "corrected"}
+    )
+
+
 @app.post("/api/evaluations/{evaluation_id}/review")
 def create_review(
     evaluation_id: int,
     payload: ReviewRequest,
     _user: User = Depends(current_user),
     db: Session = Depends(get_db),
-) -> dict[str, int]:
+) -> dict[str, Any]:
     evaluation = db.get(EvaluationResult, evaluation_id)
     if not evaluation:
         raise HTTPException(status_code=404, detail="评测结果不存在")
+    if (
+        evaluation.review_stage != payload.expected_stage
+        or evaluation.review_revision != payload.expected_review_revision
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "STALE_REVIEW_SNAPSHOT",
+                "message": "审核阶段或修订号已变化，请刷新后重试",
+                "review_stage": evaluation.review_stage,
+                "review_revision": evaluation.review_revision,
+            },
+        )
     correction_data = [item.model_dump() for item in payload.corrections]
     corrected_score = None
     corrected_level = None
@@ -2258,23 +2564,86 @@ def create_review(
         corrected_level = recalculated.get("level")
         if corrected_score is None or corrected_level is None:
             raise HTTPException(status_code=400, detail="当前结果无法自动计算正式等级")
-    review_data = payload.model_dump(exclude={"corrections", "corrected_level"})
+    current_answer = _review_standard_answer(
+        decision=payload.decision,
+        corrected_level=corrected_level,
+        corrected_score=corrected_score,
+        corrections=correction_data,
+    )
+    if payload.expected_stage == "initial":
+        next_stage = (
+            "secondary"
+            if _requires_secondary_review(evaluation, payload.decision)
+            else "completed"
+        )
+    elif payload.expected_stage == "secondary":
+        initial_review = next(
+            (
+                review
+                for review in reversed(evaluation.reviews)
+                if review.stage == "initial"
+            ),
+            None,
+        )
+        if initial_review is None:
+            raise HTTPException(status_code=409, detail="缺少初审记录，不能执行二审")
+        initial_answer = _review_standard_answer(
+            decision=initial_review.decision,
+            corrected_level=initial_review.corrected_level,
+            corrected_score=initial_review.corrected_score,
+            corrections=json.loads(initial_review.corrections_json or "[]"),
+        )
+        next_stage = (
+            "completed" if current_answer == initial_answer else "arbitration"
+        )
+    else:
+        next_stage = "completed"
+
+    next_revision = evaluation.review_revision + 1
+    needs_review = next_stage != "completed" or payload.decision == "rejected"
+    updated = db.execute(
+        update(EvaluationResult)
+        .where(
+            EvaluationResult.id == evaluation_id,
+            EvaluationResult.review_stage == payload.expected_stage,
+            EvaluationResult.review_revision == payload.expected_review_revision,
+        )
+        .values(
+            review_stage=next_stage,
+            review_revision=next_revision,
+            needs_review=needs_review,
+            updated_at=datetime.now(timezone.utc),
+        )
+    )
+    if updated.rowcount != 1:
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "STALE_REVIEW_SNAPSHOT",
+                "message": "审核记录已被其他操作更新，请刷新后重试",
+            },
+        )
     review = HumanReview(
         evaluation_id=evaluation_id,
+        stage=payload.expected_stage,
+        reviewer_name=payload.reviewer_name,
+        decision=payload.decision,
+        note=payload.note,
         corrected_level=corrected_level,
         corrected_score=corrected_score,
         corrections_json=json.dumps(correction_data, ensure_ascii=False),
-        **review_data,
     )
-    if payload.decision in {"approved", "corrected"}:
-        evaluation.needs_review = False
-    else:
-        evaluation.needs_review = True
-    evaluation.updated_at = datetime.now(timezone.utc)
-    db.add(review)
+    evaluation.reviews.append(review)
     db.commit()
     db.refresh(review)
-    return {"id": review.id}
+    return {
+        "id": review.id,
+        "stage": review.stage,
+        "review_stage": next_stage,
+        "review_revision": next_revision,
+        "completed": next_stage == "completed",
+    }
 
 
 def _sample_set_summary(sample_set: SampleSet) -> dict[str, Any]:
@@ -2697,6 +3066,7 @@ def _regression_summary(run: PromptRegressionRun) -> dict[str, Any]:
             {
                 "baseline_strategy_bundle_id": run.baseline_strategy_bundle_id,
                 "candidate_strategy_bundle_id": run.candidate_strategy_bundle_id,
+                "trigger_prompt_id": run.trigger_prompt_id,
                 "sample_set_version": run.sample_set_version,
                 "metric_rules_version": run.metric_rules_version,
                 "metric_rules": json.loads(run.metric_rules_json or "{}"),
@@ -2723,6 +3093,41 @@ def list_prompt_regressions(
         .limit(min(limit, 200))
     ).all()
     return {"items": [_regression_summary(run) for run in runs]}
+
+
+@app.get("/api/strategy-bundles")
+def list_strategy_bundles(
+    prompt_b_id: int | None = None,
+    _user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    statement = select(StrategyBundle).order_by(
+        StrategyBundle.created_at.desc(), StrategyBundle.id.desc()
+    )
+    if prompt_b_id is not None:
+        prompt = db.get(PromptVersion, prompt_b_id)
+        if not prompt or prompt.stage != "B":
+            raise HTTPException(status_code=404, detail="B 阶段提示词不存在")
+        statement = statement.where(
+            StrategyBundle.prompt_b_version == prompt.version
+        )
+    bundles = db.scalars(statement.limit(200)).all()
+    return {
+        "items": [
+            {
+                "id": bundle.id,
+                "model_id": bundle.model_id,
+                "prompt_a_version": bundle.prompt_a_version,
+                "prompt_b_version": bundle.prompt_b_version,
+                "rubric_version": bundle.rubric_version,
+                "engine_version": bundle.engine_version,
+                "risk_review_version": bundle.risk_review_version,
+                "sampling_policy_revision": bundle.sampling_policy_revision,
+                "created_at": bundle.created_at,
+            }
+            for bundle in bundles
+        ]
+    }
 
 
 def _paired_metric_rules(payload: PairedRegressionCreateRequest) -> dict[str, Any]:
@@ -2887,6 +3292,14 @@ def create_paired_regression(
             status_code=400,
             detail=str(exc),
         ) from exc
+    if payload.trigger_prompt_id is not None and payload.trigger_prompt_id not in {
+        candidate_prompt_a.id,
+        candidate_prompt_b.id,
+    }:
+        raise HTTPException(
+            status_code=400,
+            detail="发布门禁提示词不属于候选 StrategyBundle",
+        )
 
     requested_ids = [sample.sample_item_id for sample in payload.samples]
     sample_items = db.scalars(
@@ -2971,6 +3384,7 @@ def create_paired_regression(
     run = PromptRegressionRun(
         name=payload.name.strip(),
         sample_set_id=sample_set.id,
+        trigger_prompt_id=payload.trigger_prompt_id,
         prompt_a_id=candidate_prompt_a.id,
         prompt_b_id=candidate_prompt_b.id,
         regression_mode="paired",

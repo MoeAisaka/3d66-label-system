@@ -376,6 +376,25 @@ async def run_prompt_optimization(run_id: int) -> None:
             raise ValueError("安全限额内至少需要一张带有人工纠错的图片")
         run.corrected_count = corrected_count
         db.commit()
+        holdout_set = set(holdout_ids)
+        sample_items = [
+            {
+                "sample_item_id": item.id,
+                "role": record["sample_role"],
+            }
+            for item, record in selected
+        ]
+        sample_items.extend(
+            {
+                "sample_item_id": item.id,
+                "role": "blind_holdout",
+            }
+            for item in sample_set.items
+            if item.asset_id in holdout_set
+        )
+        sample_items.sort(
+            key=lambda item: (item["role"], item["sample_item_id"])
+        )
         samples = []
         for item, record, image_path in bounded_records:
             sample_text = json.dumps(
@@ -443,6 +462,7 @@ async def run_prompt_optimization(run_id: int) -> None:
             "omitted_image_count": omitted_image_count,
             "blind_holdout_count": len(holdout_ids),
             "blind_holdout_asset_ids": holdout_ids,
+            "sample_items": sample_items,
             "regression_roles": [
                 "target_error",
                 "stable_control",
@@ -501,6 +521,7 @@ async def run_prompt_optimization(run_id: int) -> None:
                     "control_count": len(selected) - corrected_count,
                     "blind_holdout_count": len(holdout_ids),
                     "blind_holdout_asset_ids": holdout_ids,
+                    "sample_items": sample_items,
                     "regression_roles": [
                         "target_error",
                         "stable_control",
