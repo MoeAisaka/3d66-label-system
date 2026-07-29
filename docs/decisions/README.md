@@ -26,7 +26,9 @@
 | [0011](0011-p0e-e3-canary-persistence-api.md) | Accepted | P0-E E3 金丝雀持久化、认证 API、幂等与乐观锁 |
 | [0012](0012-macos-keychain-credentials.md) | Accepted | macOS Keychain 与跨平台版本化凭据引用 |
 | [0013](0013-macbook-deployment-lifecycle.md) | Accepted | MacBook 首次安装、诊断、前台启动与脱敏灾备生命周期 |
-| [0014](0014-staged-human-review-and-prompt-release-gate.md) | Accepted | 分阶段人工审核、历史纠偏预览与提示词发布前门禁 |
+| [0014](0014-staged-human-review-and-prompt-release-gate.md) | Superseded | 分阶段人工审核、历史纠偏预览与提示词发布前门禁 |
+| [0015](0015-material-packages-panel-consensus-and-dual-pipeline.md) | Accepted | 素材包、初审组共识与实验台—生产平台双流水线 |
+| [0016](0016-safe-automation-feedback-and-model-benchmark.md) | Accepted | 安全自动优化、不可变生产回流与三模型横评 |
 
 ## 新增 ADR 的规则
 
