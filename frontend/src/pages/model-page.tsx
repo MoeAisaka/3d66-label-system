@@ -1,5 +1,5 @@
 import { useEffect, useState, type ReactNode } from "react"
-import { CheckCircle, FloppyDisk, Key, PlugsConnected, SlidersHorizontal, WarningCircle } from "@phosphor-icons/react"
+import { CheckCircle, FloppyDisk, Key, PlugsConnected, Plus, SlidersHorizontal, WarningCircle } from "@phosphor-icons/react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { toast } from "sonner"
 
@@ -8,14 +8,40 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { api, jsonBody } from "@/lib/api"
-import type { ModelConfig, OptimizerConfig, ReviewWorkflowPolicy, SamplingPolicy } from "@/lib/types"
+import type { ModelConfig, OptimizerConfig, ReviewWorkflowPolicy, SamplingPolicy, User } from "@/lib/types"
 
-type FormState = Omit<ModelConfig, "id" | "provider" | "api_key_mask" | "updated_at" | "has_api_key"> & { api_key: string }
+type FormState = Omit<ModelConfig, "id" | "provider" | "api_key_mask" | "updated_at" | "has_api_key" | "active"> & { api_key: string }
 type OptimizerFormState = Omit<OptimizerConfig, "id" | "provider" | "api_key_mask" | "updated_at" | "has_api_key"> & { api_key: string }
+type BenchmarkConfigDraft = Omit<FormState, "benchmark_enabled"> & {
+  provider: "openai" | "doubao"
+  benchmark_enabled: boolean
+}
+
+const emptyBenchmarkConfig: BenchmarkConfigDraft = {
+  provider: "openai",
+  name: "",
+  base_url: "",
+  api_path: "/chat/completions",
+  model_id: "",
+  api_key: "",
+  temperature: 0.1,
+  max_tokens: 4096,
+  timeout_seconds: 120,
+  max_retries: 1,
+  max_concurrency: 1,
+  structured_output: true,
+  high_risk_review_enabled: false,
+  input_micros_per_million_tokens: 0,
+  output_micros_per_million_tokens: 0,
+  max_input_tokens: 0,
+  benchmark_enabled: false,
+}
 
 export function ModelPage() {
   const queryClient = useQueryClient()
+  const me = useQuery({ queryKey: ["me"], queryFn: () => api<User>("/api/auth/me") })
   const config = useQuery({ queryKey: ["model-config"], queryFn: () => api<ModelConfig>("/api/model-config") })
+  const modelConfigs = useQuery({ queryKey: ["model-configs"], queryFn: () => api<{ items: ModelConfig[] }>("/api/model-configs") })
   const optimizerConfig = useQuery({ queryKey: ["optimizer-config"], queryFn: () => api<OptimizerConfig>("/api/optimizer-config") })
   const samplingPolicy = useQuery({ queryKey: ["sampling-policy"], queryFn: () => api<SamplingPolicy>("/api/sampling-policy") })
   const reviewWorkflowPolicy = useQuery({ queryKey: ["review-workflow-policy"], queryFn: () => api<ReviewWorkflowPolicy>("/api/review-workflow-policy") })
@@ -23,9 +49,12 @@ export function ModelPage() {
   const [optimizerForm, setOptimizerForm] = useState<OptimizerFormState | null>(null)
   const [samplingForm, setSamplingForm] = useState<SamplingPolicy | null>(null)
   const [reviewWorkflowForm, setReviewWorkflowForm] = useState<ReviewWorkflowPolicy | null>(null)
+  const [benchmarkForm, setBenchmarkForm] = useState<BenchmarkConfigDraft>(emptyBenchmarkConfig)
+  const [mainBenchmarkConfirmed, setMainBenchmarkConfirmed] = useState(false)
+  const [benchmarkCreateConfirmed, setBenchmarkCreateConfirmed] = useState(false)
   useEffect(() => {
     if (!config.data) return
-    const { id: _id, provider: _provider, api_key_mask: _mask, updated_at: _updated, has_api_key: _hasApiKey, ...rest } = config.data
+    const { id: _id, provider: _provider, api_key_mask: _mask, updated_at: _updated, has_api_key: _hasApiKey, active: _active, ...rest } = config.data
     setForm({ ...rest, api_key: "" })
   }, [config.data])
   useEffect(() => {
@@ -48,6 +77,7 @@ export function ModelPage() {
         queryClient.invalidateQueries({ queryKey: ["dashboard"] }),
       ])
       setForm((current) => current ? { ...current, api_key: "" } : current)
+      setMainBenchmarkConfirmed(false)
       toast.success("模型配置已保存")
     },
     onError: (error) => toast.error(error.message),
@@ -69,6 +99,19 @@ export function ModelPage() {
   const testOptimizer = useMutation({
     mutationFn: () => api<{ ok: boolean; message: string }>("/api/optimizer-config/test", { method: "POST" }),
     onSuccess: (data) => toast.success(data.message || "SOL 连接成功"),
+    onError: (error) => toast.error(error.message),
+  })
+  const createBenchmarkConfig = useMutation({
+    mutationFn: () => api<ModelConfig>("/api/model-configs", {
+      method: "POST",
+      ...jsonBody(benchmarkForm),
+    }),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["model-configs"] })
+      setBenchmarkForm(emptyBenchmarkConfig)
+      setBenchmarkCreateConfirmed(false)
+      toast.success("横评模型配置已创建")
+    },
     onError: (error) => toast.error(error.message),
   })
   const saveSampling = useMutation({
@@ -112,16 +155,32 @@ export function ModelPage() {
     setReviewWorkflowForm((current) => current ? { ...current, initial_reviewers: initialReviewers } : current)
   }
 
+  function updateBenchmark<K extends keyof BenchmarkConfigDraft>(key: K, value: BenchmarkConfigDraft[K]) {
+    setBenchmarkForm((current) => ({ ...current, [key]: value }))
+  }
+
+  if (me.data && !me.data.is_admin) {
+    return (
+      <>
+        <PageHeader index="06" title="模型配置" description="模型端点、计价与密钥只能由管理员修改；当前账号仅可查看安全状态。" />
+        <div className="mx-auto max-w-[1180px] px-5 py-8 md:px-8 lg:px-10">
+          <div className="border-y border-[var(--line-strong)] bg-white px-5 py-5 text-sm text-[var(--muted)]">当前账号无配置权限。API Key、完整凭据引用和原始连接异常不会显示在页面中。</div>
+          <div className="mt-6 divide-y divide-[var(--line)] border-y border-[var(--line-strong)] bg-white">{(modelConfigs.data?.items ?? []).map((item) => <div key={item.id} className="grid gap-2 px-5 py-4 md:grid-cols-[1fr_auto_auto]"><div><strong>{item.name}</strong><p className="font-data mt-1 text-xs text-[var(--muted)]">{item.model_id}</p></div><Badge>{item.has_api_key ? "密钥已配置" : "未配置密钥"}</Badge><Badge tone={item.benchmark_enabled ? "warning" : "neutral"}>{item.benchmark_enabled ? "横评已启用" : "横评关闭"}</Badge></div>)}</div>
+        </div>
+      </>
+    )
+  }
+
   return (
     <>
       <PageHeader
         index="06"
         title="模型配置"
-        description="豆包负责批量评测，SOL 负责根据人工校验样本诊断提示词。两套 API Key 分开保存，只写入当前 Windows 电脑。"
+        description="主评测模型、提示词优化模型与横评模型分别配置。API Key 仅写入当前电脑的系统凭据库，页面和 API 不返回明文。"
         actions={
           <>
             <Button variant="secondary" onClick={() => test.mutate()} disabled={!config.data?.has_api_key || test.isPending}><PlugsConnected />测试豆包连接</Button>
-            <Button onClick={() => save.mutate()} disabled={!form || save.isPending}><FloppyDisk />保存豆包配置</Button>
+            <Button onClick={() => save.mutate()} disabled={!form || save.isPending || (form.benchmark_enabled && !mainBenchmarkConfirmed)}><FloppyDisk />保存豆包配置</Button>
           </>
         }
       />
@@ -166,8 +225,13 @@ export function ModelPage() {
               <Field label="超时（秒）"><Input type="number" min="10" value={form.timeout_seconds} onChange={(event) => update("timeout_seconds", Number(event.target.value))} /></Field>
               <Field label="失败重试"><Input type="number" min="0" max="5" value={form.max_retries} onChange={(event) => update("max_retries", Number(event.target.value))} /></Field>
               <Field label="最大并发"><Input type="number" min="1" max="10" value={form.max_concurrency} onChange={(event) => update("max_concurrency", Number(event.target.value))} /></Field>
+              <Field label="单次输入上限 Token"><Input type="number" min="0" value={form.max_input_tokens} onChange={(event) => update("max_input_tokens", Number(event.target.value))} /></Field>
+              <Field label="输入计价 / 百万 Token（micros）"><Input type="number" min="0" value={form.input_micros_per_million_tokens} onChange={(event) => update("input_micros_per_million_tokens", Number(event.target.value))} /></Field>
+              <Field label="输出计价 / 百万 Token（micros）"><Input type="number" min="0" value={form.output_micros_per_million_tokens} onChange={(event) => update("output_micros_per_million_tokens", Number(event.target.value))} /></Field>
               <label className="flex min-h-20 items-center justify-between gap-4 border border-[var(--line)] bg-[#fafbf8] px-4"><span><span className="block text-sm font-semibold">结构化输出</span><span className="mt-1 block text-xs text-[var(--muted)]">仍保留服务端 JSON 校验</span></span><input type="checkbox" checked={form.structured_output} onChange={(event) => update("structured_output", event.target.checked)} className="size-5 accent-[#11130f]" /></label>
               <label className="flex min-h-20 items-center justify-between gap-4 border border-[var(--line)] bg-[#fafbf8] px-4 sm:col-span-2 xl:col-span-3"><span><span className="block text-sm font-semibold">高风险结果自动复核</span><span className="mt-1 block text-xs leading-5 text-[var(--muted)]">仅在专业摄影、L4/L5或出现5级维度时增加一次短调用；复核只能保持或降级，不会抬高分数。</span></span><input type="checkbox" checked={form.high_risk_review_enabled} onChange={(event) => update("high_risk_review_enabled", event.target.checked)} className="size-5 shrink-0 accent-[#11130f]" /></label>
+              <label className="flex min-h-20 items-center justify-between gap-4 border border-[#e8c876] bg-[#fff9e9] px-4 sm:col-span-2 xl:col-span-3"><span><span className="block text-sm font-semibold">允许参与真实横评</span><span className="mt-1 block text-xs leading-5 text-[#6f5513]">必须同时配置密钥、输入上限和非零计价；此开关不等于自动运行。</span></span><input type="checkbox" checked={form.benchmark_enabled} onChange={(event) => { update("benchmark_enabled", event.target.checked); setMainBenchmarkConfirmed(false) }} className="size-5 shrink-0" /></label>
+              {form.benchmark_enabled && <label className="flex items-start gap-3 border-y border-[#c55b52] bg-[#fff0ee] px-4 py-3 text-xs font-semibold leading-5 text-[#7d201a] sm:col-span-2 xl:col-span-3"><input className="mt-1 size-4" type="checkbox" checked={mainBenchmarkConfirmed} onChange={(event) => setMainBenchmarkConfirmed(event.target.checked)} /><span>确认该模型的端点、输入上限和计价已由管理员核对；真实横评仍需单独冻结预算。</span></label>}
             </div>
           )}
         </section>
@@ -187,12 +251,37 @@ export function ModelPage() {
               <div className="md:col-span-2"><Field label="OpenAI API Key"><Input type="password" value={optimizerForm.api_key} onChange={(event) => updateOptimizer("api_key", event.target.value)} placeholder={optimizerConfig.data?.has_api_key ? "留空以保留当前密钥" : "请输入可调用 SOL 的 API Key"} autoComplete="new-password" /></Field></div>
               <Field label="最大输出 Token"><Input type="number" min="512" value={optimizerForm.max_tokens} onChange={(event) => updateOptimizer("max_tokens", Number(event.target.value))} /></Field>
               <Field label="超时（秒）"><Input type="number" min="10" value={optimizerForm.timeout_seconds} onChange={(event) => updateOptimizer("timeout_seconds", Number(event.target.value))} /></Field>
+              <Field label="单次输入上限 Token"><Input type="number" min="0" value={optimizerForm.max_input_tokens} onChange={(event) => updateOptimizer("max_input_tokens", Number(event.target.value))} /></Field>
+              <Field label="输入计价 / 百万 Token（micros）"><Input type="number" min="0" value={optimizerForm.input_micros_per_million_tokens} onChange={(event) => updateOptimizer("input_micros_per_million_tokens", Number(event.target.value))} /></Field>
+              <Field label="输出计价 / 百万 Token（micros）"><Input type="number" min="0" value={optimizerForm.output_micros_per_million_tokens} onChange={(event) => updateOptimizer("output_micros_per_million_tokens", Number(event.target.value))} /></Field>
             </div> : <div className="h-44 animate-pulse bg-[#f1f3ef]" />}
           </div>
           <div className="flex flex-wrap items-center justify-between gap-3 px-5 py-4 lg:px-7">
             <div className="flex items-center gap-2">{optimizerConfig.data?.has_api_key ? <CheckCircle size={20} weight="fill" className="text-[#2f6f48]" /> : <WarningCircle size={20} className="text-[#a85a0a]" />}<span className="text-sm font-semibold">{optimizerConfig.data?.has_api_key ? "当前电脑已保存 SOL 密钥" : "尚未保存 SOL 密钥"}</span></div>
             <div className="flex gap-2"><Button variant="secondary" onClick={() => testOptimizer.mutate()} disabled={!optimizerConfig.data?.has_api_key || testOptimizer.isPending}><PlugsConnected />测试 SOL 连接</Button><Button onClick={() => saveOptimizer.mutate()} disabled={!optimizerForm || saveOptimizer.isPending}><FloppyDisk />保存 SOL 配置</Button></div>
           </div>
+        </section>
+
+        <section className="mt-10 border-y border-[var(--line-strong)] bg-white">
+          <div className="grid gap-7 border-b border-[var(--line)] px-5 py-6 lg:grid-cols-[230px_1fr] lg:px-7">
+            <div><div className="flex size-10 items-center justify-center rounded-[4px] border border-[var(--line-strong)]"><Plus size={21} /></div><h2 className="font-editorial mt-5 text-2xl font-bold">新增横评模型</h2><p className="mt-2 text-sm leading-6 text-[var(--muted)]">每个配置使用独立系统凭据引用。默认不启用，只有显式确认后才进入真实横评可选项。</p></div>
+            <div className="grid gap-5 md:grid-cols-2">
+              <Field label="配置名称"><Input value={benchmarkForm.name} onChange={(event) => updateBenchmark("name", event.target.value)} /></Field>
+              <Field label="模型 ID"><Input value={benchmarkForm.model_id} onChange={(event) => updateBenchmark("model_id", event.target.value)} /></Field>
+              <Field label="协议"><select className="h-11 w-full rounded-[4px] border border-[var(--line-strong)] bg-white px-3 text-sm" value={benchmarkForm.provider} onChange={(event) => updateBenchmark("provider", event.target.value as "openai" | "doubao")}><option value="openai">OpenAI-compatible</option><option value="doubao">Doubao-compatible</option></select></Field>
+              <Field label="API 路径"><Input value={benchmarkForm.api_path} onChange={(event) => updateBenchmark("api_path", event.target.value)} /></Field>
+              <div className="md:col-span-2"><Field label="Base URL"><Input value={benchmarkForm.base_url} onChange={(event) => updateBenchmark("base_url", event.target.value)} /></Field></div>
+              <div className="md:col-span-2"><Field label="API Key"><Input type="password" value={benchmarkForm.api_key} onChange={(event) => updateBenchmark("api_key", event.target.value)} autoComplete="new-password" /></Field></div>
+              <Field label="最大输入 Token"><Input type="number" min="1" value={benchmarkForm.max_input_tokens} onChange={(event) => updateBenchmark("max_input_tokens", Number(event.target.value))} /></Field>
+              <Field label="最大输出 Token"><Input type="number" min="128" value={benchmarkForm.max_tokens} onChange={(event) => updateBenchmark("max_tokens", Number(event.target.value))} /></Field>
+              <Field label="输入计价 / 百万 Token"><Input type="number" min="1" value={benchmarkForm.input_micros_per_million_tokens} onChange={(event) => updateBenchmark("input_micros_per_million_tokens", Number(event.target.value))} /></Field>
+              <Field label="输出计价 / 百万 Token"><Input type="number" min="1" value={benchmarkForm.output_micros_per_million_tokens} onChange={(event) => updateBenchmark("output_micros_per_million_tokens", Number(event.target.value))} /></Field>
+              <label className="flex items-center justify-between gap-4 border-y border-[#e8c876] bg-[#fff9e9] px-4 py-3 text-sm font-semibold md:col-span-2"><span>允许参与真实横评</span><input type="checkbox" checked={benchmarkForm.benchmark_enabled} onChange={(event) => { updateBenchmark("benchmark_enabled", event.target.checked); setBenchmarkCreateConfirmed(false) }} /></label>
+              {benchmarkForm.benchmark_enabled && <label className="flex items-start gap-3 border-y border-[#c55b52] bg-[#fff0ee] px-4 py-3 text-xs font-semibold leading-5 text-[#7d201a] md:col-span-2"><input className="mt-1 size-4" type="checkbox" checked={benchmarkCreateConfirmed} onChange={(event) => setBenchmarkCreateConfirmed(event.target.checked)} /><span>确认端点、模型、输入上限和计价均已核对。创建后仍不会自动执行。</span></label>}
+            </div>
+          </div>
+          <div className="flex flex-wrap items-center justify-between gap-3 px-5 py-4 lg:px-7"><p className="text-xs text-[var(--muted)]">已配置 {(modelConfigs.data?.items ?? []).filter((item) => !item.active).length} 个独立横评模型。</p><Button onClick={() => createBenchmarkConfig.mutate()} disabled={createBenchmarkConfig.isPending || !benchmarkForm.name || !benchmarkForm.base_url || !benchmarkForm.model_id || !benchmarkForm.api_key || !benchmarkForm.benchmark_enabled || !benchmarkCreateConfirmed || benchmarkForm.max_input_tokens <= 0 || benchmarkForm.input_micros_per_million_tokens <= 0 || benchmarkForm.output_micros_per_million_tokens <= 0}><Plus />创建横评配置</Button></div>
+          <div className="divide-y divide-[var(--line)] border-t border-[var(--line)]">{(modelConfigs.data?.items ?? []).filter((item) => !item.active).map((item) => <div key={item.id} className="grid gap-2 px-5 py-4 text-sm md:grid-cols-[1fr_auto_auto_auto]"><div><strong>{item.name}</strong><p className="font-data mt-1 text-xs text-[var(--muted)]">{item.model_id}</p></div><Badge>{item.has_api_key ? "密钥已配置" : "未配置密钥"}</Badge><Badge>{item.max_input_tokens} input</Badge><Badge tone={item.benchmark_enabled ? "warning" : "neutral"}>{item.benchmark_enabled ? "横评已启用" : "横评关闭"}</Badge></div>)}</div>
         </section>
 
         <section className="mt-10 grid gap-7 border-y border-[var(--line-strong)] bg-white px-5 py-6 lg:grid-cols-[230px_1fr] lg:px-7">
@@ -257,7 +346,7 @@ export function ModelPage() {
           ) : <div className="h-36 animate-pulse bg-[#f1f3ef]" />}
         </section>
 
-        <div className="mt-8 flex justify-end"><Button onClick={() => save.mutate()} disabled={!form || save.isPending}><FloppyDisk />保存豆包配置</Button></div>
+        <div className="mt-8 flex justify-end"><Button onClick={() => save.mutate()} disabled={!form || save.isPending || (form.benchmark_enabled && !mainBenchmarkConfirmed)}><FloppyDisk />保存豆包配置</Button></div>
       </div>
     </>
   )

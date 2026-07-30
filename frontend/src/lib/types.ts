@@ -2,6 +2,7 @@ export type User = {
   id: number
   username: string
   display_name: string
+  is_admin: boolean
 }
 
 export type CanaryRunState =
@@ -198,12 +199,20 @@ export type ModelConfig = {
   max_concurrency: number
   structured_output: boolean
   high_risk_review_enabled: boolean
+  input_micros_per_million_tokens: number
+  output_micros_per_million_tokens: number
+  max_input_tokens: number
+  benchmark_enabled: boolean
+  active: boolean
   has_api_key: boolean
   api_key_mask: string
   updated_at: string
 }
 
-export type OptimizerConfig = Omit<ModelConfig, "max_concurrency">
+export type OptimizerConfig = Omit<
+  ModelConfig,
+  "max_concurrency" | "high_risk_review_enabled" | "benchmark_enabled" | "active"
+>
 
 export type SamplingPolicy = {
   id: number
@@ -317,7 +326,14 @@ export type AutomationPolicy = {
   last_triggered_at: string | null
   updated_by: string
   updated_at: string
-  real_model_calls_enabled: false
+  budget: {
+    spent_micros: number
+    reserved_micros: number
+    used_micros: number
+    remaining_micros: number
+    limit_micros: number
+  }
+  real_model_calls_enabled: boolean
   auto_publish_enabled: false
 }
 
@@ -329,6 +345,8 @@ export type AutomationRun = {
   status:
     | "planned"
     | "awaiting_executor"
+    | "processing"
+    | "succeeded"
     | "running"
     | "awaiting_release_review"
     | "failed"
@@ -341,6 +359,10 @@ export type AutomationRun = {
   candidate_count: number
   estimated_cost_micros: number
   actual_cost_micros: number
+  input_tokens: number | null
+  output_tokens: number | null
+  total_tokens: number | null
+  retryable: boolean
   error_message: string
   created_by: string
   created_at: string
@@ -369,6 +391,7 @@ export type BenchmarkVariant = {
   model_key: "sol" | "terra" | "luna"
   provider: string
   model_id: string
+  model_config_id: number | null
   pricing: {
     input_micros_per_million_tokens: number
     output_micros_per_million_tokens: number
@@ -388,6 +411,10 @@ export type BenchmarkVariant = {
     retry_stability?: number
   }
   error_message: string
+  input_tokens: number | null
+  output_tokens: number | null
+  total_tokens: number | null
+  actual_cost_micros: number
 }
 
 export type ModelBenchmark = {
@@ -395,13 +422,16 @@ export type ModelBenchmark = {
   experiment_key: string
   name: string
   status: "draft" | "running" | "completed" | "failed" | "cancelled"
-  execution_mode: "disabled" | "test"
+  execution_mode: "disabled" | "test" | "real"
   cohort_hash: string
   snapshot_hash: string
   frozen_snapshot: {
     cohort_asset_ids: number[]
     strategy_bundle: Record<string, unknown>
     agent_plan: Record<string, unknown>
+    samples?: Array<Record<string, unknown>>
+    predicted_cost_micros?: number
+    max_round_cost_micros?: number
   }
   quality_gate: Record<string, unknown>
   decision: {
@@ -414,7 +444,9 @@ export type ModelBenchmark = {
   created_at: string
   started_at: string | null
   finished_at: string | null
-  real_model_calls_enabled: false
+  max_round_cost_micros: number
+  actual_cost_micros: number
+  real_model_calls_enabled: boolean
   variants: BenchmarkVariant[]
 }
 

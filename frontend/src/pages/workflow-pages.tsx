@@ -1,4 +1,4 @@
-import { ArrowRight, Clock, Prohibit } from "@phosphor-icons/react"
+import { ArrowRight, Clock, Play, Prohibit, ShieldWarning } from "@phosphor-icons/react"
 import { useEffect, useState, type ReactNode } from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { Link } from "react-router-dom"
@@ -14,16 +14,29 @@ import type {
   AutomationPolicy,
   AutomationRun,
   ModelBenchmark,
+  ModelConfig,
   OptimizationCase,
   ProductionFeedbackEvent,
   PromptMetricSnapshot,
   PromptVersion,
   RegressionSummary,
   StrategyBundleSummary,
+  User,
 } from "@/lib/types"
 
 const percent = (value: number | null | undefined) =>
   value == null ? "—" : `${(value * 100).toFixed(1)}%`
+
+type BenchmarkForm = {
+  experimentKey: string
+  name: string
+  executionMode: "test" | "real"
+  cohortAssetIds: string
+  strategyBundleId: number
+  modelConfigIds: Record<"sol" | "terra" | "luna", number>
+  maxRoundCostMicros: number
+  qualityGateApproved: boolean
+}
 
 export function OptimizationCasesPage() {
   const cases = useQuery({
@@ -68,6 +81,8 @@ export function AutomationControlPage() {
     queryFn: () => api<{ items: AutomationRun[] }>("/api/automation-runs?limit=100"),
   })
   const [draft, setDraft] = useState<AutomationPolicy | null>(null)
+  const [riskConfirmed, setRiskConfirmed] = useState(false)
+  const me = useQuery({ queryKey: ["me"], queryFn: () => api<User>("/api/auth/me") })
   useEffect(() => {
     if (policy.data) setDraft(policy.data)
   }, [policy.data])
@@ -91,6 +106,7 @@ export function AutomationControlPage() {
       setDraft(saved)
       await queryClient.invalidateQueries({ queryKey: ["automation-policy"] })
       toast.success("自动优化策略已保存")
+      setRiskConfirmed(false)
     },
     onError: (error) => toast.error(error.message),
   })
@@ -112,7 +128,9 @@ export function AutomationControlPage() {
       <div className="mx-auto grid max-w-[1540px] gap-6 px-5 py-8 md:px-8 lg:grid-cols-[380px_minmax(0,1fr)] lg:px-10">
         <section className="border-y border-[var(--line-strong)] bg-white p-5">
           <div className="flex items-center justify-between"><h2 className="font-editorial text-xl font-bold">消费者策略</h2><Badge tone={draft?.enabled ? "active" : "neutral"}>{draft?.enabled ? "已启用" : "已关闭"}</Badge></div>
-          {!draft ? <div className="mt-5 h-64 animate-pulse bg-[#fafbf8]" /> : (
+          {!draft ? <div className="mt-5 h-64 animate-pulse bg-[#fafbf8]" /> : !me.data?.is_admin ? (
+            <p className="mt-5 border-y border-[var(--line)] py-4 text-sm text-[var(--muted)]">当前账号可查看运行与预算，但无权修改执行策略。</p>
+          ) : (
             <div className="mt-5 space-y-4">
               <ToggleLine label="启用自动消费者" checked={draft.enabled} onChange={(enabled) => setDraft({ ...draft, enabled })} />
               <ToggleLine label="安全 dry-run" checked={draft.dry_run} onChange={(dry_run) => setDraft({ ...draft, dry_run })} />
@@ -120,26 +138,30 @@ export function AutomationControlPage() {
               <NumberField label="日预算（微单位）" value={draft.daily_budget_micros} min={0} onChange={(daily_budget_micros) => setDraft({ ...draft, daily_budget_micros })} />
               <NumberField label="冷却秒数" value={draft.cooldown_seconds} min={0} onChange={(cooldown_seconds) => setDraft({ ...draft, cooldown_seconds })} />
               <NumberField label="候选上限" value={draft.max_candidates} min={1} max={5} onChange={(max_candidates) => setDraft({ ...draft, max_candidates })} />
+              <NumberField label="租约秒数" value={draft.lease_seconds} min={30} max={3600} onChange={(lease_seconds) => setDraft({ ...draft, lease_seconds })} />
               <NumberField label="最大尝试次数" value={draft.max_attempts} min={1} max={10} onChange={(max_attempts) => setDraft({ ...draft, max_attempts })} />
-              <div className="rounded-[4px] border border-[#e8c876] bg-[#fff9e9] p-3 text-xs leading-5 text-[#6f5513]">真实模型执行器：未配置。自动发布：永久关闭。非 dry-run 必须先配置正数预算，但仍只会生成待执行计划。</div>
-              <div className="flex gap-2"><Button onClick={() => save.mutate()} disabled={save.isPending}>保存策略</Button><Button variant="secondary" onClick={() => consume.mutate()} disabled={consume.isPending}>立即检查一次</Button></div>
+              <NumberField label="基础退避秒数" value={draft.base_retry_seconds} min={1} max={86400} onChange={(base_retry_seconds) => setDraft({ ...draft, base_retry_seconds })} />
+              <div className="border-y border-[#e8c876] bg-[#fff9e9] px-3 py-3 text-xs leading-5 text-[#6f5513]">{draft.real_model_calls_enabled ? "优化执行器已连接；关闭 dry-run 后将发生真实计费，但只会创建候选草稿和配对回归。" : "优化执行器尚不可用；请先在模型配置中补齐密钥、输入上限和非零计价。"} 自动发布永久关闭。</div>
+              {draft.enabled && !draft.dry_run && <label className="flex items-start gap-3 border-y border-[#c55b52] bg-[#fff0ee] px-3 py-3 text-xs leading-5 text-[#7d201a]"><input className="mt-1 size-4" type="checkbox" checked={riskConfirmed} onChange={(event) => setRiskConfirmed(event.target.checked)} /><span>确认已核对日预算、真实计价和锁定黄金样本；保存后消费者可产生真实模型费用。</span></label>}
+              <div className="flex gap-2"><Button onClick={() => save.mutate()} disabled={save.isPending || (draft.enabled && !draft.dry_run && !riskConfirmed)}>保存策略</Button><Button variant="secondary" onClick={() => consume.mutate()} disabled={consume.isPending}>立即检查一次</Button></div>
             </div>
           )}
         </section>
         <section>
+          {draft && <div className="mb-5 grid grid-cols-2 border-y border-[var(--line-strong)] bg-white sm:grid-cols-4"><Metric label="当日已用" value={String(draft.budget.spent_micros)} /><Metric label="执行预留" value={String(draft.budget.reserved_micros)} /><Metric label="剩余预算" value={String(draft.budget.remaining_micros)} /><Metric label="日上限" value={String(draft.budget.limit_micros)} /></div>}
           <DataTable
             loading={runs.isLoading}
             empty="还没有自动优化运行"
-            headers={["运行", "提示词", "触发", "模式", "状态", "案例 / 候选", "成本", "创建时间"]}
+            headers={["运行", "提示词", "触发", "模式", "状态", "案例 / 候选", "成本 / Token", "失败与重试"]}
             rows={(runs.data?.items ?? []).map((run) => [
               <span key="id" className="font-data">#{run.id}</span>,
               <span key="prompt" className="font-data text-xs">{run.base_prompt_version}</span>,
               <span key="trigger" className="text-xs">{run.trigger_reason}</span>,
-              <Badge key="mode">{run.dry_run ? "dry-run" : "待执行器"}</Badge>,
-              <Badge key="status" tone={run.status === "failed" ? "danger" : run.status === "awaiting_release_review" ? "success" : "neutral"}>{automationStatus(run.status)}</Badge>,
+              <Badge key="mode">{run.dry_run ? "dry-run" : "真实执行"}</Badge>,
+              <Badge key="status" tone={run.status === "failed" ? "danger" : run.status === "succeeded" || run.status === "awaiting_release_review" ? "success" : run.status === "processing" ? "active" : "neutral"}>{automationStatus(run.status)}</Badge>,
               <span key="cases" className="font-data">{run.case_ids.length} / {run.candidate_count}</span>,
-              <span key="cost" className="font-data">{run.actual_cost_micros}</span>,
-              <span key="time" className="font-data text-xs text-[var(--muted)]">{new Date(run.created_at).toLocaleString("zh-CN")}</span>,
+              <span key="cost" className="font-data text-xs">{run.actual_cost_micros} / {run.total_tokens ?? "—"}</span>,
+              <span key="retry" className="text-xs text-[var(--muted)]">{run.error_message ? `${executorError(run.error_message)}${run.retryable ? "，将按策略退避重试" : "，已终止重试"}` : "—"}</span>,
             ])}
           />
         </section>
@@ -149,14 +171,21 @@ export function AutomationControlPage() {
 }
 
 export function ProductionFeedbackPage() {
+  const me = useQuery({ queryKey: ["me"], queryFn: () => api<User>("/api/auth/me") })
   const events = useQuery({
     queryKey: ["production-feedback-events"],
     queryFn: () => api<{ items: ProductionFeedbackEvent[] }>("/api/production-feedback-events?limit=500"),
+  })
+  const authStatus = useQuery({
+    queryKey: ["production-feedback-config-status"],
+    queryFn: () => api<{ configured: boolean; authentication: string; browser_session_accepted: false }>("/api/production-feedback-config-status"),
+    enabled: me.data?.is_admin === true,
   })
   return (
     <>
       <PageHeader index="03.3" title="生产案例回流" description="这里只接收生产系统已落地的最终人工纠偏事件，并幂等映射到实验台优化队列；事件不可变，不写生产数据库，也不自动实装提示词。" />
       <div className="mx-auto max-w-[1540px] px-5 py-8 md:px-8 lg:px-10">
+        <div className="mb-5 flex flex-wrap items-center justify-between gap-3 border-y border-[var(--line-strong)] bg-white px-5 py-4 text-sm"><span className="font-semibold">机器接收鉴权</span><div className="flex gap-2"><Badge tone={authStatus.data?.configured ? "success" : "danger"}>{authStatus.data?.configured ? "专用 Token 已配置" : "未配置，写入关闭"}</Badge><Badge>浏览器会话不可写入</Badge></div></div>
         <DataTable
           loading={events.isLoading}
           empty="还没有生产反馈事件"
@@ -181,25 +210,141 @@ export function ProductionFeedbackPage() {
 }
 
 export function BenchmarkPage() {
+  const queryClient = useQueryClient()
   const benchmarks = useQuery({
     queryKey: ["model-benchmarks"],
     queryFn: () => api<{ items: ModelBenchmark[] }>("/api/model-benchmarks?limit=100"),
   })
+  const me = useQuery({ queryKey: ["me"], queryFn: () => api<User>("/api/auth/me") })
+  const modelConfigs = useQuery({
+    queryKey: ["model-configs"],
+    queryFn: () => api<{ items: ModelConfig[] }>("/api/model-configs"),
+    enabled: me.data?.is_admin === true,
+  })
+  const bundles = useQuery({
+    queryKey: ["strategy-bundles"],
+    queryFn: () => api<{ items: StrategyBundleSummary[] }>("/api/strategy-bundles"),
+    enabled: me.data?.is_admin === true,
+  })
+  const [form, setForm] = useState<BenchmarkForm>({
+    experimentKey: "",
+    name: "",
+    executionMode: "test",
+    cohortAssetIds: "",
+    strategyBundleId: 0,
+    modelConfigIds: { sol: 0, terra: 0, luna: 0 },
+    maxRoundCostMicros: 0,
+    qualityGateApproved: false,
+  })
+  const [createRiskConfirmed, setCreateRiskConfirmed] = useState(false)
+  const [runRiskConfirmedId, setRunRiskConfirmedId] = useState<number | null>(null)
+  useEffect(() => {
+    const firstBundle = bundles.data?.items[0]
+    if (firstBundle) {
+      setForm((current) => current.strategyBundleId ? current : { ...current, strategyBundleId: firstBundle.id })
+    }
+  }, [bundles.data?.items])
+  const eligibleConfigs = (modelConfigs.data?.items ?? []).filter((item) =>
+    item.benchmark_enabled && item.has_api_key && item.max_input_tokens > 0 &&
+    item.input_micros_per_million_tokens > 0 && item.output_micros_per_million_tokens > 0,
+  )
+  const create = useMutation({
+    mutationFn: () => {
+      const cohortAssetIds = Array.from(new Set(
+        form.cohortAssetIds.split(/[\s,，]+/).filter(Boolean).map(Number),
+      )).filter((value) => Number.isInteger(value) && value > 0)
+      return api<ModelBenchmark>("/api/model-benchmarks", {
+        method: "POST",
+        ...jsonBody({
+          experiment_key: form.experimentKey,
+          name: form.name,
+          execution_mode: form.executionMode,
+          cohort_asset_ids: cohortAssetIds,
+          strategy_bundle_id: form.strategyBundleId,
+          variants: (["sol", "terra", "luna"] as const).map((modelKey) => form.executionMode === "real" ? {
+            model_key: modelKey,
+            model_config_id: form.modelConfigIds[modelKey],
+            human_review_cost_micros: 0,
+          } : {
+            model_key: modelKey,
+            provider: "test",
+            model_id: `test-${modelKey}`,
+            input_micros_per_million_tokens: 0,
+            output_micros_per_million_tokens: 0,
+            human_review_cost_micros: 0,
+          }),
+          min_quality_accuracy: 0.9,
+          max_p0_p1_errors: 0,
+          min_retry_stability: 0.95,
+          low_confidence_threshold: 0.7,
+          max_round_cost_micros: form.executionMode === "real" ? form.maxRoundCostMicros : 0,
+          quality_gate_approved: form.executionMode === "real" && form.qualityGateApproved,
+        }),
+      })
+    },
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["model-benchmarks"] })
+      setCreateRiskConfirmed(false)
+      toast.success("横评实验已冻结")
+    },
+    onError: (error) => toast.error(error.message),
+  })
+  const runReal = useMutation({
+    mutationFn: (experimentId: number) => api<ModelBenchmark>(`/api/model-benchmarks/${experimentId}/run-real`, { method: "POST" }),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["model-benchmarks"] })
+      setRunRiskConfirmedId(null)
+      toast.success("真实横评执行完成")
+    },
+    onError: (error) => toast.error(error.message),
+  })
+  const realConfigComplete = (["sol", "terra", "luna"] as const).every((key) => form.modelConfigIds[key] > 0)
+  const cohortComplete = form.cohortAssetIds.split(/[\s,，]+/).some((value) => Number(value) > 0)
+  const canCreate = Boolean(
+    form.experimentKey.trim() && form.name.trim() && form.strategyBundleId > 0 && cohortComplete &&
+    (form.executionMode === "test" || (
+      realConfigComplete && form.maxRoundCostMicros > 0 && form.qualityGateApproved && createRiskConfirmed
+    )),
+  )
   return (
     <>
-      <PageHeader index="05.1" title="Sol / Terra / Luna 横评" description="每次实验冻结同一 cohort、Prompt、Rubric、Engine 与 AgentPlan。当前仅支持关闭或测试替身模式，不会发起真实模型调用；先过质量与 P0/P1 硬门槛，再比较 Pareto 与含人工总成本。" />
+      <PageHeader index="05.1" title="Sol / Terra / Luna 横评" description="每次实验冻结同一 cohort、Prompt、Rubric、Engine 与 AgentPlan。默认使用测试替身；真实模式必须由管理员配置三项服务端模型、质量门和单轮成本上限。" />
       <div className="mx-auto max-w-[1540px] space-y-6 px-5 py-8 md:px-8 lg:px-10">
-        <div className="flex items-center gap-3 border-y border-[#e8c876] bg-[#fff9e9] px-5 py-4 text-sm text-[#6f5513]"><Prohibit />真实横评执行器未配置；页面只展示冻结合同、测试结果和人工生产候选建议。</div>
+        {me.data?.is_admin && <section className="border-y border-[var(--line-strong)] bg-white">
+          <div className="grid gap-5 px-5 py-5 lg:grid-cols-[220px_minmax(0,1fr)]">
+            <div><h2 className="font-editorial text-xl font-bold">冻结新实验</h2><p className="mt-2 text-sm leading-6 text-[var(--muted)]">真实模式不会自动改变生产模型，结果仍需人工决定。</p></div>
+            <div className="space-y-4">
+              <div className="inline-grid grid-cols-2 rounded-[4px] border border-[var(--line-strong)] p-1" role="group" aria-label="执行模式">
+                {(["test", "real"] as const).map((mode) => <button key={mode} type="button" className={`h-9 px-5 text-sm font-bold ${form.executionMode === mode ? "bg-primary" : "bg-white"}`} onClick={() => { setForm({ ...form, executionMode: mode }); setCreateRiskConfirmed(false) }}>{mode === "test" ? "测试替身" : "真实执行"}</button>)}
+              </div>
+              <div className="grid gap-4 md:grid-cols-2">
+                <label className="text-xs font-semibold">实验键<Input className="mt-2" value={form.experimentKey} onChange={(event) => setForm({ ...form, experimentKey: event.target.value })} /></label>
+                <label className="text-xs font-semibold">实验名称<Input className="mt-2" value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} /></label>
+                <label className="text-xs font-semibold">素材 ID<Input className="mt-2" value={form.cohortAssetIds} onChange={(event) => setForm({ ...form, cohortAssetIds: event.target.value })} placeholder="例如：12, 18, 27" /></label>
+                <label className="text-xs font-semibold">StrategyBundle<select className="mt-2 h-11 w-full rounded-[4px] border border-[var(--line-strong)] bg-white px-3 text-sm" value={form.strategyBundleId} onChange={(event) => setForm({ ...form, strategyBundleId: Number(event.target.value) })}><option value={0}>请选择冻结策略</option>{(bundles.data?.items ?? []).map((bundle) => <option key={bundle.id} value={bundle.id}>#{bundle.id} · {bundle.model_id} · {bundle.prompt_a_version}/{bundle.prompt_b_version ?? "—"}</option>)}</select></label>
+              </div>
+              {form.executionMode === "real" && <div className="space-y-4 border-y border-[#e8c876] bg-[#fff9e9] px-4 py-4">
+                <div className="grid gap-4 md:grid-cols-3">{(["sol", "terra", "luna"] as const).map((key) => <label key={key} className="text-xs font-semibold uppercase">{key}<select className="mt-2 h-11 w-full rounded-[4px] border border-[var(--line-strong)] bg-white px-3 text-sm normal-case" value={form.modelConfigIds[key]} onChange={(event) => setForm({ ...form, modelConfigIds: { ...form.modelConfigIds, [key]: Number(event.target.value) } })}><option value={0}>选择已启用配置</option>{eligibleConfigs.map((config) => <option key={config.id} value={config.id}>{config.name} · {config.model_id}</option>)}</select></label>)}</div>
+                <label className="block text-xs font-semibold">单轮成本上限（micros）<Input className="mt-2 max-w-xs" type="number" min="1" value={form.maxRoundCostMicros} onChange={(event) => setForm({ ...form, maxRoundCostMicros: Number(event.target.value) })} /></label>
+                <label className="flex items-start gap-3 text-xs leading-5"><input className="mt-1 size-4" type="checkbox" checked={form.qualityGateApproved} onChange={(event) => setForm({ ...form, qualityGateApproved: event.target.checked })} /><span>确认该冻结组合已完成质量门审查；服务端仍会先验证冻结哈希、版本和预测成本。</span></label>
+                <label className="flex items-start gap-3 text-xs font-semibold leading-5 text-[#7d201a]"><input className="mt-1 size-4" type="checkbox" checked={createRiskConfirmed} onChange={(event) => setCreateRiskConfirmed(event.target.checked)} /><span>确认创建的是可产生真实模型费用的实验，且不会自动扩预算或切换生产模型。</span></label>
+              </div>}
+              <Button onClick={() => create.mutate()} disabled={!canCreate || create.isPending}><ShieldWarning />冻结实验</Button>
+            </div>
+          </div>
+        </section>}
+        {!me.data?.is_admin && <div className="flex items-center gap-3 border-y border-[var(--line-strong)] bg-white px-5 py-4 text-sm text-[var(--muted)]"><Prohibit />当前账号可查看冻结实验与结果，但无权配置或运行真实横评。</div>}
         {(benchmarks.data?.items ?? []).map((experiment) => (
           <section key={experiment.id} className="border-y border-[var(--line-strong)] bg-white">
             <div className="flex flex-wrap items-start justify-between gap-3 border-b border-[var(--line)] px-5 py-4">
               <div><h2 className="font-editorial text-xl font-bold">{experiment.name}</h2><p className="font-data mt-1 text-xs text-[var(--muted)]">{experiment.experiment_key} · cohort {experiment.frozen_snapshot.cohort_asset_ids.length} · {experiment.snapshot_hash.slice(0, 12)}</p></div>
-              <div className="flex gap-2"><Badge>{experiment.execution_mode === "test" ? "测试替身" : "未启用"}</Badge><Badge tone={experiment.status === "completed" ? "success" : experiment.status === "failed" ? "danger" : "neutral"}>{benchmarkStatus(experiment.status)}</Badge></div>
+              <div className="flex gap-2"><Badge tone={experiment.execution_mode === "real" ? "warning" : "neutral"}>{experiment.execution_mode === "real" ? "真实执行" : experiment.execution_mode === "test" ? "测试替身" : "未启用"}</Badge><Badge tone={experiment.status === "completed" ? "success" : experiment.status === "failed" ? "danger" : experiment.status === "running" ? "active" : "neutral"}>{benchmarkStatus(experiment.status)}</Badge></div>
             </div>
+            <div className="grid grid-cols-2 border-b border-[var(--line)] bg-[#fafbf8] sm:grid-cols-4"><Metric label="预测成本" value={String(experiment.frozen_snapshot.predicted_cost_micros ?? 0)} /><Metric label="实际成本" value={String(experiment.actual_cost_micros)} /><Metric label="单轮上限" value={String(experiment.max_round_cost_micros)} /><Metric label="质量门" value={experiment.quality_gate.approved_for_real_execution === true ? "已批准" : "测试模式"} /></div>
             <div className="grid divide-y divide-[var(--line)] xl:grid-cols-3 xl:divide-x xl:divide-y-0">
-              {experiment.variants.map((variant) => <div key={variant.id} className="p-5"><div className="flex items-center justify-between"><strong className="uppercase">{variant.model_key}</strong><Badge>{variant.status}</Badge></div><p className="font-data mt-2 text-xs text-[var(--muted)]">{variant.model_id}</p><div className="mt-4 grid grid-cols-2 gap-3 text-xs"><Metric label="质量准确率" value={percent(variant.metrics.quality_accuracy)} /><Metric label="P0/P1" value={String(variant.metrics.p0_p1_error_count ?? "—")} /><Metric label="人工率" value={percent(variant.metrics.human_review_rate)} /><Metric label="P95" value={variant.metrics.latency_p95_ms == null ? "—" : `${variant.metrics.latency_p95_ms.toFixed(0)}ms`} /><Metric label="模型成本" value={String(variant.metrics.model_cost_micros ?? "—")} /><Metric label="含人工总成本" value={String(variant.metrics.total_cost_with_human_micros ?? "—")} /></div></div>)}
+              {experiment.variants.map((variant) => <div key={variant.id} className="p-5"><div className="flex items-center justify-between"><strong className="uppercase">{variant.model_key}</strong><Badge tone={variant.status === "failed" ? "danger" : variant.status === "completed" ? "success" : variant.status === "running" ? "active" : "neutral"}>{variant.status}</Badge></div><p className="font-data mt-2 text-xs text-[var(--muted)]">{variant.model_id}</p><div className="mt-4 grid grid-cols-2 gap-3 text-xs"><Metric label="质量准确率" value={percent(variant.metrics.quality_accuracy)} /><Metric label="P0/P1" value={String(variant.metrics.p0_p1_error_count ?? "—")} /><Metric label="实际成本" value={String(variant.actual_cost_micros)} /><Metric label="Token" value={String(variant.total_tokens ?? "—")} /><Metric label="人工率" value={percent(variant.metrics.human_review_rate)} /><Metric label="P95" value={variant.metrics.latency_p95_ms == null ? "—" : `${variant.metrics.latency_p95_ms.toFixed(0)}ms`} /></div>{variant.error_message && <p className="mt-4 border-t border-[var(--line)] pt-3 text-xs text-[#8d2924]">{executorError(variant.error_message)}</p>}</div>)}
             </div>
-            <div className="border-t border-[var(--line)] bg-[#fafbf8] px-5 py-4 text-sm">人工候选建议：<strong>{experiment.decision.recommendation?.toUpperCase() ?? "尚无"}</strong><span className="ml-3 text-xs text-[var(--muted)]">{experiment.decision.reason ?? "等待测试证据"}</span></div>
+            <div className="flex flex-wrap items-center justify-between gap-4 border-t border-[var(--line)] bg-[#fafbf8] px-5 py-4 text-sm"><div>人工候选建议：<strong>{experiment.decision.recommendation?.toUpperCase() ?? "尚无"}</strong><span className="ml-3 text-xs text-[var(--muted)]">{experiment.decision.reason ?? "等待执行证据"}</span></div>{me.data?.is_admin && experiment.execution_mode === "real" && (experiment.status === "draft" || experiment.status === "failed") && <div className="flex flex-wrap items-center gap-3"><label className="flex items-center gap-2 text-xs font-semibold"><input type="checkbox" checked={runRiskConfirmedId === experiment.id} onChange={(event) => setRunRiskConfirmedId(event.target.checked ? experiment.id : null)} />确认本轮费用上限</label><Button size="sm" onClick={() => runReal.mutate(experiment.id)} disabled={runRiskConfirmedId !== experiment.id || runReal.isPending}><Play />运行真实横评</Button></div>}</div>
           </section>
         ))}
         {!benchmarks.isLoading && !benchmarks.data?.items.length && <EmptyLine text="还没有冻结的三模型横评实验" />}
@@ -579,13 +724,35 @@ function automationStatus(value: string) {
     cooldown: "冷却中",
     budget_blocked: "预算阻断",
     lease_conflict: "租约冲突",
+    executor_config_blocked: "执行配置阻断",
     planned: "dry-run 已规划",
     awaiting_executor: "等待执行器",
+    processing: "处理中",
+    succeeded: "已生成候选与回归",
     running: "处理中",
     awaiting_release_review: "等待发布二审",
     failed: "失败待恢复",
     cancelled: "已取消",
   } as Record<string, string>)[value] ?? value
+}
+
+function executorError(value: string) {
+  return ({
+    optimizer_usage_missing: "模型未返回可计费 usage",
+    optimizer_usage_exceeds_reserved_cost: "实际 usage 超过预算预留",
+    automation_lease_lost: "执行租约已失效",
+    automation_budget_settlement_conflict: "预算结算冲突",
+    model_timeout: "模型调用超时",
+    model_network: "模型网络异常",
+    model_429: "模型服务限流",
+    model_provider5xx: "模型服务暂时不可用",
+    invalid_executor_output: "执行器输出不符合安全合同",
+    automation_executor_failed: "自动优化执行失败",
+    benchmark_usage_missing: "横评模型未返回可计费 usage",
+    benchmark_actual_cost_exceeds_round_limit: "横评实际成本达到单轮上限",
+    invalid_benchmark_output: "横评输出不符合安全合同",
+    benchmark_executor_failed: "横评执行失败",
+  } as Record<string, string>)[value] ?? "执行失败，请查看审计记录"
 }
 
 function benchmarkStatus(value: ModelBenchmark["status"]) {
