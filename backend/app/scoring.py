@@ -537,10 +537,18 @@ def calculate_score(
         if len(unsupported_high) >= int(
             high_evidence_rule["dimensions_for_l3_cap"]
         ):
+            evidence_requirement = (
+                "两"
+                if (
+                    len(dimension_keys) == 8
+                    and minimum_evidence == 2
+                )
+                else str(minimum_evidence)
+            )
             apply_cap(
                 3,
                 "多个高分维度缺少至少"
-                f"{minimum_evidence}条独立视觉证据",
+                f"{evidence_requirement}条独立视觉证据",
             )
             review_reasons.append("高分证据不足：" + "、".join(unsupported_high))
 
@@ -565,15 +573,46 @@ def calculate_score(
                     and model_review
                 )
             ):
+                legacy_top_level_contract = (
+                    len(dimension_keys) == 8
+                    and int(
+                        top_level_rule[
+                            "grade_five_minimum_count"
+                        ]
+                    )
+                    == 5
+                    and int(
+                        top_level_rule[
+                            "other_dimension_minimum_grade"
+                        ]
+                    )
+                    == 4
+                    and float(
+                        top_level_rule["minimum_confidence"]
+                    )
+                    == 0.9
+                    and bool(
+                        top_level_rule[
+                            "requires_no_model_review"
+                        ]
+                    )
+                )
                 apply_cap(
                     4,
-                    "L5 需要至少"
-                    f"{int(top_level_rule['grade_five_minimum_count'])}"
-                    "个5级维度、其余不低于"
-                    f"{int(top_level_rule['other_dimension_minimum_grade'])}"
-                    "级、置信度不低于"
-                    f"{float(top_level_rule['minimum_confidence']):g}"
-                    "且满足复核约束",
+                    (
+                        "L5 需要至少五个5级维度、其余不低于4级、"
+                        "置信度不低于0.9且无复核项"
+                        if legacy_top_level_contract
+                        else (
+                            "L5 需要至少"
+                            f"{int(top_level_rule['grade_five_minimum_count'])}"
+                            "个5级维度、其余不低于"
+                            f"{int(top_level_rule['other_dimension_minimum_grade'])}"
+                            "级、置信度不低于"
+                            f"{float(top_level_rule['minimum_confidence']):g}"
+                            "且满足复核约束"
+                        )
+                    ),
                 )
 
         professional_status, _ = _status(media.get("professional_photography"))

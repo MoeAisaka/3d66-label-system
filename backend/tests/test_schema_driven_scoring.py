@@ -174,6 +174,55 @@ def test_non_eight_dimension_schema_scores_without_space_constants() -> None:
     )
 
 
+def test_non_eight_dimension_schema_keeps_dynamic_rule_messages() -> None:
+    definition = _three_dimension_schema()
+    grades = {
+        "presentation_integrity": 4,
+        "visual_hierarchy": 4,
+        "inspiration_reference": 4,
+    }
+    weak_evidence = _aesthetic(
+        grades,
+        scoring_profile="space_aesthetic_v1.3",
+    )
+    for item in weak_evidence["dimensions"].values():
+        item["evidence"] = ["只有一条证据"]
+
+    weak_result = calculate_score(
+        _precheck(),
+        weak_evidence,
+        dimension_schema=definition,
+    )
+
+    assert weak_result["caps"] == [
+        {
+            "cap": "L3",
+            "reason": "多个高分维度缺少至少2条独立视觉证据",
+        }
+    ]
+
+    top_level = _aesthetic(
+        {key: 5 for key in grades},
+        scoring_profile="space_aesthetic_v1.3",
+    )
+    top_level["assessment_confidence"] = 0.8
+    top_result = calculate_score(
+        _precheck(),
+        top_level,
+        dimension_schema=definition,
+    )
+
+    assert top_result["caps"] == [
+        {
+            "cap": "L4",
+            "reason": (
+                "L5 需要至少2个5级维度、其余不低于4级、"
+                "置信度不低于0.9且满足复核约束"
+            ),
+        }
+    ]
+
+
 def test_schema_rejects_unknown_or_missing_dimension_output() -> None:
     definition = _three_dimension_schema()
     valid = {
