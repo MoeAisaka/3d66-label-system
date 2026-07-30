@@ -6,6 +6,7 @@ import { PageHeader } from "@/components/app-shell"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
+import { dimensionKeys } from "@/lib/dimension-schema"
 import type { EvaluationRecord, ReviewStage } from "@/lib/types"
 
 export type ReviewWorkspaceView =
@@ -88,17 +89,6 @@ const samplingNames = {
   reviewed: "已审核",
 } as const
 
-const requiredDimensionKeys = [
-  "composition_viewpoint",
-  "lighting_atmosphere",
-  "color_material",
-  "spatial_design_furnishing",
-  "visual_hierarchy",
-  "detail_completion",
-  "inspiration_reference",
-  "presentation_integrity",
-]
-
 const qualityNames: Record<string, string> = {
   good: "画质正常",
   minor: "轻微问题",
@@ -115,6 +105,9 @@ function reviewStatus(asset: EvaluationRecord) {
 
 function resultStatus(asset: EvaluationRecord) {
   if (asset.evaluation.precheck?.classification?.scope_status === "out_of_scope") return "out_of_scope"
+  if (asset.evaluation.dimension_schema?.status !== "resolved") return "invalid_contract"
+  const requiredDimensionKeys = dimensionKeys(asset.evaluation.dimension_schema)
+  if (!requiredDimensionKeys.length) return "invalid_contract"
   const dimensions = asset.evaluation.aesthetic?.dimensions ?? {}
   return requiredDimensionKeys.some((key) => !Number(dimensions[key]?.grade)) ? "incomplete" : "scored"
 }
@@ -327,12 +320,16 @@ export function ReviewList({ items, loading, searchParams, setSearchParams, stag
               const category = evaluation?.precheck?.classification?.primary_category || "无法判断"
               const quality = normalizedQuality(evaluation?.precheck?.image_quality?.quality_severity)
               const forms = mediaLabels(asset)
-              const nonScored = result === "out_of_scope" || result === "incomplete"
+              const nonScored = result !== "scored"
+              const expectedDimensions = dimensionKeys(evaluation.dimension_schema)
+              const completedDimensions = expectedDimensions.filter(
+                (key) => Number(evaluation.aesthetic?.dimensions?.[key]?.grade),
+              ).length
               return <tr key={evaluation.id} className="border-b border-[var(--line)] last:border-0 hover:bg-[#fbfcfa]">
                 <td className="px-4 py-3"><div className="flex min-w-0 items-center gap-3"><img src={asset.image_url} alt="" loading="lazy" className="size-16 rounded-[4px] border border-[var(--line)] object-cover" /><div className="min-w-0"><p className="file-name max-w-[260px] truncate">{asset.name}</p><p className="font-data mt-1 text-[0.68rem] text-[var(--muted)]">素材 #{String(asset.id).padStart(5, "0")} · 结果 #{String(evaluation.id).padStart(5, "0")} · {asset.width} × {asset.height}</p></div></div></td>
                 <td className="px-3 py-3"><Badge tone="active">{category}</Badge><div className="mt-2 flex max-w-52 flex-wrap gap-1">{forms.slice(0, 3).map((label) => <Badge key={label}>{label}</Badge>)}{forms.length > 3 && <Badge>+{forms.length - 3}</Badge>}</div></td>
                 <td className="px-3 py-3"><span className={`text-xs font-semibold ${quality === "severe" || quality === "unusable" ? "text-[#8d2924]" : "text-[var(--muted)]"}`}>{qualityNames[quality] || quality || "—"}</span>{(evaluation?.scoring?.caps?.length ?? 0) > 0 && <p className="mt-2 text-xs text-[#7d4308]">{evaluation?.scoring.caps.length} 项等级限制</p>}</td>
-                <td className="px-3 py-3">{result === "out_of_scope" ? <><Badge>范围外</Badge><p className="mt-2 text-xs text-[var(--muted)]">范围判定后未生成美感等级</p></> : result === "incomplete" ? <><Badge tone="danger">结果不完整</Badge><p className="mt-2 text-xs text-[#8d2924]">缺少八维数据</p></> : <><div className="flex items-baseline gap-2"><strong className="font-data text-xl">{level || "—"}</strong><span className="font-data text-xs text-[var(--muted)]">{evaluation?.final_score?.toFixed(1) ?? "—"}</span></div>{evaluation?.risk_review?.verdict === "downgrade" && <p className="mt-1 text-xs font-semibold text-[#7d4308]">高风险复核已降级</p>}{evaluation?.final_level !== evaluation?.level && <p className="mt-1 text-xs text-[var(--muted)]">模型 {evaluation?.level} · {evaluation?.score?.toFixed(1)}</p>}</>}</td>
+                <td className="px-3 py-3">{result === "out_of_scope" ? <><Badge>范围外</Badge><p className="mt-2 text-xs text-[var(--muted)]">范围判定后未生成美感等级</p></> : result === "invalid_contract" ? <><Badge tone="danger">规则异常</Badge><p className="mt-2 text-xs text-[#8d2924]">维度合同无法解析</p></> : result === "incomplete" ? <><Badge tone="danger">结果不完整</Badge><p className="mt-2 text-xs text-[#8d2924]">维度数据 {completedDimensions}/{expectedDimensions.length}</p></> : <><div className="flex items-baseline gap-2"><strong className="font-data text-xl">{level || "—"}</strong><span className="font-data text-xs text-[var(--muted)]">{evaluation?.final_score?.toFixed(1) ?? "—"}</span></div>{evaluation?.risk_review?.verdict === "downgrade" && <p className="mt-1 text-xs font-semibold text-[#7d4308]">高风险复核已降级</p>}{evaluation?.final_level !== evaluation?.level && <p className="mt-1 text-xs text-[var(--muted)]">模型 {evaluation?.level} · {evaluation?.score?.toFixed(1)}</p>}</>}</td>
                 <td className="font-data px-3 py-3"><span className={evaluation?.confidence != null && evaluation.confidence < 0.7 ? "font-semibold text-[#8d2924]" : ""}>{nonScored ? "不适用" : evaluation?.confidence != null ? `${Math.round(evaluation.confidence * 100)}%` : "—"}</span>{evaluation?.needs_review && <p className="mt-2 text-xs text-[#7d4308]">需要复核</p>}</td>
                 <td className="px-3 py-3"><div className="flex items-center gap-2"><Badge tone={samplingTone(asset.sampling.tier)}>{samplingNames[asset.sampling.tier]}</Badge><span className="font-data text-xs font-semibold">P{asset.sampling.priority}</span></div><p className="mt-2 max-w-48 text-xs leading-5 text-[var(--muted)]">{asset.sampling.reasons.slice(0, 2).map((reason) => reason.label).join("；")}</p></td>
                 <td className="px-3 py-3"><Badge tone={statusTone(status)}>{statusNames[status]}</Badge>{evaluation?.human_review && <p className="mt-2 max-w-32 truncate text-xs text-[var(--muted)]">{evaluation.human_review.reviewer_name}</p>}</td>

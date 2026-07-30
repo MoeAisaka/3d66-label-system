@@ -18,8 +18,12 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { api, jsonBody } from "@/lib/api"
+import {
+  dimensionKeys as dimensionKeysForSchema,
+  dimensionLabels as dimensionLabelsForSchema,
+} from "@/lib/dimension-schema"
 import type { EvaluationRecord, ReviewCorrection, ReviewPanelSummary, ReviewStage, User } from "@/lib/types"
-import { dimensionLabels, ReviewCorrectionForm } from "@/pages/review-correction-form"
+import { ReviewCorrectionForm } from "@/pages/review-correction-form"
 import {
   filterReviewAssets,
   ReviewList,
@@ -27,8 +31,6 @@ import {
   reviewWorkspaceMeta,
   type ReviewWorkspaceView,
 } from "@/pages/review-list"
-
-const requiredDimensionKeys = Object.keys(dimensionLabels)
 
 const samplingNames: Record<EvaluationRecord["sampling"]["tier"], string> = {
   required: "必须审核",
@@ -82,7 +84,19 @@ export function ReviewPage({ user }: { user: User }) {
   const dimensions = evaluation?.aesthetic?.dimensions ?? {}
   const scoring = evaluation?.scoring
   const scopeStatus = evaluation?.precheck?.classification?.scope_status
+  const requiredDimensionKeys = useMemo(
+    () => dimensionKeysForSchema(evaluation?.dimension_schema),
+    [evaluation?.dimension_schema],
+  )
+  const dimensionLabels = useMemo(
+    () => dimensionLabelsForSchema(evaluation?.dimension_schema),
+    [evaluation?.dimension_schema],
+  )
   const completeDimensionCount = requiredDimensionKeys.filter((key) => Number(dimensions[key]?.grade)).length
+  const dimensionContractReady = Boolean(
+    evaluation?.dimension_schema?.status === "resolved"
+    && requiredDimensionKeys.length,
+  )
 
   useEffect(() => {
     setZoom(100)
@@ -265,8 +279,8 @@ export function ReviewPage({ user }: { user: User }) {
 
           <aside className="min-w-0 bg-white">
             <div className="flex min-h-20 items-center justify-between border-b border-[var(--line)] px-5 py-4">
-              <div><h2 className="font-editorial text-2xl font-bold">证据</h2><p className="mt-1 text-xs text-[var(--muted)]">八个审美维度</p></div>
-              {scopeStatus !== "out_of_scope" && completeDimensionCount === requiredDimensionKeys.length && evaluation?.level && (
+              <div><h2 className="font-editorial text-2xl font-bold">证据</h2><p className="mt-1 text-xs text-[var(--muted)]">{requiredDimensionKeys.length || "—"} 个审美维度</p></div>
+              {scopeStatus !== "out_of_scope" && dimensionContractReady && completeDimensionCount === requiredDimensionKeys.length && evaluation?.level && (
                 <div className="text-right">
                   {evaluation.human_review?.decision === "corrected" && <Badge tone="success" className="mb-2">人工最终</Badge>}
                   <p className="font-data text-3xl font-semibold">{evaluation.final_level || evaluation.level}</p>
@@ -288,15 +302,15 @@ export function ReviewPage({ user }: { user: User }) {
                 <Badge>不参与空间美感评分</Badge>
                 <ImageSquare className="mt-5" size={32} weight="light" />
                 <h3 className="font-editorial mt-4 text-xl font-bold">{evaluation.versions.prompt ? "单提示词判定为范围外" : "A 阶段判定为范围外"}</h3>
-                <p className="mt-2 max-w-[46ch] text-sm leading-6 text-[var(--muted)]">该素材属于“{evaluation.precheck?.classification?.primary_category || "其他类型"}”，因此不会生成八个空间美感维度。这不是数据丢失。</p>
+                <p className="mt-2 max-w-[46ch] text-sm leading-6 text-[var(--muted)]">该素材属于“{evaluation.precheck?.classification?.primary_category || "其他类型"}”，因此本次不会进入维度评分。这不是数据丢失。</p>
                 <Button className="mt-6" variant="secondary" onClick={() => enqueue.mutate()} disabled={enqueue.isPending}>使用当前版本重新评测<ArrowRight /></Button>
               </div>
-            ) : completeDimensionCount < requiredDimensionKeys.length ? (
+            ) : !dimensionContractReady || completeDimensionCount < requiredDimensionKeys.length ? (
               <div className="flex min-h-[520px] flex-col items-center justify-center px-8 text-center">
                 <Badge tone="danger">评测不完整</Badge>
                 <WarningCircle className="mt-5 text-[#8d2924]" size={32} weight="light" />
-                <h3 className="font-editorial mt-4 text-xl font-bold">缺少八维评分数据</h3>
-                <p className="mt-2 max-w-[46ch] text-sm leading-6 text-[var(--muted)]">当前结果只有 {completeDimensionCount} / {requiredDimensionKeys.length} 个有效维度，系统不会把它当作正式评分。请使用当前提示词版本重新评测。</p>
+                <h3 className="font-editorial mt-4 text-xl font-bold">{dimensionContractReady ? "缺少维度评分数据" : "维度规则无法解析"}</h3>
+                <p className="mt-2 max-w-[46ch] text-sm leading-6 text-[var(--muted)]">{dimensionContractReady ? `当前结果只有 ${completeDimensionCount} / ${requiredDimensionKeys.length} 个有效维度，系统不会把它当作正式评分。请使用当前提示词版本重新评测。` : "系统无法确认这条结果使用的维度规则，因此不会开放逐维纠偏。可以重新评测，或退回给管理员检查规则快照。"}</p>
                 <Button className="mt-6" onClick={() => enqueue.mutate()} disabled={enqueue.isPending}>重新评测<ArrowRight /></Button>
               </div>
             ) : (
@@ -323,7 +337,7 @@ export function ReviewPage({ user }: { user: User }) {
                       <Badge tone={evaluation.risk_review.verdict === "downgrade" ? "warning" : evaluation.risk_review.verdict === "keep" ? "success" : "danger"}>{evaluation.risk_review.verdict === "downgrade" ? `已修正 ${evaluation.risk_review.corrections?.length ?? 0} 项` : evaluation.risk_review.verdict === "keep" ? "维持初评" : evaluation.risk_review.verdict === "error" ? "复核失败" : "需要人工确认"}</Badge>
                     </div>
                     {(evaluation.risk_review.trigger_reasons?.length ?? 0) > 0 && <p className="mt-2 text-xs leading-5 text-[var(--muted)]">触发原因：{evaluation.risk_review.trigger_reasons?.join("、")}</p>}
-                    {(evaluation.risk_review.corrections?.length ?? 0) > 0 && <div className="mt-3 flex flex-wrap gap-1.5">{evaluation.risk_review.corrections?.map((correction, index) => <Badge key={`${correction.field}-${index}`} tone="active">{riskFieldLabel(correction.field)} {String(correction.before)} → {String(correction.after)}</Badge>)}</div>}
+                    {(evaluation.risk_review.corrections?.length ?? 0) > 0 && <div className="mt-3 flex flex-wrap gap-1.5">{evaluation.risk_review.corrections?.map((correction, index) => <Badge key={`${correction.field}-${index}`} tone="active">{riskFieldLabel(correction.field, dimensionLabels)} {String(correction.before)} → {String(correction.after)}</Badge>)}</div>}
                     {(evaluation.risk_review.reasons?.length ?? 0) > 0 && <p className="mt-3 line-clamp-3 text-xs leading-5 text-[var(--muted)]">{evaluation.risk_review.reasons?.join("；")}</p>}
                   </div>
                 )}
@@ -351,7 +365,7 @@ export function ReviewPage({ user }: { user: User }) {
                     <Button variant="secondary" onClick={() => review.mutate({ decision: "rejected", corrected_level: null, reviewNote: note.trim() })} disabled={review.isPending}>退回复核</Button>
                     <Button onClick={() => review.mutate({ decision: "approved", corrected_level: null, reviewNote: note.trim() })} disabled={review.isPending}><Check weight="bold" />确认结果</Button>
                   </div></div>}
-                  <ReviewCorrectionForm key={`${evaluation.id}-${evaluation.review_revision}`} dimensions={dimensions} precheck={evaluation?.precheck ?? {}} scoring={scoring ?? {}} pending={review.isPending} editable={evaluation.review_stage !== "completed"} onSubmit={({ note: correctionNote, corrections }) => {
+                  <ReviewCorrectionForm key={`${evaluation.id}-${evaluation.review_revision}`} dimensions={dimensions} dimensionSchema={evaluation.dimension_schema} scoring={scoring ?? {}} pending={review.isPending} editable={evaluation.review_stage !== "completed"} onSubmit={({ note: correctionNote, corrections }) => {
                     review.mutate({ decision: "corrected", corrected_level: null, reviewNote: correctionNote, corrections })
                   }} />
                 </div>
@@ -364,7 +378,7 @@ export function ReviewPage({ user }: { user: User }) {
   )
 }
 
-function riskFieldLabel(field: string) {
+function riskFieldLabel(field: string, dimensionLabels: Record<string, string>) {
   if (field.startsWith("dimensions.")) return dimensionLabels[field.replace("dimensions.", "")] || field
   return ({ professional_photography: "专业摄影", documentary_record: "现场记录", quality_severity: "画质", level_cap: "等级上限" } as Record<string, string>)[field] || field
 }

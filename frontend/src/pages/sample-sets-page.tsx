@@ -25,6 +25,7 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { api, jsonBody } from "@/lib/api"
+import { truthDimensionDefinitions } from "@/lib/dimension-schema"
 import type {
   EvaluationRecord,
   PromptVersion,
@@ -36,17 +37,6 @@ import type {
   SampleSetSummary,
   SampleTruth,
 } from "@/lib/types"
-
-const DIMENSIONS = [
-  ["composition_viewpoint", "构图与机位"],
-  ["lighting_atmosphere", "光影与氛围"],
-  ["color_material", "色彩与材质"],
-  ["spatial_design_furnishing", "空间设计与家具软装"],
-  ["visual_hierarchy", "视觉层级"],
-  ["detail_completion", "细节完成度"],
-  ["inspiration_reference", "灵感与参考价值"],
-  ["presentation_integrity", "画面呈现完整性"],
-] as const
 
 const MEDIA_FIELDS = [
   ["real_photo", "实景图"],
@@ -259,9 +249,20 @@ function EmptySet({ kind, onCreate }: { kind: "golden" | "test"; onCreate: () =>
 function EmptyItems({ onAdd }: { onAdd: () => void }) { return <div className="px-6 py-16 text-center"><Square size={28} className="mx-auto" /><h3 className="mt-4 text-xl font-bold">样本集还是空的</h3><p className="mt-2 text-sm text-[var(--muted)]">从已完成人工审核的素材中建立可靠标准。</p><Button className="mt-5" onClick={onAdd}><Plus />添加第一批素材</Button></div> }
 
 function truthCompleteness(truth: SampleTruth) {
-  const dimensions = Object.keys(truth.dimensions || {}).length
+  const definitions = truthDimensionDefinitions(truth)
+  const dimensions = definitions.filter(
+    ({ key }) => Number(truth.dimensions?.[key]),
+  ).length
   const core = Boolean(truth.level && truth.category && truth.quality_severity)
-  return { dimensions, complete: core && dimensions === 8 }
+  const bound = Boolean(
+    truth.dimension_schema?.canonical_hash && definitions.length,
+  )
+  return {
+    dimensions,
+    expected: definitions.length,
+    bound,
+    complete: core && bound && dimensions === definitions.length,
+  }
 }
 
 function SampleRow({ item, selected, onHistory, onRemove }: { item: SampleSetItem; selected: boolean; onHistory: () => void; onRemove: () => void }) {
@@ -269,7 +270,7 @@ function SampleRow({ item, selected, onHistory, onRemove }: { item: SampleSetIte
   return <article className={`grid gap-4 border-b border-[var(--line)] p-4 last:border-0 lg:grid-cols-[72px_minmax(200px,1fr)_110px_150px_140px] lg:items-center ${selected ? "bg-[#f7f9ef]" : ""}`}>
     <img src={item.image_url} alt="" className="size-[72px] rounded-[4px] border border-[var(--line)] object-cover" loading="lazy" />
     <div className="min-w-0"><p className="file-name truncate text-sm">{item.asset_name}</p><div className="mt-2 flex flex-wrap gap-2"><Badge tone="active">{item.truth.level || "未定级"}</Badge><span className="text-xs text-[var(--muted)]">{item.truth.category || item.expected_category}</span></div></div>
-    <div><p className="text-sm font-semibold">{completeness.dimensions}/8 维</p><p className="mt-1 text-xs text-[var(--muted)]">{completeness.complete ? "标准完整" : "需要补充"}</p></div>
+    <div><p className="text-sm font-semibold">{completeness.dimensions}/{completeness.expected || "?"} 维</p><p className="mt-1 text-xs text-[var(--muted)]">{completeness.complete ? "标准完整" : completeness.bound ? "需要补充" : "历史规则未绑定"}</p></div>
     <div className="min-w-0"><p className="font-data truncate text-xs">{item.source_model_id}</p><p className="mt-1 text-xs text-[var(--muted)]">标准 V{item.truth_revision}</p></div>
     <div className="flex flex-wrap justify-end gap-1"><Button size="sm" variant="secondary" onClick={onHistory}>标准与历史<ArrowRight /></Button><Button size="sm" variant="ghost" onClick={onRemove} aria-label="移出样本集"><Trash /></Button></div>
   </article>
@@ -292,6 +293,10 @@ function SampleInspector({ data, loading, sampleSetId, onSaved }: { data?: Sampl
     onError: (error) => toast.error(error.message),
   })
   if (loading || !data) return <div className="mt-6 h-64 animate-pulse border-y border-[var(--line)] bg-white" />
+  const truthDefinitions = truthDimensionDefinitions(truth)
+  const truthSchemaBound = Boolean(
+    truth.dimension_schema?.canonical_hash && truthDefinitions.length,
+  )
   const updateDimension = (key: string, value: number) => setTruth((current) => ({ ...current, dimensions: { ...current.dimensions, [key]: value } }))
   const updateMedia = (key: string, value: "yes" | "no" | "uncertain") => setTruth((current) => ({ ...current, media_form: { ...current.media_form, [key]: value } }))
   return <section className="mt-7 border-y border-[var(--line-strong)] bg-white">
@@ -299,7 +304,7 @@ function SampleInspector({ data, loading, sampleSetId, onSaved }: { data?: Sampl
     <div className="flex gap-6 border-b border-[var(--line)] px-5 pt-4"><WorkspaceTab active={tab === "truth"} onClick={() => setTab("truth")}>黄金标准</WorkspaceTab><WorkspaceTab active={tab === "runs"} onClick={() => setTab("runs")}>模型与回归历史</WorkspaceTab><WorkspaceTab active={tab === "reviews"} onClick={() => setTab("reviews")}>人工修改历史</WorkspaceTab></div>
     {tab === "truth" && <div className="p-5"><div className="grid gap-5 xl:grid-cols-[220px_1fr]">
       <div className="space-y-4"><label><FieldLabel>最终等级</FieldLabel><select className="h-11 w-full rounded-[4px] border border-[var(--line-strong)] bg-white px-3" value={truth.level || ""} onChange={(event) => setTruth({ ...truth, level: event.target.value })}><option value="">未定级</option>{["L1", "L2", "L3", "L4", "L5"].map((level) => <option key={level}>{level}</option>)}</select></label><label><FieldLabel>主分类</FieldLabel><Input value={truth.category || ""} onChange={(event) => setTruth({ ...truth, category: event.target.value })} /></label><label><FieldLabel>画质问题</FieldLabel><select className="h-11 w-full rounded-[4px] border border-[var(--line-strong)] bg-white px-3" value={truth.quality_severity || "uncertain"} onChange={(event) => setTruth({ ...truth, quality_severity: event.target.value })}>{[["normal", "画质正常"], ["slight", "轻微"], ["moderate", "中度"], ["severe", "严重"], ["unusable", "不可用"], ["uncertain", "不确定"]].map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label></div>
-      <div><p className="text-xs font-semibold">八个美感维度</p><div className="mt-2 grid gap-px border border-[var(--line)] bg-[var(--line)] sm:grid-cols-2">{DIMENSIONS.map(([key, label]) => <label key={key} className="flex items-center justify-between gap-3 bg-white px-3 py-3"><span className="text-xs">{label}</span><select className="h-9 w-16 rounded-[4px] border border-[var(--line)] bg-white px-2 text-sm font-semibold" value={truth.dimensions?.[key] || ""} onChange={(event) => updateDimension(key, Number(event.target.value))}><option value="">—</option>{[1, 2, 3, 4, 5].map((grade) => <option key={grade}>{grade}</option>)}</select></label>)}</div><p className="mt-5 text-xs font-semibold">图片形态</p><div className="mt-2 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">{MEDIA_FIELDS.map(([key, label]) => <label key={key}><span className="mb-1 block text-xs text-[var(--muted)]">{label}</span><select className="h-9 w-full rounded-[4px] border border-[var(--line)] bg-white px-2 text-xs" value={truth.media_form?.[key] || "uncertain"} onChange={(event) => updateMedia(key, event.target.value as "yes" | "no" | "uncertain")}><option value="yes">是</option><option value="no">否</option><option value="uncertain">不确定</option></select></label>)}</div></div>
+      <div><div className="flex flex-wrap items-center justify-between gap-2"><p className="text-xs font-semibold">{truthSchemaBound ? `${truthDefinitions.length} 个美感维度` : "历史维度记录"}</p>{truthSchemaBound ? <Badge tone="active">{truth.dimension_schema?.schema_key} · {truth.dimension_schema?.version}</Badge> : <Badge tone="warning">规则未绑定，仅供查看</Badge>}</div>{truthSchemaBound ? <div className="mt-2 grid gap-px border border-[var(--line)] bg-[var(--line)] sm:grid-cols-2">{truthDefinitions.map(({ key, label }) => <label key={key} className="flex items-center justify-between gap-3 bg-white px-3 py-3"><span className="text-xs">{label}</span><select className="h-9 w-16 rounded-[4px] border border-[var(--line)] bg-white px-2 text-sm font-semibold" value={truth.dimensions?.[key] || ""} onChange={(event) => updateDimension(key, Number(event.target.value))}><option value="">—</option>{[1, 2, 3, 4, 5].map((grade) => <option key={grade}>{grade}</option>)}</select></label>)}</div> : <div className="mt-2 grid gap-px border border-[var(--line)] bg-[var(--line)] sm:grid-cols-2">{Object.entries(truth.dimensions || {}).map(([key, grade]) => <div key={key} className="flex items-center justify-between gap-3 bg-white px-3 py-3"><span className="font-data text-xs">{key}</span><span className="text-sm font-semibold">{grade || "—"}</span></div>)}</div>}<p className="mt-5 text-xs font-semibold">图片形态</p><div className="mt-2 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">{MEDIA_FIELDS.map(([key, label]) => <label key={key}><span className="mb-1 block text-xs text-[var(--muted)]">{label}</span><select className="h-9 w-full rounded-[4px] border border-[var(--line)] bg-white px-2 text-xs" value={truth.media_form?.[key] || "uncertain"} onChange={(event) => updateMedia(key, event.target.value as "yes" | "no" | "uncertain")}><option value="yes">是</option><option value="no">否</option><option value="uncertain">不确定</option></select></label>)}</div></div>
     </div><div className="mt-6 grid gap-4 border-t border-[var(--line)] pt-5 lg:grid-cols-[1fr_1fr_auto] lg:items-end"><label><FieldLabel>标准备注</FieldLabel><Input value={note} onChange={(event) => setNote(event.target.value)} placeholder="记录难点和判断依据" /></label><label><FieldLabel>本次修改原因</FieldLabel><Input value={reason} onChange={(event) => setReason(event.target.value)} placeholder="例如：人工复核确认画质应为中度异常" /></label><Button onClick={() => save.mutate()} disabled={save.isPending}>保存为 V{data.item.truth_revision + 1}</Button></div></div>}
     {tab === "runs" && <HistoryRuns data={data} />}
     {tab === "reviews" && <ReviewHistory data={data} />}

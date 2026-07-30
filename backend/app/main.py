@@ -137,6 +137,7 @@ from .schema_adapter import repair_combined_aesthetic_results, rescore_stored_re
 from .regression import (
     SAMPLE_ROLES,
     complete_paired_regression_item,
+    dimension_contract_for_result,
     paired_gate_policy,
     refresh_paired_regression_run,
     reviewed_truth_snapshot,
@@ -162,10 +163,12 @@ from .review_panel import (
 from .review_sampling import build_review_sampling
 from .risk_review import RISK_REVIEW_VERSION
 from .scoring import (
+    DimensionScoringContractError,
     ENGINE_VERSION,
     calculate_corrected_score,
     dimension_schema_from_strategy_snapshot,
 )
+from .dimension_schema_registry import canonical_hash
 from .strategy_bundle import (
     build_strategy_snapshot,
     get_or_create_bundle,
@@ -1052,6 +1055,7 @@ def _result_payload(result: EvaluationResult | None) -> dict[str, Any] | None:
         "prompt_b_id": result.job.prompt_b_id,
         "precheck": json.loads(result.precheck_json),
         "aesthetic": json.loads(result.aesthetic_json) if result.aesthetic_json else None,
+        "dimension_schema": _evaluation_dimension_schema_payload(result),
         "scoring": json.loads(result.scoring_json),
         "score": result.score,
         "level": result.level,
@@ -1111,6 +1115,78 @@ def _result_payload(result: EvaluationResult | None) -> dict[str, Any] | None:
         "created_at": result.created_at,
         "updated_at": result.updated_at,
     }
+
+
+def _evaluation_dimension_schema_payload(
+    result: EvaluationResult,
+) -> dict[str, Any]:
+    """Expose the exact result-bound dimension contract to UI consumers."""
+    try:
+        definition, dimension_keys, identity = (
+            dimension_contract_for_result(result)
+        )
+        if identity is not None:
+            return {
+                "status": "resolved",
+                "schema_id": identity["schema_id"],
+                "schema_key": identity["schema_key"],
+                "version": identity["version"],
+                "canonical_hash": identity["canonical_hash"],
+                "legacy_derived": False,
+                "dimension_keys": list(dimension_keys),
+                "definition": definition,
+                "error": None,
+            }
+        return {
+            "status": "resolved",
+            "schema_id": None,
+            "schema_key": str(
+                definition.get("schema_key")
+                or definition.get("package_key")
+                or "space_aesthetic"
+            ),
+            "version": str(
+                definition.get("compatibility_revision")
+                or definition.get("package_version")
+                or "legacy-derived"
+            ),
+            "canonical_hash": canonical_hash(definition),
+            "legacy_derived": True,
+            "dimension_keys": list(dimension_keys),
+            "definition": definition,
+            "error": None,
+        }
+    except (
+        DimensionScoringContractError,
+        json.JSONDecodeError,
+        KeyError,
+        TypeError,
+        ValueError,
+    ) as exc:
+        aesthetic: dict[str, Any] = {}
+        try:
+            parsed = json.loads(result.aesthetic_json or "{}")
+            if isinstance(parsed, dict):
+                aesthetic = parsed
+        except (json.JSONDecodeError, TypeError):
+            pass
+        dimensions = aesthetic.get("dimensions")
+        display_keys = (
+            [str(key) for key in dimensions]
+            if isinstance(dimensions, dict)
+            else []
+        )
+        return {
+            "status": "invalid",
+            "schema_id": None,
+            "schema_key": None,
+            "version": None,
+            "canonical_hash": None,
+            "legacy_derived": False,
+            "dimension_keys": display_keys,
+            "definition": None,
+            "error": str(exc),
+        }
 
 
 @app.get("/api/health")
