@@ -1,0 +1,378 @@
+{
+  "fixture_version": "space-zero-drift-v1",
+  "legacy_source_commit": "2cbb5947e9c76cecb4a8f38a5d50f18952f8390f",
+  "canonical_json": {
+    "ensure_ascii": false,
+    "sort_keys": true,
+    "separators": [",", ":"]
+  },
+  "cases": [
+    {
+      "name": "historical_mixed_no_caps",
+      "grades": [4, 3, 2, 5, 4, 3, 1, 4],
+      "evidence_count": 0,
+      "expected_sha256": "47ea60a15a94dc8be9e3f356a2363a96f221c1f1bda093b2548113b0ff6a735d",
+      "expected_summary": {
+        "formal": true,
+        "score": 71.2,
+        "level": "L3",
+        "raw_level": "L3",
+        "raw_score": 71.2,
+        "caps": [],
+        "needs_review": true
+      }
+    },
+    {
+      "name": "active_mixed_no_caps",
+      "profile": "space_aesthetic_v1.3",
+      "grades": [4, 3, 2, 5, 4, 3, 1, 4],
+      "evidence_count": 3,
+      "expected_sha256": "b05cb7a3456dc09eef2c0e91e99cb68b0189e7e03fa5979d703bc25a85c5dfb4",
+      "expected_summary": {
+        "formal": true,
+        "score": 69.7,
+        "level": "L3",
+        "raw_level": "L3",
+        "raw_score": 69.7,
+        "caps": [],
+        "needs_review": true
+      }
+    },
+    {
+      "name": "historical_ai_cap_l4",
+      "grades": [5, 5, 5, 5, 5, 5, 5, 5],
+      "evidence_count": 0,
+      "precheck_overrides": {
+        "media_form": {
+          "ai_generated": {
+            "status": "yes",
+            "confidence": 0.93
+          }
+        }
+      },
+      "expected_sha256": "55dda52b56452764c3469f5f5092d1579012958b4a6c26280629e616fe94eeb2",
+      "expected_summary": {
+        "formal": true,
+        "score": 89.0,
+        "level": "L4",
+        "raw_level": "L5",
+        "raw_score": 95.0,
+        "caps": [
+          {
+            "cap": "L4",
+            "reason": "AI 图置信度达到 0.75"
+          }
+        ],
+        "needs_review": true
+      }
+    },
+    {
+      "name": "historical_casual_cap_l2_review",
+      "grades": [5, 5, 5, 5, 5, 5, 5, 5],
+      "evidence_count": 0,
+      "precheck_overrides": {
+        "media_form": {
+          "casual_snapshot": {
+            "status": "yes",
+            "confidence": 0.4
+          }
+        }
+      },
+      "expected_sha256": "d7c521fcfae69de6fbe3efdc3383bc616c75d440873760f3512848937cc60ed7",
+      "expected_summary": {
+        "formal": true,
+        "score": 59.0,
+        "level": "L2",
+        "raw_level": "L5",
+        "raw_score": 95.0,
+        "caps": [
+          {
+            "cap": "L2",
+            "reason": "随拍图最高 L2"
+          }
+        ],
+        "needs_review": true
+      }
+    },
+    {
+      "name": "historical_severe_quality_cap_l1",
+      "grades": [5, 5, 5, 5, 5, 5, 5, 5],
+      "evidence_count": 0,
+      "precheck_overrides": {
+        "image_quality": {
+          "quality_severity": "severe",
+          "confidence": 0.91,
+          "evidence": ["明显失焦", "大面积压缩块"]
+        }
+      },
+      "expected_sha256": "eac6d2054389614cb074e6a9f819c6a6785b8464e7081e934a077d732137818b",
+      "expected_summary": {
+        "formal": true,
+        "score": 39.0,
+        "level": "L1",
+        "raw_level": "L5",
+        "raw_score": 95.0,
+        "caps": [
+          {
+            "cap": "L2",
+            "reason": "画质受损最高 L2"
+          },
+          {
+            "cap": "L1",
+            "reason": "严重或不可用画质，且证据与置信度达到规则阈值"
+          }
+        ],
+        "needs_review": true
+      }
+    },
+    {
+      "name": "historical_low_classification_non_formal",
+      "grades": [5, 5, 5, 5, 5, 5, 5, 5],
+      "evidence_count": 0,
+      "precheck_overrides": {
+        "classification": {
+          "primary_confidence": 0.4
+        }
+      },
+      "expected_sha256": "b3435a7850cb2534b52ae7eac6c403f81352067415f9953d62eb6851eca621d6",
+      "expected_summary": {
+        "formal": false,
+        "score": null,
+        "level": null,
+        "raw_level": "L5",
+        "raw_score": 95.0,
+        "caps": [],
+        "needs_review": true
+      }
+    },
+    {
+      "name": "historical_out_of_scope_non_formal",
+      "aesthetic": null,
+      "precheck_overrides": {
+        "classification": {
+          "scope_status": "out_of_scope"
+        }
+      },
+      "expected_sha256": "69996c608d3af1bfe66ba4836312fb742c29824dc94cfb28f590b4153b9ebe1f",
+      "expected_summary": {
+        "formal": false,
+        "score": null,
+        "level": null,
+        "raw_level": null,
+        "caps": [],
+        "needs_review": false
+      }
+    },
+    {
+      "name": "active_weak_high_evidence_cap_l3",
+      "profile": "space_aesthetic_v1.3",
+      "grades": [4, 4, 4, 4, 4, 4, 4, 4],
+      "evidence_count": 1,
+      "expected_sha256": "c0f0774a76684526ef915a334e58230435c747acc0624537ec15fe99ef32dbe0",
+      "expected_summary": {
+        "formal": true,
+        "score": 74.0,
+        "level": "L3",
+        "raw_level": "L4",
+        "raw_score": 82.0,
+        "caps": [
+          {
+            "cap": "L3",
+            "reason": "多个高分维度缺少至少两条独立视觉证据"
+          }
+        ],
+        "needs_review": true
+      }
+    },
+    {
+      "name": "active_l5_confidence_cap_l4",
+      "profile": "space_aesthetic_v1.3",
+      "grades": [5, 5, 5, 5, 5, 5, 5, 5],
+      "evidence_count": 3,
+      "assessment_confidence": 0.8,
+      "expected_sha256": "b4cb9aaf196b28f038a21a1558dbdf1035f3bb416ab9381d7ec50c2d0317aad0",
+      "expected_summary": {
+        "formal": true,
+        "score": 89.0,
+        "level": "L4",
+        "raw_level": "L5",
+        "raw_score": 95.0,
+        "caps": [
+          {
+            "cap": "L4",
+            "reason": "L5 需要至少五个5级维度、其余不低于4级、置信度不低于0.9且无复核项"
+          }
+        ],
+        "needs_review": true
+      }
+    },
+    {
+      "name": "active_uniform_mid_collapse_review",
+      "profile": "space_aesthetic_v1.3",
+      "grades": [3, 3, 3, 3, 3, 3, 3, 3],
+      "evidence_count": 3,
+      "expected_sha256": "5dbe2df2964355290726c495bea52f604cf407ecf626b085c2a089dfe5e5cd20",
+      "expected_summary": {
+        "formal": true,
+        "score": 65.0,
+        "level": "L3",
+        "raw_level": "L3",
+        "raw_score": 65.0,
+        "caps": [],
+        "needs_review": true
+      }
+    },
+    {
+      "name": "historical_rendering_special_caps",
+      "grades": [5, 5, 5, 5, 5, 5, 5, 5],
+      "evidence_count": 0,
+      "precheck_overrides": {
+        "media_form": {
+          "rendering": {
+            "status": "yes",
+            "confidence": 0.95
+          }
+        }
+      },
+      "aesthetic_overrides": {
+        "special_checks": {
+          "realism": {
+            "applicable": true,
+            "grade": 3
+          },
+          "lighting": {
+            "applicable": true,
+            "grade": 5
+          }
+        }
+      },
+      "expected_sha256": "9e7ed931f068f217b77757581c8f7389643ad21087f95dd786b6b4d4dfdf52ad",
+      "expected_summary": {
+        "formal": true,
+        "score": 74.0,
+        "level": "L3",
+        "raw_level": "L5",
+        "raw_score": 95.0,
+        "caps": [
+          {
+            "cap": "L3",
+            "reason": "效果图进入 L4 的适用特殊检查未全部达到 4 级"
+          },
+          {
+            "cap": "L4",
+            "reason": "效果图进入 L5 的原始分或 5 级特殊检查数量不足"
+          }
+        ],
+        "needs_review": true
+      }
+    },
+    {
+      "name": "active_professional_documentary_conflict",
+      "profile": "space_aesthetic_v1.3",
+      "grades": [4, 4, 4, 4, 4, 4, 4, 4],
+      "evidence_count": 3,
+      "precheck_overrides": {
+        "media_form": {
+          "professional_photography": {
+            "status": "yes",
+            "confidence": 0.95
+          },
+          "documentary_record": {
+            "status": "yes",
+            "confidence": 0.95
+          }
+        }
+      },
+      "expected_sha256": "82b664346f86662ce770cb82c7dafa09af633d6143beef21b5aef48b2495d727",
+      "expected_summary": {
+        "formal": true,
+        "score": 74.0,
+        "level": "L3",
+        "raw_level": "L4",
+        "raw_score": 82.0,
+        "caps": [
+          {
+            "cap": "L3",
+            "reason": "现场记录图置信度达到 0.75"
+          }
+        ],
+        "needs_review": true
+      }
+    },
+    {
+      "name": "historical_hard_gate_l1",
+      "grades": [5, 5, 5, 5, 5, 5, 5, 5],
+      "evidence_count": 0,
+      "aesthetic_overrides": {
+        "decision_rules": {
+          "hard_gate_triggered": true,
+          "hard_gate_reasons": ["主体严重缺失"]
+        }
+      },
+      "expected_sha256": "e681a992da037ebdf159d6dc67d10b4bc39881ab389ccea73342e45d778a3279",
+      "expected_summary": {
+        "formal": true,
+        "score": 39.0,
+        "level": "L1",
+        "raw_level": "L5",
+        "raw_score": 95.0,
+        "caps": [
+          {
+            "cap": "L1",
+            "reason": "主体严重缺失"
+          }
+        ],
+        "needs_review": true
+      }
+    },
+    {
+      "name": "active_declared_cap_l3",
+      "profile": "space_aesthetic_v1.3",
+      "grades": [5, 5, 5, 5, 5, 5, 5, 5],
+      "evidence_count": 3,
+      "aesthetic_overrides": {
+        "decision_rules": {
+          "level_cap": "L3",
+          "level_cap_reasons": ["业务规则限制"]
+        }
+      },
+      "expected_sha256": "5c59dd5b7c9b07035ebda91b7d43e5249f06100087bdc640c7f90e8d99eaab04",
+      "expected_summary": {
+        "formal": true,
+        "score": 74.0,
+        "level": "L3",
+        "raw_level": "L5",
+        "raw_score": 95.0,
+        "caps": [
+          {
+            "cap": "L3",
+            "reason": "业务规则限制"
+          }
+        ],
+        "needs_review": true
+      }
+    },
+    {
+      "name": "historical_human_correction",
+      "grades": [4, 4, 4, 4, 4, 4, 4, 4],
+      "evidence_count": 0,
+      "corrections": [
+        {
+          "target_type": "dimension",
+          "field_key": "spatial_design_furnishing",
+          "human_value": 1
+        }
+      ],
+      "expected_sha256": "5ac061e008f4951e68f60a5d142ea411e72beab1ddd050ef5b92cc9b812e1feb",
+      "expected_summary": {
+        "formal": true,
+        "score": 70.84,
+        "level": "L3",
+        "raw_level": "L3",
+        "raw_score": 70.84,
+        "caps": [],
+        "needs_review": true
+      }
+    }
+  ]
+}

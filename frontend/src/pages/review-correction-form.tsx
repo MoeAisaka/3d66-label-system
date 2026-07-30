@@ -4,18 +4,15 @@ import { ArrowCounterClockwise, Check, WarningCircle } from "@phosphor-icons/rea
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Textarea } from "@/components/ui/textarea"
-import type { ReviewCorrection } from "@/lib/types"
-
-export const dimensionLabels: Record<string, string> = {
-  composition_viewpoint: "构图与机位",
-  lighting_atmosphere: "光影与氛围",
-  color_material: "色彩与材质",
-  spatial_design_furnishing: "空间设计与家具软装",
-  visual_hierarchy: "视觉层级",
-  detail_completion: "细节完成度",
-  inspiration_reference: "灵感与参考价值",
-  presentation_integrity: "画面呈现完整性",
-}
+import {
+  calculateDimensionPreview,
+  dimensionKeys as dimensionKeysForSchema,
+  dimensionLabels as dimensionLabelsForSchema,
+} from "@/lib/dimension-schema"
+import type {
+  EvaluationDimensionSchema,
+  ReviewCorrection,
+} from "@/lib/types"
 
 const reasons = [
   ["overrated", "评分偏高"],
@@ -29,44 +26,31 @@ const reasons = [
   ["invalid_evidence", "使用了不可靠证据"],
 ] as const
 
-const gradePoints: Record<number, number> = { 1: 20, 2: 45, 3: 65, 4: 82, 5: 95 }
-const defaultWeights: Record<string, number> = {
-  composition_viewpoint: 0.15,
-  lighting_atmosphere: 0.12,
-  color_material: 0.12,
-  spatial_design_furnishing: 0.18,
-  visual_hierarchy: 0.10,
-  detail_completion: 0.10,
-  inspiration_reference: 0.08,
-  presentation_integrity: 0.15,
-}
-
 type Draft = { humanGrade: number; reasons: string[]; note: string }
-
-function levelForScore(score: number) {
-  if (score < 40) return "L1"
-  if (score < 60) return "L2"
-  if (score < 75) return "L3"
-  if (score < 90) return "L4"
-  return "L5"
-}
 
 export function ReviewCorrectionForm({
   dimensions,
-  precheck,
+  dimensionSchema,
   scoring,
   pending,
   editable = true,
   onSubmit,
 }: {
   dimensions: Record<string, any>
-  precheck: Record<string, any>
+  dimensionSchema: EvaluationDimensionSchema
   scoring: Record<string, any>
   pending: boolean
   editable?: boolean
   onSubmit: (payload: { note: string; corrections: ReviewCorrection[] }) => void
 }) {
-  const dimensionKeys = Object.keys(dimensionLabels)
+  const dimensionKeys = useMemo(
+    () => dimensionKeysForSchema(dimensionSchema),
+    [dimensionSchema],
+  )
+  const dimensionLabels = useMemo(
+    () => dimensionLabelsForSchema(dimensionSchema),
+    [dimensionSchema],
+  )
   const [drafts, setDrafts] = useState<Record<string, Draft>>({})
   const [overallNote, setOverallNote] = useState("")
   const [error, setError] = useState("")
@@ -77,40 +61,23 @@ export function ReviewCorrectionForm({
         const draft = drafts[key]
         return draft && draft.humanGrade !== Number(dimensions[key]?.grade || 0)
       }),
-    [drafts, dimensions],
+    [dimensionKeys, drafts, dimensions],
   )
 
   const preview = useMemo(() => {
-    let score = 0
-    dimensionKeys.forEach((key) => {
-      const grade = drafts[key]?.humanGrade ?? Number(dimensions[key]?.grade || 0)
-      const weight = Number(scoring?.dimension_points?.[key]?.weight ?? defaultWeights[key])
-      score += (gradePoints[grade] ?? 0) * weight
-    })
-    score = Math.round(score * 100) / 100
-    let level = levelForScore(score)
-    const caps = (scoring?.caps ?? [])
-      .map((item: any) => Number(String(item.cap || "").replace("L", "")))
-      .filter(Boolean)
-    const qualitySeverity = String(precheck?.image_quality?.quality_severity ?? "normal")
-    if (["slight", "moderate", "severe", "unusable"].includes(qualitySeverity)) caps.push(2)
-    const qualityConfidence = Number(precheck?.image_quality?.confidence ?? 0)
-    const qualityEvidence = precheck?.image_quality?.evidence
-    if (
-      ["severe", "unusable"].includes(qualitySeverity) &&
-      qualityConfidence >= 0.8 &&
-      Array.isArray(qualityEvidence) &&
-      qualityEvidence.length >= 2
+    const grades = Object.fromEntries(
+      dimensionKeys.map((key) => [
+        key,
+        drafts[key]?.humanGrade
+          ?? Number(dimensions[key]?.grade || 0),
+      ]),
     )
-      caps.push(1)
-    if (precheck?.media_form?.casual_snapshot?.status === "yes") caps.push(2)
-    if (caps.length) {
-      const cap = Math.min(...caps)
-      level = `L${Math.min(Number(level.replace("L", "")), cap)}`
-      score = Math.min(score, { 1: 39, 2: 59, 3: 74, 4: 89 }[cap as 1 | 2 | 3 | 4] ?? score)
-    }
-    return { score, level }
-  }, [dimensions, drafts, precheck, scoring])
+    return calculateDimensionPreview(
+      dimensionSchema,
+      grades,
+      scoring?.caps ?? [],
+    )
+  }, [dimensionKeys, dimensionSchema, dimensions, drafts, scoring])
 
   function updateDraft(key: string, patch: Partial<Draft>) {
     setError("")
@@ -177,8 +144,25 @@ export function ReviewCorrectionForm({
     onSubmit({ corrections, note: [summary, overallNote.trim()].filter(Boolean).join("；") })
   }
 
+  if (!dimensionKeys.length || !preview) {
+    return (
+      <section
+        aria-label="维度合同异常"
+        className="border-y border-[#e4c7c3] bg-[#fff8f7] px-5 py-5"
+      >
+        <p className="flex items-center gap-2 text-sm font-semibold text-[#8d2924]">
+          <WarningCircle />维度规则无法解析，已禁止逐维纠偏
+        </p>
+        <p className="mt-2 text-xs leading-5 text-[#74302b]">
+          可以确认或退回整条结果，但不能在规则身份不明时修改维度分数。
+          {dimensionSchema.error ? ` 原因：${dimensionSchema.error}` : ""}
+        </p>
+      </section>
+    )
+  }
+
   return (
-    <section aria-label="八维证据与人工纠偏">
+    <section aria-label="维度证据与人工纠偏">
       <div className="divide-y divide-[var(--line)] border-b border-[var(--line)]">
         {dimensionKeys.map((key, index) => {
           const item = dimensions[key] ?? {}

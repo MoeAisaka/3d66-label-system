@@ -61,20 +61,29 @@ from .schema_adapter import (
     is_combined_aesthetic_response,
     normalize_precheck_business_rules,
 )
+from .dimension_schema_registry import (
+    space_schema_definition_for_scoring_profile,
+)
 from .regression import (
     complete_paired_regression_item,
     complete_regression_item,
     fail_regression_item,
 )
 from .risk_review import (
-    RISK_REVIEW_SYSTEM_PROMPT,
     RISK_REVIEW_VERSION,
     apply_risk_review,
+    build_risk_review_system_prompt,
     build_risk_review_user_prompt,
     risk_review_reasons,
 )
 from .seed import seed_defaults
-from .strategy_bundle import build_strategy_snapshot, get_or_create_bundle
+from .strategy_bundle import (
+    STRATEGY_SCHEMA_VERSION,
+    build_evaluation_strategy_snapshot,
+    build_strategy_snapshot,
+    get_or_create_bundle,
+    resolve_frozen_dimension_entry,
+)
 from .baseline_regression import complete_baseline_item, fail_baseline_item
 
 
@@ -623,8 +632,31 @@ async def evaluate_job(job_id: int) -> None:
 
     risk_review_report = None
     risk_review_raw = None
-    preliminary_scoring = calculate_score(precheck, aesthetic)
-    trigger_reasons = risk_review_reasons(precheck, aesthetic, preliminary_scoring)
+    dimension_definition = (
+        resolve_frozen_dimension_entry(
+            bundle=frozen_bundle,
+            aesthetic=aesthetic,
+        )["definition"]
+        if frozen_bundle is not None
+        and frozen_bundle.strategy_schema_version
+        == STRATEGY_SCHEMA_VERSION
+        else space_schema_definition_for_scoring_profile(
+            aesthetic.get("scoring_profile")
+            if isinstance(aesthetic, dict)
+            else None
+        )
+    )
+    preliminary_scoring = calculate_score(
+        precheck,
+        aesthetic,
+        dimension_schema=dimension_definition,
+    )
+    trigger_reasons = risk_review_reasons(
+        precheck,
+        aesthetic,
+        preliminary_scoring,
+        dimension_schema=dimension_definition,
+    )
     risk_review_enabled = bool(model_config.high_risk_review_enabled)
     if frozen_bundle is not None:
         risk_review_enabled = (
@@ -635,13 +667,25 @@ async def evaluate_job(job_id: int) -> None:
         _set_job(job_id, stage="risk_review", progress=76)
         try:
             risk_response = await client.chat_json(
-                RISK_REVIEW_SYSTEM_PROMPT,
-                build_risk_review_user_prompt(precheck, aesthetic, preliminary_scoring),
+                build_risk_review_system_prompt(
+                    dimension_definition
+                ),
+                build_risk_review_user_prompt(
+                    precheck,
+                    aesthetic,
+                    preliminary_scoring,
+                    dimension_schema=dimension_definition,
+                ),
                 image_path=image_path,
                 mime_type=asset.mime_type,
             )
             risk_review_raw = risk_response.raw_payload
-            risk_review_report = apply_risk_review(precheck, aesthetic, risk_response.parsed)
+            risk_review_report = apply_risk_review(
+                precheck,
+                aesthetic,
+                risk_response.parsed,
+                dimension_schema=dimension_definition,
+            )
             risk_review_report["trigger_reasons"] = trigger_reasons
             precheck = normalize_precheck_business_rules(precheck)
         except Exception as exc:
@@ -660,7 +704,27 @@ async def evaluate_job(job_id: int) -> None:
 
     _set_job(job_id, stage="scoring", progress=86)
     _ensure_job_processing(job_id)
-    scoring = calculate_score(precheck, aesthetic)
+    if frozen_bundle is not None and (
+        frozen_bundle.strategy_schema_version
+        == STRATEGY_SCHEMA_VERSION
+    ):
+        dimension_definition = resolve_frozen_dimension_entry(
+            bundle=frozen_bundle,
+            aesthetic=aesthetic,
+        )["definition"]
+    elif frozen_bundle is None:
+        dimension_definition = (
+            space_schema_definition_for_scoring_profile(
+                aesthetic.get("scoring_profile")
+                if isinstance(aesthetic, dict)
+                else None
+            )
+        )
+    scoring = calculate_score(
+        precheck,
+        aesthetic,
+        dimension_schema=dimension_definition,
+    )
     now = datetime.now(timezone.utc)
     with session_scope() as db:
         current_job = db.get(EvaluationJob, job_id)
@@ -674,8 +738,7 @@ async def evaluate_job(job_id: int) -> None:
             bundle = db.get(StrategyBundle, frozen_bundle.id)
             if bundle is None:
                 raise RuntimeError("任务冻结 StrategyBundle 已不存在")
-            strategy_snapshot = frozen_strategy_snapshot
-            if strategy_snapshot is None:
+            if frozen_strategy_snapshot is None:
                 raise RuntimeError("任务冻结策略快照缺失")
             rubric_version = bundle.rubric_version
         else:
@@ -693,12 +756,14 @@ async def evaluate_job(job_id: int) -> None:
                 risk_review_version=risk_review_version_used,
                 sampling_policy=sampling_policy,
             )
-            strategy_snapshot = build_strategy_snapshot(
-                bundle=bundle,
-                prompt_a=prompt_a,
-                prompt_b=prompt_b,
-                sampling_policy=sampling_policy,
-            )
+        strategy_snapshot = build_evaluation_strategy_snapshot(
+            db=db,
+            bundle=bundle,
+            prompt_a=prompt_a,
+            prompt_b=prompt_b,
+            sampling_policy=sampling_policy,
+            aesthetic=aesthetic,
+        )
 
         result = EvaluationResult(
             asset_id=asset.id,

@@ -46,6 +46,7 @@ from .models import (
     BaselineSet,
     BaselineSetItem,
     CircuitBreaker,
+    DimensionSchema,
     EvaluationControl,
     EvaluationJob,
     EvaluationResult,
@@ -136,6 +137,7 @@ from .schema_adapter import repair_combined_aesthetic_results, rescore_stored_re
 from .regression import (
     SAMPLE_ROLES,
     complete_paired_regression_item,
+    dimension_contract_for_result,
     paired_gate_policy,
     refresh_paired_regression_run,
     reviewed_truth_snapshot,
@@ -160,7 +162,13 @@ from .review_panel import (
 )
 from .review_sampling import build_review_sampling
 from .risk_review import RISK_REVIEW_VERSION
-from .scoring import ENGINE_VERSION, calculate_corrected_score
+from .scoring import (
+    DimensionScoringContractError,
+    ENGINE_VERSION,
+    calculate_corrected_score,
+    dimension_schema_from_strategy_snapshot,
+)
+from .dimension_schema_registry import canonical_hash
 from .strategy_bundle import (
     build_strategy_snapshot,
     get_or_create_bundle,
@@ -1047,6 +1055,7 @@ def _result_payload(result: EvaluationResult | None) -> dict[str, Any] | None:
         "prompt_b_id": result.job.prompt_b_id,
         "precheck": json.loads(result.precheck_json),
         "aesthetic": json.loads(result.aesthetic_json) if result.aesthetic_json else None,
+        "dimension_schema": _evaluation_dimension_schema_payload(result),
         "scoring": json.loads(result.scoring_json),
         "score": result.score,
         "level": result.level,
@@ -1106,6 +1115,78 @@ def _result_payload(result: EvaluationResult | None) -> dict[str, Any] | None:
         "created_at": result.created_at,
         "updated_at": result.updated_at,
     }
+
+
+def _evaluation_dimension_schema_payload(
+    result: EvaluationResult,
+) -> dict[str, Any]:
+    """Expose the exact result-bound dimension contract to UI consumers."""
+    try:
+        definition, dimension_keys, identity = (
+            dimension_contract_for_result(result)
+        )
+        if identity is not None:
+            return {
+                "status": "resolved",
+                "schema_id": identity["schema_id"],
+                "schema_key": identity["schema_key"],
+                "version": identity["version"],
+                "canonical_hash": identity["canonical_hash"],
+                "legacy_derived": False,
+                "dimension_keys": list(dimension_keys),
+                "definition": definition,
+                "error": None,
+            }
+        return {
+            "status": "resolved",
+            "schema_id": None,
+            "schema_key": str(
+                definition.get("schema_key")
+                or definition.get("package_key")
+                or "space_aesthetic"
+            ),
+            "version": str(
+                definition.get("compatibility_revision")
+                or definition.get("package_version")
+                or "legacy-derived"
+            ),
+            "canonical_hash": canonical_hash(definition),
+            "legacy_derived": True,
+            "dimension_keys": list(dimension_keys),
+            "definition": definition,
+            "error": None,
+        }
+    except (
+        DimensionScoringContractError,
+        json.JSONDecodeError,
+        KeyError,
+        TypeError,
+        ValueError,
+    ) as exc:
+        aesthetic: dict[str, Any] = {}
+        try:
+            parsed = json.loads(result.aesthetic_json or "{}")
+            if isinstance(parsed, dict):
+                aesthetic = parsed
+        except (json.JSONDecodeError, TypeError):
+            pass
+        dimensions = aesthetic.get("dimensions")
+        display_keys = (
+            [str(key) for key in dimensions]
+            if isinstance(dimensions, dict)
+            else []
+        )
+        return {
+            "status": "invalid",
+            "schema_id": None,
+            "schema_key": None,
+            "version": None,
+            "canonical_hash": None,
+            "legacy_derived": False,
+            "dimension_keys": display_keys,
+            "definition": None,
+            "error": str(exc),
+        }
 
 
 @app.get("/api/health")
@@ -3624,6 +3705,20 @@ def _claim_review_panel_revision_or_409(
         ) from None
 
 
+def _evaluation_aesthetic_and_dimension_schema(
+    evaluation: EvaluationResult,
+) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    aesthetic = (
+        json.loads(evaluation.aesthetic_json)
+        if evaluation.aesthetic_json
+        else None
+    )
+    return aesthetic, dimension_schema_from_strategy_snapshot(
+        evaluation.strategy_snapshot_json,
+        aesthetic=aesthetic,
+    )
+
+
 def _finalize_review_panel(
     db: Session,
     *,
@@ -3644,18 +3739,18 @@ def _finalize_review_panel(
     corrected_score = None
     corrected_level = None
     if decision == "corrected":
+        aesthetic, dimension_schema = (
+            _evaluation_aesthetic_and_dimension_schema(evaluation)
+        )
         recalculated = calculate_corrected_score(
             json.loads(evaluation.precheck_json),
-            (
-                json.loads(evaluation.aesthetic_json)
-                if evaluation.aesthetic_json
-                else None
-            ),
+            aesthetic,
             [
                 correction
                 for correction in corrections
                 if correction.get("target_type") == "dimension"
             ],
+            dimension_schema=dimension_schema,
         )
         corrected_score = recalculated.get("score")
         corrected_level = recalculated.get("level")
@@ -3858,14 +3953,14 @@ def submit_review_panel_vote(
     correction_data = [item.model_dump() for item in payload.corrections]
     if payload.decision == "corrected":
         try:
+            aesthetic, dimension_schema = (
+                _evaluation_aesthetic_and_dimension_schema(evaluation)
+            )
             recalculated = calculate_corrected_score(
                 json.loads(evaluation.precheck_json),
-                (
-                    json.loads(evaluation.aesthetic_json)
-                    if evaluation.aesthetic_json
-                    else None
-                ),
+                aesthetic,
                 correction_data,
+                dimension_schema=dimension_schema,
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -4932,10 +5027,14 @@ def create_review(
     corrected_level = None
     if payload.decision == "corrected":
         try:
+            aesthetic, dimension_schema = (
+                _evaluation_aesthetic_and_dimension_schema(evaluation)
+            )
             recalculated = calculate_corrected_score(
                 json.loads(evaluation.precheck_json),
-                json.loads(evaluation.aesthetic_json) if evaluation.aesthetic_json else None,
+                aesthetic,
                 correction_data,
+                dimension_schema=dimension_schema,
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -6065,6 +6164,83 @@ def list_strategy_bundles(
             for bundle in bundles
         ]
     }
+
+
+def _dimension_schema_payload(
+    schema: DimensionSchema,
+    *,
+    include_definition: bool,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "id": schema.id,
+        "schema_key": schema.schema_key,
+        "version": schema.version,
+        "schema_type": schema.schema_type,
+        "family_key": schema.family_key,
+        "display_name": schema.display_name,
+        "status": schema.status,
+        "parent_schema_id": schema.parent_schema_id,
+        "core_schema_id": schema.core_schema_id,
+        "canonical_hash": schema.canonical_hash,
+        "source_optimization_run_id": schema.source_optimization_run_id,
+        "created_by": schema.created_by,
+        "created_at": schema.created_at,
+        "published_by": schema.published_by,
+        "published_at": schema.published_at,
+        "retired_at": schema.retired_at,
+    }
+    if include_definition:
+        payload["definition"] = json.loads(schema.definition_json)
+    return payload
+
+
+@app.get("/api/dimension-schemas")
+def list_dimension_schemas(
+    schema_key: str | None = None,
+    schema_type: str | None = None,
+    family_key: str | None = None,
+    status: str | None = None,
+    _user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    statement = select(DimensionSchema).order_by(
+        DimensionSchema.schema_key,
+        DimensionSchema.created_at.desc(),
+        DimensionSchema.id.desc(),
+    )
+    for column, value in (
+        (DimensionSchema.schema_key, schema_key),
+        (DimensionSchema.schema_type, schema_type),
+        (DimensionSchema.family_key, family_key),
+        (DimensionSchema.status, status),
+    ):
+        if value is not None:
+            statement = statement.where(column == value)
+    schemas = db.scalars(statement.limit(200)).all()
+    return {
+        "items": [
+            _dimension_schema_payload(schema, include_definition=False)
+            for schema in schemas
+        ]
+    }
+
+
+@app.get("/api/dimension-schemas/{schema_key}/versions/{version}")
+def get_dimension_schema_version(
+    schema_key: str,
+    version: str,
+    _user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    schema = db.scalar(
+        select(DimensionSchema).where(
+            DimensionSchema.schema_key == schema_key,
+            DimensionSchema.version == version,
+        )
+    )
+    if schema is None:
+        raise HTTPException(status_code=404, detail="维度 Schema 版本不存在")
+    return _dimension_schema_payload(schema, include_definition=True)
 
 
 def _paired_metric_rules(payload: PairedRegressionCreateRequest) -> dict[str, Any]:

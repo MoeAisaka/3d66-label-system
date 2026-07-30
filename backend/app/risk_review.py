@@ -4,6 +4,12 @@ import json
 from copy import deepcopy
 from typing import Any
 
+from .dimension_schema_registry import (
+    ACTIVE_V13_VERSION,
+    HISTORICAL_DEFAULT_VERSION,
+    canonical_hash,
+    space_schema_definition_for_version,
+)
 
 RISK_REVIEW_VERSION = "risk-review-v1.1"
 
@@ -28,6 +34,14 @@ QUALITY_RANK = {
 }
 
 CAP_RANK = {"none": 6, "L5": 5, "L4": 4, "L3": 3, "L2": 2, "L1": 1}
+_COMPATIBLE_SPACE_HASHES = {
+    canonical_hash(
+        space_schema_definition_for_version(HISTORICAL_DEFAULT_VERSION)
+    ),
+    canonical_hash(
+        space_schema_definition_for_version(ACTIVE_V13_VERSION)
+    ),
+}
 
 RISK_REVIEW_SYSTEM_PROMPT = """你是3D66图片评测的保守复核员。初评经常把普通、整洁、对称、清楚误判为专业摄影和3至5级。忽略初评的褒义措辞，先独立看原图，再寻找反证。
 
@@ -63,31 +77,157 @@ RISK_REVIEW_SYSTEM_PROMPT = """你是3D66图片评测的保守复核员。初评
 }"""
 
 
+def _risk_contract(
+    dimension_schema: dict[str, Any] | None,
+) -> tuple[
+    tuple[str, ...],
+    dict[str, int],
+    dict[str, int],
+    dict[str, Any],
+    str,
+]:
+    if dimension_schema is None:
+        return (
+            DIMENSION_KEYS,
+            QUALITY_RANK,
+            CAP_RANK,
+            {
+                "professional_photography_status": "yes",
+                "levels": ["L4", "L5"],
+                "trigger_when_grade_five_count_gte": 1,
+            },
+            RISK_REVIEW_VERSION,
+        )
+    output_contract = dimension_schema.get("output_contract")
+    risk_review = dimension_schema.get("risk_review")
+    if (
+        not isinstance(output_contract, dict)
+        or not isinstance(risk_review, dict)
+    ):
+        raise ValueError("DimensionSchema 缺少高风险复核合同")
+    keys = output_contract.get("dimension_output_keys")
+    risk_dimension_keys = risk_review.get("dimension_keys")
+    quality_rank = risk_review.get("quality_rank")
+    cap_rank = risk_review.get("cap_rank")
+    trigger_rules = risk_review.get("trigger_rules")
+    version = risk_review.get("version")
+    if (
+        not isinstance(keys, list)
+        or not keys
+        or len(keys) != len(set(keys))
+        or not all(isinstance(key, str) and key for key in keys)
+        or risk_dimension_keys != keys
+        or not isinstance(quality_rank, dict)
+        or not isinstance(cap_rank, dict)
+        or not isinstance(trigger_rules, dict)
+        or not isinstance(version, str)
+        or not version
+    ):
+        raise ValueError("DimensionSchema 高风险复核合同不完整")
+    return (
+        tuple(keys),
+        {str(key): int(value) for key, value in quality_rank.items()},
+        {str(key): int(value) for key, value in cap_rank.items()},
+        trigger_rules,
+        version,
+    )
+
+
+def build_risk_review_system_prompt(
+    dimension_schema: dict[str, Any] | None = None,
+) -> str:
+    """Keep the frozen space prompt byte-identical; render future packs safely."""
+    keys, _, _, _, _ = _risk_contract(dimension_schema)
+    if (
+        dimension_schema is None
+        or canonical_hash(dimension_schema) in _COMPATIBLE_SPACE_HASHES
+    ):
+        return RISK_REVIEW_SYSTEM_PROMPT
+    dimensions = (
+        dimension_schema.get("dimensions")
+        if isinstance(dimension_schema, dict)
+        else None
+    )
+    if not isinstance(dimensions, list):
+        raise ValueError("DimensionSchema 缺少维度定义")
+    definitions = {
+        item["key"]: {
+            "label": item.get("label"),
+            "anchors": item.get("anchors"),
+            "evidence_rule": item.get("evidence_rule"),
+        }
+        for item in dimensions
+        if isinstance(item, dict) and item.get("key") in keys
+    }
+    if set(definitions) != set(keys):
+        raise ValueError("DimensionSchema 复核维度定义不完整")
+    output = {
+        "verdict": "keep|downgrade|uncertain",
+        "risk_reasons": [],
+        "professional_photography": "yes|no|uncertain",
+        "documentary_record": "yes|no|uncertain",
+        "quality_severity": (
+            "normal|slight|moderate|severe|unusable|uncertain"
+        ),
+        "dimension_grades": {key: 1 for key in keys},
+        "level_cap": "none|L4|L3|L2|L1",
+        "confidence": 0.0,
+    }
+    return (
+        "你是3D66图片评测的保守复核员。只允许保持或降低初评，"
+        "不得提高维度等级、最终等级或改善画质结论。"
+        "逐维依据冻结定义寻找可定位反证；证据不足输出uncertain。"
+        "只输出合法JSON。\n\n冻结维度定义：\n"
+        + json.dumps(definitions, ensure_ascii=False, sort_keys=True)
+        + "\n\n输出合同：\n"
+        + json.dumps(output, ensure_ascii=False, sort_keys=True)
+    )
+
+
 def risk_review_reasons(
-    precheck: dict[str, Any], aesthetic: dict[str, Any] | None, scoring: dict[str, Any]
+    precheck: dict[str, Any],
+    aesthetic: dict[str, Any] | None,
+    scoring: dict[str, Any],
+    *,
+    dimension_schema: dict[str, Any] | None = None,
 ) -> list[str]:
     if not aesthetic:
         return []
     reasons: list[str] = []
     media = precheck.get("media_form") or {}
     professional = media.get("professional_photography") or {}
-    if professional.get("status") == "yes":
+    keys, _, _, trigger_rules, _ = _risk_contract(dimension_schema)
+    professional_status = trigger_rules.get(
+        "professional_photography_status"
+    )
+    if professional.get("status") == professional_status:
         reasons.append("模型判定为专业摄影")
     level = scoring.get("level")
-    if level in {"L4", "L5"}:
+    trigger_levels = trigger_rules.get("levels")
+    if isinstance(trigger_levels, list) and level in trigger_levels:
         reasons.append(f"初评分达到{level}")
     dimensions = aesthetic.get("dimensions") or {}
-    grade_fives = sum(
-        1 for key in DIMENSION_KEYS if (dimensions.get(key) or {}).get("grade") == 5
+    grade_five_threshold = int(
+        trigger_rules.get("trigger_when_grade_five_count_gte", 1)
     )
-    if grade_fives:
+    grade_fives = sum(
+        1
+        for key in keys
+        if (dimensions.get(key) or {}).get("grade") == 5
+    )
+    if grade_fives >= grade_five_threshold:
         reasons.append(f"存在{grade_fives}个5级维度")
     return reasons
 
 
 def build_risk_review_user_prompt(
-    precheck: dict[str, Any], aesthetic: dict[str, Any], scoring: dict[str, Any]
+    precheck: dict[str, Any],
+    aesthetic: dict[str, Any],
+    scoring: dict[str, Any],
+    *,
+    dimension_schema: dict[str, Any] | None = None,
 ) -> str:
+    keys, _, _, _, _ = _risk_contract(dimension_schema)
     media = precheck.get("media_form") or {}
     compact_media = {
         key: {
@@ -107,7 +247,7 @@ def build_risk_review_user_prompt(
         and isinstance(value, dict)
     }
     dimensions = {}
-    for key in DIMENSION_KEYS:
+    for key in keys:
         value = (aesthetic.get("dimensions") or {}).get(key) or {}
         dimensions[key] = {
             "grade": value.get("grade"),
@@ -131,9 +271,16 @@ def build_risk_review_user_prompt(
 
 
 def apply_risk_review(
-    precheck: dict[str, Any], aesthetic: dict[str, Any], audit: dict[str, Any]
+    precheck: dict[str, Any],
+    aesthetic: dict[str, Any],
+    audit: dict[str, Any],
+    *,
+    dimension_schema: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Apply only conservative corrections. The audit can never raise a model conclusion."""
+    keys, quality_rank, cap_rank, _, risk_review_version = (
+        _risk_contract(dimension_schema)
+    )
     corrections: list[dict[str, Any]] = []
     reasons = [str(item) for item in audit.get("risk_reasons") or [] if str(item).strip()]
     media = precheck.setdefault("media_form", {})
@@ -171,7 +318,9 @@ def apply_risk_review(
 
     current_quality = str(quality.get("quality_severity") or "uncertain")
     audited_quality = str(audit.get("quality_severity") or current_quality)
-    if QUALITY_RANK.get(audited_quality, 0) > QUALITY_RANK.get(current_quality, 0):
+    if quality_rank.get(audited_quality, 0) > quality_rank.get(
+        current_quality, 0
+    ):
         quality["quality_severity"] = audited_quality
         quality["confidence"] = float(audit.get("confidence") or 0.0)
         evidence = list(quality.get("evidence") or [])
@@ -183,7 +332,7 @@ def apply_risk_review(
 
     dimensions = aesthetic.get("dimensions") or {}
     for key, audited_grade in (audit.get("dimension_grades") or {}).items():
-        if key not in DIMENSION_KEYS or not isinstance(audited_grade, int):
+        if key not in keys or not isinstance(audited_grade, int):
             continue
         item = dimensions.get(key)
         if not isinstance(item, dict):
@@ -203,7 +352,10 @@ def apply_risk_review(
     audited_cap = str(audit.get("level_cap") or "none")
     decision_rules = aesthetic.setdefault("decision_rules", {})
     current_cap = str(decision_rules.get("level_cap") or "none")
-    if audited_cap in CAP_RANK and CAP_RANK[audited_cap] < CAP_RANK.get(current_cap, 6):
+    if (
+        audited_cap in cap_rank
+        and cap_rank[audited_cap] < cap_rank.get(current_cap, 6)
+    ):
         decision_rules["level_cap"] = audited_cap
         decision_rules["level_cap_reasons"] = reasons or ["高风险复核设置等级上限"]
         corrections.append({"field": "level_cap", "before": current_cap, "after": audited_cap})
@@ -219,7 +371,7 @@ def apply_risk_review(
         aesthetic["review_reasons"] = review_reasons
 
     return {
-        "version": RISK_REVIEW_VERSION,
+        "version": risk_review_version,
         "triggered": True,
         "verdict": audit.get("verdict") or ("downgrade" if corrections else "keep"),
         "confidence": confidence,

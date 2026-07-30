@@ -221,7 +221,7 @@ export function AssetsPage({ view = "assets" }: { view?: "packages" | "assets" }
               开始评测 {selected.size ? `(${selected.size})` : ""}<ArrowRight weight="bold" />
             </Button>
             </div>
-            <p className="mt-3 text-xs leading-5 text-[var(--muted)]">{effectivePromptMode === "single" ? "单提示词必须一次返回分类、画质和八个美感维度的完整结果。" : "A/B 两阶段先完成分类与画质预检，再对范围内图片执行美感评测。"} 创建任务不会覆盖旧结果。</p>
+            <p className="mt-3 text-xs leading-5 text-[var(--muted)]">{effectivePromptMode === "single" ? "单提示词必须一次返回分类、画质和当前维度规则要求的完整结果。" : "A/B 两阶段先完成分类与画质预检，再对范围内图片执行美感评测。"} 创建任务不会覆盖旧结果。</p>
           </div>
           <div className="overflow-x-auto border-y border-[var(--line-strong)] bg-white scrollbar-thin">
             {assets.isLoading ? (

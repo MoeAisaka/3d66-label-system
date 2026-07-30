@@ -39,6 +39,8 @@ MIGRATION_NAMES = [
     "enforce_material_package_immutability",
     "add_real_executor_safety",
     "add_baseline_regression_and_repair_prompt_fk",
+    "add_dimension_schemas",
+    "bind_dimension_contract_to_strategy",
 ]
 
 
@@ -1993,7 +1995,7 @@ def test_v23_real_executor_migration_preserves_rows_and_adds_safe_defaults(
                 )
             assert connection.exec_driver_sql(
                 "SELECT max(version) FROM schema_migrations"
-            ).scalar_one() == 25
+            ).scalar_one() == 27
     finally:
         engine.dispose()
 

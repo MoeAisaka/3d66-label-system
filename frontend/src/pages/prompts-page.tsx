@@ -263,7 +263,7 @@ export function PromptCandidatesPage() {
                 <Button onClick={() => startOptimization.mutate()} disabled={!sampleSetId || selected.stage !== "B" || !optimizerConfig.data?.has_api_key || Boolean(activeOptimization) || startOptimization.isPending}>{activeOptimization ? "SOL 正在分析" : "生成候选提示词"}<MagicWand /></Button>
               </div>
               {!optimizerConfig.data?.has_api_key && <div className="flex items-start gap-2 border-t border-[var(--line)] bg-[#fff9ef] px-5 py-3 text-xs leading-5 text-[#7d4308]"><WarningCircle className="mt-0.5 shrink-0" />请先到“模型配置”填写 SOL API Key。Codex 登录权限不能直接供网站调用。</div>}
-              {selected.stage !== "B" && <div className="border-t border-[var(--line)] px-5 py-3 text-xs text-[var(--muted)]">样本驱动优化目前用于调用 B 的八个美感维度。请选择调用 B 的提示词版本。</div>}
+              {selected.stage !== "B" && <div className="border-t border-[var(--line)] px-5 py-3 text-xs text-[var(--muted)]">样本驱动优化目前用于调用 B 的维度评分。请选择调用 B 的提示词版本。</div>}
               {latestOptimization && <div className="border-t border-[var(--line)] px-5 py-4">
                 <div className="flex flex-wrap items-center justify-between gap-3">
                   <div><p className="text-sm font-semibold">最近一次：{latestOptimization.sample_set_name}</p><p className="font-data mt-1 text-xs text-[var(--muted)]">{latestOptimization.optimizer_model_id} · {latestOptimization.sample_count || "—"} 张已校验样本</p></div>

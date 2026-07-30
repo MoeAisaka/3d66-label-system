@@ -60,6 +60,45 @@ export type HumanReview = {
   created_at: string
 }
 
+export type DimensionDefinition = {
+  key: string
+  label: string
+  display_order?: number
+  weight?: number
+  grade_points?: Record<string, number>
+  aggregation_role?: string
+  anchors?: Record<string, string>
+}
+
+export type DimensionSchemaDefinition = {
+  format_version?: string
+  package_key?: string
+  package_version?: string
+  compatibility_revision?: string
+  dimensions: DimensionDefinition[]
+  aggregation?: {
+    grade_points?: Record<string, number>
+    level_thresholds?: Record<string, number>
+    score_round_digits?: number
+  }
+  output_contract?: {
+    dimension_output_keys?: string[]
+    unknown_key_policy?: string
+  }
+}
+
+export type EvaluationDimensionSchema = {
+  status: "resolved" | "invalid"
+  schema_id: number | null
+  schema_key: string | null
+  version: string | null
+  canonical_hash: string | null
+  legacy_derived: boolean
+  dimension_keys: string[]
+  definition: DimensionSchemaDefinition | null
+  error: string | null
+}
+
 export type Evaluation = {
   id: number
   asset_id: number
@@ -69,6 +108,7 @@ export type Evaluation = {
   prompt_b_id: number | null
   precheck: Record<string, any>
   aesthetic: Record<string, any> | null
+  dimension_schema: EvaluationDimensionSchema
   scoring: Record<string, any>
   score: number | null
   level: string | null
@@ -683,6 +723,14 @@ export type SampleTruth = {
   quality_severity?: string
   media_form?: Record<string, "yes" | "no" | "uncertain">
   dimensions?: Record<string, number>
+  dimension_schema?: {
+    binding_version?: string
+    schema_id?: number
+    schema_key?: string
+    version?: string
+    canonical_hash?: string
+    definition?: DimensionSchemaDefinition
+  }
 }
 
 export type SampleItemHistory = {

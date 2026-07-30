@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from datetime import datetime, timezone
 
@@ -511,10 +512,45 @@ class CanaryRun(Base):
 
 class StrategyBundle(Base):
     __tablename__ = "strategy_bundles"
-    __table_args__ = (UniqueConstraint("canonical_hash", name="uq_strategy_canonical_hash"),)
+    __table_args__ = (
+        CheckConstraint(
+            "strategy_schema_version IN ("
+            "'strategy-bundle-v1','strategy-bundle-v2'"
+            ")",
+            name="ck_strategy_bundles_schema_version",
+        ),
+        CheckConstraint(
+            "("
+            "strategy_schema_version = 'strategy-bundle-v1' "
+            "AND dimension_route_policy_id IS NULL "
+            "AND dimension_schema_set_snapshot IS NULL "
+            "AND label_field_set_snapshot IS NULL "
+            "AND resolved_schema_contract_version IS NULL"
+            ") OR ("
+            "strategy_schema_version = 'strategy-bundle-v2' "
+            "AND length(trim(dimension_route_policy_id)) > 0 "
+            "AND json_valid(dimension_schema_set_snapshot) "
+            "AND json_type(dimension_schema_set_snapshot, '$') = 'object' "
+            "AND json_valid(label_field_set_snapshot) "
+            "AND json_type(label_field_set_snapshot, '$') = 'object' "
+            "AND length(trim(resolved_schema_contract_version)) > 0"
+            ")",
+            name="ck_strategy_bundles_dimension_contract",
+        ),
+        UniqueConstraint(
+            "canonical_hash",
+            name="uq_strategy_canonical_hash",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     canonical_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    strategy_schema_version: Mapped[str] = mapped_column(
+        String(40),
+        default="strategy-bundle-v1",
+        server_default="strategy-bundle-v1",
+        index=True,
+    )
     model_id: Mapped[str] = mapped_column(String(200), index=True)
     model_config_snapshot: Mapped[str] = mapped_column(Text)
     prompt_a_version: Mapped[str] = mapped_column(String(40), index=True)
@@ -529,7 +565,131 @@ class StrategyBundle(Base):
         server_default="controlled-agent-plan-v1",
         index=True,
     )
+    dimension_route_policy_id: Mapped[str | None] = mapped_column(
+        String(100), nullable=True, index=True
+    )
+    dimension_schema_set_snapshot: Mapped[str | None] = mapped_column(
+        Text, nullable=True
+    )
+    label_field_set_snapshot: Mapped[str | None] = mapped_column(
+        Text, nullable=True
+    )
+    resolved_schema_contract_version: Mapped[str | None] = mapped_column(
+        String(80), nullable=True, index=True
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class DimensionSchema(Base):
+    __tablename__ = "dimension_schemas"
+    __table_args__ = (
+        CheckConstraint(
+            "length(trim(schema_key)) > 0",
+            name="ck_dimension_schemas_schema_key",
+        ),
+        CheckConstraint(
+            "length(trim(version)) > 0",
+            name="ck_dimension_schemas_version",
+        ),
+        CheckConstraint(
+            "schema_type IN ('core','family_pack','extension')",
+            name="ck_dimension_schemas_schema_type",
+        ),
+        CheckConstraint(
+            "family_key IN ('space','product','graphic','intent','common')",
+            name="ck_dimension_schemas_family_key",
+        ),
+        CheckConstraint(
+            "status IN ('draft','candidate','published','retired')",
+            name="ck_dimension_schemas_status",
+        ),
+        CheckConstraint(
+            "json_valid(definition_json) "
+            "AND json_type(definition_json, '$') = 'object'",
+            name="ck_dimension_schemas_definition_json",
+        ),
+        CheckConstraint(
+            "length(canonical_hash) = 64 "
+            "AND canonical_hash = lower(canonical_hash) "
+            "AND canonical_hash NOT GLOB '*[^0-9a-f]*'",
+            name="ck_dimension_schemas_canonical_hash",
+        ),
+        CheckConstraint(
+            "parent_schema_id IS NULL OR parent_schema_id <> id",
+            name="ck_dimension_schemas_parent_not_self",
+        ),
+        CheckConstraint(
+            "core_schema_id IS NULL OR core_schema_id <> id",
+            name="ck_dimension_schemas_core_not_self",
+        ),
+        CheckConstraint(
+            "((status IN ('published','retired')) "
+            "AND published_by IS NOT NULL AND published_at IS NOT NULL) "
+            "OR ((status IN ('draft','candidate')) "
+            "AND published_by IS NULL AND published_at IS NULL)",
+            name="ck_dimension_schemas_publish_audit",
+        ),
+        CheckConstraint(
+            "(status = 'retired' AND retired_at IS NOT NULL) "
+            "OR (status <> 'retired' AND retired_at IS NULL)",
+            name="ck_dimension_schemas_retired_at",
+        ),
+        UniqueConstraint(
+            "schema_key",
+            "version",
+            name="uq_dimension_schemas_key_version",
+        ),
+        UniqueConstraint(
+            "canonical_hash",
+            name="uq_dimension_schemas_canonical_hash",
+        ),
+        Index(
+            "ix_dimension_schemas_registry",
+            "schema_type",
+            "family_key",
+            "status",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    schema_key: Mapped[str] = mapped_column(String(80), index=True)
+    version: Mapped[str] = mapped_column(String(64), index=True)
+    schema_type: Mapped[str] = mapped_column(String(20), index=True)
+    family_key: Mapped[str] = mapped_column(String(20), index=True)
+    display_name: Mapped[str] = mapped_column(String(160))
+    status: Mapped[str] = mapped_column(String(20), default="draft", index=True)
+    parent_schema_id: Mapped[int | None] = mapped_column(
+        ForeignKey("dimension_schemas.id", ondelete="RESTRICT"),
+        nullable=True,
+        index=True,
+    )
+    core_schema_id: Mapped[int | None] = mapped_column(
+        ForeignKey("dimension_schemas.id", ondelete="RESTRICT"),
+        nullable=True,
+        index=True,
+    )
+    definition_json: Mapped[str] = mapped_column(Text)
+    canonical_hash: Mapped[str] = mapped_column(String(64), index=True)
+    source_optimization_run_id: Mapped[int | None] = mapped_column(
+        ForeignKey("prompt_optimization_runs.id", ondelete="RESTRICT"),
+        nullable=True,
+        index=True,
+    )
+    created_by: Mapped[str] = mapped_column(String(80), default="system")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utcnow,
+        server_default=sql_text("CURRENT_TIMESTAMP"),
+    )
+    published_by: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    published_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    retired_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
 
 
 class LoopRun(Base):
@@ -795,6 +955,10 @@ class StrategyBundleImmutableError(ValueError):
     """Raised when persisted strategy history is changed in place."""
 
 
+class DimensionSchemaImmutableError(ValueError):
+    """Raised when a published dimension schema is changed in place."""
+
+
 class StrategySnapshotRequiredError(ValueError):
     """Raised when a new result lacks its complete strategy binding."""
 
@@ -854,6 +1018,209 @@ def _strategy_contract_is_active(connection: Connection) -> bool:
     )
 
 
+def _contract_canonical_json(value: object) -> str:
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def _contract_sha256(value: object) -> str:
+    return hashlib.sha256(
+        _contract_canonical_json(value).encode("utf-8")
+    ).hexdigest()
+
+
+def _is_sha256(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and value == value.lower()
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def _validate_v2_dimension_snapshot(
+    snapshot: dict[str, object],
+    bundle: object,
+    connection: Connection,
+) -> None:
+    required_bundle_keys = {
+        "agent_plan_version",
+        "dimension_route_policy_id",
+        "dimension_schema_set",
+        "label_field_set",
+        "resolved_schema_contract_version",
+    }
+    required_resolution_keys = {
+        "resolved_dimension_schema_id",
+        "resolved_dimension_schema_key",
+        "resolved_dimension_schema_version",
+        "resolved_dimension_schema_hash",
+        "resolved_dimensions_snapshot",
+        "resolved_prompt_b_hash",
+        "route_decision_snapshot",
+        "resolved_snapshot_hash",
+    }
+    if not required_bundle_keys.issubset(snapshot) or not (
+        required_resolution_keys.issubset(snapshot)
+    ):
+        raise StrategySnapshotRequiredError(
+            "strategy-bundle-v2 缺少维度身份或解析结果"
+        )
+
+    try:
+        bundle_dimension_set = json.loads(
+            bundle["dimension_schema_set_snapshot"]
+        )
+        bundle_label_set = json.loads(bundle["label_field_set_snapshot"])
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise StrategySnapshotRequiredError(
+            "StrategyBundle 的维度合同已损坏"
+        ) from exc
+
+    if (
+        snapshot["dimension_route_policy_id"]
+        != bundle["dimension_route_policy_id"]
+        or snapshot["dimension_schema_set"] != bundle_dimension_set
+        or snapshot["label_field_set"] != bundle_label_set
+        or snapshot["resolved_schema_contract_version"]
+        != bundle["resolved_schema_contract_version"]
+    ):
+        raise StrategySnapshotRequiredError(
+            "strategy_snapshot_json 与 StrategyBundle 维度合同不一致"
+        )
+
+    bundle_definition_keys = (
+        "schema_version",
+        "model_id",
+        "model_config",
+        "prompt_a",
+        "prompt_b",
+        "rubric_version",
+        "engine_version",
+        "sampling_policy",
+        "risk_review_version",
+        "agent_plan_version",
+        "dimension_route_policy_id",
+        "dimension_schema_set",
+        "label_field_set",
+        "resolved_schema_contract_version",
+    )
+    bundle_definition = {
+        key: snapshot[key] for key in bundle_definition_keys
+    }
+    if _contract_sha256(bundle_definition) != snapshot["canonical_hash"]:
+        raise StrategySnapshotRequiredError(
+            "strategy-bundle-v2 规范哈希无法复算"
+        )
+
+    schema_id = snapshot["resolved_dimension_schema_id"]
+    schema_key = snapshot["resolved_dimension_schema_key"]
+    schema_version = snapshot["resolved_dimension_schema_version"]
+    schema_hash = snapshot["resolved_dimension_schema_hash"]
+    definition = snapshot["resolved_dimensions_snapshot"]
+    route_decision = snapshot["route_decision_snapshot"]
+    if (
+        not isinstance(schema_id, int)
+        or schema_id <= 0
+        or not isinstance(schema_key, str)
+        or not schema_key
+        or not isinstance(schema_version, str)
+        or not schema_version
+        or not _is_sha256(schema_hash)
+        or not isinstance(definition, dict)
+        or not isinstance(route_decision, dict)
+        or route_decision.get("policy_id")
+        != bundle["dimension_route_policy_id"]
+        or route_decision.get("dimension_schema_id") != schema_id
+        or route_decision.get("dimension_schema_hash") != schema_hash
+    ):
+        raise StrategySnapshotRequiredError(
+            "strategy-bundle-v2 的维度解析身份不完整"
+        )
+
+    set_entries = (
+        bundle_dimension_set.get("schemas")
+        if isinstance(bundle_dimension_set, dict)
+        else None
+    )
+    if not isinstance(set_entries, list) or not any(
+        isinstance(entry, dict)
+        and entry.get("schema_key") == schema_key
+        and entry.get("version") == schema_version
+        and entry.get("canonical_hash") == schema_hash
+        and entry.get("definition") == definition
+        for entry in set_entries
+    ):
+        raise StrategySnapshotRequiredError(
+            "解析后的维度 Schema 不在冻结候选集合中"
+        )
+
+    persisted_schema = connection.exec_driver_sql(
+        """
+        SELECT schema_key, version, canonical_hash, definition_json
+        FROM dimension_schemas
+        WHERE id = ?
+        """,
+        (schema_id,),
+    ).mappings().first()
+    if persisted_schema is None:
+        raise StrategySnapshotRequiredError(
+            "resolved_dimension_schema_id 不存在"
+        )
+    try:
+        persisted_definition = json.loads(
+            persisted_schema["definition_json"]
+        )
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise StrategySnapshotRequiredError(
+            "已发布 DimensionSchema 定义损坏"
+        ) from exc
+    if (
+        persisted_schema["schema_key"] != schema_key
+        or persisted_schema["version"] != schema_version
+        or persisted_schema["canonical_hash"] != schema_hash
+        or persisted_definition != definition
+        or _contract_sha256(definition) != schema_hash
+    ):
+        raise StrategySnapshotRequiredError(
+            "结果维度快照与已发布 DimensionSchema 不一致"
+        )
+
+    prompt_b = snapshot["prompt_b"]
+    expected_prompt_hash = (
+        _contract_sha256(prompt_b)
+        if isinstance(prompt_b, dict)
+        else None
+    )
+    if snapshot["resolved_prompt_b_hash"] != expected_prompt_hash:
+        raise StrategySnapshotRequiredError(
+            "resolved_prompt_b_hash 无法复算"
+        )
+
+    resolution_keys = (
+        "resolved_dimension_schema_id",
+        "resolved_dimension_schema_key",
+        "resolved_dimension_schema_version",
+        "resolved_dimension_schema_hash",
+        "resolved_dimensions_snapshot",
+        "resolved_prompt_b_hash",
+        "route_decision_snapshot",
+    )
+    resolution = {key: snapshot[key] for key in resolution_keys}
+    if (
+        not _is_sha256(snapshot["resolved_snapshot_hash"])
+        or _contract_sha256(resolution)
+        != snapshot["resolved_snapshot_hash"]
+    ):
+        raise StrategySnapshotRequiredError(
+            "维度解析快照哈希无法复算"
+        )
+
+
 def _validate_strategy_snapshot(
     result: EvaluationResult, connection: Connection
 ) -> None:
@@ -898,13 +1265,9 @@ def _validate_strategy_snapshot(
             "strategy_snapshot_json 与 strategy_bundle_id 不一致"
         )
     if (
-        not isinstance(snapshot["canonical_hash"], str)
-        or len(snapshot["canonical_hash"]) != 64
-        or any(
-            character not in "0123456789abcdef"
-            for character in snapshot["canonical_hash"].lower()
-        )
-        or snapshot["schema_version"] != "strategy-bundle-v1"
+        not _is_sha256(snapshot["canonical_hash"])
+        or snapshot["schema_version"]
+        not in {"strategy-bundle-v1", "strategy-bundle-v2"}
         or not isinstance(snapshot["model_config"], dict)
         or not isinstance(snapshot["model_id"], str)
         or not snapshot["model_id"]
@@ -986,9 +1349,12 @@ def _validate_strategy_snapshot(
 
     bundle = connection.exec_driver_sql(
         """
-        SELECT canonical_hash, model_id, prompt_a_version, prompt_b_version,
+        SELECT canonical_hash, strategy_schema_version, model_id,
+               prompt_a_version, prompt_b_version,
                rubric_version, engine_version, sampling_policy_revision,
-               risk_review_version
+               risk_review_version, agent_plan_version,
+               dimension_route_policy_id, dimension_schema_set_snapshot,
+               label_field_set_snapshot, resolved_schema_contract_version
         FROM strategy_bundles
         WHERE id = ?
         """,
@@ -996,6 +1362,10 @@ def _validate_strategy_snapshot(
     ).mappings().first()
     if bundle is None:
         raise StrategySnapshotRequiredError("strategy_bundle_id 不存在")
+    if snapshot["schema_version"] != bundle["strategy_schema_version"]:
+        raise StrategySnapshotRequiredError(
+            "strategy_snapshot_json 与 StrategyBundle 快照版本不一致"
+        )
 
     snapshot_prompt_b = snapshot["prompt_b"]
     snapshot_bundle_values = {
@@ -1019,6 +1389,8 @@ def _validate_strategy_snapshot(
         raise StrategySnapshotRequiredError(
             "strategy_snapshot_json 与所绑定 StrategyBundle 定义不一致"
         )
+    if snapshot["schema_version"] == "strategy-bundle-v2":
+        _validate_v2_dimension_snapshot(snapshot, bundle, connection)
     if (
         result.model_id != bundle["model_id"]
         or result.prompt_a_version != bundle["prompt_a_version"]
@@ -1047,6 +1419,48 @@ def _prevent_strategy_bundle_delete(
     _mapper: object, _connection: Connection, _target: StrategyBundle
 ) -> None:
     raise StrategyBundleImmutableError("StrategyBundle 是永久审计记录，禁止删除")
+
+
+def _persisted_dimension_schema_status(
+    connection: Connection,
+    target: DimensionSchema,
+) -> str | None:
+    if target.id is None:
+        return None
+    return connection.exec_driver_sql(
+        "SELECT status FROM dimension_schemas WHERE id = ?",
+        (target.id,),
+    ).scalar_one_or_none()
+
+
+@event.listens_for(DimensionSchema, "before_update")
+def _prevent_published_dimension_schema_update(
+    _mapper: object,
+    connection: Connection,
+    target: DimensionSchema,
+) -> None:
+    if _persisted_dimension_schema_status(connection, target) in {
+        "published",
+        "retired",
+    }:
+        raise DimensionSchemaImmutableError(
+            "已发布的 DimensionSchema 禁止原地更新；请创建新版本"
+        )
+
+
+@event.listens_for(DimensionSchema, "before_delete")
+def _prevent_published_dimension_schema_delete(
+    _mapper: object,
+    connection: Connection,
+    target: DimensionSchema,
+) -> None:
+    if _persisted_dimension_schema_status(connection, target) in {
+        "published",
+        "retired",
+    }:
+        raise DimensionSchemaImmutableError(
+            "已发布的 DimensionSchema 是永久审计记录，禁止删除"
+        )
 
 
 @event.listens_for(EvaluationResult, "before_insert")

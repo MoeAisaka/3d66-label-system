@@ -46,7 +46,7 @@ export function HistoricalCorrectionsPage() {
         <section className="grid gap-5 border-y border-[var(--line-strong)] bg-white p-5 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-end">
           <div>
             <div className="flex items-center gap-2"><FileXls size={22} /><h2 className="text-lg font-bold">选择历史纠偏表格</h2></div>
-            <p className="mt-2 max-w-[80ch] text-sm leading-6 text-[var(--muted)]">支持同时选择多份 XLSX。预览保留来源文件与行号；缺少当前八维评分或版本信息的记录不会被伪装成八维Gold。</p>
+            <p className="mt-2 max-w-[80ch] text-sm leading-6 text-[var(--muted)]">支持同时选择多份 XLSX。预览保留来源文件与行号；缺少当前维度评分或规则版本的记录不会被伪装成可比较 Gold。</p>
             <input ref={inputRef} type="file" accept=".xlsx" multiple className="sr-only" onChange={(event) => { setFiles(Array.from(event.target.files ?? [])); setPreview(null) }} />
             <div className="mt-4 flex flex-wrap items-center gap-2">
               <Button variant="secondary" onClick={() => inputRef.current?.click()}><UploadSimple />选择 XLSX</Button>

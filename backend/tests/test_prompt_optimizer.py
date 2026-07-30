@@ -187,7 +187,13 @@ def _bounded_item(tmp_path, index, decision, payload=b"image"):
                 sha256=f"{index:064x}",
             ),
         ),
-        {"decision": decision, "sample_role": role},
+        {
+            "decision": decision,
+            "sample_role": role,
+            "dimension_schema": {
+                "canonical_hash": "a" * 64,
+            },
+        },
     )
 
 
@@ -257,6 +263,32 @@ def test_invalid_early_records_are_backfilled_from_full_role_pools(
         "approved",
         "corrected",
     ]
+
+
+def test_optimizer_rejects_mixed_dimension_semantics(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    first = _bounded_item(tmp_path, 0, "corrected")
+    second = _bounded_item(tmp_path, 1, "approved")
+    records = {
+        first[0].asset_id: first[1],
+        second[0].asset_id: {
+            **second[1],
+            "dimension_schema": {"canonical_hash": "b" * 64},
+        },
+    }
+    monkeypatch.setattr(
+        optimizer,
+        "_review_record",
+        lambda item: dict(records[item.asset_id]),
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="不能混用不同 DimensionSchema",
+    ):
+        optimizer._select_records([first[0], second[0]])
 
 
 def test_diagnostic_records_respect_aggregate_byte_limit(
@@ -384,6 +416,77 @@ def _create_optimizer_run(tmp_path):
         db.add(run)
         db.commit()
         return engine, session_factory, run.id
+
+
+def test_review_record_uses_result_bound_dimension_names(tmp_path) -> None:
+    engine, session_factory, _run_id = _create_optimizer_run(tmp_path)
+    definition = {
+        "format_version": "dimension-schema-definition-v1",
+        "dimensions": [
+            {
+                "key": "presentation_integrity",
+                "label": "呈现质量",
+            },
+            {
+                "key": "visual_hierarchy",
+                "label": "视觉组织",
+            },
+            {
+                "key": "inspiration_reference",
+                "label": "参考价值",
+            },
+        ],
+        "output_contract": {
+            "dimension_output_keys": [
+                "presentation_integrity",
+                "visual_hierarchy",
+                "inspiration_reference",
+            ],
+            "unknown_key_policy": "reject",
+        },
+    }
+    try:
+        with session_factory() as db:
+            item = db.scalar(select(SampleSetItem))
+            result = item.source_result
+            result.strategy_snapshot_json = json.dumps(
+                {
+                    "schema_version": "strategy-bundle-v2",
+                    "resolved_dimension_schema_id": 71,
+                    "resolved_dimension_schema_key": "dimension.test",
+                    "resolved_dimension_schema_version": "test-v1",
+                    "resolved_dimension_schema_hash": (
+                        optimizer.canonical_hash(definition)
+                    ),
+                    "resolved_dimensions_snapshot": definition,
+                },
+                ensure_ascii=False,
+            )
+            result.aesthetic_json = json.dumps(
+                {
+                    "dimensions": {
+                        dimension["key"]: {"grade": 3}
+                        for dimension in definition["dimensions"]
+                    }
+                },
+                ensure_ascii=False,
+            )
+            record = optimizer._review_record(item)
+
+        assert record is not None
+        assert record["dimension_names"] == {
+            "presentation_integrity": "呈现质量",
+            "visual_hierarchy": "视觉组织",
+            "inspiration_reference": "参考价值",
+        }
+        assert record["dimension_schema"] == {
+            "schema_id": 71,
+            "schema_key": "dimension.test",
+            "version": "test-v1",
+            "canonical_hash": optimizer.canonical_hash(definition),
+        }
+    finally:
+        engine.dispose()
 
 
 def _install_optimizer_dependencies(
