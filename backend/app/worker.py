@@ -159,6 +159,7 @@ def claim_next_job() -> int | None:
             select(ModelConfig)
             .where(
                 ModelConfig.encrypted_api_key.is_not(None),
+                ModelConfig.active.is_(True),
             )
             .order_by(ModelConfig.active.desc(), ModelConfig.id.asc())
             .limit(1)

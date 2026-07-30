@@ -39,6 +39,7 @@ class Settings:
     host: str
     port: int
     session_days: int
+    production_feedback_token: str | None
 
 
 @lru_cache(maxsize=1)
@@ -58,6 +59,9 @@ def get_settings() -> Settings:
         host=os.getenv("APP_HOST", "0.0.0.0"),
         port=int(os.getenv("APP_PORT", "8080")),
         session_days=max(1, int(os.getenv("SESSION_DAYS", "7"))),
+        production_feedback_token=(
+            os.getenv("PRODUCTION_FEEDBACK_TOKEN", "").strip() or None
+        ),
     )
     settings.database_path.parent.mkdir(parents=True, exist_ok=True)
     settings.upload_dir.mkdir(parents=True, exist_ok=True)

@@ -7,6 +7,7 @@ import ctypes.util
 import hashlib
 import hmac
 import os
+import re
 import secrets
 import sys
 from ctypes import wintypes
@@ -562,7 +563,10 @@ def _get_macos_keychain() -> _MacOSKeychain:
 
 
 def _validate_account(account: str) -> str:
-    if account not in _ALLOWED_KEYCHAIN_ACCOUNTS:
+    if (
+        account not in _ALLOWED_KEYCHAIN_ACCOUNTS
+        and re.fullmatch(r"model-config-[1-9][0-9]*", account) is None
+    ):
         raise SecretStorageError("不支持的 API Key account")
     return account
 

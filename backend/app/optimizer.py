@@ -4,6 +4,7 @@ import hashlib
 import json
 import re
 import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
@@ -54,6 +55,110 @@ DIMENSION_LABELS = {
     "inspiration_reference": "灵感与参考价值",
     "presentation_integrity": "画面呈现完整性",
 }
+
+
+@dataclass(frozen=True)
+class AutomationCandidateGeneration:
+    candidates: list[dict[str, Any]]
+    input_tokens: int
+    output_tokens: int
+    total_tokens: int
+
+
+async def generate_automation_candidates(
+    *,
+    config: OptimizerConfig,
+    base_prompt: Any,
+    frozen_input: dict[str, Any],
+    max_candidates: int,
+) -> AutomationCandidateGeneration:
+    """Run the existing diagnosis/synthesis pattern for queued correction cases."""
+    client = DoubaoClient(config)
+    diagnostic = await client.chat_json(
+        "你是3D66提示词纠偏诊断专家。人工真值优先。只输出合法JSON，"
+        "字段为 summary、patterns、prompt_risks；不得生成最终提示词。",
+        json.dumps(
+            {
+                "base_prompt": {
+                    "stage": base_prompt.stage,
+                    "version": base_prompt.version,
+                    "system_prompt": base_prompt.system_prompt,
+                    "user_prompt": base_prompt.user_prompt,
+                },
+                "cases": frozen_input["cases"],
+            },
+            ensure_ascii=False,
+        ),
+        output_budget=DIAGNOSTIC_OUTPUT_BUDGET,
+        reasoning_effort=OPTIMIZER_REASONING_EFFORT,
+        structured_output=True,
+    )
+    if (
+        diagnostic.input_tokens is None
+        or diagnostic.output_tokens is None
+        or diagnostic.total_tokens is None
+    ):
+        raise RuntimeError("optimizer_usage_missing")
+    synthesis = await client.chat_json(
+        "你是3D66提示词优化专家。根据诊断做最小且可回归的修改，"
+        "保留原有字段、JSON结构、安全边界和调用变量。只输出合法JSON，"
+        "字段 candidates；每个候选必须含 system_prompt、user_prompt、change_note。",
+        json.dumps(
+            {
+                "base_prompt": {
+                    "stage": base_prompt.stage,
+                    "version": base_prompt.version,
+                    "system_prompt": base_prompt.system_prompt,
+                    "user_prompt": base_prompt.user_prompt,
+                },
+                "diagnosis": diagnostic.parsed,
+                "candidate_limit": max_candidates,
+            },
+            ensure_ascii=False,
+        ),
+        output_budget=SYNTHESIS_OUTPUT_BUDGET,
+        reasoning_effort=OPTIMIZER_REASONING_EFFORT,
+        structured_output=True,
+    )
+    if (
+        synthesis.input_tokens is None
+        or synthesis.output_tokens is None
+        or synthesis.total_tokens is None
+    ):
+        raise RuntimeError("optimizer_usage_missing")
+    responses = (diagnostic, synthesis)
+    candidates = synthesis.parsed.get("candidates")
+    if not isinstance(candidates, list) or not candidates:
+        single = {
+            "system_prompt": synthesis.parsed.get("candidate_system_prompt"),
+            "user_prompt": synthesis.parsed.get("candidate_user_prompt"),
+            "change_note": synthesis.parsed.get("change_note"),
+        }
+        candidates = [single]
+    if len(candidates) > max_candidates:
+        raise ValueError("优化模型返回候选数超过策略上限")
+    normalized = []
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            raise ValueError("优化候选结构无效")
+        system_prompt = str(candidate.get("system_prompt") or "").strip()
+        user_prompt = str(candidate.get("user_prompt") or "").strip()
+        change_note = str(candidate.get("change_note") or "").strip()
+        if not system_prompt or not user_prompt or not change_note:
+            raise ValueError("优化候选缺少提示词或变更说明")
+        normalized.append(
+            {
+                "system_prompt": system_prompt,
+                "user_prompt": user_prompt,
+                "change_note": change_note,
+            }
+        )
+    return AutomationCandidateGeneration(
+        candidates=normalized,
+        input_tokens=sum(int(response.input_tokens or 0) for response in responses),
+        output_tokens=sum(int(response.output_tokens or 0) for response in responses),
+        total_tokens=sum(int(response.total_tokens or 0) for response in responses),
+    )
 
 
 def _empty_stage_audit() -> dict[str, Any]:

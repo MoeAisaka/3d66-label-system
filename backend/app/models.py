@@ -43,6 +43,9 @@ class User(Base):
     password_hash: Mapped[str] = mapped_column(Text)
     display_name: Mapped[str] = mapped_column(String(80), default="管理员")
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    is_admin: Mapped[bool] = mapped_column(
+        Boolean, default=True, server_default=sql_text("1")
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
@@ -76,6 +79,18 @@ class ModelConfig(Base):
     max_concurrency: Mapped[int] = mapped_column(Integer, default=2)
     structured_output: Mapped[bool] = mapped_column(Boolean, default=True)
     high_risk_review_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    input_micros_per_million_tokens: Mapped[int] = mapped_column(
+        Integer, default=0, server_default=sql_text("0")
+    )
+    output_micros_per_million_tokens: Mapped[int] = mapped_column(
+        Integer, default=0, server_default=sql_text("0")
+    )
+    max_input_tokens: Mapped[int] = mapped_column(
+        Integer, default=0, server_default=sql_text("0")
+    )
+    benchmark_enabled: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=sql_text("0")
+    )
     active: Mapped[bool] = mapped_column(Boolean, default=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, onupdate=utcnow
@@ -97,6 +112,15 @@ class OptimizerConfig(Base):
     timeout_seconds: Mapped[int] = mapped_column(Integer, default=300)
     max_retries: Mapped[int] = mapped_column(Integer, default=1)
     structured_output: Mapped[bool] = mapped_column(Boolean, default=True)
+    input_micros_per_million_tokens: Mapped[int] = mapped_column(
+        Integer, default=0, server_default=sql_text("0")
+    )
+    output_micros_per_million_tokens: Mapped[int] = mapped_column(
+        Integer, default=0, server_default=sql_text("0")
+    )
+    max_input_tokens: Mapped[int] = mapped_column(
+        Integer, default=0, server_default=sql_text("0")
+    )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, onupdate=utcnow
     )
@@ -122,6 +146,11 @@ class PromptVersion(Base):
     source: Mapped[str] = mapped_column(String(20), default="manual")
     source_optimization_run_id: Mapped[int | None] = mapped_column(
         Integer, nullable=True, index=True
+    )
+    source_automation_run_id: Mapped[int | None] = mapped_column(
+        ForeignKey("automation_optimization_runs.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
     )
     rollback_prompt_id: Mapped[int | None] = mapped_column(
         ForeignKey("prompt_versions.id", ondelete="SET NULL"),
@@ -1239,7 +1268,7 @@ class AutomationOptimizationRun(Base):
         UniqueConstraint("run_key", name="uq_automation_optimization_run_key"),
         CheckConstraint(
             "status IN ("
-            "'planned','awaiting_executor','running','awaiting_release_review',"
+            "'planned','awaiting_executor','processing','succeeded','running','awaiting_release_review',"
             "'failed','cancelled'"
             ")",
             name="ck_automation_optimization_run_status",
@@ -1265,6 +1294,10 @@ class AutomationOptimizationRun(Base):
     candidate_count: Mapped[int] = mapped_column(Integer, default=0)
     estimated_cost_micros: Mapped[int] = mapped_column(Integer, default=0)
     actual_cost_micros: Mapped[int] = mapped_column(Integer, default=0)
+    input_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    output_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    total_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    retryable: Mapped[bool] = mapped_column(Boolean, default=False)
     error_message: Mapped[str] = mapped_column(Text, default="")
     created_by: Mapped[str] = mapped_column(String(80), default="automation")
     created_at: Mapped[datetime] = mapped_column(
@@ -1272,6 +1305,23 @@ class AutomationOptimizationRun(Base):
     )
     finished_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
+    )
+
+
+class AutomationBudgetDay(Base):
+    __tablename__ = "automation_budget_days"
+    __table_args__ = (
+        CheckConstraint(
+            "reserved_micros >= 0 AND spent_micros >= 0",
+            name="ck_automation_budget_day_costs",
+        ),
+    )
+
+    budget_date: Mapped[str] = mapped_column(String(10), primary_key=True)
+    reserved_micros: Mapped[int] = mapped_column(Integer, default=0)
+    spent_micros: Mapped[int] = mapped_column(Integer, default=0)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
     )
 
 
@@ -1330,7 +1380,7 @@ class ModelBenchmarkExperiment(Base):
             name="ck_model_benchmark_status",
         ),
         CheckConstraint(
-            "execution_mode IN ('disabled','test')",
+            "execution_mode IN ('disabled','test','real')",
             name="ck_model_benchmark_execution_mode",
         ),
     )
@@ -1344,12 +1394,14 @@ class ModelBenchmarkExperiment(Base):
         String(20), default="draft", index=True
     )
     execution_mode: Mapped[str] = mapped_column(
-        String(20), default="disabled", index=True
+        String(20), default="test", index=True
     )
     cohort_hash: Mapped[str] = mapped_column(String(64), index=True)
     snapshot_hash: Mapped[str] = mapped_column(String(64), index=True)
     frozen_snapshot_json: Mapped[str] = mapped_column(Text)
     quality_gate_json: Mapped[str] = mapped_column(Text)
+    max_round_cost_micros: Mapped[int] = mapped_column(Integer, default=0)
+    actual_cost_micros: Mapped[int] = mapped_column(Integer, default=0)
     decision_json: Mapped[str] = mapped_column(Text, default="{}")
     created_by: Mapped[str] = mapped_column(String(80), default="system")
     created_at: Mapped[datetime] = mapped_column(
@@ -1383,6 +1435,11 @@ class ModelBenchmarkVariant(Base):
     model_key: Mapped[str] = mapped_column(String(80), index=True)
     provider: Mapped[str] = mapped_column(String(80))
     model_id: Mapped[str] = mapped_column(String(200))
+    model_config_id: Mapped[int | None] = mapped_column(
+        ForeignKey("model_configs.id", ondelete="RESTRICT"),
+        nullable=True,
+        index=True,
+    )
     pricing_json: Mapped[str] = mapped_column(Text)
     status: Mapped[str] = mapped_column(
         String(20), default="pending", index=True
@@ -1390,6 +1447,10 @@ class ModelBenchmarkVariant(Base):
     metrics_json: Mapped[str] = mapped_column(Text, default="{}")
     observations_json: Mapped[str] = mapped_column(Text, default="[]")
     error_message: Mapped[str] = mapped_column(Text, default="")
+    input_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    output_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    total_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    actual_cost_micros: Mapped[int] = mapped_column(Integer, default=0)
     started_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )

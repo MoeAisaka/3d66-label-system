@@ -3,15 +3,21 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import asyncio
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Protocol
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .audit import append_audit_event, canonical_json
-from .models import ModelBenchmarkExperiment, ModelBenchmarkVariant
+from .doubao import DoubaoClient
+from .models import ModelBenchmarkExperiment, ModelBenchmarkVariant, ModelConfig
+from .schema_adapter import normalize_precheck_business_rules
+from .scoring import calculate_score
 
 
 MODEL_KEYS = ("sol", "terra", "luna")
@@ -23,7 +29,16 @@ class BenchmarkAdapter(Protocol):
         *,
         model_key: str,
         frozen_snapshot: dict[str, Any],
-    ) -> list[dict[str, Any]]: ...
+    ) -> "BenchmarkAdapterResult | list[dict[str, Any]]": ...
+
+
+@dataclass(frozen=True)
+class BenchmarkAdapterResult:
+    observations: list[dict[str, Any]]
+    input_tokens: int
+    output_tokens: int
+    total_tokens: int
+    actual_cost_micros: int
 
 
 class DisabledBenchmarkAdapter:
@@ -51,6 +66,148 @@ class DeterministicBenchmarkAdapter:
         if model_key not in self.observations:
             raise ValueError(f"测试观测缺少 {model_key}")
         return self.observations[model_key]
+
+
+def token_cost_micros(
+    input_tokens: int,
+    output_tokens: int,
+    pricing: dict[str, Any],
+) -> int:
+    input_price = int(pricing.get("input_micros_per_million_tokens", 0))
+    output_price = int(pricing.get("output_micros_per_million_tokens", 0))
+    if input_price <= 0 or output_price <= 0:
+        raise ValueError("模型计价未完整配置")
+    return math.ceil(
+        (input_tokens * input_price + output_tokens * output_price) / 1_000_000
+    )
+
+
+class OpenAICompatibleBenchmarkAdapter:
+    """Execute frozen A/B samples through existing configured model clients."""
+
+    def __init__(
+        self,
+        *,
+        configs: dict[str, ModelConfig],
+        asset_paths: dict[int, Path],
+        round_cost_limit_micros: int,
+    ):
+        self.configs = configs
+        self.asset_paths = asset_paths
+        self.round_cost_limit_micros = round_cost_limit_micros
+        self.spent_micros = 0
+
+    def evaluate(
+        self,
+        *,
+        model_key: str,
+        frozen_snapshot: dict[str, Any],
+    ) -> BenchmarkAdapterResult:
+        return asyncio.run(
+            self._evaluate(model_key=model_key, frozen_snapshot=frozen_snapshot)
+        )
+
+    async def _evaluate(
+        self,
+        *,
+        model_key: str,
+        frozen_snapshot: dict[str, Any],
+    ) -> BenchmarkAdapterResult:
+        config = self.configs[model_key]
+        pricing = {
+            "input_micros_per_million_tokens":
+                config.input_micros_per_million_tokens,
+            "output_micros_per_million_tokens":
+                config.output_micros_per_million_tokens,
+        }
+        client = DoubaoClient(config)
+        prompt_a = frozen_snapshot["prompt_a"]
+        prompt_b = frozen_snapshot["prompt_b"]
+        observations: list[dict[str, Any]] = []
+        input_tokens = output_tokens = total_tokens = 0
+        for sample in frozen_snapshot["samples"]:
+            started = time.perf_counter()
+            image_path = self.asset_paths[int(sample["asset_id"])]
+            metadata = sample["image"]
+            user_a = str(prompt_a["user_prompt"]).replace(
+                "{{image_metadata}}", canonical_json(metadata)
+            )
+            response_a = await client.chat_json(
+                str(prompt_a["system_prompt"]),
+                user_a,
+                image_path=image_path,
+                mime_type=str(metadata["mime_type"]),
+            )
+            self._record_usage(response_a, pricing)
+            responses = [response_a]
+            precheck = normalize_precheck_business_rules(response_a.parsed)
+            aesthetic = None
+            scope = (precheck.get("classification") or {}).get("scope_status")
+            if scope == "in_scope":
+                user_b = str(prompt_b["user_prompt"]).replace(
+                    "{{precheck_json}}", canonical_json(precheck)
+                ).replace("{{rubric_version}}", str(prompt_b["rubric_version"]))
+                response_b = await client.chat_json(
+                    str(prompt_b["system_prompt"]),
+                    user_b,
+                    image_path=image_path,
+                    mime_type=str(metadata["mime_type"]),
+                )
+                self._record_usage(response_b, pricing)
+                responses.append(response_b)
+                aesthetic = response_b.parsed
+            for response in responses:
+                input_tokens += response.input_tokens
+                output_tokens += response.output_tokens
+                total_tokens += response.total_tokens
+            scoring = calculate_score(precheck, aesthetic)
+            predicted_level = scoring.get("level")
+            expected_level = (sample.get("truth") or {}).get("level")
+            correct = predicted_level == expected_level
+            observations.append(
+                {
+                    "correct": correct,
+                    "error_severity": None if correct else "P1",
+                    "confidence": float(scoring.get("confidence") or 0),
+                    "needs_human": bool(scoring.get("needs_review")),
+                    "latency_ms": max(
+                        0, int(round((time.perf_counter() - started) * 1000))
+                    ),
+                    "input_tokens": sum(
+                        int(response.input_tokens or 0) for response in responses
+                    ),
+                    "output_tokens": sum(
+                        int(response.output_tokens or 0) for response in responses
+                    ),
+                    "retry_count": sum(
+                        max(0, response.attempt_count - 1) for response in responses
+                    ),
+                }
+            )
+        return BenchmarkAdapterResult(
+            observations=observations,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            total_tokens=total_tokens,
+            actual_cost_micros=token_cost_micros(
+                input_tokens, output_tokens, pricing
+            ),
+        )
+
+    def _record_usage(self, response: Any, pricing: dict[str, Any]) -> None:
+        if (
+            response.input_tokens is None
+            or response.output_tokens is None
+            or response.total_tokens is None
+        ):
+            raise RuntimeError("benchmark_usage_missing")
+        self.spent_micros += token_cost_micros(
+            response.input_tokens,
+            response.output_tokens,
+            pricing,
+        )
+        if self.spent_micros > self.round_cost_limit_micros:
+            raise RuntimeError("benchmark_actual_cost_exceeds_round_limit")
 
 
 def snapshot_hash(value: dict[str, Any]) -> str:
@@ -229,13 +386,20 @@ def run_benchmark_experiment(
     adapter: BenchmarkAdapter,
     actor: str,
 ) -> ModelBenchmarkExperiment:
-    if experiment.execution_mode != "test":
-        raise ValueError("横评执行器未配置；只允许显式测试模式")
+    if experiment.execution_mode not in {"test", "real"}:
+        raise ValueError("横评执行器未配置")
     if experiment.status not in {"draft", "failed"}:
         raise ValueError("当前横评状态不可执行")
     now = datetime.now(timezone.utc)
     snapshot = json.loads(experiment.frozen_snapshot_json)
     quality_gate = json.loads(experiment.quality_gate_json)
+    if (
+        experiment.execution_mode == "real"
+        and quality_gate.get("approved_for_real_execution") is not True
+    ):
+        raise ValueError("横评质量门尚未批准真实执行")
+    if snapshot_hash(snapshot) != experiment.snapshot_hash:
+        raise ValueError("横评冻结快照哈希不匹配")
     experiment.status = "running"
     experiment.started_at = now
     variants = db.scalars(
@@ -248,10 +412,18 @@ def run_benchmark_experiment(
         for variant in variants:
             variant.status = "running"
             variant.started_at = now
-            observations = adapter.evaluate(
+            adapter_result = adapter.evaluate(
                 model_key=variant.model_key,
                 frozen_snapshot=snapshot,
             )
+            if isinstance(adapter_result, BenchmarkAdapterResult):
+                observations = adapter_result.observations
+                variant.input_tokens = adapter_result.input_tokens
+                variant.output_tokens = adapter_result.output_tokens
+                variant.total_tokens = adapter_result.total_tokens
+                variant.actual_cost_micros = adapter_result.actual_cost_micros
+            else:
+                observations = adapter_result
             metrics = calculate_variant_metrics(
                 observations,
                 json.loads(variant.pricing_json),
@@ -269,6 +441,9 @@ def run_benchmark_experiment(
         experiment.decision_json = canonical_json(
             select_benchmark_candidate(summaries, quality_gate)
         )
+        experiment.actual_cost_micros = sum(
+            variant.actual_cost_micros for variant in variants
+        )
         experiment.status = "completed"
         experiment.finished_at = now
         append_audit_event(
@@ -282,12 +457,13 @@ def run_benchmark_experiment(
             event_key=f"model-benchmark-completed:{experiment.experiment_key}",
         )
     except Exception as exc:
+        safe_error = _safe_benchmark_error(exc)
         experiment.status = "failed"
         experiment.finished_at = now
         for variant in variants:
             if variant.status == "running":
                 variant.status = "failed"
-                variant.error_message = str(exc)[:300]
+                variant.error_message = safe_error
                 variant.finished_at = now
         append_audit_event(
             db,
@@ -296,8 +472,30 @@ def run_benchmark_experiment(
             subject_type="model_benchmark_experiment",
             subject_id=experiment.id,
             actor=actor,
-            payload={"error": str(exc)[:300]},
+            payload={"error": safe_error},
             event_key=f"model-benchmark-failed:{experiment.experiment_key}",
         )
         raise
     return experiment
+
+
+def _safe_benchmark_error(exc: Exception) -> str:
+    message = str(exc)
+    if message in {
+        "benchmark_usage_missing",
+        "benchmark_actual_cost_exceeds_round_limit",
+    }:
+        return message
+    technical_type = str(getattr(exc, "technical_error_type", ""))
+    if technical_type in {
+        "timeout",
+        "network",
+        "429",
+        "provider5xx",
+        "json_truncated",
+        "transient_parse",
+    }:
+        return f"model_{technical_type}"
+    if isinstance(exc, ValueError):
+        return "invalid_benchmark_output"
+    return "benchmark_executor_failed"

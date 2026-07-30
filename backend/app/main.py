@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import hmac
 import io
 import json
 import mimetypes
@@ -12,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
-from fastapi import BackgroundTasks, Cookie, Depends, FastAPI, File, HTTPException, Response, UploadFile
+from fastapi import BackgroundTasks, Cookie, Depends, FastAPI, File, Header, HTTPException, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import (
@@ -76,8 +77,10 @@ from .audit import canonical_json
 from .benchmarking import (
     MODEL_KEYS,
     DeterministicBenchmarkAdapter,
+    OpenAICompatibleBenchmarkAdapter,
     run_benchmark_experiment,
     snapshot_hash as benchmark_snapshot_hash,
+    token_cost_micros,
 )
 from .loop_engine import (
     LoopContractError,
@@ -108,7 +111,11 @@ from .security import (
     verify_password,
 )
 from .optimizer import run_prompt_optimization, stage_audit_payload
-from .optimization_automation import consume_optimization_queue_once
+from .optimization_automation import (
+    automation_budget_status,
+    configured_optimization_adapter,
+    consume_optimization_queue_once,
+)
 from .p0e_canary_api import build_canary_router
 from .seed import seed_defaults
 from .schema_adapter import repair_combined_aesthetic_results, rescore_stored_results
@@ -118,6 +125,7 @@ from .regression import (
     paired_gate_policy,
     refresh_paired_regression_run,
     reviewed_truth_snapshot,
+    latest_review_for_result,
     truth_from_result,
 )
 from .prompt_metrics import (
@@ -190,6 +198,10 @@ class ModelConfigUpdate(BaseModel):
     max_concurrency: int = Field(ge=1, le=10)
     structured_output: bool = True
     high_risk_review_enabled: bool = True
+    input_micros_per_million_tokens: int = Field(default=0, ge=0, le=1_000_000_000)
+    output_micros_per_million_tokens: int = Field(default=0, ge=0, le=1_000_000_000)
+    max_input_tokens: int = Field(default=0, ge=0, le=10_000_000)
+    benchmark_enabled: bool = False
 
 
 class OptimizerConfigUpdate(BaseModel):
@@ -206,6 +218,13 @@ class OptimizerConfigUpdate(BaseModel):
     timeout_seconds: int = Field(default=300, ge=10, le=900)
     max_retries: int = Field(default=1, ge=0, le=5)
     structured_output: bool = True
+    input_micros_per_million_tokens: int = Field(default=0, ge=0, le=1_000_000_000)
+    output_micros_per_million_tokens: int = Field(default=0, ge=0, le=1_000_000_000)
+    max_input_tokens: int = Field(default=0, ge=0, le=10_000_000)
+
+
+class BenchmarkModelConfigCreate(ModelConfigUpdate):
+    provider: Literal["openai", "doubao"] = "openai"
 
 
 class SamplingPolicyUpdate(BaseModel):
@@ -268,17 +287,18 @@ class ProductionFeedbackRequest(BaseModel):
 
 class BenchmarkVariantRequest(BaseModel):
     model_key: Literal["sol", "terra", "luna"]
-    provider: str = Field(min_length=1, max_length=80)
-    model_id: str = Field(min_length=1, max_length=200)
-    input_micros_per_million_tokens: int = Field(ge=0, le=1_000_000_000)
-    output_micros_per_million_tokens: int = Field(ge=0, le=1_000_000_000)
+    model_config_id: int | None = Field(default=None, ge=1)
+    provider: str | None = Field(default=None, min_length=1, max_length=80)
+    model_id: str | None = Field(default=None, min_length=1, max_length=200)
+    input_micros_per_million_tokens: int = Field(default=0, ge=0, le=1_000_000_000)
+    output_micros_per_million_tokens: int = Field(default=0, ge=0, le=1_000_000_000)
     human_review_cost_micros: int = Field(ge=0, le=100_000_000)
 
 
 class BenchmarkCreateRequest(BaseModel):
     experiment_key: str = Field(min_length=1, max_length=160)
     name: str = Field(min_length=1, max_length=200)
-    execution_mode: Literal["disabled", "test"] = "disabled"
+    execution_mode: Literal["disabled", "test", "real"] = "test"
     cohort_asset_ids: list[int] = Field(min_length=1, max_length=5000)
     strategy_bundle_id: int = Field(ge=1)
     variants: list[BenchmarkVariantRequest] = Field(
@@ -288,6 +308,8 @@ class BenchmarkCreateRequest(BaseModel):
     max_p0_p1_errors: int = Field(default=0, ge=0, le=1000)
     min_retry_stability: float = Field(default=0.95, ge=0, le=1)
     low_confidence_threshold: float = Field(default=0.7, ge=0, le=1)
+    max_round_cost_micros: int = Field(default=0, ge=0, le=1_000_000_000)
+    quality_gate_approved: bool = False
 
     @model_validator(mode="after")
     def validate_frozen_cohort(self) -> "BenchmarkCreateRequest":
@@ -295,6 +317,18 @@ class BenchmarkCreateRequest(BaseModel):
             raise ValueError("横评 cohort 不能包含重复素材")
         if {item.model_key for item in self.variants} != set(MODEL_KEYS):
             raise ValueError("横评必须同时冻结 Sol、Terra、Luna")
+        if self.execution_mode == "real":
+            if self.max_round_cost_micros <= 0:
+                raise ValueError("真实横评必须配置正数单轮成本上限")
+            if not self.quality_gate_approved:
+                raise ValueError("真实横评必须先通过质量门")
+            if any(item.model_config_id is None for item in self.variants):
+                raise ValueError("真实横评的每个变体必须绑定服务端模型配置")
+        elif any(
+            item.model_config_id is None and (not item.provider or not item.model_id)
+            for item in self.variants
+        ):
+            raise ValueError("测试横评变体必须提供测试标识或模型配置")
         return self
 
 
@@ -811,6 +845,33 @@ def current_user(
     if not user or not user.is_active:
         raise HTTPException(status_code=401, detail="账号不可用")
     return user
+
+
+def admin_user(user: User = Depends(current_user)) -> User:
+    if not user.is_admin:
+        raise HTTPException(status_code=403, detail="仅管理员可执行此操作")
+    return user
+
+
+def production_feedback_sender(
+    authorization: str | None = Header(default=None),
+) -> str:
+    configured = settings.production_feedback_token
+    if configured is None:
+        raise HTTPException(status_code=503, detail="生产回流接收未配置")
+    prefix = "Bearer "
+    supplied = (
+        authorization[len(prefix) :]
+        if authorization and authorization.startswith(prefix)
+        else ""
+    )
+    if not supplied or not hmac.compare_digest(supplied, configured):
+        raise HTTPException(
+            status_code=401,
+            detail="生产回流认证失败",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return "production-feedback-sender"
 
 
 app.include_router(build_canary_router(current_user))
@@ -1707,7 +1768,12 @@ def login(payload: LoginRequest, response: Response, db: Session = Depends(get_d
         max_age=settings.session_days * 24 * 3600,
         path="/",
     )
-    return {"id": user.id, "username": user.username, "display_name": user.display_name}
+    return {
+        "id": user.id,
+        "username": user.username,
+        "display_name": user.display_name,
+        "is_admin": user.is_admin,
+    }
 
 
 @app.post("/api/auth/logout")
@@ -1727,7 +1793,12 @@ def logout(
 
 @app.get("/api/auth/me")
 def me(user: User = Depends(current_user)) -> dict[str, Any]:
-    return {"id": user.id, "username": user.username, "display_name": user.display_name}
+    return {
+        "id": user.id,
+        "username": user.username,
+        "display_name": user.display_name,
+        "is_admin": user.is_admin,
+    }
 
 
 @app.get("/api/dashboard")
@@ -2281,6 +2352,10 @@ def get_model_config(
     config = db.scalar(select(ModelConfig).where(ModelConfig.active.is_(True)))
     if not config:
         raise HTTPException(status_code=404, detail="模型配置不存在")
+    return _model_config_payload(config)
+
+
+def _model_config_payload(config: ModelConfig) -> dict[str, Any]:
     return {
         "id": config.id,
         "name": config.name,
@@ -2295,10 +2370,84 @@ def get_model_config(
         "max_concurrency": config.max_concurrency,
         "structured_output": config.structured_output,
         "high_risk_review_enabled": config.high_risk_review_enabled,
+        "input_micros_per_million_tokens": config.input_micros_per_million_tokens,
+        "output_micros_per_million_tokens": config.output_micros_per_million_tokens,
+        "max_input_tokens": config.max_input_tokens,
+        "benchmark_enabled": config.benchmark_enabled,
+        "active": config.active,
         "has_api_key": bool(config.encrypted_api_key),
         "api_key_mask": "••••••••" if config.encrypted_api_key else "",
         "updated_at": config.updated_at,
     }
+
+
+@app.get("/api/model-configs")
+def list_model_configs(
+    _user: User = Depends(current_user), db: Session = Depends(get_db)
+) -> dict[str, Any]:
+    configs = db.scalars(select(ModelConfig).order_by(ModelConfig.id.asc())).all()
+    return {"items": [_model_config_payload(config) for config in configs]}
+
+
+@app.post("/api/model-configs")
+def create_benchmark_model_config(
+    payload: BenchmarkModelConfigCreate,
+    _user: User = Depends(admin_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    config = ModelConfig(provider=payload.provider, active=False)
+    db.add(config)
+    db.flush()
+    for field in (
+        "name", "base_url", "api_path", "model_id", "temperature",
+        "max_tokens", "timeout_seconds", "max_retries", "max_concurrency",
+        "structured_output", "high_risk_review_enabled",
+        "input_micros_per_million_tokens",
+        "output_micros_per_million_tokens", "max_input_tokens",
+        "benchmark_enabled",
+    ):
+        setattr(config, field, getattr(payload, field))
+    protected_api_key = _protected_api_key(
+        payload.api_key,
+        account=f"model-config-{config.id}",
+    )
+    if protected_api_key is not None:
+        config.encrypted_api_key = protected_api_key
+    db.commit()
+    db.refresh(config)
+    return _model_config_payload(config)
+
+
+@app.put("/api/model-configs/{config_id}")
+def update_benchmark_model_config(
+    config_id: int,
+    payload: BenchmarkModelConfigCreate,
+    _user: User = Depends(admin_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    config = db.get(ModelConfig, config_id)
+    if config is None:
+        raise HTTPException(status_code=404, detail="横评模型配置不存在")
+    if config.active:
+        raise HTTPException(status_code=409, detail="主评测模型请使用主配置入口修改")
+    for field in (
+        "provider", "name", "base_url", "api_path", "model_id",
+        "temperature", "max_tokens", "timeout_seconds", "max_retries",
+        "max_concurrency", "structured_output", "high_risk_review_enabled",
+        "input_micros_per_million_tokens",
+        "output_micros_per_million_tokens", "max_input_tokens",
+        "benchmark_enabled",
+    ):
+        setattr(config, field, getattr(payload, field))
+    protected_api_key = _protected_api_key(
+        payload.api_key,
+        account=f"model-config-{config.id}",
+    )
+    if protected_api_key is not None:
+        config.encrypted_api_key = protected_api_key
+    db.commit()
+    db.refresh(config)
+    return _model_config_payload(config)
 
 
 def _sampling_policy_payload(policy: SamplingPolicy) -> dict[str, Any]:
@@ -2402,7 +2551,7 @@ def update_sampling_policy(
 @app.put("/api/model-config")
 def update_model_config(
     payload: ModelConfigUpdate,
-    _user: User = Depends(current_user),
+    _user: User = Depends(admin_user),
     db: Session = Depends(get_db),
 ) -> dict[str, bool]:
     config = db.scalar(select(ModelConfig).where(ModelConfig.active.is_(True)))
@@ -2421,6 +2570,10 @@ def update_model_config(
         "max_concurrency",
         "structured_output",
         "high_risk_review_enabled",
+        "input_micros_per_million_tokens",
+        "output_micros_per_million_tokens",
+        "max_input_tokens",
+        "benchmark_enabled",
     ):
         setattr(config, field, getattr(payload, field))
     protected_api_key = _protected_api_key(
@@ -2435,7 +2588,7 @@ def update_model_config(
 
 @app.post("/api/model-config/test")
 async def test_model_config(
-    _user: User = Depends(current_user), db: Session = Depends(get_db)
+    _user: User = Depends(admin_user), db: Session = Depends(get_db)
 ) -> dict[str, Any]:
     config = db.scalar(select(ModelConfig).where(ModelConfig.active.is_(True)))
     if not config:
@@ -2460,6 +2613,9 @@ def _optimizer_config_payload(config: OptimizerConfig) -> dict[str, Any]:
         "timeout_seconds": config.timeout_seconds,
         "max_retries": config.max_retries,
         "structured_output": config.structured_output,
+        "input_micros_per_million_tokens": config.input_micros_per_million_tokens,
+        "output_micros_per_million_tokens": config.output_micros_per_million_tokens,
+        "max_input_tokens": config.max_input_tokens,
         "has_api_key": bool(config.encrypted_api_key),
         "api_key_mask": "••••••••" if config.encrypted_api_key else "",
         "updated_at": config.updated_at,
@@ -2482,7 +2638,7 @@ def get_optimizer_config(
 @app.put("/api/optimizer-config")
 def update_optimizer_config(
     payload: OptimizerConfigUpdate,
-    _user: User = Depends(current_user),
+    _user: User = Depends(admin_user),
     db: Session = Depends(get_db),
 ) -> dict[str, bool]:
     config = db.scalar(select(OptimizerConfig).limit(1))
@@ -2499,6 +2655,9 @@ def update_optimizer_config(
         "timeout_seconds",
         "max_retries",
         "structured_output",
+        "input_micros_per_million_tokens",
+        "output_micros_per_million_tokens",
+        "max_input_tokens",
     ):
         setattr(config, field, getattr(payload, field))
     protected_api_key = _protected_api_key(
@@ -2513,7 +2672,7 @@ def update_optimizer_config(
 
 @app.post("/api/optimizer-config/test")
 async def test_optimizer_config(
-    _user: User = Depends(current_user), db: Session = Depends(get_db)
+    _user: User = Depends(admin_user), db: Session = Depends(get_db)
 ) -> dict[str, Any]:
     config = db.scalar(select(OptimizerConfig).limit(1))
     if not config:
@@ -3839,7 +3998,10 @@ def list_optimization_cases(
     }
 
 
-def _automation_policy_payload(policy: AutomationPolicy) -> dict[str, Any]:
+def _automation_policy_payload(
+    policy: AutomationPolicy, db: Session
+) -> dict[str, Any]:
+    adapter = configured_optimization_adapter(db)
     return {
         "id": policy.id,
         "enabled": policy.enabled,
@@ -3858,7 +4020,8 @@ def _automation_policy_payload(policy: AutomationPolicy) -> dict[str, Any]:
         "last_triggered_at": policy.last_triggered_at,
         "updated_by": policy.updated_by,
         "updated_at": policy.updated_at,
-        "real_model_calls_enabled": False,
+        "budget": automation_budget_status(db, policy),
+        "real_model_calls_enabled": adapter is not None,
         "auto_publish_enabled": False,
     }
 
@@ -3874,13 +4037,13 @@ def get_automation_policy(
         db.add(policy)
         db.commit()
         db.refresh(policy)
-    return _automation_policy_payload(policy)
+    return _automation_policy_payload(policy, db)
 
 
 @app.put("/api/automation-policy")
 def update_automation_policy(
     payload: AutomationPolicyUpdate,
-    user: User = Depends(current_user),
+    user: User = Depends(admin_user),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     policy = db.get(AutomationPolicy, 1)
@@ -3898,7 +4061,7 @@ def update_automation_policy(
     policy.updated_by = user.username
     db.commit()
     db.refresh(policy)
-    return _automation_policy_payload(policy)
+    return _automation_policy_payload(policy, db)
 
 
 def _automation_run_payload(
@@ -3918,6 +4081,10 @@ def _automation_run_payload(
         "candidate_count": run.candidate_count,
         "estimated_cost_micros": run.estimated_cost_micros,
         "actual_cost_micros": run.actual_cost_micros,
+        "input_tokens": run.input_tokens,
+        "output_tokens": run.output_tokens,
+        "total_tokens": run.total_tokens,
+        "retryable": run.retryable,
         "error_message": run.error_message,
         "created_by": run.created_by,
         "created_at": run.created_at,
@@ -3945,13 +4112,13 @@ def list_automation_runs(
 
 @app.post("/api/automation-runs/consume")
 def consume_automation_runs(
-    user: User = Depends(current_user),
+    user: User = Depends(admin_user),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     result = consume_optimization_queue_once(
         db,
         worker_id=f"manual:{user.username}",
-        adapter=None,
+        adapter=configured_optimization_adapter(db),
     )
     db.commit()
     return result
@@ -3981,7 +4148,7 @@ def _production_feedback_payload(
 @app.post("/api/production-feedback-events")
 def create_production_feedback_event(
     payload: ProductionFeedbackRequest,
-    user: User = Depends(current_user),
+    sender: str = Depends(production_feedback_sender),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     try:
@@ -3993,7 +4160,7 @@ def create_production_feedback_event(
             source_system=payload.source_system,
             occurred_at=payload.occurred_at,
             payload=payload.payload,
-            received_by=user.username,
+            received_by=sender,
         )
     except FeedbackConflict as exc:
         db.rollback()
@@ -4043,6 +4210,17 @@ def list_production_feedback_events(
     }
 
 
+@app.get("/api/production-feedback-config-status")
+def production_feedback_config_status(
+    _user: User = Depends(admin_user),
+) -> dict[str, Any]:
+    return {
+        "configured": settings.production_feedback_token is not None,
+        "authentication": "dedicated_bearer_token",
+        "browser_session_accepted": False,
+    }
+
+
 def _benchmark_payload(
     experiment: ModelBenchmarkExperiment,
     variants: list[ModelBenchmarkVariant],
@@ -4057,26 +4235,107 @@ def _benchmark_payload(
         "snapshot_hash": experiment.snapshot_hash,
         "frozen_snapshot": json.loads(experiment.frozen_snapshot_json),
         "quality_gate": json.loads(experiment.quality_gate_json),
+        "max_round_cost_micros": experiment.max_round_cost_micros,
+        "actual_cost_micros": experiment.actual_cost_micros,
         "decision": json.loads(experiment.decision_json or "{}"),
         "created_by": experiment.created_by,
         "created_at": experiment.created_at,
         "started_at": experiment.started_at,
         "finished_at": experiment.finished_at,
-        "real_model_calls_enabled": False,
+        "real_model_calls_enabled": experiment.execution_mode == "real",
         "variants": [
             {
                 "id": variant.id,
                 "model_key": variant.model_key,
                 "provider": variant.provider,
                 "model_id": variant.model_id,
+                "model_config_id": variant.model_config_id,
                 "pricing": json.loads(variant.pricing_json),
                 "status": variant.status,
                 "metrics": json.loads(variant.metrics_json or "{}"),
                 "error_message": variant.error_message,
+                "input_tokens": variant.input_tokens,
+                "output_tokens": variant.output_tokens,
+                "total_tokens": variant.total_tokens,
+                "actual_cost_micros": variant.actual_cost_micros,
             }
             for variant in variants
         ],
     }
+
+
+def _benchmark_config_snapshot(config: ModelConfig) -> dict[str, Any]:
+    return {
+        "id": config.id,
+        "name": config.name,
+        "provider": config.provider,
+        "model_id": config.model_id,
+        "temperature": config.temperature,
+        "max_tokens": config.max_tokens,
+        "timeout_seconds": config.timeout_seconds,
+        "max_retries": config.max_retries,
+        "structured_output": config.structured_output,
+        "input_micros_per_million_tokens":
+            config.input_micros_per_million_tokens,
+        "output_micros_per_million_tokens":
+            config.output_micros_per_million_tokens,
+        "max_input_tokens": config.max_input_tokens,
+        "benchmark_enabled": config.benchmark_enabled,
+        "transport_fingerprint": hashlib.sha256(
+            canonical_json({
+                "provider": config.provider,
+                "base_url": config.base_url,
+                "api_path": config.api_path,
+            }).encode("utf-8")
+        ).hexdigest(),
+        "updated_at": config.updated_at.isoformat(),
+    }
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _real_benchmark_truth(
+    db: Session, asset: Asset
+) -> dict[str, Any]:
+    results = db.scalars(
+        select(EvaluationResult)
+        .where(EvaluationResult.asset_id == asset.id)
+        .order_by(EvaluationResult.created_at.desc(), EvaluationResult.id.desc())
+    ).all()
+    for result in results:
+        if latest_review_for_result(result) is not None:
+            return truth_from_result(result)
+    raise ValueError(f"素材 #{asset.id} 缺少最终人工真值")
+
+
+def _real_benchmark_estimate(
+    configs: list[ModelConfig], sample_count: int
+) -> int:
+    total = 0
+    for config in configs:
+        if (
+            config.max_input_tokens <= 0
+            or config.input_micros_per_million_tokens <= 0
+            or config.output_micros_per_million_tokens <= 0
+        ):
+            raise ValueError("真实横评模型缺少输入上限或计价配置")
+        total += 2 * sample_count * token_cost_micros(
+            config.max_input_tokens,
+            config.max_tokens,
+            {
+                "input_micros_per_million_tokens":
+                    config.input_micros_per_million_tokens,
+                "output_micros_per_million_tokens":
+                    config.output_micros_per_million_tokens,
+            },
+        )
+    return total
 
 
 @app.post("/api/model-benchmarks")
@@ -4085,20 +4344,18 @@ def create_model_benchmark(
     user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
+    if payload.execution_mode == "real" and not user.is_admin:
+        raise HTTPException(status_code=403, detail="仅管理员可创建真实横评")
     existing = db.scalar(
         select(ModelBenchmarkExperiment).where(
             ModelBenchmarkExperiment.experiment_key
             == payload.experiment_key
         )
     )
-    assets_found = set(
-        db.scalars(
-            select(Asset.id).where(
-                Asset.id.in_(payload.cohort_asset_ids)
-            )
-        ).all()
-    )
-    if assets_found != set(payload.cohort_asset_ids):
+    assets = db.scalars(
+        select(Asset).where(Asset.id.in_(payload.cohort_asset_ids))
+    ).all()
+    if {asset.id for asset in assets} != set(payload.cohort_asset_ids):
         raise HTTPException(status_code=422, detail="冻结 cohort 含不存在素材")
     bundle = db.get(StrategyBundle, payload.strategy_bundle_id)
     if bundle is None:
@@ -4110,6 +4367,112 @@ def create_model_benchmark(
     )
     if plan is None:
         raise HTTPException(status_code=422, detail="AgentPlan 快照不存在")
+    configs_by_id = {
+        config.id: config
+        for config in db.scalars(
+            select(ModelConfig).where(
+                ModelConfig.id.in_(
+                    [
+                        item.model_config_id
+                        for item in payload.variants
+                        if item.model_config_id is not None
+                    ]
+                )
+            )
+        ).all()
+    }
+    if payload.execution_mode == "real":
+        try:
+            real_configs = [
+                configs_by_id[int(item.model_config_id)]
+                for item in payload.variants
+            ]
+        except KeyError:
+            raise HTTPException(
+                status_code=422, detail="真实横评模型配置不存在"
+            ) from None
+        if any(
+            not config.benchmark_enabled or not config.encrypted_api_key
+            for config in real_configs
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="真实横评模型必须由管理员显式启用并配置密钥",
+            )
+        try:
+            predicted_cost = _real_benchmark_estimate(
+                real_configs, len(assets)
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from None
+        if predicted_cost > payload.max_round_cost_micros:
+            raise HTTPException(
+                status_code=409,
+                detail="真实横评预测成本超过单轮上限",
+            )
+        try:
+            _snapshot_json, prompt_a, prompt_b = _strategy_snapshot_for_bundle(
+                db, bundle
+            )
+            sample_snapshots = []
+            for asset in sorted(assets, key=lambda item: item.id):
+                image_path = settings.upload_dir / asset.stored_name
+                if not image_path.is_file() or _sha256_file(image_path) != asset.sha256:
+                    raise ValueError(f"素材 #{asset.id} 文件与冻结哈希不匹配")
+                sample_snapshots.append(
+                    {
+                        "asset_id": asset.id,
+                        "asset_sha256": asset.sha256,
+                        "image": {
+                            "mime_type": asset.mime_type,
+                            "size_bytes": asset.size_bytes,
+                            "width": asset.width,
+                            "height": asset.height,
+                        },
+                        "truth": _real_benchmark_truth(db, asset),
+                    }
+                )
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from None
+    else:
+        prompt_a = prompt_b = None
+        sample_snapshots = []
+        predicted_cost = 0
+
+    frozen_variants = []
+    for item in sorted(payload.variants, key=lambda value: value.model_key):
+        config = configs_by_id.get(item.model_config_id or -1)
+        if payload.execution_mode == "real" and config is not None:
+            frozen_variants.append(
+                {
+                    "model_key": item.model_key,
+                    "model_config": _benchmark_config_snapshot(config),
+                    "pricing": {
+                        "input_micros_per_million_tokens":
+                            config.input_micros_per_million_tokens,
+                        "output_micros_per_million_tokens":
+                            config.output_micros_per_million_tokens,
+                        "human_review_cost_micros":
+                            item.human_review_cost_micros,
+                    },
+                }
+            )
+        else:
+            frozen_variants.append(
+                {
+                    "model_key": item.model_key,
+                    "provider": item.provider,
+                    "model_id": item.model_id,
+                    "pricing": {
+                        "input_micros_per_million_tokens":
+                            item.input_micros_per_million_tokens,
+                        "output_micros_per_million_tokens":
+                            item.output_micros_per_million_tokens,
+                        "human_review_cost_micros":
+                            item.human_review_cost_micros,
+                    },
+                }
+            )
     frozen = {
         "schema_version": "model-benchmark-v1",
         "cohort_asset_ids": sorted(payload.cohort_asset_ids),
@@ -4129,24 +4492,28 @@ def create_model_benchmark(
             "version": plan.version,
             "plan": json.loads(plan.plan_json),
         },
-        "variants": [
+        "variants": frozen_variants,
+        "samples": sample_snapshots,
+        "prompt_a": (
             {
-                "model_key": item.model_key,
-                "provider": item.provider,
-                "model_id": item.model_id,
-                "pricing": {
-                    "input_micros_per_million_tokens":
-                        item.input_micros_per_million_tokens,
-                    "output_micros_per_million_tokens":
-                        item.output_micros_per_million_tokens,
-                    "human_review_cost_micros":
-                        item.human_review_cost_micros,
-                },
+                "version": prompt_a.version,
+                "rubric_version": prompt_a.rubric_version,
+                "system_prompt": prompt_a.system_prompt,
+                "user_prompt": prompt_a.user_prompt,
             }
-            for item in sorted(
-                payload.variants, key=lambda value: value.model_key
-            )
-        ],
+            if prompt_a is not None else None
+        ),
+        "prompt_b": (
+            {
+                "version": prompt_b.version,
+                "rubric_version": prompt_b.rubric_version,
+                "system_prompt": prompt_b.system_prompt,
+                "user_prompt": prompt_b.user_prompt,
+            }
+            if prompt_b is not None else None
+        ),
+        "predicted_cost_micros": predicted_cost,
+        "max_round_cost_micros": payload.max_round_cost_micros,
     }
     quality_gate = {
         "min_quality_accuracy": payload.min_quality_accuracy,
@@ -4154,6 +4521,7 @@ def create_model_benchmark(
         "min_retry_stability": payload.min_retry_stability,
         "low_confidence_threshold": payload.low_confidence_threshold,
         "selection": "quality_gate_then_pareto_composite_cost",
+        "approved_for_real_execution": payload.quality_gate_approved,
     }
     frozen_hash = benchmark_snapshot_hash(frozen)
     if existing is not None:
@@ -4183,23 +4551,28 @@ def create_model_benchmark(
         snapshot_hash=frozen_hash,
         frozen_snapshot_json=canonical_json(frozen),
         quality_gate_json=canonical_json(quality_gate),
+        max_round_cost_micros=payload.max_round_cost_micros,
         created_by=user.username,
     )
     db.add(experiment)
     db.flush()
     for item in payload.variants:
+        config = configs_by_id.get(item.model_config_id or -1)
         db.add(
             ModelBenchmarkVariant(
                 experiment_id=experiment.id,
                 model_key=item.model_key,
-                provider=item.provider,
-                model_id=item.model_id,
+                provider=config.provider if config else str(item.provider),
+                model_id=config.model_id if config else str(item.model_id),
+                model_config_id=config.id if config else None,
                 pricing_json=canonical_json(
                     {
                         "input_micros_per_million_tokens":
-                            item.input_micros_per_million_tokens,
+                            config.input_micros_per_million_tokens
+                            if config else item.input_micros_per_million_tokens,
                         "output_micros_per_million_tokens":
-                            item.output_micros_per_million_tokens,
+                            config.output_micros_per_million_tokens
+                            if config else item.output_micros_per_million_tokens,
                         "human_review_cost_micros":
                             item.human_review_cost_micros,
                     }
@@ -4290,6 +4663,141 @@ def run_model_benchmark_test(
             ModelBenchmarkVariant.experiment_id == experiment.id
         )
     ).all()
+    return _benchmark_payload(experiment, variants)
+
+
+@app.post("/api/model-benchmarks/{experiment_id}/run-real")
+def run_model_benchmark_real(
+    experiment_id: int,
+    user: User = Depends(admin_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    experiment = db.get(ModelBenchmarkExperiment, experiment_id)
+    if experiment is None:
+        raise HTTPException(status_code=404, detail="横评实验不存在")
+    if experiment.execution_mode != "real":
+        raise HTTPException(status_code=409, detail="横评实验未显式配置真实模式")
+    try:
+        quality_gate = json.loads(experiment.quality_gate_json)
+        snapshot = json.loads(experiment.frozen_snapshot_json)
+    except (TypeError, json.JSONDecodeError):
+        raise HTTPException(status_code=409, detail="横评冻结数据无法解析") from None
+    if quality_gate.get("approved_for_real_execution") is not True:
+        raise HTTPException(status_code=409, detail="横评质量门尚未批准真实执行")
+    if benchmark_snapshot_hash(snapshot) != experiment.snapshot_hash:
+        raise HTTPException(status_code=409, detail="横评冻结快照哈希不匹配")
+    frozen_strategy = snapshot.get("strategy_bundle")
+    if not isinstance(frozen_strategy, dict):
+        raise HTTPException(status_code=409, detail="横评冻结策略缺失")
+    bundle = db.get(StrategyBundle, frozen_strategy.get("id"))
+    if (
+        bundle is None
+        or bundle.canonical_hash != frozen_strategy.get("canonical_hash")
+    ):
+        raise HTTPException(status_code=409, detail="横评冻结策略版本不匹配")
+    try:
+        _snapshot_json, prompt_a, prompt_b = _strategy_snapshot_for_bundle(db, bundle)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from None
+    for key, prompt in (("prompt_a", prompt_a), ("prompt_b", prompt_b)):
+        if snapshot.get(key) != {
+            "version": prompt.version,
+            "rubric_version": prompt.rubric_version,
+            "system_prompt": prompt.system_prompt,
+            "user_prompt": prompt.user_prompt,
+        }:
+            raise HTTPException(status_code=409, detail="横评冻结提示词版本不匹配")
+    frozen_plan = snapshot.get("agent_plan")
+    plan = db.scalar(
+        select(AgentPlanVersion).where(
+            AgentPlanVersion.version == bundle.agent_plan_version
+        )
+    )
+    if (
+        not isinstance(frozen_plan, dict)
+        or plan is None
+        or frozen_plan != {"version": plan.version, "plan": json.loads(plan.plan_json)}
+    ):
+        raise HTTPException(status_code=409, detail="横评冻结 AgentPlan 版本不匹配")
+    frozen_cohort = snapshot.get("cohort_asset_ids")
+    frozen_samples = snapshot.get("samples")
+    try:
+        cohort_ids = sorted(int(asset_id) for asset_id in frozen_cohort)
+        sample_ids = sorted(
+            int(item["asset_id"])
+            for item in frozen_samples
+            if isinstance(item, dict)
+        )
+    except (KeyError, TypeError, ValueError):
+        raise HTTPException(status_code=409, detail="横评冻结 cohort 不匹配") from None
+    if (
+        not isinstance(frozen_cohort, list)
+        or not isinstance(frozen_samples, list)
+        or len(sample_ids) != len(frozen_samples)
+        or sample_ids != cohort_ids
+        or hashlib.sha256(canonical_json(cohort_ids).encode("utf-8")).hexdigest()
+        != experiment.cohort_hash
+    ):
+        raise HTTPException(status_code=409, detail="横评冻结 cohort 不匹配")
+    variants = db.scalars(
+        select(ModelBenchmarkVariant)
+        .where(ModelBenchmarkVariant.experiment_id == experiment.id)
+        .order_by(ModelBenchmarkVariant.model_key.asc())
+    ).all()
+    frozen_variants = {
+        item.get("model_key"): item
+        for item in snapshot.get("variants", [])
+        if isinstance(item, dict)
+    }
+    if set(frozen_variants) != set(MODEL_KEYS) or {
+        variant.model_key for variant in variants
+    } != set(MODEL_KEYS):
+        raise HTTPException(status_code=409, detail="横评冻结模型组合不匹配")
+    configs: dict[str, ModelConfig] = {}
+    for variant in variants:
+        config = db.get(ModelConfig, variant.model_config_id)
+        if (
+            config is None
+            or not config.benchmark_enabled
+            or not config.encrypted_api_key
+        ):
+            raise HTTPException(status_code=409, detail="横评模型配置不可执行")
+        frozen_variant = frozen_variants[variant.model_key]
+        if frozen_variant.get("model_config") != _benchmark_config_snapshot(config):
+            raise HTTPException(status_code=409, detail="横评模型配置已发生变化")
+        configs[variant.model_key] = config
+    asset_paths: dict[int, Path] = {}
+    for sample in snapshot.get("samples", []):
+        asset = db.get(Asset, int(sample["asset_id"]))
+        if asset is None or asset.sha256 != sample["asset_sha256"]:
+            raise HTTPException(status_code=409, detail="横评冻结素材已发生变化")
+        path = settings.upload_dir / asset.stored_name
+        if not path.is_file() or _sha256_file(path) != sample["asset_sha256"]:
+            raise HTTPException(status_code=409, detail="横评冻结图片哈希不匹配")
+        asset_paths[asset.id] = path
+    try:
+        predicted = _real_benchmark_estimate(
+            list(configs.values()), len(asset_paths)
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from None
+    if predicted > experiment.max_round_cost_micros:
+        raise HTTPException(status_code=409, detail="横评预测成本超过单轮上限")
+    try:
+        run_benchmark_experiment(
+            db,
+            experiment=experiment,
+            adapter=OpenAICompatibleBenchmarkAdapter(
+                configs=configs,
+                asset_paths=asset_paths,
+                round_cost_limit_micros=experiment.max_round_cost_micros,
+            ),
+            actor=user.username,
+        )
+    except Exception:
+        db.commit()
+        raise HTTPException(status_code=502, detail="真实横评执行失败；请查看脱敏状态") from None
+    db.commit()
     return _benchmark_payload(experiment, variants)
 
 
@@ -5090,11 +5598,12 @@ def _strategy_snapshot_for_bundle(
     return matches[0]
 
 
-@app.post("/api/paired-regressions")
-def create_paired_regression(
+def _create_paired_regression(
     payload: PairedRegressionCreateRequest,
     user: User = Depends(current_user),
     db: Session = Depends(get_db),
+    *,
+    commit: bool,
 ) -> dict[str, Any]:
     sample_set = db.get(SampleSet, payload.sample_set_id)
     if not sample_set:
@@ -5314,7 +5823,8 @@ def create_paired_regression(
                 pending_job_ids.append(candidate_job.id)
                 item.job_id = candidate_job.id
     refresh_paired_regression_run(db, run)
-    db.commit()
+    if commit:
+        db.commit()
     return {
         "id": run.id,
         "status": run.status,
@@ -5324,6 +5834,15 @@ def create_paired_regression(
         "pending_item_ids": pending_item_ids,
         "pending_job_ids": pending_job_ids,
     }
+
+
+@app.post("/api/paired-regressions")
+def create_paired_regression(
+    payload: PairedRegressionCreateRequest,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    return _create_paired_regression(payload, user, db, commit=True)
 
 
 @app.post("/api/paired-regressions/{run_id}/items/{item_id}/results")

@@ -2687,6 +2687,379 @@ def _migration_023_enforce_material_package_immutability(
         """)
 
 
+def _migration_024_add_real_executor_safety(connection: Connection) -> None:
+    tables = {
+        row[0]
+        for row in connection.exec_driver_sql(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )
+    }
+
+    def add_columns(table: str, columns: tuple[tuple[str, str], ...]) -> None:
+        if table not in tables:
+            return
+        existing = {
+            row[1]
+            for row in connection.exec_driver_sql(f"PRAGMA table_info({table})")
+        }
+        for name, definition in columns:
+            if name not in existing:
+                connection.exec_driver_sql(
+                    f"ALTER TABLE {table} ADD COLUMN {name} {definition}"
+                )
+
+    add_columns("users", (("is_admin", "BOOLEAN NOT NULL DEFAULT 1"),))
+    pricing_columns = (
+        ("input_micros_per_million_tokens", "INTEGER NOT NULL DEFAULT 0"),
+        ("output_micros_per_million_tokens", "INTEGER NOT NULL DEFAULT 0"),
+        ("max_input_tokens", "INTEGER NOT NULL DEFAULT 0"),
+    )
+    add_columns(
+        "model_configs",
+        pricing_columns + (("benchmark_enabled", "BOOLEAN NOT NULL DEFAULT 0"),),
+    )
+    add_columns("optimizer_configs", pricing_columns)
+    add_columns(
+        "prompt_versions",
+        ((
+            "source_automation_run_id",
+            "INTEGER REFERENCES automation_optimization_runs(id) ON DELETE SET NULL",
+        ),),
+    )
+    if "prompt_versions" in tables:
+        connection.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_prompt_versions_source_automation_run "
+            "ON prompt_versions(source_automation_run_id)"
+        )
+    add_columns(
+        "automation_optimization_runs",
+        (
+            ("input_tokens", "INTEGER"),
+            ("output_tokens", "INTEGER"),
+            ("total_tokens", "INTEGER"),
+            ("retryable", "BOOLEAN NOT NULL DEFAULT 0"),
+        ),
+    )
+    add_columns(
+        "model_benchmark_experiments",
+        (
+            ("max_round_cost_micros", "INTEGER NOT NULL DEFAULT 0"),
+            ("actual_cost_micros", "INTEGER NOT NULL DEFAULT 0"),
+        ),
+    )
+    add_columns(
+        "model_benchmark_variants",
+        (
+            (
+                "model_config_id",
+                (
+                    "INTEGER REFERENCES model_configs(id) ON DELETE RESTRICT"
+                    if "model_configs" in tables
+                    else "INTEGER"
+                ),
+            ),
+            ("input_tokens", "INTEGER"),
+            ("output_tokens", "INTEGER"),
+            ("total_tokens", "INTEGER"),
+            ("actual_cost_micros", "INTEGER NOT NULL DEFAULT 0"),
+        ),
+    )
+    connection.exec_driver_sql(
+        "CREATE INDEX IF NOT EXISTS ix_model_benchmark_variants_model_config "
+        "ON model_benchmark_variants(model_config_id)"
+    )
+    connection.exec_driver_sql("""
+        CREATE TABLE IF NOT EXISTS automation_budget_days (
+            budget_date VARCHAR(10) PRIMARY KEY,
+            reserved_micros INTEGER NOT NULL DEFAULT 0,
+            spent_micros INTEGER NOT NULL DEFAULT 0,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            CONSTRAINT ck_automation_budget_day_costs
+                CHECK(reserved_micros >= 0 AND spent_micros >= 0)
+        )
+    """)
+
+    automation_sql = str(
+        connection.exec_driver_sql(
+            "SELECT sql FROM sqlite_master "
+            "WHERE type='table' AND name='automation_optimization_runs'"
+        ).scalar_one_or_none()
+        or ""
+    )
+    if automation_sql and (
+        "'processing'" not in automation_sql or "'succeeded'" not in automation_sql
+    ):
+        connection.exec_driver_sql(
+            "ALTER TABLE optimization_case_queue "
+            "RENAME TO optimization_case_queue_v24"
+        )
+        connection.exec_driver_sql(
+            "ALTER TABLE automation_optimization_runs "
+            "RENAME TO automation_optimization_runs_v24"
+        )
+        connection.exec_driver_sql("""
+            CREATE TABLE automation_optimization_runs (
+                id INTEGER PRIMARY KEY,
+                run_key VARCHAR(160) NOT NULL UNIQUE,
+                base_prompt_version VARCHAR(40) NOT NULL,
+                policy_revision INTEGER NOT NULL,
+                status VARCHAR(40) NOT NULL DEFAULT 'planned'
+                    CHECK(status IN (
+                        'planned','awaiting_executor','processing','succeeded',
+                        'running','awaiting_release_review','failed','cancelled'
+                    )),
+                dry_run BOOLEAN NOT NULL DEFAULT 1,
+                trigger_reason VARCHAR(80) NOT NULL,
+                case_ids_json TEXT NOT NULL,
+                frozen_input_json TEXT NOT NULL,
+                result_json TEXT NOT NULL DEFAULT '{}',
+                candidate_count INTEGER NOT NULL DEFAULT 0,
+                estimated_cost_micros INTEGER NOT NULL DEFAULT 0,
+                actual_cost_micros INTEGER NOT NULL DEFAULT 0,
+                input_tokens INTEGER,
+                output_tokens INTEGER,
+                total_tokens INTEGER,
+                retryable BOOLEAN NOT NULL DEFAULT 0,
+                error_message TEXT NOT NULL DEFAULT '',
+                created_by VARCHAR(80) NOT NULL DEFAULT 'automation',
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                finished_at DATETIME,
+                CHECK(estimated_cost_micros >= 0 AND actual_cost_micros >= 0)
+            )
+        """)
+        connection.exec_driver_sql("""
+            INSERT INTO automation_optimization_runs (
+                id, run_key, base_prompt_version, policy_revision, status,
+                dry_run, trigger_reason, case_ids_json, frozen_input_json,
+                result_json, candidate_count, estimated_cost_micros,
+                actual_cost_micros, input_tokens, output_tokens, total_tokens,
+                retryable, error_message, created_by, created_at, finished_at
+            )
+            SELECT
+                id, run_key, base_prompt_version, policy_revision, status,
+                dry_run, trigger_reason, case_ids_json, frozen_input_json,
+                result_json, candidate_count, estimated_cost_micros,
+                actual_cost_micros, input_tokens, output_tokens, total_tokens,
+                retryable, error_message, created_by, created_at, finished_at
+            FROM automation_optimization_runs_v24
+        """)
+        connection.exec_driver_sql("""
+            CREATE TABLE optimization_case_queue (
+                id INTEGER PRIMARY KEY,
+                idempotency_key VARCHAR(160) NOT NULL UNIQUE,
+                evaluation_id INTEGER REFERENCES evaluation_results(id)
+                    ON DELETE RESTRICT,
+                final_review_id INTEGER REFERENCES human_reviews(id)
+                    ON DELETE RESTRICT,
+                source_type VARCHAR(30) NOT NULL DEFAULT 'human_review',
+                source_event_id INTEGER UNIQUE
+                    REFERENCES production_feedback_events(id) ON DELETE RESTRICT,
+                prompt_version VARCHAR(40) NOT NULL,
+                severity VARCHAR(10) NOT NULL DEFAULT 'P2'
+                    CHECK(severity IN ('P0','P1','P2','P3')),
+                case_json TEXT NOT NULL,
+                status VARCHAR(30) NOT NULL DEFAULT 'pending'
+                    CHECK(status IN (
+                        'pending','batched','processing','completed','failed'
+                    )),
+                lease_owner VARCHAR(120),
+                lease_token VARCHAR(80),
+                lease_expires_at DATETIME,
+                attempt_count INTEGER NOT NULL DEFAULT 0,
+                next_attempt_at DATETIME,
+                last_error TEXT NOT NULL DEFAULT '',
+                automation_run_id INTEGER
+                    REFERENCES automation_optimization_runs(id) ON DELETE SET NULL,
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                CHECK(
+                    (source_type = 'human_review' AND evaluation_id IS NOT NULL
+                     AND final_review_id IS NOT NULL AND source_event_id IS NULL)
+                    OR
+                    (source_type = 'production_feedback' AND evaluation_id IS NULL
+                     AND final_review_id IS NULL AND source_event_id IS NOT NULL)
+                )
+            )
+        """)
+        if int(
+            connection.exec_driver_sql(
+                "SELECT COUNT(*) FROM optimization_case_queue_v24"
+            ).scalar_one()
+        ):
+            connection.exec_driver_sql("""
+                INSERT INTO optimization_case_queue (
+                    id, idempotency_key, evaluation_id, final_review_id,
+                    source_type, source_event_id, prompt_version, severity,
+                    case_json, status, lease_owner, lease_token, lease_expires_at,
+                    attempt_count, next_attempt_at, last_error, automation_run_id,
+                    created_at, updated_at
+                )
+                SELECT
+                    id, idempotency_key, evaluation_id, final_review_id,
+                    source_type, source_event_id, prompt_version, severity,
+                    case_json, status, lease_owner, lease_token, lease_expires_at,
+                    attempt_count, next_attempt_at, last_error, automation_run_id,
+                    created_at, updated_at
+                FROM optimization_case_queue_v24
+            """)
+        connection.exec_driver_sql("DROP TABLE optimization_case_queue_v24")
+        connection.exec_driver_sql(
+            "DROP TABLE automation_optimization_runs_v24"
+        )
+        for statement in (
+            "CREATE INDEX ix_automation_runs_status "
+            "ON automation_optimization_runs(status)",
+            "CREATE INDEX ix_automation_runs_created_at "
+            "ON automation_optimization_runs(created_at)",
+            "CREATE INDEX ix_optimization_case_queue_status "
+            "ON optimization_case_queue(status)",
+            "CREATE INDEX ix_optimization_case_queue_source_type "
+            "ON optimization_case_queue(source_type)",
+            "CREATE INDEX ix_optimization_case_queue_prompt "
+            "ON optimization_case_queue(prompt_version)",
+            "CREATE INDEX ix_optimization_case_queue_lease "
+            "ON optimization_case_queue(lease_expires_at)",
+            "CREATE INDEX ix_optimization_case_queue_lease_token "
+            "ON optimization_case_queue(lease_token)",
+            "CREATE INDEX ix_optimization_case_queue_next_attempt "
+            "ON optimization_case_queue(next_attempt_at)",
+            "CREATE INDEX ix_optimization_case_queue_run "
+            "ON optimization_case_queue(automation_run_id)",
+        ):
+            connection.exec_driver_sql(statement)
+
+    benchmark_sql = str(
+        connection.exec_driver_sql(
+            "SELECT sql FROM sqlite_master "
+            "WHERE type='table' AND name='model_benchmark_experiments'"
+        ).scalar_one_or_none()
+        or ""
+    )
+    if benchmark_sql and "'real'" not in benchmark_sql:
+        model_config_reference = (
+            "REFERENCES model_configs(id) ON DELETE RESTRICT"
+            if "model_configs" in tables
+            else ""
+        )
+        connection.exec_driver_sql("DROP TRIGGER IF EXISTS trg_benchmark_snapshot_no_update")
+        connection.exec_driver_sql(
+            "ALTER TABLE model_benchmark_variants "
+            "RENAME TO model_benchmark_variants_v24"
+        )
+        connection.exec_driver_sql(
+            "ALTER TABLE model_benchmark_experiments "
+            "RENAME TO model_benchmark_experiments_v24"
+        )
+        connection.exec_driver_sql("""
+            CREATE TABLE model_benchmark_experiments (
+                id INTEGER PRIMARY KEY,
+                experiment_key VARCHAR(160) NOT NULL UNIQUE,
+                name VARCHAR(200) NOT NULL,
+                status VARCHAR(20) NOT NULL DEFAULT 'draft'
+                    CHECK(status IN (
+                        'draft','running','completed','failed','cancelled'
+                    )),
+                execution_mode VARCHAR(20) NOT NULL DEFAULT 'test'
+                    CHECK(execution_mode IN ('disabled','test','real')),
+                cohort_hash VARCHAR(64) NOT NULL,
+                snapshot_hash VARCHAR(64) NOT NULL,
+                frozen_snapshot_json TEXT NOT NULL,
+                quality_gate_json TEXT NOT NULL,
+                max_round_cost_micros INTEGER NOT NULL DEFAULT 0,
+                actual_cost_micros INTEGER NOT NULL DEFAULT 0,
+                decision_json TEXT NOT NULL DEFAULT '{}',
+                created_by VARCHAR(80) NOT NULL DEFAULT 'system',
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                started_at DATETIME,
+                finished_at DATETIME
+            )
+        """)
+        connection.exec_driver_sql("""
+            INSERT INTO model_benchmark_experiments (
+                id, experiment_key, name, status, execution_mode,
+                cohort_hash, snapshot_hash, frozen_snapshot_json,
+                quality_gate_json, max_round_cost_micros,
+                actual_cost_micros, decision_json, created_by, created_at,
+                started_at, finished_at
+            )
+            SELECT
+                id, experiment_key, name, status, execution_mode,
+                cohort_hash, snapshot_hash, frozen_snapshot_json,
+                quality_gate_json, max_round_cost_micros,
+                actual_cost_micros, decision_json, created_by, created_at,
+                started_at, finished_at
+            FROM model_benchmark_experiments_v24
+        """)
+        connection.exec_driver_sql("""
+            CREATE TABLE model_benchmark_variants (
+                id INTEGER PRIMARY KEY,
+                experiment_id INTEGER NOT NULL
+                    REFERENCES model_benchmark_experiments(id) ON DELETE CASCADE,
+                model_key VARCHAR(80) NOT NULL,
+                provider VARCHAR(80) NOT NULL,
+                model_id VARCHAR(200) NOT NULL,
+                model_config_id INTEGER
+                    {model_config_reference},
+                pricing_json TEXT NOT NULL,
+                status VARCHAR(20) NOT NULL DEFAULT 'pending'
+                    CHECK(status IN ('pending','running','completed','failed')),
+                metrics_json TEXT NOT NULL DEFAULT '{}',
+                observations_json TEXT NOT NULL DEFAULT '[]',
+                error_message TEXT NOT NULL DEFAULT '',
+                input_tokens INTEGER,
+                output_tokens INTEGER,
+                total_tokens INTEGER,
+                actual_cost_micros INTEGER NOT NULL DEFAULT 0,
+                started_at DATETIME,
+                finished_at DATETIME,
+                UNIQUE(experiment_id, model_key)
+            )
+        """.replace("{model_config_reference}", model_config_reference))
+        connection.exec_driver_sql("""
+            INSERT INTO model_benchmark_variants (
+                id, experiment_id, model_key, provider, model_id,
+                model_config_id, pricing_json, status, metrics_json,
+                observations_json, error_message, input_tokens, output_tokens,
+                total_tokens, actual_cost_micros, started_at, finished_at
+            )
+            SELECT
+                id, experiment_id, model_key, provider, model_id,
+                model_config_id, pricing_json, status, metrics_json,
+                observations_json, error_message, input_tokens, output_tokens,
+                total_tokens, actual_cost_micros, started_at, finished_at
+            FROM model_benchmark_variants_v24
+        """)
+        connection.exec_driver_sql("DROP TABLE model_benchmark_variants_v24")
+        connection.exec_driver_sql("DROP TABLE model_benchmark_experiments_v24")
+        connection.exec_driver_sql(
+            "CREATE INDEX ix_model_benchmark_experiments_status "
+            "ON model_benchmark_experiments(status)"
+        )
+        connection.exec_driver_sql(
+            "CREATE INDEX ix_model_benchmark_variants_experiment "
+            "ON model_benchmark_variants(experiment_id)"
+        )
+        connection.exec_driver_sql(
+            "CREATE INDEX ix_model_benchmark_variants_model_config "
+            "ON model_benchmark_variants(model_config_id)"
+        )
+    if "model_benchmark_experiments" in tables:
+        connection.exec_driver_sql(
+            "DROP TRIGGER IF EXISTS trg_benchmark_snapshot_no_update"
+        )
+        connection.exec_driver_sql("""
+            CREATE TRIGGER trg_benchmark_snapshot_no_update
+            BEFORE UPDATE OF
+                experiment_key, execution_mode, cohort_hash, snapshot_hash,
+                frozen_snapshot_json, quality_gate_json,
+                max_round_cost_micros
+            ON model_benchmark_experiments
+            BEGIN
+                SELECT RAISE(ABORT, 'benchmark snapshot is immutable');
+            END
+        """)
+
+
 MIGRATIONS = [
     Migration(1, "add_sample_expected_level", _migration_001_add_sample_expected_level),
     Migration(2, "add_review_corrections", _migration_002_add_review_corrections),
@@ -2758,6 +3131,11 @@ MIGRATIONS = [
         23,
         "enforce_material_package_immutability",
         _migration_023_enforce_material_package_immutability,
+    ),
+    Migration(
+        24,
+        "add_real_executor_safety",
+        _migration_024_add_real_executor_safety,
     ),
 ]
 

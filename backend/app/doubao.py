@@ -25,6 +25,9 @@ class DoubaoResponse:
     output_budget: int | None = None
     reasoning_effort: str | None = None
     input_image_bytes: int | None = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    total_tokens: int | None = None
 
 
 @dataclass(frozen=True)
@@ -168,6 +171,24 @@ def parse_json_text(text: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise DoubaoParseError("模型 JSON 顶层必须是对象")
     return value
+
+
+def response_usage(payload: dict[str, Any]) -> tuple[int, int, int] | None:
+    """Read the common Chat Completions/Responses usage shapes."""
+    usage = payload.get("usage")
+    if not isinstance(usage, dict):
+        return None
+    input_tokens = usage.get("input_tokens", usage.get("prompt_tokens"))
+    output_tokens = usage.get("output_tokens", usage.get("completion_tokens"))
+    total_tokens = usage.get("total_tokens")
+    values = (input_tokens, output_tokens, total_tokens)
+    if any(isinstance(value, bool) or not isinstance(value, int) for value in values):
+        return None
+    if input_tokens < 0 or output_tokens < 0 or total_tokens < 0:
+        return None
+    if total_tokens < input_tokens + output_tokens:
+        return None
+    return input_tokens, output_tokens, total_tokens
 
 
 class DoubaoClient:
@@ -338,6 +359,7 @@ class DoubaoClient:
                     exc.upstream_status_code = status_code
                     exc.request_correlation_id = request_id
                     raise
+                usage = response_usage(raw)
                 return DoubaoResponse(
                     parsed=parsed,
                     raw_text=raw_text,
@@ -347,6 +369,9 @@ class DoubaoClient:
                     attempt_count=attempt + 1,
                     output_budget=actual_budget,
                     reasoning_effort=actual_reasoning_effort,
+                    input_tokens=usage[0] if usage else None,
+                    output_tokens=usage[1] if usage else None,
+                    total_tokens=usage[2] if usage else None,
                 )
             except Exception as exc:  # API 与 JSON 错误都按配置重试
                 if isinstance(exc, DoubaoError):
@@ -424,6 +449,7 @@ class DoubaoClient:
                     exc.upstream_status_code = status_code
                     exc.request_correlation_id = request_id
                     raise
+                usage = response_usage(raw)
                 return DoubaoResponse(
                     parsed=parsed,
                     raw_text=raw_text,
@@ -434,6 +460,9 @@ class DoubaoClient:
                     output_budget=actual_budget,
                     reasoning_effort=actual_reasoning_effort,
                     input_image_bytes=input_image_bytes,
+                    input_tokens=usage[0] if usage else None,
+                    output_tokens=usage[1] if usage else None,
+                    total_tokens=usage[2] if usage else None,
                 )
             except Exception as exc:
                 if isinstance(exc, DoubaoError):

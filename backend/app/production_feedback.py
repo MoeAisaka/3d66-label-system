@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import select
@@ -62,8 +62,20 @@ def ingest_production_feedback(
         )
     )
     if existing is not None:
-        if existing.payload_hash != payload_hash:
-            raise FeedbackConflict("同一 event_id 的 payload 不一致")
+        existing_occurred = existing.occurred_at
+        if existing_occurred.tzinfo is None:
+            existing_occurred = existing_occurred.replace(tzinfo=timezone.utc)
+        incoming_occurred = occurred_at
+        if incoming_occurred.tzinfo is None:
+            incoming_occurred = incoming_occurred.replace(tzinfo=timezone.utc)
+        if (
+            existing.payload_hash != payload_hash
+            or existing.schema_version != schema_version
+            or existing.event_type != event_type
+            or existing.source_system != source_system
+            or existing_occurred != incoming_occurred
+        ):
+            raise FeedbackConflict("同一 event_id 的事件载荷不一致")
         existing_case = db.scalar(
             select(OptimizationCaseQueue).where(
                 OptimizationCaseQueue.source_event_id == existing.id
