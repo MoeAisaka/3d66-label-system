@@ -74,7 +74,11 @@ from .risk_review import (
     risk_review_reasons,
 )
 from .seed import seed_defaults
-from .strategy_bundle import build_strategy_snapshot, get_or_create_bundle
+from .strategy_bundle import (
+    build_evaluation_strategy_snapshot,
+    build_strategy_snapshot,
+    get_or_create_bundle,
+)
 from .baseline_regression import complete_baseline_item, fail_baseline_item
 
 
@@ -674,8 +678,7 @@ async def evaluate_job(job_id: int) -> None:
             bundle = db.get(StrategyBundle, frozen_bundle.id)
             if bundle is None:
                 raise RuntimeError("任务冻结 StrategyBundle 已不存在")
-            strategy_snapshot = frozen_strategy_snapshot
-            if strategy_snapshot is None:
+            if frozen_strategy_snapshot is None:
                 raise RuntimeError("任务冻结策略快照缺失")
             rubric_version = bundle.rubric_version
         else:
@@ -693,12 +696,14 @@ async def evaluate_job(job_id: int) -> None:
                 risk_review_version=risk_review_version_used,
                 sampling_policy=sampling_policy,
             )
-            strategy_snapshot = build_strategy_snapshot(
-                bundle=bundle,
-                prompt_a=prompt_a,
-                prompt_b=prompt_b,
-                sampling_policy=sampling_policy,
-            )
+        strategy_snapshot = build_evaluation_strategy_snapshot(
+            db=db,
+            bundle=bundle,
+            prompt_a=prompt_a,
+            prompt_b=prompt_b,
+            sampling_policy=sampling_policy,
+            aesthetic=aesthetic,
+        )
 
         result = EvaluationResult(
             asset_id=asset.id,

@@ -31,6 +31,7 @@ from app.strategy_bundle import (
     REDACTED,
     StrategySecretError,
     _redact_secrets,
+    build_evaluation_strategy_snapshot,
     build_strategy_snapshot,
     get_or_create_bundle,
 )
@@ -875,7 +876,14 @@ def test_persisted_bundle_rejects_orm_delete(db: Session) -> None:
 def test_new_result_persists_complete_bundle_snapshot(db: Session) -> None:
     model_config, prompt_a, prompt_b, policy = _seed_strategy_inputs(db)
     bundle = _bundle(db, model_config, prompt_a, prompt_b, policy)
-    snapshot_json = build_strategy_snapshot(bundle, prompt_a, prompt_b, policy)
+    snapshot_json = build_evaluation_strategy_snapshot(
+        db=db,
+        bundle=bundle,
+        prompt_a=prompt_a,
+        prompt_b=prompt_b,
+        sampling_policy=policy,
+        aesthetic={"scoring_profile": "space_aesthetic_v1.3"},
+    )
     asset, job = _asset_and_job(db)
 
     result = _evaluation(
@@ -912,7 +920,14 @@ def test_new_result_rejects_missing_or_incomplete_strategy(
 ) -> None:
     model_config, prompt_a, prompt_b, policy = _seed_strategy_inputs(db)
     bundle = _bundle(db, model_config, prompt_a, prompt_b, policy)
-    snapshot_json = build_strategy_snapshot(bundle, prompt_a, prompt_b, policy)
+    snapshot_json = build_evaluation_strategy_snapshot(
+        db=db,
+        bundle=bundle,
+        prompt_a=prompt_a,
+        prompt_b=prompt_b,
+        sampling_policy=policy,
+        aesthetic={"scoring_profile": "space_aesthetic_v1.3"},
+    )
     asset, job = _asset_and_job(db)
     bundle_id: int | None = bundle.id
 

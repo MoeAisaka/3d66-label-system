@@ -13,11 +13,27 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .loop_engine import contains_credential_auth_scheme
-from .models import ModelConfig, PromptVersion, SamplingPolicy, StrategyBundle
+from .dimension_schema_registry import (
+    ACTIVE_V13_VERSION,
+    HISTORICAL_DEFAULT_VERSION,
+    SPACE_SCHEMA_KEY,
+)
+from .models import (
+    DimensionSchema,
+    ModelConfig,
+    PromptVersion,
+    SamplingPolicy,
+    StrategyBundle,
+)
 
 
 REDACTED = "[REDACTED]"
-STRATEGY_SCHEMA_VERSION = "strategy-bundle-v1"
+LEGACY_STRATEGY_SCHEMA_VERSION = "strategy-bundle-v1"
+STRATEGY_SCHEMA_VERSION = "strategy-bundle-v2"
+DIMENSION_ROUTE_POLICY_ID = "space-static-by-scoring-profile-v1"
+RESOLVED_SCHEMA_CONTRACT_VERSION = "dimension-resolution-v1"
+DIMENSION_SCHEMA_SET_FORMAT_VERSION = "dimension-schema-set-v1"
+LABEL_FIELD_SET_FORMAT_VERSION = "label-field-set-snapshot-v1"
 
 _ENDPOINT_KEYS = {
     "apibase",
@@ -583,8 +599,110 @@ def _build_sampling_policy_definition(
     }
 
 
+def _load_dimension_contract(
+    db: Session,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Freeze both behavior-compatible space revisions into a stable set."""
+    schemas = db.scalars(
+        select(DimensionSchema)
+        .where(
+            DimensionSchema.schema_key == SPACE_SCHEMA_KEY,
+            DimensionSchema.version.in_(
+                (HISTORICAL_DEFAULT_VERSION, ACTIVE_V13_VERSION)
+            ),
+            DimensionSchema.status == "published",
+        )
+        .order_by(DimensionSchema.version.asc())
+    ).all()
+    by_version = {schema.version: schema for schema in schemas}
+    expected_versions = {
+        HISTORICAL_DEFAULT_VERSION,
+        ACTIVE_V13_VERSION,
+    }
+    if set(by_version) != expected_versions:
+        raise ValueError(
+            "创建 StrategyBundle 前必须存在两个已发布的空间维度兼容修订"
+        )
+
+    entries: list[dict[str, Any]] = []
+    label_sets: dict[str, dict[str, Any]] = {}
+    for version in sorted(expected_versions):
+        schema = by_version[version]
+        try:
+            definition = json.loads(schema.definition_json)
+        except json.JSONDecodeError as exc:
+            raise ValueError("DimensionSchema definition_json 已损坏") from exc
+        if (
+            not isinstance(definition, dict)
+            or _compute_canonical_hash(definition)
+            != schema.canonical_hash
+        ):
+            raise ValueError("DimensionSchema 规范哈希无法复算")
+        output_contract = definition.get("output_contract")
+        if not isinstance(output_contract, dict):
+            raise ValueError("DimensionSchema 缺少 output_contract")
+        label_set_id = output_contract.get("label_field_set_id")
+        label_fields = output_contract.get("label_fields_snapshot")
+        if (
+            not isinstance(label_set_id, str)
+            or not label_set_id
+            or not isinstance(label_fields, list)
+        ):
+            raise ValueError("DimensionSchema 标签字段集合不完整")
+        label_sets[label_set_id] = {
+            "label_field_set_id": label_set_id,
+            "label_fields_snapshot": label_fields,
+        }
+        entries.append(
+            {
+                "schema_key": schema.schema_key,
+                "version": schema.version,
+                "schema_type": schema.schema_type,
+                "family_key": schema.family_key,
+                "canonical_hash": schema.canonical_hash,
+                "definition": definition,
+            }
+        )
+
+    dimension_set = {
+        "format_version": DIMENSION_SCHEMA_SET_FORMAT_VERSION,
+        "schemas": entries,
+    }
+    label_set = {
+        "format_version": LABEL_FIELD_SET_FORMAT_VERSION,
+        "sets": [
+            label_sets[key]
+            for key in sorted(label_sets)
+        ],
+    }
+    return dimension_set, label_set
+
+
+def _dimension_contract_is_active(db: Session) -> bool:
+    """Keep pre-migration/test databases on the readable v1 contract."""
+    if db.get_bind().dialect.name != "sqlite":
+        return True
+    connection = db.connection()
+    migrations_table = connection.exec_driver_sql(
+        """
+        SELECT 1
+        FROM sqlite_master
+        WHERE type = 'table' AND name = 'schema_migrations'
+        """
+    ).first()
+    if migrations_table is None:
+        return False
+    return (
+        connection.exec_driver_sql(
+            "SELECT 1 FROM schema_migrations WHERE version = 26"
+        ).first()
+        is not None
+    )
+
+
 def _build_canonical_definition(
     *,
+    schema_version: str,
     model_id: str,
     model_config_snapshot: dict[str, Any],
     prompt_a: PromptVersion,
@@ -594,9 +712,13 @@ def _build_canonical_definition(
     sampling_policy: SamplingPolicy | None,
     risk_review_version: str | None,
     agent_plan_version: str,
+    dimension_route_policy_id: str | None = None,
+    dimension_schema_set: dict[str, Any] | None = None,
+    label_field_set: dict[str, Any] | None = None,
+    resolved_schema_contract_version: str | None = None,
 ) -> dict[str, Any]:
-    return _redact_secrets({
-        "schema_version": STRATEGY_SCHEMA_VERSION,
+    definition = {
+        "schema_version": schema_version,
         "model_id": model_id,
         "model_config": model_config_snapshot,
         "prompt_a": _build_prompt_definition(prompt_a),
@@ -606,7 +728,28 @@ def _build_canonical_definition(
         "sampling_policy": _build_sampling_policy_definition(sampling_policy),
         "risk_review_version": risk_review_version,
         "agent_plan_version": agent_plan_version,
-    })
+    }
+    if schema_version == STRATEGY_SCHEMA_VERSION:
+        if (
+            not dimension_route_policy_id
+            or not isinstance(dimension_schema_set, dict)
+            or not isinstance(label_field_set, dict)
+            or not resolved_schema_contract_version
+        ):
+            raise ValueError("strategy-bundle-v2 缺少完整维度合同")
+        definition.update(
+            {
+                "dimension_route_policy_id": dimension_route_policy_id,
+                "dimension_schema_set": dimension_schema_set,
+                "label_field_set": label_field_set,
+                "resolved_schema_contract_version": (
+                    resolved_schema_contract_version
+                ),
+            }
+        )
+    elif schema_version != LEGACY_STRATEGY_SCHEMA_VERSION:
+        raise ValueError("不支持的 StrategyBundle 快照版本")
+    return _redact_secrets(definition)
 
 
 def _compute_canonical_hash(definition: dict[str, Any]) -> str:
@@ -653,6 +796,7 @@ def _assert_strategy_identity_is_safe(
 def _bundle_values(
     *,
     canonical_hash: str,
+    strategy_schema_version: str,
     model_config: ModelConfig,
     model_config_snapshot: dict[str, Any],
     prompt_a: PromptVersion,
@@ -662,9 +806,14 @@ def _bundle_values(
     risk_review_version: str | None,
     sampling_policy: SamplingPolicy | None,
     agent_plan_version: str,
+    dimension_route_policy_id: str | None,
+    dimension_schema_set: dict[str, Any] | None,
+    label_field_set: dict[str, Any] | None,
+    resolved_schema_contract_version: str | None,
 ) -> dict[str, Any]:
     return {
         "canonical_hash": canonical_hash,
+        "strategy_schema_version": strategy_schema_version,
         "model_id": model_config.model_id,
         "model_config_snapshot": _canonical_json(model_config_snapshot),
         "prompt_a_version": prompt_a.version,
@@ -676,6 +825,20 @@ def _bundle_values(
         ),
         "risk_review_version": risk_review_version,
         "agent_plan_version": agent_plan_version,
+        "dimension_route_policy_id": dimension_route_policy_id,
+        "dimension_schema_set_snapshot": (
+            _canonical_json(dimension_schema_set)
+            if dimension_schema_set is not None
+            else None
+        ),
+        "label_field_set_snapshot": (
+            _canonical_json(label_field_set)
+            if label_field_set is not None
+            else None
+        ),
+        "resolved_schema_contract_version": (
+            resolved_schema_contract_version
+        ),
     }
 
 
@@ -715,7 +878,8 @@ def get_or_create_bundle(
 ) -> StrategyBundle:
     """Reuse an identical immutable definition or persist a new bundle."""
     model_config_snapshot = _build_model_config_snapshot(model_config)
-    definition = _build_canonical_definition(
+    legacy_shape_for_secret_gate = _build_canonical_definition(
+        schema_version=LEGACY_STRATEGY_SCHEMA_VERSION,
         model_id=model_config.model_id,
         model_config_snapshot=model_config_snapshot,
         prompt_a=prompt_a,
@@ -725,6 +889,50 @@ def get_or_create_bundle(
         sampling_policy=sampling_policy,
         risk_review_version=risk_review_version,
         agent_plan_version=agent_plan_version,
+    )
+    _assert_strategy_identity_is_safe(
+        legacy_shape_for_secret_gate,
+        model_config=model_config,
+        prompt_a=prompt_a,
+        prompt_b=prompt_b,
+        rubric_version=rubric_version,
+        engine_version=engine_version,
+        risk_review_version=risk_review_version,
+        agent_plan_version=agent_plan_version,
+    )
+    _assert_no_sensitive_material(legacy_shape_for_secret_gate)
+
+    dimension_contract_active = _dimension_contract_is_active(db)
+    if dimension_contract_active:
+        dimension_schema_set, label_field_set = (
+            _load_dimension_contract(db)
+        )
+        strategy_schema_version = STRATEGY_SCHEMA_VERSION
+        dimension_route_policy_id = DIMENSION_ROUTE_POLICY_ID
+        resolved_schema_contract_version = (
+            RESOLVED_SCHEMA_CONTRACT_VERSION
+        )
+    else:
+        dimension_schema_set = None
+        label_field_set = None
+        strategy_schema_version = LEGACY_STRATEGY_SCHEMA_VERSION
+        dimension_route_policy_id = None
+        resolved_schema_contract_version = None
+    definition = _build_canonical_definition(
+        schema_version=strategy_schema_version,
+        model_id=model_config.model_id,
+        model_config_snapshot=model_config_snapshot,
+        prompt_a=prompt_a,
+        prompt_b=prompt_b,
+        rubric_version=rubric_version,
+        engine_version=engine_version,
+        sampling_policy=sampling_policy,
+        risk_review_version=risk_review_version,
+        agent_plan_version=agent_plan_version,
+        dimension_route_policy_id=dimension_route_policy_id,
+        dimension_schema_set=dimension_schema_set,
+        label_field_set=label_field_set,
+        resolved_schema_contract_version=resolved_schema_contract_version,
     )
     _assert_strategy_identity_is_safe(
         definition,
@@ -747,6 +955,7 @@ def get_or_create_bundle(
 
     values = _bundle_values(
         canonical_hash=canonical_hash,
+        strategy_schema_version=strategy_schema_version,
         model_config=model_config,
         model_config_snapshot=model_config_snapshot,
         prompt_a=prompt_a,
@@ -756,6 +965,10 @@ def get_or_create_bundle(
         risk_review_version=risk_review_version,
         sampling_policy=sampling_policy,
         agent_plan_version=agent_plan_version,
+        dimension_route_policy_id=dimension_route_policy_id,
+        dimension_schema_set=dimension_schema_set,
+        label_field_set=label_field_set,
+        resolved_schema_contract_version=resolved_schema_contract_version,
     )
     _assert_no_sensitive_material(values)
     if db.get_bind().dialect.name == "sqlite":
@@ -790,7 +1003,22 @@ def build_strategy_snapshot(
 ) -> str:
     """Build the complete, deterministic and recursively redacted run snapshot."""
     model_config_snapshot = json.loads(bundle.model_config_snapshot)
+    schema_version = (
+        bundle.strategy_schema_version
+        or LEGACY_STRATEGY_SCHEMA_VERSION
+    )
+    dimension_schema_set = (
+        json.loads(bundle.dimension_schema_set_snapshot)
+        if bundle.dimension_schema_set_snapshot is not None
+        else None
+    )
+    label_field_set = (
+        json.loads(bundle.label_field_set_snapshot)
+        if bundle.label_field_set_snapshot is not None
+        else None
+    )
     definition = _build_canonical_definition(
+        schema_version=schema_version,
         model_id=bundle.model_id,
         model_config_snapshot=model_config_snapshot,
         prompt_a=prompt_a,
@@ -800,6 +1028,12 @@ def build_strategy_snapshot(
         sampling_policy=sampling_policy,
         risk_review_version=bundle.risk_review_version,
         agent_plan_version=bundle.agent_plan_version,
+        dimension_route_policy_id=bundle.dimension_route_policy_id,
+        dimension_schema_set=dimension_schema_set,
+        label_field_set=label_field_set,
+        resolved_schema_contract_version=(
+            bundle.resolved_schema_contract_version
+        ),
     )
     if _compute_canonical_hash(definition) != bundle.canonical_hash:
         raise ValueError(
@@ -812,6 +1046,113 @@ def build_strategy_snapshot(
         "canonical_hash": bundle.canonical_hash,
         **safe_definition,
     }
+    return _canonical_json(snapshot)
+
+
+def build_evaluation_strategy_snapshot(
+    *,
+    db: Session,
+    bundle: StrategyBundle,
+    prompt_a: PromptVersion,
+    prompt_b: PromptVersion | None,
+    sampling_policy: SamplingPolicy | None,
+    aesthetic: dict[str, Any] | None,
+) -> str:
+    """Resolve one frozen DimensionSchema for a persisted evaluation result."""
+    snapshot = json.loads(
+        build_strategy_snapshot(
+            bundle,
+            prompt_a,
+            prompt_b,
+            sampling_policy,
+        )
+    )
+    if snapshot["schema_version"] == LEGACY_STRATEGY_SCHEMA_VERSION:
+        return _canonical_json(snapshot)
+
+    dimension_set = snapshot.get("dimension_schema_set")
+    entries = (
+        dimension_set.get("schemas")
+        if isinstance(dimension_set, dict)
+        else None
+    )
+    if not isinstance(entries, list):
+        raise ValueError("StrategyBundle 缺少冻结维度集合")
+
+    scoring_profile = (
+        aesthetic.get("scoring_profile")
+        if isinstance(aesthetic, dict)
+        else None
+    )
+    resolved_version = (
+        ACTIVE_V13_VERSION
+        if scoring_profile == "space_aesthetic_v1.3"
+        else HISTORICAL_DEFAULT_VERSION
+    )
+    selected = next(
+        (
+            entry
+            for entry in entries
+            if isinstance(entry, dict)
+            and entry.get("schema_key") == SPACE_SCHEMA_KEY
+            and entry.get("version") == resolved_version
+        ),
+        None,
+    )
+    if selected is None:
+        raise ValueError("冻结维度集合缺少所需空间兼容修订")
+
+    schema = db.scalar(
+        select(DimensionSchema).where(
+            DimensionSchema.schema_key == selected["schema_key"],
+            DimensionSchema.version == selected["version"],
+            DimensionSchema.canonical_hash == selected["canonical_hash"],
+            DimensionSchema.status.in_(("published", "retired")),
+        )
+    )
+    if schema is None:
+        raise ValueError("冻结 DimensionSchema 在注册表中不存在")
+    definition = json.loads(schema.definition_json)
+    if (
+        selected.get("definition") != definition
+        or _compute_canonical_hash(definition) != schema.canonical_hash
+    ):
+        raise ValueError("冻结 DimensionSchema 与注册表定义不一致")
+
+    prompt_b_hash = (
+        _compute_canonical_hash(_build_prompt_definition(prompt_b))
+        if prompt_b is not None
+        else None
+    )
+    route_decision = {
+        "policy_id": bundle.dimension_route_policy_id,
+        "family_key": schema.family_key,
+        "dimension_schema_id": schema.id,
+        "dimension_schema_key": schema.schema_key,
+        "dimension_schema_version": schema.version,
+        "dimension_schema_hash": schema.canonical_hash,
+        "input": {"scoring_profile": scoring_profile},
+        "reason": (
+            "scoring_profile_matches_active_v1_3"
+            if resolved_version == ACTIVE_V13_VERSION
+            else "historical_default_compatibility"
+        ),
+        "needs_review": False,
+    }
+    resolution = {
+        "resolved_dimension_schema_id": schema.id,
+        "resolved_dimension_schema_key": schema.schema_key,
+        "resolved_dimension_schema_version": schema.version,
+        "resolved_dimension_schema_hash": schema.canonical_hash,
+        "resolved_dimensions_snapshot": definition,
+        "resolved_prompt_b_hash": prompt_b_hash,
+        "route_decision_snapshot": route_decision,
+    }
+    snapshot.update(resolution)
+    snapshot["resolved_snapshot_hash"] = _compute_canonical_hash(
+        resolution
+    )
+    _assert_no_sensitive_material(snapshot)
     return _canonical_json(snapshot)
 
 

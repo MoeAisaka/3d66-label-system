@@ -29,7 +29,10 @@ from app.models import (
     StrategyBundle,
     User,
 )
-from app.strategy_bundle import build_strategy_snapshot, get_or_create_bundle
+from app.strategy_bundle import (
+    build_evaluation_strategy_snapshot,
+    get_or_create_bundle,
+)
 from app.regression import compare_paired_results
 
 
@@ -195,8 +198,13 @@ def _add_result(
         asset_id=asset.id,
         job_id=job.id,
         strategy_bundle_id=bundle.id,
-        strategy_snapshot_json=build_strategy_snapshot(
-            bundle, prompt_a, prompt_b, policy
+        strategy_snapshot_json=build_evaluation_strategy_snapshot(
+            db=db,
+            bundle=bundle,
+            prompt_a=prompt_a,
+            prompt_b=prompt_b,
+            sampling_policy=policy,
+            aesthetic=_aesthetic(color_grade=color_grade),
         ),
         precheck_json=json.dumps(
             _precheck(scope=scope, quality=quality), ensure_ascii=False

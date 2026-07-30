@@ -3674,6 +3674,545 @@ def _migration_026_add_dimension_schemas(connection: Connection) -> None:
         )
 
 
+def _install_v2_strategy_result_triggers(
+    connection: Connection,
+    *,
+    install_result_triggers: bool,
+) -> None:
+    trigger_names = ["trg_strategy_bundles_contract_insert"]
+    if install_result_triggers:
+        trigger_names.extend(
+            (
+                "trg_evaluation_results_require_strategy_insert",
+                "trg_evaluation_results_require_strategy_update",
+            )
+        )
+    for trigger_name in trigger_names:
+        connection.exec_driver_sql(
+            f"DROP TRIGGER IF EXISTS {trigger_name}"
+        )
+
+    connection.exec_driver_sql("""
+        CREATE TRIGGER trg_strategy_bundles_contract_insert
+        BEFORE INSERT ON strategy_bundles
+        WHEN NEW.strategy_schema_version NOT IN (
+                'strategy-bundle-v1','strategy-bundle-v2'
+             )
+          OR (
+              NEW.strategy_schema_version = 'strategy-bundle-v1'
+              AND (
+                  NEW.dimension_route_policy_id IS NOT NULL
+                  OR NEW.dimension_schema_set_snapshot IS NOT NULL
+                  OR NEW.label_field_set_snapshot IS NOT NULL
+                  OR NEW.resolved_schema_contract_version IS NOT NULL
+              )
+          )
+          OR (
+              NEW.strategy_schema_version = 'strategy-bundle-v2'
+              AND (
+                  NEW.dimension_route_policy_id IS NULL
+                  OR length(trim(NEW.dimension_route_policy_id)) = 0
+                  OR json_valid(NEW.dimension_schema_set_snapshot) = 0
+                  OR json_type(
+                      NEW.dimension_schema_set_snapshot, '$'
+                  ) <> 'object'
+                  OR json_type(
+                      NEW.dimension_schema_set_snapshot, '$.schemas'
+                  ) <> 'array'
+                  OR json_array_length(
+                      NEW.dimension_schema_set_snapshot, '$.schemas'
+                  ) < 1
+                  OR json_valid(NEW.label_field_set_snapshot) = 0
+                  OR json_type(
+                      NEW.label_field_set_snapshot, '$'
+                  ) <> 'object'
+                  OR NEW.resolved_schema_contract_version IS NULL
+                  OR length(
+                      trim(NEW.resolved_schema_contract_version)
+                  ) = 0
+              )
+          )
+        BEGIN
+            SELECT RAISE(
+                ABORT,
+                'StrategyBundle dimension contract is invalid'
+            );
+        END
+    """)
+
+    if not install_result_triggers:
+        return
+
+    invalid_contract = """
+        NEW.strategy_bundle_id IS NULL
+        OR NEW.strategy_snapshot_json IS NULL
+        OR length(trim(NEW.strategy_snapshot_json)) < 3
+        OR CASE
+            WHEN json_valid(NEW.strategy_snapshot_json) = 0 THEN 1
+            ELSE
+                json_type(NEW.strategy_snapshot_json, '$') <> 'object'
+                OR json_extract(
+                    NEW.strategy_snapshot_json, '$.bundle_id'
+                ) IS NULL
+                OR length(json_extract(
+                    NEW.strategy_snapshot_json, '$.canonical_hash'
+                )) <> 64
+                OR json_extract(
+                    NEW.strategy_snapshot_json, '$.schema_version'
+                ) NOT IN ('strategy-bundle-v1','strategy-bundle-v2')
+                OR json_type(
+                    NEW.strategy_snapshot_json, '$.model_config'
+                ) <> 'object'
+                OR json_type(
+                    NEW.strategy_snapshot_json, '$.prompt_a'
+                ) <> 'object'
+                OR json_extract(
+                    NEW.strategy_snapshot_json, '$.prompt_a.id'
+                ) IS NULL
+                OR json_extract(
+                    NEW.strategy_snapshot_json, '$.prompt_a.version'
+                ) IS NULL
+                OR json_type(
+                    NEW.strategy_snapshot_json, '$.prompt_b'
+                ) IS NULL
+                OR json_extract(
+                    NEW.strategy_snapshot_json, '$.rubric_version'
+                ) IS NULL
+                OR json_extract(
+                    NEW.strategy_snapshot_json, '$.engine_version'
+                ) IS NULL
+                OR json_type(
+                    NEW.strategy_snapshot_json, '$.sampling_policy'
+                ) IS NULL
+                OR json_type(
+                    NEW.strategy_snapshot_json, '$.risk_review_version'
+                ) IS NULL
+          END
+        OR NOT EXISTS (
+            SELECT 1
+            FROM strategy_bundles AS bundle
+            WHERE bundle.id = NEW.strategy_bundle_id
+              AND bundle.id = json_extract(
+                  NEW.strategy_snapshot_json, '$.bundle_id'
+              )
+              AND bundle.canonical_hash = json_extract(
+                  NEW.strategy_snapshot_json, '$.canonical_hash'
+              )
+              AND bundle.strategy_schema_version = json_extract(
+                  NEW.strategy_snapshot_json, '$.schema_version'
+              )
+              AND bundle.model_id = json_extract(
+                  NEW.strategy_snapshot_json, '$.model_id'
+              )
+              AND bundle.prompt_a_version = json_extract(
+                  NEW.strategy_snapshot_json, '$.prompt_a.version'
+              )
+              AND bundle.prompt_b_version IS json_extract(
+                  NEW.strategy_snapshot_json, '$.prompt_b.version'
+              )
+              AND bundle.rubric_version = json_extract(
+                  NEW.strategy_snapshot_json, '$.rubric_version'
+              )
+              AND bundle.engine_version = json_extract(
+                  NEW.strategy_snapshot_json, '$.engine_version'
+              )
+              AND bundle.sampling_policy_revision IS json_extract(
+                  NEW.strategy_snapshot_json,
+                  '$.sampling_policy.revision'
+              )
+              AND bundle.risk_review_version IS json_extract(
+                  NEW.strategy_snapshot_json, '$.risk_review_version'
+              )
+              AND (
+                  bundle.strategy_schema_version = 'strategy-bundle-v1'
+                  OR (
+                      bundle.strategy_schema_version
+                          = 'strategy-bundle-v2'
+                      AND json_type(
+                          NEW.strategy_snapshot_json,
+                          '$.dimension_schema_set'
+                      ) = 'object'
+                      AND json_type(
+                          NEW.strategy_snapshot_json,
+                          '$.label_field_set'
+                      ) = 'object'
+                      AND json_type(
+                          NEW.strategy_snapshot_json,
+                          '$.resolved_dimensions_snapshot'
+                      ) = 'object'
+                      AND json_type(
+                          NEW.strategy_snapshot_json,
+                          '$.route_decision_snapshot'
+                      ) = 'object'
+                      AND json_type(
+                          NEW.strategy_snapshot_json,
+                          '$.resolved_dimension_schema_id'
+                      ) = 'integer'
+                      AND length(json_extract(
+                          NEW.strategy_snapshot_json,
+                          '$.resolved_dimension_schema_hash'
+                      )) = 64
+                      AND length(json_extract(
+                          NEW.strategy_snapshot_json,
+                          '$.resolved_snapshot_hash'
+                      )) = 64
+                      AND bundle.dimension_route_policy_id = json_extract(
+                          NEW.strategy_snapshot_json,
+                          '$.dimension_route_policy_id'
+                      )
+                      AND bundle.resolved_schema_contract_version
+                          = json_extract(
+                              NEW.strategy_snapshot_json,
+                              '$.resolved_schema_contract_version'
+                          )
+                      AND json(json_extract(
+                          NEW.strategy_snapshot_json,
+                          '$.dimension_schema_set'
+                      )) = json(bundle.dimension_schema_set_snapshot)
+                      AND json(json_extract(
+                          NEW.strategy_snapshot_json,
+                          '$.label_field_set'
+                      )) = json(bundle.label_field_set_snapshot)
+                      AND json_extract(
+                          NEW.strategy_snapshot_json,
+                          '$.route_decision_snapshot.policy_id'
+                      ) = bundle.dimension_route_policy_id
+                      AND json_extract(
+                          NEW.strategy_snapshot_json,
+                          '$.route_decision_snapshot.dimension_schema_id'
+                      ) = json_extract(
+                          NEW.strategy_snapshot_json,
+                          '$.resolved_dimension_schema_id'
+                      )
+                      AND json_extract(
+                          NEW.strategy_snapshot_json,
+                          '$.route_decision_snapshot.dimension_schema_hash'
+                      ) = json_extract(
+                          NEW.strategy_snapshot_json,
+                          '$.resolved_dimension_schema_hash'
+                      )
+                      AND EXISTS (
+                          SELECT 1
+                          FROM dimension_schemas AS schema
+                          WHERE schema.id = json_extract(
+                              NEW.strategy_snapshot_json,
+                              '$.resolved_dimension_schema_id'
+                          )
+                            AND schema.schema_key = json_extract(
+                              NEW.strategy_snapshot_json,
+                              '$.resolved_dimension_schema_key'
+                            )
+                            AND schema.version = json_extract(
+                              NEW.strategy_snapshot_json,
+                              '$.resolved_dimension_schema_version'
+                            )
+                            AND schema.canonical_hash = json_extract(
+                              NEW.strategy_snapshot_json,
+                              '$.resolved_dimension_schema_hash'
+                            )
+                            AND json(schema.definition_json) = json(
+                              json_extract(
+                                  NEW.strategy_snapshot_json,
+                                  '$.resolved_dimensions_snapshot'
+                              )
+                            )
+                      )
+                      AND EXISTS (
+                          SELECT 1
+                          FROM json_each(
+                              bundle.dimension_schema_set_snapshot,
+                              '$.schemas'
+                          ) AS frozen
+                          WHERE json_extract(
+                              frozen.value, '$.schema_key'
+                          ) = json_extract(
+                              NEW.strategy_snapshot_json,
+                              '$.resolved_dimension_schema_key'
+                          )
+                            AND json_extract(
+                              frozen.value, '$.version'
+                          ) = json_extract(
+                              NEW.strategy_snapshot_json,
+                              '$.resolved_dimension_schema_version'
+                          )
+                            AND json_extract(
+                              frozen.value, '$.canonical_hash'
+                          ) = json_extract(
+                              NEW.strategy_snapshot_json,
+                              '$.resolved_dimension_schema_hash'
+                          )
+                      )
+                  )
+              )
+        )
+    """
+    connection.exec_driver_sql(f"""
+        CREATE TRIGGER trg_evaluation_results_require_strategy_insert
+        BEFORE INSERT ON evaluation_results
+        WHEN {invalid_contract}
+        BEGIN
+            SELECT RAISE(
+                ABORT,
+                'EvaluationResult strategy binding is required'
+            );
+        END
+    """)
+    connection.exec_driver_sql(f"""
+        CREATE TRIGGER trg_evaluation_results_require_strategy_update
+        BEFORE UPDATE OF strategy_bundle_id, strategy_snapshot_json
+        ON evaluation_results
+        WHEN {invalid_contract}
+        BEGIN
+            SELECT RAISE(
+                ABORT,
+                'EvaluationResult strategy binding is required'
+            );
+        END
+    """)
+
+
+def _install_v2_paired_strategy_snapshot_trigger(
+    connection: Connection,
+) -> None:
+    connection.exec_driver_sql(
+        "DROP TRIGGER IF EXISTS "
+        "trg_paired_regression_strategy_snapshot_insert"
+    )
+    snapshot_invalid = """
+        json_valid({snapshot}) = 0
+        OR json_type({snapshot}, '$') IS NOT 'object'
+        OR json_extract({snapshot}, '$.schema_version')
+            NOT IN ('strategy-bundle-v1','strategy-bundle-v2')
+        OR json_type({snapshot}, '$.model_config') IS NOT 'object'
+        OR json_type({snapshot}, '$.model_config.name') IS NULL
+        OR json_type({snapshot}, '$.model_config.provider') IS NULL
+        OR json_type({snapshot}, '$.model_config.base_url') IS NULL
+        OR json_type({snapshot}, '$.model_config.api_path') IS NULL
+        OR json_type({snapshot}, '$.model_config.model_id') IS NULL
+        OR json_type({snapshot}, '$.model_config.temperature') IS NULL
+        OR json_type({snapshot}, '$.model_config.max_tokens') IS NULL
+        OR json_type(
+            {snapshot}, '$.model_config.timeout_seconds'
+        ) IS NULL
+        OR json_type({snapshot}, '$.model_config.max_retries') IS NULL
+        OR json_type(
+            {snapshot}, '$.model_config.max_concurrency'
+        ) IS NULL
+        OR json_type(
+            {snapshot}, '$.model_config.structured_output'
+        ) IS NULL
+        OR json_type(
+            {snapshot}, '$.model_config.high_risk_review_enabled'
+        ) IS NULL
+        OR json_type({snapshot}, '$.prompt_a') IS NOT 'object'
+        OR json_type({snapshot}, '$.prompt_b') IS NOT 'object'
+        OR json_extract({snapshot}, '$.prompt_a.stage') <> 'A'
+        OR json_extract({snapshot}, '$.prompt_b.stage') <> 'B'
+        OR json_type({snapshot}, '$.prompt_a.id') IS NULL
+        OR json_type({snapshot}, '$.prompt_b.id') IS NULL
+        OR json_type({snapshot}, '$.prompt_a.name') IS NULL
+        OR json_type({snapshot}, '$.prompt_b.name') IS NULL
+        OR json_type({snapshot}, '$.prompt_a.rubric_version') IS NULL
+        OR json_type({snapshot}, '$.prompt_b.rubric_version') IS NULL
+        OR json_type({snapshot}, '$.prompt_a.system_prompt') IS NULL
+        OR json_type({snapshot}, '$.prompt_b.system_prompt') IS NULL
+        OR json_type({snapshot}, '$.prompt_a.user_prompt') IS NULL
+        OR json_type({snapshot}, '$.prompt_b.user_prompt') IS NULL
+        OR json_type({snapshot}, '$.sampling_policy') IS NULL
+        OR json_type({snapshot}, '$.sampling_policy')
+            NOT IN ('object', 'null')
+        OR json_type({snapshot}, '$.risk_review_version') IS NULL
+        OR NOT EXISTS (
+            SELECT 1
+            FROM strategy_bundles AS bundle
+            WHERE bundle.id = {bundle_id}
+              AND bundle.id = json_extract({snapshot}, '$.bundle_id')
+              AND bundle.canonical_hash =
+                  json_extract({snapshot}, '$.canonical_hash')
+              AND bundle.strategy_schema_version =
+                  json_extract({snapshot}, '$.schema_version')
+              AND bundle.model_id =
+                  json_extract({snapshot}, '$.model_id')
+              AND json(bundle.model_config_snapshot) =
+                  json(json_extract({snapshot}, '$.model_config'))
+              AND bundle.prompt_a_version =
+                  json_extract({snapshot}, '$.prompt_a.version')
+              AND bundle.prompt_b_version =
+                  json_extract({snapshot}, '$.prompt_b.version')
+              AND bundle.rubric_version =
+                  json_extract({snapshot}, '$.rubric_version')
+              AND bundle.engine_version =
+                  json_extract({snapshot}, '$.engine_version')
+              AND bundle.sampling_policy_revision IS
+                  json_extract(
+                      {snapshot}, '$.sampling_policy.revision'
+                  )
+              AND bundle.risk_review_version IS
+                  json_extract({snapshot}, '$.risk_review_version')
+              AND (
+                  bundle.strategy_schema_version = 'strategy-bundle-v1'
+                  OR (
+                      json_type(
+                          {snapshot}, '$.dimension_schema_set'
+                      ) = 'object'
+                      AND json_type(
+                          {snapshot}, '$.label_field_set'
+                      ) = 'object'
+                      AND bundle.dimension_route_policy_id =
+                          json_extract(
+                              {snapshot},
+                              '$.dimension_route_policy_id'
+                          )
+                      AND bundle.resolved_schema_contract_version =
+                          json_extract(
+                              {snapshot},
+                              '$.resolved_schema_contract_version'
+                          )
+                      AND json(json_extract(
+                          {snapshot}, '$.dimension_schema_set'
+                      )) = json(bundle.dimension_schema_set_snapshot)
+                      AND json(json_extract(
+                          {snapshot}, '$.label_field_set'
+                      )) = json(bundle.label_field_set_snapshot)
+                  )
+              )
+        )
+    """
+    baseline_invalid = snapshot_invalid.format(
+        snapshot="NEW.baseline_strategy_snapshot_json",
+        bundle_id="NEW.baseline_strategy_bundle_id",
+    )
+    candidate_invalid = snapshot_invalid.format(
+        snapshot="NEW.candidate_strategy_snapshot_json",
+        bundle_id="NEW.candidate_strategy_bundle_id",
+    )
+    connection.exec_driver_sql(f"""
+        CREATE TRIGGER
+            trg_paired_regression_strategy_snapshot_insert
+        BEFORE INSERT ON prompt_regression_runs
+        WHEN NEW.regression_mode = 'paired'
+          AND ({baseline_invalid} OR {candidate_invalid})
+        BEGIN
+            SELECT RAISE(
+                ABORT,
+                'Paired regression strategy snapshot is invalid'
+            );
+        END
+    """)
+
+
+def _migration_027_bind_dimension_contract_to_strategy(
+    connection: Connection,
+) -> None:
+    tables = {
+        row[0]
+        for row in connection.exec_driver_sql(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )
+    }
+    if "strategy_bundles" not in tables:
+        violations = connection.exec_driver_sql(
+            "PRAGMA foreign_key_check"
+        ).all()
+        if violations:
+            raise RuntimeError(
+                "无 StrategyBundle 分叉库 foreign_key_check 失败："
+                f"{violations[:3]}"
+            )
+        return
+
+    bundle_columns = {
+        row[1]
+        for row in connection.exec_driver_sql(
+            "PRAGMA table_info(strategy_bundles)"
+        )
+    }
+    additions = (
+        (
+            "strategy_schema_version",
+            "VARCHAR(40) NOT NULL DEFAULT 'strategy-bundle-v1'",
+        ),
+        ("dimension_route_policy_id", "VARCHAR(100)"),
+        ("dimension_schema_set_snapshot", "TEXT"),
+        ("label_field_set_snapshot", "TEXT"),
+        ("resolved_schema_contract_version", "VARCHAR(80)"),
+    )
+    for column_name, definition in additions:
+        if column_name not in bundle_columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE strategy_bundles ADD COLUMN "
+                f"{column_name} {definition}"
+            )
+
+    for statement in (
+        "CREATE INDEX IF NOT EXISTS ix_strategy_bundles_schema_version "
+        "ON strategy_bundles(strategy_schema_version)",
+        "CREATE INDEX IF NOT EXISTS "
+        "ix_strategy_bundles_dimension_route_policy_id "
+        "ON strategy_bundles(dimension_route_policy_id)",
+        "CREATE INDEX IF NOT EXISTS "
+        "ix_strategy_bundles_resolved_schema_contract_version "
+        "ON strategy_bundles(resolved_schema_contract_version)",
+    ):
+        connection.exec_driver_sql(statement)
+
+    invalid_existing = connection.exec_driver_sql("""
+        SELECT id
+        FROM strategy_bundles
+        WHERE strategy_schema_version <> 'strategy-bundle-v1'
+           OR dimension_route_policy_id IS NOT NULL
+           OR dimension_schema_set_snapshot IS NOT NULL
+           OR label_field_set_snapshot IS NOT NULL
+           OR resolved_schema_contract_version IS NOT NULL
+        LIMIT 1
+    """).first()
+    if invalid_existing is not None:
+        raise RuntimeError(
+            "迁移前 StrategyBundle 存在无法解释的维度合同字段"
+        )
+
+    result_columns = (
+        {
+            row[1]
+            for row in connection.exec_driver_sql(
+                "PRAGMA table_info(evaluation_results)"
+            )
+        }
+        if "evaluation_results" in tables
+        else set()
+    )
+    _install_v2_strategy_result_triggers(
+        connection,
+        install_result_triggers={
+            "strategy_bundle_id",
+            "strategy_snapshot_json",
+        }.issubset(result_columns),
+    )
+    if "prompt_regression_runs" in tables:
+        regression_columns = {
+            row[1]
+            for row in connection.exec_driver_sql(
+                "PRAGMA table_info(prompt_regression_runs)"
+            )
+        }
+        if {
+            "regression_mode",
+            "baseline_strategy_bundle_id",
+            "candidate_strategy_bundle_id",
+            "baseline_strategy_snapshot_json",
+            "candidate_strategy_snapshot_json",
+        }.issubset(regression_columns):
+            _install_v2_paired_strategy_snapshot_trigger(connection)
+    violations = connection.exec_driver_sql(
+        "PRAGMA foreign_key_check"
+    ).all()
+    if violations:
+        raise RuntimeError(
+            "StrategyBundle 维度合同迁移 foreign_key_check 失败："
+            f"{violations[:3]}"
+        )
+
+
 MIGRATIONS = [
     Migration(1, "add_sample_expected_level", _migration_001_add_sample_expected_level),
     Migration(2, "add_review_corrections", _migration_002_add_review_corrections),
@@ -3760,6 +4299,11 @@ MIGRATIONS = [
         26,
         "add_dimension_schemas",
         _migration_026_add_dimension_schemas,
+    ),
+    Migration(
+        27,
+        "bind_dimension_contract_to_strategy",
+        _migration_027_bind_dimension_contract_to_strategy,
     ),
 ]
 

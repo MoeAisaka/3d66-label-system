@@ -22,7 +22,10 @@ from app.models import (
     User,
 )
 from app.regression import reviewed_truth_snapshot
-from app.strategy_bundle import build_strategy_snapshot, get_or_create_bundle
+from app.strategy_bundle import (
+    build_evaluation_strategy_snapshot,
+    get_or_create_bundle,
+)
 
 
 def _client_with_result(*, level: str = "L3", needs_review: bool = False):
@@ -89,8 +92,13 @@ def _client_with_result(*, level: str = "L3", needs_review: bool = False):
         asset_id=asset.id,
         job_id=job.id,
         strategy_bundle_id=bundle.id,
-        strategy_snapshot_json=build_strategy_snapshot(
-            bundle, prompt, None, policy
+        strategy_snapshot_json=build_evaluation_strategy_snapshot(
+            db=db,
+            bundle=bundle,
+            prompt_a=prompt,
+            prompt_b=None,
+            sampling_policy=policy,
+            aesthetic={"scoring_profile": "space_aesthetic_v1.3"},
         ),
         precheck_json=json.dumps(
             {
