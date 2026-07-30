@@ -21,6 +21,9 @@ const PromptCandidatesPage = lazy(() =>
 const PairedRegressionPage = lazy(() =>
   import("@/pages/paired-regression-page").then((module) => ({ default: module.PairedRegressionPage })),
 )
+const BaselineRegressionPage = lazy(() =>
+  import("@/pages/baseline-regression-page").then((module) => ({ default: module.BaselineRegressionPage })),
+)
 const ReviewPage = lazy(() =>
   import("@/pages/review-page").then((module) => ({ default: module.ReviewPage })),
 )
@@ -86,6 +89,7 @@ export default function App() {
             <Route path="workflow/optimization/feedback" element={<Suspense fallback={<RouteLoading />}><ProductionFeedbackPage /></Suspense>} />
             <Route path="workflow/optimization/candidates" element={<Suspense fallback={<RouteLoading />}><PromptCandidatesPage /></Suspense>} />
             <Route path="workflow/optimization/paired-regression" element={<Suspense fallback={<RouteLoading />}><PairedRegressionPage user={user} /></Suspense>} />
+            <Route path="workflow/optimization/baseline-regression" element={<Suspense fallback={<RouteLoading />}><BaselineRegressionPage /></Suspense>} />
             <Route path="workflow/releases/decisions" element={<Suspense fallback={<RouteLoading />}><ReleaseWorkspacePage view="decisions" /></Suspense>} />
             <Route path="workflow/releases/metrics" element={<Suspense fallback={<RouteLoading />}><ReleaseWorkspacePage view="metrics" /></Suspense>} />
             <Route path="workflow/releases/history" element={<Suspense fallback={<RouteLoading />}><ReleaseWorkspacePage view="history" /></Suspense>} />

@@ -124,6 +124,123 @@ export type Asset = {
     | "failed"
 }
 
+export type BaselineLevel = "L1" | "L2" | "L3" | "L4" | "L5"
+
+export type BaselineLevelMetrics = {
+  schema_version: "baseline-level-metrics-v1"
+  levels: BaselineLevel[]
+  total: number
+  completed: number
+  pending: number
+  denominator: number
+  valid_predictions: number
+  failed: number
+  exact_hits: number
+  adjacent_hits: number
+  deviations: number
+  exact_accuracy: number
+  adjacent_accuracy: number
+  confusion_matrix: Record<BaselineLevel, Record<BaselineLevel, number>>
+}
+
+export type BaselineRegressionRun = {
+  id: number
+  baseline_set_id: number
+  sequence_no: number
+  previous_run_id: number | null
+  strategy_bundle_id: number
+  strategy_canonical_id: string
+  status: "running" | "completed" | "partial_failed" | "failed"
+  total: number
+  completed: number
+  valid_predictions: number
+  failed: number
+  metrics: BaselineLevelMetrics
+  created_by: string
+  created_at: string
+  finished_at: string | null
+}
+
+export type BaselineSetSummary = {
+  id: number
+  name: string
+  description: string
+  default_expected_level: BaselineLevel
+  fingerprint: string
+  item_count: number
+  run_count: number
+  latest_run: BaselineRegressionRun | null
+  frozen: true
+  created_by: string
+  created_at: string
+}
+
+export type BaselineSetItem = {
+  id: number
+  asset_id: number
+  source_package_id: number | null
+  expected_level: BaselineLevel
+  asset: {
+    schema_version: "baseline-asset-v1"
+    asset_id: number
+    name: string
+    sha256: string
+    mime_type: string
+    size_bytes: number
+    width: number | null
+    height: number | null
+    source_package_id: number | null
+    created_at: string
+  }
+  image_url: string
+  frozen: true
+}
+
+export type BaselineSetDetail = {
+  summary: BaselineSetSummary
+  items: BaselineSetItem[]
+  runs: BaselineRegressionRun[]
+}
+
+export type BaselineRegressionItem = {
+  id: number
+  baseline_set_item_id: number
+  asset_id: number
+  asset: BaselineSetItem["asset"]
+  image_url: string
+  expected_level: BaselineLevel
+  predicted_level: BaselineLevel | null
+  authoritative_score: number | null
+  cap_reasons: Array<Record<string, unknown>>
+  stage_a: Record<string, unknown>
+  status: "queued" | "completed" | "failed"
+  deviation: boolean
+  error_message: string
+  evaluation_id: number | null
+  job_id: number | null
+  run_id: number
+  optimization_case_id: number | null
+  finished_at: string | null
+}
+
+export type BaselineRegressionDetail = {
+  summary: BaselineRegressionRun
+  baseline_set: BaselineSetSummary
+  strategy: Record<string, unknown>
+  comparison: {
+    comparable: boolean
+    previous_run_id: number | null
+    current_sequence_no: number
+    previous_sequence_no: number | null
+    exact_accuracy_delta: number | null
+    adjacent_accuracy_delta: number | null
+    current: { total: number; valid_predictions: number; failed: number }
+    previous: { total: number; valid_predictions: number; failed: number } | null
+  }
+  filter: { deviations_only: boolean }
+  items: BaselineRegressionItem[]
+}
+
 export type MaterialPackage = {
   id: number
   package_key: string
@@ -296,8 +413,9 @@ export type OptimizationCase = {
   id: number
   evaluation_id: number | null
   final_review_id: number | null
-  source_type: "human_review" | "production_feedback"
+  source_type: "human_review" | "production_feedback" | "baseline_regression"
   source_event_id: number | null
+  baseline_regression_item_id?: number | null
   prompt_version: string
   severity: "P0" | "P1" | "P2" | "P3"
   status: "pending" | "batched" | "processing" | "completed" | "failed"

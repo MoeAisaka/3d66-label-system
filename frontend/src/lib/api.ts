@@ -1,3 +1,12 @@
+import type {
+  Asset,
+  BaselineLevel,
+  BaselineRegressionDetail,
+  BaselineRegressionRun,
+  BaselineSetDetail,
+  BaselineSetSummary,
+} from "@/lib/types"
+
 export type ApiErrorDetail = {
   code?: string
   message?: string
@@ -69,4 +78,35 @@ export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
 
 export function jsonBody(value: unknown): RequestInit {
   return { body: JSON.stringify(value) }
+}
+
+export const baselineRegressionApi = {
+  listAssets: () => api<{ items: Asset[]; total: number }>("/api/assets?limit=1000"),
+  uploadAssets: (files: FileList | File[]) => {
+    const form = new FormData()
+    Array.from(files).forEach((file) => form.append("files", file))
+    return api<{ items: Asset[] }>("/api/assets/upload", { method: "POST", body: form })
+  },
+  listSets: () => api<{ items: BaselineSetSummary[] }>("/api/baseline-sets"),
+  getSet: (setId: number) => api<BaselineSetDetail>(`/api/baseline-sets/${setId}`),
+  createSet: (payload: {
+    name: string
+    description: string
+    default_expected_level: BaselineLevel
+    items: Array<{
+      asset_id: number
+      expected_level?: BaselineLevel
+      source_package_id?: number
+    }>
+  }) => api<BaselineSetSummary>("/api/baseline-sets", {
+    method: "POST",
+    ...jsonBody(payload),
+  }),
+  createRun: (setId: number) => api<BaselineRegressionRun & { job_ids: number[] }>(
+    `/api/baseline-sets/${setId}/runs`,
+    { method: "POST" },
+  ),
+  getRun: (runId: number) => api<BaselineRegressionDetail>(
+    `/api/baseline-regressions/${runId}`,
+  ),
 }
