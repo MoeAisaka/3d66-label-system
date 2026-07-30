@@ -27,6 +27,7 @@ from pydantic import (
 )
 from PIL import Image, UnidentifiedImageError
 from sqlalchemy import func, select, update
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -40,6 +41,10 @@ from .models import (
     AuditEvent,
     AutomationOptimizationRun,
     AutomationPolicy,
+    BaselineRegressionItem,
+    BaselineRegressionRun,
+    BaselineSet,
+    BaselineSetItem,
     CircuitBreaker,
     EvaluationControl,
     EvaluationJob,
@@ -73,7 +78,16 @@ from .models import (
     ProductionFeedbackEvent,
     User,
 )
-from .audit import canonical_json
+from .audit import append_audit_event, canonical_json
+from .baseline_regression import (
+    LEVELS as BASELINE_LEVELS,
+    TERMINAL_RUN_STATUSES as BASELINE_TERMINAL_STATUSES,
+    baseline_set_fingerprint,
+    canonical_json as baseline_canonical_json,
+    compute_level_metrics,
+    fail_baseline_item,
+    run_comparison,
+)
 from .benchmarking import (
     MODEL_KEYS,
     DeterministicBenchmarkAdapter,
@@ -145,6 +159,7 @@ from .review_panel import (
     review_truth,
 )
 from .review_sampling import build_review_sampling
+from .risk_review import RISK_REVIEW_VERSION
 from .scoring import ENGINE_VERSION, calculate_corrected_score
 from .strategy_bundle import (
     build_strategy_snapshot,
@@ -524,6 +539,38 @@ class RegressionCreateRequest(BaseModel):
     prompt_a_id: int | None = Field(default=None, ge=1)
     prompt_b_id: int | None = Field(default=None, ge=1)
     threshold: float = Field(default=0.9, ge=0.5, le=1.0)
+
+
+class BaselineSetItemCreateRequest(BaseModel):
+    asset_id: int = Field(ge=1)
+    expected_level: Literal["L1", "L2", "L3", "L4", "L5"] | None = None
+    source_package_id: int | None = Field(default=None, ge=1)
+
+
+class BaselineSetCreateRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=160)
+    description: str = Field(default="", max_length=2000)
+    default_expected_level: Literal["L1", "L2", "L3", "L4", "L5"]
+    items: list[BaselineSetItemCreateRequest] = Field(
+        min_length=1, max_length=1000
+    )
+
+    @model_validator(mode="after")
+    def validate_unique_assets(self) -> "BaselineSetCreateRequest":
+        asset_ids = [item.asset_id for item in self.items]
+        if len(asset_ids) != len(set(asset_ids)):
+            raise ValueError("基准集不能包含重复素材")
+        return self
+
+
+class BaselineOptimizationQueueRequest(BaseModel):
+    item_ids: list[int] = Field(min_length=1, max_length=1000)
+
+    @model_validator(mode="after")
+    def validate_unique_items(self) -> "BaselineOptimizationQueueRequest":
+        if len(self.item_ids) != len(set(self.item_ids)):
+            raise ValueError("偏差条目不能重复")
+        return self
 
 
 class PairedRegressionSampleRequest(BaseModel):
@@ -1934,7 +1981,10 @@ def _asset_evaluation_status(
 ) -> str:
     jobs = db.scalars(
         select(EvaluationJob)
-        .where(EvaluationJob.asset_id == asset.id)
+        .where(
+            EvaluationJob.asset_id == asset.id,
+            EvaluationJob.baseline_regression_item_id.is_(None),
+        )
         .order_by(EvaluationJob.created_at.desc(), EvaluationJob.id.desc())
     ).all()
 
@@ -5090,6 +5140,542 @@ def _create_regression_runs(
             regression_item.job_id = job.id
         run_ids.append(run.id)
     return run_ids
+
+
+def _baseline_run_summary(run: BaselineRegressionRun) -> dict[str, Any]:
+    try:
+        metrics = json.loads(run.metrics_json or "{}")
+    except json.JSONDecodeError:
+        metrics = {}
+    return {
+        "id": run.id,
+        "baseline_set_id": run.baseline_set_id,
+        "sequence_no": run.sequence_no,
+        "previous_run_id": run.previous_run_id,
+        "strategy_bundle_id": run.strategy_bundle_id,
+        "strategy_canonical_id": run.strategy_bundle.canonical_hash,
+        "status": run.status,
+        "total": run.total,
+        "completed": run.completed,
+        "valid_predictions": run.valid_predictions,
+        "failed": run.failed,
+        "metrics": metrics,
+        "created_by": run.created_by,
+        "created_at": run.created_at,
+        "finished_at": run.finished_at,
+    }
+
+
+def _baseline_set_summary(baseline_set: BaselineSet) -> dict[str, Any]:
+    latest_run = baseline_set.runs[-1] if baseline_set.runs else None
+    return {
+        "id": baseline_set.id,
+        "name": baseline_set.name,
+        "description": baseline_set.description,
+        "default_expected_level": baseline_set.default_expected_level,
+        "fingerprint": baseline_set.fingerprint,
+        "item_count": len(baseline_set.items),
+        "run_count": len(baseline_set.runs),
+        "latest_run": _baseline_run_summary(latest_run) if latest_run else None,
+        "frozen": True,
+        "created_by": baseline_set.created_by,
+        "created_at": baseline_set.created_at,
+    }
+
+
+@app.get("/api/baseline-sets")
+def list_baseline_sets(
+    _user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    sets = db.scalars(
+        select(BaselineSet).order_by(
+            BaselineSet.created_at.desc(), BaselineSet.id.desc()
+        )
+    ).all()
+    return {"items": [_baseline_set_summary(item) for item in sets]}
+
+
+@app.post("/api/baseline-sets")
+def create_baseline_set(
+    payload: BaselineSetCreateRequest,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    name = payload.name.strip()
+    if db.scalar(select(BaselineSet.id).where(BaselineSet.name == name)):
+        raise HTTPException(status_code=409, detail="基准集名称已存在")
+    asset_ids = [item.asset_id for item in payload.items]
+    assets = db.scalars(select(Asset).where(Asset.id.in_(asset_ids))).all()
+    assets_by_id = {asset.id: asset for asset in assets}
+    if set(assets_by_id) != set(asset_ids):
+        raise HTTPException(status_code=404, detail="部分基准素材不存在")
+
+    frozen_items: list[dict[str, Any]] = []
+    for requested in payload.items:
+        asset = assets_by_id[requested.asset_id]
+        if requested.source_package_id is not None:
+            package_item = db.scalar(
+                select(MaterialPackageItem.id)
+                .where(
+                    MaterialPackageItem.package_id
+                    == requested.source_package_id,
+                    MaterialPackageItem.asset_id == asset.id,
+                )
+                .limit(1)
+            )
+            if package_item is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"素材 #{asset.id} 不属于所选素材包",
+                )
+        expected_level = (
+            requested.expected_level or payload.default_expected_level
+        )
+        asset_snapshot = {
+            "schema_version": "baseline-asset-v1",
+            "asset_id": asset.id,
+            "name": asset.original_name,
+            "sha256": asset.sha256,
+            "mime_type": asset.mime_type,
+            "size_bytes": asset.size_bytes,
+            "width": asset.width,
+            "height": asset.height,
+            "source_package_id": requested.source_package_id,
+            "created_at": asset.created_at.isoformat(),
+        }
+        frozen_items.append(
+            {
+                "asset": asset,
+                "expected_level": expected_level,
+                "source_package_id": requested.source_package_id,
+                "asset_snapshot": asset_snapshot,
+            }
+        )
+
+    fingerprint = baseline_set_fingerprint(
+        {
+            "asset_id": entry["asset"].id,
+            "asset_sha256": entry["asset"].sha256,
+            "expected_level": entry["expected_level"],
+        }
+        for entry in frozen_items
+    )
+    baseline_set = BaselineSet(
+        name=name,
+        description=payload.description.strip(),
+        default_expected_level=payload.default_expected_level,
+        fingerprint=fingerprint,
+        created_by=user.username,
+    )
+    db.add(baseline_set)
+    db.flush()
+    for entry in frozen_items:
+        db.add(
+            BaselineSetItem(
+                baseline_set_id=baseline_set.id,
+                asset_id=entry["asset"].id,
+                source_package_id=entry["source_package_id"],
+                expected_level=entry["expected_level"],
+                asset_snapshot_json=baseline_canonical_json(
+                    entry["asset_snapshot"]
+                ),
+            )
+        )
+    append_audit_event(
+        db,
+        category="baseline_regression",
+        action="baseline_set_created",
+        subject_type="baseline_set",
+        subject_id=baseline_set.id,
+        actor=user.username,
+        payload={
+            "fingerprint": fingerprint,
+            "item_count": len(frozen_items),
+            "default_expected_level": payload.default_expected_level,
+        },
+        event_key=f"baseline-set:{baseline_set.id}:created",
+    )
+    db.commit()
+    db.refresh(baseline_set)
+    return _baseline_set_summary(baseline_set)
+
+
+@app.get("/api/baseline-sets/{baseline_set_id}")
+def baseline_set_detail(
+    baseline_set_id: int,
+    _user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    baseline_set = db.get(BaselineSet, baseline_set_id)
+    if baseline_set is None:
+        raise HTTPException(status_code=404, detail="基准集不存在")
+    return {
+        "summary": _baseline_set_summary(baseline_set),
+        "items": [
+            {
+                "id": item.id,
+                "asset_id": item.asset_id,
+                "source_package_id": item.source_package_id,
+                "expected_level": item.expected_level,
+                "asset": json.loads(item.asset_snapshot_json),
+                "image_url": f"/api/assets/{item.asset_id}/file",
+                "frozen": True,
+            }
+            for item in baseline_set.items
+        ],
+        "runs": [
+            _baseline_run_summary(run)
+            for run in reversed(baseline_set.runs)
+        ],
+    }
+
+
+@app.post("/api/baseline-sets/{baseline_set_id}/runs")
+def create_baseline_run(
+    baseline_set_id: int,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    baseline_set = db.get(BaselineSet, baseline_set_id)
+    if baseline_set is None:
+        raise HTTPException(status_code=404, detail="基准集不存在")
+    if not baseline_set.items:
+        raise HTTPException(status_code=409, detail="空基准集不能创建 run")
+    running = db.scalar(
+        select(BaselineRegressionRun.id).where(
+            BaselineRegressionRun.baseline_set_id == baseline_set.id,
+            BaselineRegressionRun.status == "running",
+        )
+    )
+    if running is not None:
+        raise HTTPException(status_code=409, detail="该基准集上一轮仍在运行")
+
+    model_config = db.scalar(
+        select(ModelConfig)
+        .where(ModelConfig.active.is_(True))
+        .order_by(ModelConfig.id.asc())
+        .limit(1)
+    )
+    prompt_a = db.scalar(
+        select(PromptVersion)
+        .where(
+            PromptVersion.stage == "A",
+            PromptVersion.status == "published",
+        )
+        .order_by(PromptVersion.created_at.desc(), PromptVersion.id.desc())
+        .limit(1)
+    )
+    prompt_b = db.scalar(
+        select(PromptVersion)
+        .where(
+            PromptVersion.stage == "B",
+            PromptVersion.status == "published",
+        )
+        .order_by(PromptVersion.created_at.desc(), PromptVersion.id.desc())
+        .limit(1)
+    )
+    if model_config is None or prompt_a is None or prompt_b is None:
+        raise HTTPException(
+            status_code=409,
+            detail="当前已发布 A/B 提示词或启用模型配置不完整",
+        )
+    sampling_policy = db.get(SamplingPolicy, 1)
+    bundle = get_or_create_bundle(
+        db=db,
+        model_config=model_config,
+        prompt_a=prompt_a,
+        prompt_b=prompt_b,
+        rubric_version=prompt_b.rubric_version,
+        engine_version=ENGINE_VERSION,
+        risk_review_version=(
+            RISK_REVIEW_VERSION
+            if model_config.high_risk_review_enabled
+            else None
+        ),
+        sampling_policy=sampling_policy,
+    )
+    strategy_snapshot = build_strategy_snapshot(
+        bundle=bundle,
+        prompt_a=prompt_a,
+        prompt_b=prompt_b,
+        sampling_policy=sampling_policy,
+    )
+    previous = db.scalar(
+        select(BaselineRegressionRun)
+        .where(
+            BaselineRegressionRun.baseline_set_id == baseline_set.id,
+            BaselineRegressionRun.status.in_(BASELINE_TERMINAL_STATUSES),
+        )
+        .order_by(BaselineRegressionRun.sequence_no.desc())
+        .limit(1)
+    )
+    sequence_no = (previous.sequence_no + 1) if previous else 1
+    initial_metrics = compute_level_metrics(
+        {
+            "status": "queued",
+            "expected_level": item.expected_level,
+            "predicted_level": None,
+        }
+        for item in baseline_set.items
+    )
+    run = BaselineRegressionRun(
+        baseline_set_id=baseline_set.id,
+        sequence_no=sequence_no,
+        previous_run_id=previous.id if previous else None,
+        strategy_bundle_id=bundle.id,
+        strategy_snapshot_json=strategy_snapshot,
+        baseline_set_fingerprint=baseline_set.fingerprint,
+        status="running",
+        total=len(baseline_set.items),
+        metrics_json=baseline_canonical_json(initial_metrics),
+        created_by=user.username,
+    )
+    db.add(run)
+    db.flush()
+    batch_key = f"baseline:{run.id}:{uuid.uuid4().hex}"
+    job_ids: list[int] = []
+    for frozen_item in baseline_set.items:
+        run_item = BaselineRegressionItem(
+            run_id=run.id,
+            baseline_set_item_id=frozen_item.id,
+            asset_id=frozen_item.asset_id,
+            expected_level=frozen_item.expected_level,
+            status="queued",
+        )
+        db.add(run_item)
+        db.flush()
+        job = EvaluationJob(
+            asset_id=frozen_item.asset_id,
+            prompt_a_id=prompt_a.id,
+            prompt_b_id=prompt_b.id,
+            baseline_regression_item_id=run_item.id,
+            strategy_bundle_id=bundle.id,
+            queue_class="validation",
+            origin_queue_class="validation",
+            batch_key=batch_key,
+        )
+        db.add(job)
+        db.flush()
+        run_item.job_id = job.id
+        job_ids.append(job.id)
+    append_audit_event(
+        db,
+        category="baseline_regression",
+        action="run_created",
+        subject_type="baseline_regression_run",
+        subject_id=run.id,
+        actor=user.username,
+        payload={
+            "baseline_set_id": baseline_set.id,
+            "sequence_no": sequence_no,
+            "strategy_bundle_id": bundle.id,
+            "strategy_canonical_id": bundle.canonical_hash,
+            "total": run.total,
+        },
+        event_key=f"baseline-run:{run.id}:created",
+    )
+    db.commit()
+    return {**_baseline_run_summary(run), "job_ids": job_ids}
+
+
+@app.get("/api/baseline-regressions")
+def list_baseline_runs(
+    baseline_set_id: int | None = None,
+    _user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    statement = select(BaselineRegressionRun)
+    if baseline_set_id is not None:
+        statement = statement.where(
+            BaselineRegressionRun.baseline_set_id == baseline_set_id
+        )
+    runs = db.scalars(
+        statement.order_by(
+            BaselineRegressionRun.created_at.desc(),
+            BaselineRegressionRun.id.desc(),
+        )
+    ).all()
+    return {"items": [_baseline_run_summary(run) for run in runs]}
+
+
+@app.get("/api/baseline-regressions/{run_id}")
+def baseline_run_detail(
+    run_id: int,
+    deviations_only: bool = False,
+    _user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    run = db.get(BaselineRegressionRun, run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="基准回归 run 不存在")
+    queue_cases = {
+        case.baseline_regression_item_id: case
+        for case in db.scalars(
+            select(OptimizationCaseQueue).where(
+                OptimizationCaseQueue.baseline_regression_item_id.in_(
+                    [item.id for item in run.items]
+                )
+            )
+        ).all()
+    }
+    item_payloads: list[dict[str, Any]] = []
+    for item in run.items:
+        snapshot = json.loads(item.result_snapshot_json or "{}")
+        actual = snapshot.get("predicted_level")
+        deviation = actual in BASELINE_LEVELS and actual != item.expected_level
+        if deviations_only and not deviation:
+            continue
+        frozen_asset = json.loads(
+            item.baseline_set_item.asset_snapshot_json
+        )
+        queue_case = queue_cases.get(item.id)
+        item_payloads.append(
+            {
+                "id": item.id,
+                "baseline_set_item_id": item.baseline_set_item_id,
+                "asset_id": item.asset_id,
+                "asset": frozen_asset,
+                "image_url": f"/api/assets/{item.asset_id}/file",
+                "expected_level": item.expected_level,
+                "predicted_level": actual,
+                "authoritative_score": snapshot.get("authoritative_score"),
+                "cap_reasons": snapshot.get("cap_reasons") or [],
+                "stage_a": snapshot.get("stage_a") or {},
+                "status": item.status,
+                "deviation": deviation,
+                "error_message": item.error_message,
+                "evaluation_id": item.evaluation_id,
+                "job_id": item.job_id,
+                "run_id": run.id,
+                "optimization_case_id": queue_case.id if queue_case else None,
+                "finished_at": item.finished_at,
+            }
+        )
+    previous = db.get(BaselineRegressionRun, run.previous_run_id)
+    return {
+        "summary": _baseline_run_summary(run),
+        "baseline_set": _baseline_set_summary(run.baseline_set),
+        "strategy": safe_strategy_snapshot_payload(
+            run.strategy_snapshot_json
+        ),
+        "comparison": run_comparison(run, previous),
+        "filter": {"deviations_only": deviations_only},
+        "items": item_payloads,
+    }
+
+
+@app.post("/api/baseline-regressions/{run_id}/optimization-cases")
+def enqueue_baseline_optimization_cases(
+    run_id: int,
+    payload: BaselineOptimizationQueueRequest,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    run = db.get(BaselineRegressionRun, run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="基准回归 run 不存在")
+    selected = db.scalars(
+        select(BaselineRegressionItem).where(
+            BaselineRegressionItem.run_id == run.id,
+            BaselineRegressionItem.id.in_(payload.item_ids),
+        )
+    ).all()
+    if {item.id for item in selected} != set(payload.item_ids):
+        raise HTTPException(status_code=400, detail="存在不属于该 run 的条目")
+
+    case_ids: list[int] = []
+    created_count = 0
+    for item in selected:
+        snapshot = json.loads(item.result_snapshot_json or "{}")
+        actual = snapshot.get("predicted_level")
+        if (
+            item.status != "completed"
+            or actual not in BASELINE_LEVELS
+            or actual == item.expected_level
+            or item.evaluation_id is None
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail=f"条目 #{item.id} 不是可入队的已完成偏差样本",
+            )
+        distance = abs(
+            BASELINE_LEVELS.index(item.expected_level)
+            - BASELINE_LEVELS.index(actual)
+        )
+        prompt_version = (
+            (snapshot.get("versions") or {}).get("prompt_b")
+            or (snapshot.get("versions") or {}).get("prompt_a")
+            or run.strategy_bundle.prompt_b_version
+            or run.strategy_bundle.prompt_a_version
+        )
+        case_payload = {
+            "schema_version": "optimization-case-v1",
+            "source": "baseline_regression",
+            "expected_level": item.expected_level,
+            "actual_level": actual,
+            "baseline_set_id": run.baseline_set_id,
+            "baseline_run_id": run.id,
+            "baseline_item_id": item.id,
+            "baseline_set_item_id": item.baseline_set_item_id,
+            "asset_id": item.asset_id,
+            "evaluation_id": item.evaluation_id,
+            "job_id": item.job_id,
+            "diagnostic": {
+                "level_distance": distance,
+                "authoritative_score": snapshot.get(
+                    "authoritative_score"
+                ),
+                "cap_reasons": snapshot.get("cap_reasons") or [],
+                "stage_a": snapshot.get("stage_a") or {},
+            },
+        }
+        statement = (
+            sqlite_insert(OptimizationCaseQueue)
+            .values(
+                idempotency_key=f"baseline-regression-item:{item.id}",
+                evaluation_id=item.evaluation_id,
+                final_review_id=None,
+                source_type="baseline_regression",
+                source_event_id=None,
+                baseline_regression_item_id=item.id,
+                prompt_version=str(prompt_version),
+                severity="P1" if distance >= 2 else "P2",
+                case_json=baseline_canonical_json(case_payload),
+                status="pending",
+            )
+            # 无冲突目标：idempotency_key 与 baseline_regression_item_id 是 1:1 的
+            # 两个唯一索引，重复入队会同时命中。指定单一 index_elements 时 SQLite 仍会
+            # 对另一个唯一索引 ABORT，命中顺序不可控，因此对全部唯一约束一律 DO NOTHING。
+            .on_conflict_do_nothing()
+        )
+        result = db.execute(statement)
+        created_count += int(result.rowcount or 0)
+        case = db.scalar(
+            select(OptimizationCaseQueue).where(
+                OptimizationCaseQueue.baseline_regression_item_id == item.id
+            )
+        )
+        if case is None:
+            raise HTTPException(status_code=409, detail="偏差样本并发入队失败")
+        case_ids.append(case.id)
+        append_audit_event(
+            db,
+            category="baseline_regression",
+            action="deviation_enqueued",
+            subject_type="baseline_regression_item",
+            subject_id=item.id,
+            actor=user.username,
+            payload={"optimization_case_id": case.id, **case_payload},
+            event_key=f"baseline-item:{item.id}:optimization-case",
+        )
+    db.commit()
+    return {
+        "run_id": run.id,
+        "case_ids": case_ids,
+        "created": created_count,
+        "idempotent": created_count == 0,
+    }
 
 
 @app.get("/api/sample-sets")

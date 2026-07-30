@@ -3060,6 +3060,426 @@ def _migration_024_add_real_executor_safety(connection: Connection) -> None:
         """)
 
 
+def _migration_025_add_baseline_regression_and_repair_prompt_fk(
+    connection: Connection,
+) -> None:
+    """Migration 26: add baseline regression in a legal SQLite rebuild window.
+
+    The repository's initial ORM schema is unnumbered, so product-facing
+    Migration 26 is stored as schema_migrations version 25.
+    """
+    raw = connection.connection.driver_connection
+    raw.commit()
+    raw.execute("PRAGMA foreign_keys=OFF")
+    raw.execute("PRAGMA legacy_alter_table=ON")
+    try:
+        raw.execute("BEGIN IMMEDIATE")
+        tables = {
+            row[0]
+            for row in raw.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+
+        if "prompt_versions" in tables:
+            prompt_columns = {
+                row[1] for row in raw.execute("PRAGMA table_info(prompt_versions)")
+            }
+            if "source_automation_run_id" not in prompt_columns:
+                raw.execute(
+                    "ALTER TABLE prompt_versions ADD COLUMN "
+                    "source_automation_run_id INTEGER REFERENCES "
+                    "automation_optimization_runs(id) ON DELETE SET NULL"
+                )
+                prompt_columns.add("source_automation_run_id")
+            automation_fk = next(
+                (
+                    row
+                    for row in raw.execute(
+                        "PRAGMA foreign_key_list(prompt_versions)"
+                    )
+                    if row[3] == "source_automation_run_id"
+                ),
+                None,
+            )
+            prompt_sql = str(
+                raw.execute(
+                    "SELECT sql FROM sqlite_master "
+                    "WHERE type='table' AND name='prompt_versions'"
+                ).fetchone()[0]
+                or ""
+            )
+            prompt_fk_polluted = (
+                automation_fk is None
+                or automation_fk[2] != "automation_optimization_runs"
+                or "automation_optimization_runs_v24" in prompt_sql
+            )
+            supported_prompt_columns = {
+                "id",
+                "stage",
+                "name",
+                "version",
+                "system_prompt",
+                "user_prompt",
+                "rubric_version",
+                "status",
+                "source",
+                "source_optimization_run_id",
+                "source_automation_run_id",
+                "rollback_prompt_id",
+                "canary_status",
+                "change_note",
+                "created_by",
+                "created_at",
+                "updated_at",
+            }
+            if not supported_prompt_columns.issubset(prompt_columns):
+                prompt_fk_polluted = False
+            if prompt_fk_polluted:
+                before_count = raw.execute(
+                    "SELECT COUNT(*) FROM prompt_versions"
+                ).fetchone()[0]
+                raw.execute(
+                    "ALTER TABLE prompt_versions "
+                    "RENAME TO prompt_versions_m26"
+                )
+                raw.execute("""
+                    CREATE TABLE prompt_versions (
+                        id INTEGER PRIMARY KEY,
+                        stage VARCHAR(10) NOT NULL,
+                        name VARCHAR(120) NOT NULL,
+                        version VARCHAR(40) NOT NULL,
+                        system_prompt TEXT NOT NULL,
+                        user_prompt TEXT NOT NULL,
+                        rubric_version VARCHAR(40) NOT NULL
+                            DEFAULT 'rubric-v2.1',
+                        status VARCHAR(20) NOT NULL DEFAULT 'draft',
+                        source VARCHAR(20) NOT NULL DEFAULT 'manual',
+                        source_optimization_run_id INTEGER,
+                        source_automation_run_id INTEGER
+                            REFERENCES automation_optimization_runs(id)
+                            ON DELETE SET NULL,
+                        rollback_prompt_id INTEGER
+                            REFERENCES prompt_versions(id) ON DELETE SET NULL,
+                        canary_status VARCHAR(20) NOT NULL
+                            DEFAULT 'not_started',
+                        change_note TEXT NOT NULL DEFAULT '',
+                        created_by VARCHAR(80) NOT NULL DEFAULT 'system',
+                        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        CONSTRAINT uq_prompt_versions_source_optimization_run
+                            UNIQUE(source_optimization_run_id)
+                    )
+                """)
+                prompt_copy_columns = (
+                    "id, stage, name, version, system_prompt, user_prompt, "
+                    "rubric_version, status, source, source_optimization_run_id, "
+                    "source_automation_run_id, rollback_prompt_id, canary_status, "
+                    "change_note, created_by, created_at, updated_at"
+                )
+                raw.execute(
+                    f"INSERT INTO prompt_versions ({prompt_copy_columns}) "
+                    f"SELECT {prompt_copy_columns} FROM prompt_versions_m26"
+                )
+                after_count = raw.execute(
+                    "SELECT COUNT(*) FROM prompt_versions"
+                ).fetchone()[0]
+                if before_count != after_count:
+                    raise RuntimeError("prompt_versions 重建行数校验失败")
+                raw.execute("DROP TABLE prompt_versions_m26")
+
+            if supported_prompt_columns.issubset(prompt_columns):
+                for statement in (
+                    "CREATE INDEX IF NOT EXISTS ix_prompt_versions_stage "
+                    "ON prompt_versions(stage)",
+                    "CREATE INDEX IF NOT EXISTS ix_prompt_versions_version "
+                    "ON prompt_versions(version)",
+                    "CREATE INDEX IF NOT EXISTS ix_prompt_versions_status "
+                    "ON prompt_versions(status)",
+                    "CREATE INDEX IF NOT EXISTS ix_prompt_versions_source_optimization_run_id "
+                    "ON prompt_versions(source_optimization_run_id)",
+                    "CREATE INDEX IF NOT EXISTS ix_prompt_versions_source_automation_run_id "
+                    "ON prompt_versions(source_automation_run_id)",
+                    "CREATE INDEX IF NOT EXISTS ix_prompt_versions_rollback_prompt_id "
+                    "ON prompt_versions(rollback_prompt_id)",
+                    "CREATE INDEX IF NOT EXISTS ix_prompt_versions_canary_status "
+                    "ON prompt_versions(canary_status)",
+                ):
+                    raw.execute(statement)
+
+        required_business_tables = {
+            "assets",
+            "material_packages",
+            "evaluation_jobs",
+            "evaluation_results",
+            "strategy_bundles",
+            "optimization_case_queue",
+            "human_reviews",
+            "production_feedback_events",
+            "automation_optimization_runs",
+        }
+        if not required_business_tables.issubset(tables):
+            raw.commit()
+            return
+
+        raw.execute("""
+            CREATE TABLE IF NOT EXISTS baseline_sets (
+                id INTEGER PRIMARY KEY,
+                name VARCHAR(160) NOT NULL UNIQUE,
+                description TEXT NOT NULL DEFAULT '',
+                default_expected_level VARCHAR(10) NOT NULL
+                    CHECK(default_expected_level IN ('L1','L2','L3','L4','L5')),
+                fingerprint VARCHAR(64) NOT NULL,
+                created_by VARCHAR(80) NOT NULL DEFAULT 'system',
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        raw.execute("""
+            CREATE TABLE IF NOT EXISTS baseline_set_items (
+                id INTEGER PRIMARY KEY,
+                baseline_set_id INTEGER NOT NULL
+                    REFERENCES baseline_sets(id) ON DELETE RESTRICT,
+                asset_id INTEGER NOT NULL
+                    REFERENCES assets(id) ON DELETE RESTRICT,
+                source_package_id INTEGER
+                    REFERENCES material_packages(id) ON DELETE RESTRICT,
+                expected_level VARCHAR(10) NOT NULL
+                    CHECK(expected_level IN ('L1','L2','L3','L4','L5')),
+                asset_snapshot_json TEXT NOT NULL,
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                CONSTRAINT uq_baseline_set_asset
+                    UNIQUE(baseline_set_id, asset_id)
+            )
+        """)
+        raw.execute("""
+            CREATE TABLE IF NOT EXISTS baseline_regression_runs (
+                id INTEGER PRIMARY KEY,
+                baseline_set_id INTEGER NOT NULL
+                    REFERENCES baseline_sets(id) ON DELETE RESTRICT,
+                sequence_no INTEGER NOT NULL CHECK(sequence_no >= 1),
+                previous_run_id INTEGER
+                    REFERENCES baseline_regression_runs(id) ON DELETE RESTRICT,
+                strategy_bundle_id INTEGER NOT NULL
+                    REFERENCES strategy_bundles(id) ON DELETE RESTRICT,
+                strategy_snapshot_json TEXT NOT NULL,
+                baseline_set_fingerprint VARCHAR(64) NOT NULL,
+                status VARCHAR(30) NOT NULL DEFAULT 'running'
+                    CHECK(status IN (
+                        'running','completed','partial_failed','failed'
+                    )),
+                total INTEGER NOT NULL,
+                completed INTEGER NOT NULL DEFAULT 0,
+                valid_predictions INTEGER NOT NULL DEFAULT 0,
+                failed INTEGER NOT NULL DEFAULT 0,
+                metrics_json TEXT NOT NULL DEFAULT '{}',
+                created_by VARCHAR(80) NOT NULL DEFAULT 'system',
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                finished_at DATETIME,
+                CONSTRAINT uq_baseline_run_sequence
+                    UNIQUE(baseline_set_id, sequence_no)
+            )
+        """)
+        raw.execute("""
+            CREATE TABLE IF NOT EXISTS baseline_regression_items (
+                id INTEGER PRIMARY KEY,
+                run_id INTEGER NOT NULL
+                    REFERENCES baseline_regression_runs(id) ON DELETE CASCADE,
+                baseline_set_item_id INTEGER NOT NULL
+                    REFERENCES baseline_set_items(id) ON DELETE RESTRICT,
+                asset_id INTEGER NOT NULL
+                    REFERENCES assets(id) ON DELETE RESTRICT,
+                expected_level VARCHAR(10) NOT NULL
+                    CHECK(expected_level IN ('L1','L2','L3','L4','L5')),
+                job_id INTEGER
+                    REFERENCES evaluation_jobs(id) ON DELETE SET NULL,
+                evaluation_id INTEGER UNIQUE
+                    REFERENCES evaluation_results(id) ON DELETE SET NULL,
+                status VARCHAR(30) NOT NULL DEFAULT 'queued'
+                    CHECK(status IN ('queued','completed','failed')),
+                result_snapshot_json TEXT NOT NULL DEFAULT '{}',
+                error_message TEXT NOT NULL DEFAULT '',
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                finished_at DATETIME,
+                CONSTRAINT uq_baseline_run_set_item
+                    UNIQUE(run_id, baseline_set_item_id)
+            )
+        """)
+
+        evaluation_job_columns = {
+            row[1] for row in raw.execute("PRAGMA table_info(evaluation_jobs)")
+        }
+        if "baseline_regression_item_id" not in evaluation_job_columns:
+            raw.execute(
+                "ALTER TABLE evaluation_jobs ADD COLUMN "
+                "baseline_regression_item_id INTEGER REFERENCES "
+                "baseline_regression_items(id) ON DELETE RESTRICT"
+            )
+
+        if "optimization_case_queue" in tables:
+            queue_columns = {
+                row[1]
+                for row in raw.execute(
+                    "PRAGMA table_info(optimization_case_queue)"
+                )
+            }
+            queue_sql = str(
+                raw.execute(
+                    "SELECT sql FROM sqlite_master WHERE type='table' "
+                    "AND name='optimization_case_queue'"
+                ).fetchone()[0]
+                or ""
+            )
+            if (
+                "baseline_regression_item_id" not in queue_columns
+                or "baseline_regression" not in queue_sql
+            ):
+                before_count = raw.execute(
+                    "SELECT COUNT(*) FROM optimization_case_queue"
+                ).fetchone()[0]
+                raw.execute(
+                    "ALTER TABLE optimization_case_queue "
+                    "RENAME TO optimization_case_queue_m26"
+                )
+                raw.execute("""
+                    CREATE TABLE optimization_case_queue (
+                        id INTEGER PRIMARY KEY,
+                        idempotency_key VARCHAR(160) NOT NULL UNIQUE,
+                        evaluation_id INTEGER
+                            REFERENCES evaluation_results(id) ON DELETE RESTRICT,
+                        final_review_id INTEGER
+                            REFERENCES human_reviews(id) ON DELETE RESTRICT,
+                        source_type VARCHAR(30) NOT NULL DEFAULT 'human_review'
+                            CHECK(source_type IN (
+                                'human_review','production_feedback',
+                                'baseline_regression'
+                            )),
+                        source_event_id INTEGER UNIQUE
+                            REFERENCES production_feedback_events(id)
+                            ON DELETE RESTRICT,
+                        baseline_regression_item_id INTEGER UNIQUE
+                            REFERENCES baseline_regression_items(id)
+                            ON DELETE RESTRICT,
+                        prompt_version VARCHAR(40) NOT NULL,
+                        severity VARCHAR(10) NOT NULL DEFAULT 'P2'
+                            CHECK(severity IN ('P0','P1','P2','P3')),
+                        case_json TEXT NOT NULL,
+                        status VARCHAR(30) NOT NULL DEFAULT 'pending'
+                            CHECK(status IN (
+                                'pending','batched','processing',
+                                'completed','failed'
+                            )),
+                        lease_owner VARCHAR(120),
+                        lease_token VARCHAR(80),
+                        lease_expires_at DATETIME,
+                        attempt_count INTEGER NOT NULL DEFAULT 0
+                            CHECK(attempt_count >= 0),
+                        next_attempt_at DATETIME,
+                        last_error TEXT NOT NULL DEFAULT '',
+                        automation_run_id INTEGER
+                            REFERENCES automation_optimization_runs(id)
+                            ON DELETE SET NULL,
+                        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        CHECK(
+                            (source_type = 'human_review'
+                             AND evaluation_id IS NOT NULL
+                             AND final_review_id IS NOT NULL
+                             AND source_event_id IS NULL
+                             AND baseline_regression_item_id IS NULL)
+                            OR
+                            (source_type = 'production_feedback'
+                             AND evaluation_id IS NULL
+                             AND final_review_id IS NULL
+                             AND source_event_id IS NOT NULL
+                             AND baseline_regression_item_id IS NULL)
+                            OR
+                            (source_type = 'baseline_regression'
+                             AND evaluation_id IS NOT NULL
+                             AND final_review_id IS NULL
+                             AND source_event_id IS NULL
+                             AND baseline_regression_item_id IS NOT NULL)
+                        )
+                    )
+                """)
+                queue_copy_columns = (
+                    "id, idempotency_key, evaluation_id, final_review_id, "
+                    "source_type, source_event_id, prompt_version, severity, "
+                    "case_json, status, lease_owner, lease_token, "
+                    "lease_expires_at, attempt_count, next_attempt_at, "
+                    "last_error, automation_run_id, created_at, updated_at"
+                )
+                raw.execute(
+                    "INSERT INTO optimization_case_queue ("
+                    f"{queue_copy_columns}, baseline_regression_item_id) "
+                    f"SELECT {queue_copy_columns}, NULL "
+                    "FROM optimization_case_queue_m26"
+                )
+                after_count = raw.execute(
+                    "SELECT COUNT(*) FROM optimization_case_queue"
+                ).fetchone()[0]
+                if before_count != after_count:
+                    raise RuntimeError(
+                        "optimization_case_queue 重建行数校验失败"
+                    )
+                raw.execute("DROP TABLE optimization_case_queue_m26")
+
+        for statement in (
+            "CREATE INDEX IF NOT EXISTS ix_baseline_sets_name ON baseline_sets(name)",
+            "CREATE INDEX IF NOT EXISTS ix_baseline_sets_fingerprint ON baseline_sets(fingerprint)",
+            "CREATE INDEX IF NOT EXISTS ix_baseline_set_items_set ON baseline_set_items(baseline_set_id)",
+            "CREATE INDEX IF NOT EXISTS ix_baseline_set_items_asset ON baseline_set_items(asset_id)",
+            "CREATE INDEX IF NOT EXISTS ix_baseline_set_items_package ON baseline_set_items(source_package_id)",
+            "CREATE INDEX IF NOT EXISTS ix_baseline_runs_set ON baseline_regression_runs(baseline_set_id)",
+            "CREATE INDEX IF NOT EXISTS ix_baseline_runs_strategy ON baseline_regression_runs(strategy_bundle_id)",
+            "CREATE INDEX IF NOT EXISTS ix_baseline_runs_status ON baseline_regression_runs(status)",
+            "CREATE INDEX IF NOT EXISTS ix_baseline_items_run ON baseline_regression_items(run_id)",
+            "CREATE INDEX IF NOT EXISTS ix_baseline_items_set_item ON baseline_regression_items(baseline_set_item_id)",
+            "CREATE INDEX IF NOT EXISTS ix_baseline_items_asset ON baseline_regression_items(asset_id)",
+            "CREATE INDEX IF NOT EXISTS ix_baseline_items_status ON baseline_regression_items(status)",
+            "CREATE INDEX IF NOT EXISTS ix_evaluation_jobs_baseline_regression_item_id ON evaluation_jobs(baseline_regression_item_id)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_evaluation_jobs_baseline_regression_item ON evaluation_jobs(baseline_regression_item_id) WHERE baseline_regression_item_id IS NOT NULL AND technical_attempt = 0",
+            "CREATE INDEX IF NOT EXISTS ix_optimization_case_queue_status ON optimization_case_queue(status)",
+            "CREATE INDEX IF NOT EXISTS ix_optimization_case_queue_source_type ON optimization_case_queue(source_type)",
+            "CREATE INDEX IF NOT EXISTS ix_optimization_case_queue_prompt ON optimization_case_queue(prompt_version)",
+            "CREATE INDEX IF NOT EXISTS ix_optimization_case_queue_baseline_item ON optimization_case_queue(baseline_regression_item_id)",
+        ):
+            raw.execute(statement)
+
+        for statement in (
+            "CREATE TRIGGER IF NOT EXISTS trg_baseline_sets_no_update BEFORE UPDATE ON baseline_sets BEGIN SELECT RAISE(ABORT, 'BaselineSet is immutable'); END",
+            "CREATE TRIGGER IF NOT EXISTS trg_baseline_sets_no_delete BEFORE DELETE ON baseline_sets BEGIN SELECT RAISE(ABORT, 'BaselineSet cannot be deleted'); END",
+            "CREATE TRIGGER IF NOT EXISTS trg_baseline_set_items_no_update BEFORE UPDATE ON baseline_set_items BEGIN SELECT RAISE(ABORT, 'BaselineSetItem is immutable'); END",
+            "CREATE TRIGGER IF NOT EXISTS trg_baseline_set_items_no_delete BEFORE DELETE ON baseline_set_items BEGIN SELECT RAISE(ABORT, 'BaselineSetItem cannot be deleted'); END",
+            "CREATE TRIGGER IF NOT EXISTS trg_baseline_runs_frozen BEFORE UPDATE OF baseline_set_id, sequence_no, previous_run_id, strategy_bundle_id, strategy_snapshot_json, baseline_set_fingerprint, total, created_by, created_at ON baseline_regression_runs BEGIN SELECT RAISE(ABORT, 'BaselineRegressionRun snapshot is immutable'); END",
+            "CREATE TRIGGER IF NOT EXISTS trg_baseline_runs_no_delete BEFORE DELETE ON baseline_regression_runs BEGIN SELECT RAISE(ABORT, 'BaselineRegressionRun cannot be deleted'); END",
+            "CREATE TRIGGER IF NOT EXISTS trg_baseline_items_frozen BEFORE UPDATE OF run_id, baseline_set_item_id, asset_id, expected_level, created_at ON baseline_regression_items BEGIN SELECT RAISE(ABORT, 'BaselineRegressionItem truth is immutable'); END",
+            "CREATE TRIGGER IF NOT EXISTS trg_baseline_items_no_delete BEFORE DELETE ON baseline_regression_items BEGIN SELECT RAISE(ABORT, 'BaselineRegressionItem cannot be deleted'); END",
+        ):
+            raw.execute(statement)
+
+        violations = raw.execute("PRAGMA foreign_key_check").fetchall()
+        if violations:
+            raise RuntimeError(
+                f"Migration 26 foreign_key_check 失败：{violations[:3]}"
+            )
+        raw.commit()
+    except Exception:
+        if raw.in_transaction:
+            raw.rollback()
+        raise
+    finally:
+        raw.execute("PRAGMA legacy_alter_table=OFF")
+        raw.execute("PRAGMA foreign_keys=ON")
+
+    if raw.execute("PRAGMA foreign_keys").fetchone()[0] != 1:
+        raise RuntimeError("Migration 26 未能恢复 PRAGMA foreign_keys=ON")
+    violations = raw.execute("PRAGMA foreign_key_check").fetchall()
+    if violations:
+        raise RuntimeError(
+            f"Migration 26 收尾 foreign_key_check 失败：{violations[:3]}"
+        )
+
+
 MIGRATIONS = [
     Migration(1, "add_sample_expected_level", _migration_001_add_sample_expected_level),
     Migration(2, "add_review_corrections", _migration_002_add_review_corrections),
@@ -3136,6 +3556,11 @@ MIGRATIONS = [
         24,
         "add_real_executor_safety",
         _migration_024_add_real_executor_safety,
+    ),
+    Migration(
+        25,
+        "add_baseline_regression_and_repair_prompt_fk",
+        _migration_025_add_baseline_regression_and_repair_prompt_fk,
     ),
 ]
 

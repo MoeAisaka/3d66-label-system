@@ -314,6 +314,15 @@ class EvaluationJob(Base):
                 "AND technical_attempt = 0"
             ),
         ),
+        Index(
+            "uq_evaluation_jobs_baseline_regression_item",
+            "baseline_regression_item_id",
+            unique=True,
+            sqlite_where=sql_text(
+                "baseline_regression_item_id IS NOT NULL "
+                "AND technical_attempt = 0"
+            ),
+        ),
         CheckConstraint(
             "queue_class IN ('validation','interactive','production_batch','canary','recovery')",
             name="ck_evaluation_jobs_queue_class",
@@ -338,6 +347,11 @@ class EvaluationJob(Base):
     )
     regression_item_id: Mapped[int | None] = mapped_column(
         ForeignKey("prompt_regression_items.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    baseline_regression_item_id: Mapped[int | None] = mapped_column(
+        ForeignKey("baseline_regression_items.id", ondelete="RESTRICT"),
+        nullable=True,
+        index=True,
     )
     strategy_bundle_id: Mapped[int | None] = mapped_column(
         ForeignKey("strategy_bundles.id", ondelete="RESTRICT"),
@@ -792,7 +806,10 @@ def _apply_evaluation_job_queue_defaults(
     target: EvaluationJob,
 ) -> None:
     queue_class = target.queue_class or "production_batch"
-    if target.regression_item_id is not None and queue_class == "production_batch":
+    if (
+        target.regression_item_id is not None
+        or target.baseline_regression_item_id is not None
+    ) and queue_class == "production_batch":
         queue_class = "validation"
     target.queue_class = queue_class
     target.origin_queue_class = target.origin_queue_class or queue_class
@@ -1120,7 +1137,7 @@ class OptimizationCaseQueue(Base):
     __table_args__ = (
         UniqueConstraint("idempotency_key", name="uq_optimization_case_key"),
         CheckConstraint(
-            "source_type IN ('human_review','production_feedback')",
+            "source_type IN ('human_review','production_feedback','baseline_regression')",
             name="ck_optimization_case_source_type",
         ),
         CheckConstraint(
@@ -1139,12 +1156,20 @@ class OptimizationCaseQueue(Base):
             "(source_type = 'human_review' "
             "AND evaluation_id IS NOT NULL "
             "AND final_review_id IS NOT NULL "
-            "AND source_event_id IS NULL) "
+            "AND source_event_id IS NULL "
+            "AND baseline_regression_item_id IS NULL) "
             "OR "
             "(source_type = 'production_feedback' "
             "AND evaluation_id IS NULL "
             "AND final_review_id IS NULL "
-            "AND source_event_id IS NOT NULL)",
+            "AND source_event_id IS NOT NULL "
+            "AND baseline_regression_item_id IS NULL) "
+            "OR "
+            "(source_type = 'baseline_regression' "
+            "AND evaluation_id IS NOT NULL "
+            "AND final_review_id IS NULL "
+            "AND source_event_id IS NULL "
+            "AND baseline_regression_item_id IS NOT NULL)",
             name="ck_optimization_case_source_refs",
         ),
     )
@@ -1168,6 +1193,12 @@ class OptimizationCaseQueue(Base):
     )
     source_event_id: Mapped[int | None] = mapped_column(
         ForeignKey("production_feedback_events.id", ondelete="RESTRICT"),
+        nullable=True,
+        unique=True,
+        index=True,
+    )
+    baseline_regression_item_id: Mapped[int | None] = mapped_column(
+        ForeignKey("baseline_regression_items.id", ondelete="RESTRICT"),
         nullable=True,
         unique=True,
         index=True,
@@ -1520,6 +1551,204 @@ class SampleTruthRevision(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     sample_item: Mapped[SampleSetItem] = relationship()
+
+
+class BaselineSet(Base):
+    __tablename__ = "baseline_sets"
+    __table_args__ = (
+        CheckConstraint(
+            "default_expected_level IN ('L1','L2','L3','L4','L5')",
+            name="ck_baseline_sets_default_level",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(160), unique=True, index=True)
+    description: Mapped[str] = mapped_column(Text, default="")
+    default_expected_level: Mapped[str] = mapped_column(String(10), index=True)
+    fingerprint: Mapped[str] = mapped_column(String(64), index=True)
+    created_by: Mapped[str] = mapped_column(String(80), default="system")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow
+    )
+
+    items: Mapped[list["BaselineSetItem"]] = relationship(
+        back_populates="baseline_set",
+        cascade="all, delete-orphan",
+        order_by="BaselineSetItem.id",
+    )
+    runs: Mapped[list["BaselineRegressionRun"]] = relationship(
+        back_populates="baseline_set",
+        order_by="BaselineRegressionRun.sequence_no",
+    )
+
+
+class BaselineSetItem(Base):
+    __tablename__ = "baseline_set_items"
+    __table_args__ = (
+        UniqueConstraint(
+            "baseline_set_id", "asset_id", name="uq_baseline_set_asset"
+        ),
+        CheckConstraint(
+            "expected_level IN ('L1','L2','L3','L4','L5')",
+            name="ck_baseline_set_items_expected_level",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    baseline_set_id: Mapped[int] = mapped_column(
+        ForeignKey("baseline_sets.id", ondelete="RESTRICT"), index=True
+    )
+    asset_id: Mapped[int] = mapped_column(
+        ForeignKey("assets.id", ondelete="RESTRICT"), index=True
+    )
+    source_package_id: Mapped[int | None] = mapped_column(
+        ForeignKey("material_packages.id", ondelete="RESTRICT"),
+        nullable=True,
+        index=True,
+    )
+    expected_level: Mapped[str] = mapped_column(String(10), index=True)
+    asset_snapshot_json: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow
+    )
+
+    baseline_set: Mapped[BaselineSet] = relationship(back_populates="items")
+    asset: Mapped[Asset] = relationship()
+    source_package: Mapped[MaterialPackage | None] = relationship()
+
+
+class BaselineRegressionRun(Base):
+    __tablename__ = "baseline_regression_runs"
+    __table_args__ = (
+        UniqueConstraint(
+            "baseline_set_id", "sequence_no", name="uq_baseline_run_sequence"
+        ),
+        CheckConstraint(
+            "status IN ('running','completed','partial_failed','failed')",
+            name="ck_baseline_regression_runs_status",
+        ),
+        CheckConstraint(
+            "sequence_no >= 1", name="ck_baseline_regression_runs_sequence"
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    baseline_set_id: Mapped[int] = mapped_column(
+        ForeignKey("baseline_sets.id", ondelete="RESTRICT"), index=True
+    )
+    sequence_no: Mapped[int] = mapped_column(Integer)
+    previous_run_id: Mapped[int | None] = mapped_column(
+        ForeignKey("baseline_regression_runs.id", ondelete="RESTRICT"),
+        nullable=True,
+        index=True,
+    )
+    strategy_bundle_id: Mapped[int] = mapped_column(
+        ForeignKey("strategy_bundles.id", ondelete="RESTRICT"), index=True
+    )
+    strategy_snapshot_json: Mapped[str] = mapped_column(Text)
+    baseline_set_fingerprint: Mapped[str] = mapped_column(String(64), index=True)
+    status: Mapped[str] = mapped_column(String(30), default="running", index=True)
+    total: Mapped[int] = mapped_column(Integer)
+    completed: Mapped[int] = mapped_column(Integer, default=0)
+    valid_predictions: Mapped[int] = mapped_column(Integer, default=0)
+    failed: Mapped[int] = mapped_column(Integer, default=0)
+    metrics_json: Mapped[str] = mapped_column(Text, default="{}")
+    created_by: Mapped[str] = mapped_column(String(80), default="system")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, index=True
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    baseline_set: Mapped[BaselineSet] = relationship(back_populates="runs")
+    previous_run: Mapped["BaselineRegressionRun | None"] = relationship(
+        remote_side=[id]
+    )
+    strategy_bundle: Mapped[StrategyBundle] = relationship()
+    items: Mapped[list["BaselineRegressionItem"]] = relationship(
+        back_populates="run",
+        cascade="all, delete-orphan",
+        order_by="BaselineRegressionItem.id",
+    )
+
+
+class BaselineRegressionItem(Base):
+    __tablename__ = "baseline_regression_items"
+    __table_args__ = (
+        UniqueConstraint(
+            "run_id", "baseline_set_item_id", name="uq_baseline_run_set_item"
+        ),
+        CheckConstraint(
+            "expected_level IN ('L1','L2','L3','L4','L5')",
+            name="ck_baseline_regression_items_expected_level",
+        ),
+        CheckConstraint(
+            "status IN ('queued','completed','failed')",
+            name="ck_baseline_regression_items_status",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    run_id: Mapped[int] = mapped_column(
+        ForeignKey("baseline_regression_runs.id", ondelete="CASCADE"), index=True
+    )
+    baseline_set_item_id: Mapped[int] = mapped_column(
+        ForeignKey("baseline_set_items.id", ondelete="RESTRICT"), index=True
+    )
+    asset_id: Mapped[int] = mapped_column(
+        ForeignKey("assets.id", ondelete="RESTRICT"), index=True
+    )
+    expected_level: Mapped[str] = mapped_column(String(10), index=True)
+    job_id: Mapped[int | None] = mapped_column(
+        ForeignKey("evaluation_jobs.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    evaluation_id: Mapped[int | None] = mapped_column(
+        ForeignKey("evaluation_results.id", ondelete="SET NULL"),
+        nullable=True,
+        unique=True,
+        index=True,
+    )
+    status: Mapped[str] = mapped_column(String(30), default="queued", index=True)
+    result_snapshot_json: Mapped[str] = mapped_column(Text, default="{}")
+    error_message: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    run: Mapped[BaselineRegressionRun] = relationship(back_populates="items")
+    baseline_set_item: Mapped[BaselineSetItem] = relationship()
+    asset: Mapped[Asset] = relationship()
+    job: Mapped[EvaluationJob | None] = relationship(foreign_keys=[job_id])
+    evaluation: Mapped[EvaluationResult | None] = relationship(
+        foreign_keys=[evaluation_id]
+    )
+
+
+class BaselineFrozenError(ValueError):
+    """Raised when a frozen baseline definition is changed in place."""
+
+
+@event.listens_for(BaselineSet, "before_update")
+@event.listens_for(BaselineSet, "before_delete")
+def _prevent_baseline_set_mutation(
+    _mapper: object, _connection: Connection, _target: BaselineSet
+) -> None:
+    raise BaselineFrozenError("BaselineSet 创建后不可修改或删除")
+
+
+@event.listens_for(BaselineSetItem, "before_update")
+@event.listens_for(BaselineSetItem, "before_delete")
+def _prevent_baseline_set_item_mutation(
+    _mapper: object, _connection: Connection, _target: BaselineSetItem
+) -> None:
+    raise BaselineFrozenError("BaselineSet 条目创建后不可修改或删除")
 
 
 class PromptRegressionRun(Base):

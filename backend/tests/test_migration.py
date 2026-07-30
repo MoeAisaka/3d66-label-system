@@ -38,6 +38,7 @@ MIGRATION_NAMES = [
     "add_phase_b_automation_feedback_benchmarks",
     "enforce_material_package_immutability",
     "add_real_executor_safety",
+    "add_baseline_regression_and_repair_prompt_fk",
 ]
 
 
@@ -1992,7 +1993,7 @@ def test_v23_real_executor_migration_preserves_rows_and_adds_safe_defaults(
                 )
             assert connection.exec_driver_sql(
                 "SELECT max(version) FROM schema_migrations"
-            ).scalar_one() == 24
+            ).scalar_one() == 25
     finally:
         engine.dispose()
 
@@ -2075,5 +2076,80 @@ def test_material_package_database_guards_reject_mutation(
             ).one()
             assert package_row[0] == "不可变素材包"
             assert item_row[0] == "source.jpg"
+    finally:
+        engine.dispose()
+
+
+def test_migration_26_repairs_dangling_prompt_fk_and_allows_real_insert(
+    tmp_path,
+) -> None:
+    engine = _engine(tmp_path, "migration-26-prompt-fk.db")
+    _create_latest_and_run_migrations(engine)
+    try:
+        with engine.begin() as connection:
+            connection.exec_driver_sql(
+                "DELETE FROM schema_migrations WHERE version = 25"
+            )
+            connection.exec_driver_sql("PRAGMA writable_schema=ON")
+            connection.exec_driver_sql("""
+                UPDATE sqlite_master
+                SET sql = replace(
+                    sql,
+                    'automation_optimization_runs',
+                    'automation_optimization_runs_v24'
+                )
+                WHERE type='table' AND name='prompt_versions'
+            """)
+            connection.exec_driver_sql("PRAGMA writable_schema=OFF")
+            version = connection.exec_driver_sql(
+                "PRAGMA schema_version"
+            ).scalar_one()
+            connection.exec_driver_sql(f"PRAGMA schema_version={version + 1}")
+            assert any(
+                row[2] == "automation_optimization_runs_v24"
+                for row in connection.exec_driver_sql(
+                    "PRAGMA foreign_key_list(prompt_versions)"
+                )
+            )
+            run_migrations(connection)
+            assert connection.exec_driver_sql(
+                "PRAGMA foreign_key_check"
+            ).all() == []
+            assert any(
+                row[2] == "automation_optimization_runs"
+                for row in connection.exec_driver_sql(
+                    "PRAGMA foreign_key_list(prompt_versions)"
+                )
+            )
+            connection.exec_driver_sql("""
+                INSERT INTO automation_optimization_runs (
+                    id, run_key, base_prompt_version, policy_revision,
+                    status, dry_run, trigger_reason, case_ids_json,
+                    frozen_input_json, result_json, candidate_count,
+                    estimated_cost_micros, actual_cost_micros, retryable,
+                    error_message, created_by, created_at
+                ) VALUES (
+                    9001, 'm26-smoke', 'B1', 1, 'planned', 1, 'test',
+                    '[]', '{}', '{}', 0, 0, 0, 0, '', 'test',
+                    CURRENT_TIMESTAMP
+                )
+            """)
+            connection.exec_driver_sql("""
+                INSERT INTO prompt_versions (
+                    id, stage, name, version, system_prompt, user_prompt,
+                    source_automation_run_id
+                ) VALUES (9001, 'B', 'smoke', 'm26-smoke', 's', 'u', 9001)
+            """)
+            assert connection.exec_driver_sql(
+                "SELECT source_automation_run_id FROM prompt_versions "
+                "WHERE id=9001"
+            ).scalar_one() == 9001
+            connection.exec_driver_sql("DELETE FROM prompt_versions WHERE id=9001")
+            connection.exec_driver_sql(
+                "DELETE FROM automation_optimization_runs WHERE id=9001"
+            )
+            assert connection.exec_driver_sql(
+                "PRAGMA foreign_key_check"
+            ).all() == []
     finally:
         engine.dispose()

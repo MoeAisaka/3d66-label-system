@@ -75,6 +75,7 @@ from .risk_review import (
 )
 from .seed import seed_defaults
 from .strategy_bundle import build_strategy_snapshot, get_or_create_bundle
+from .baseline_regression import complete_baseline_item, fail_baseline_item
 
 
 settings = get_settings()
@@ -744,7 +745,16 @@ async def evaluate_job(job_id: int) -> None:
             if sampling_policy is not None
             else 0.7
         )
-        if result.confidence is None or result.confidence < low_confidence_threshold:
+        is_baseline_regression = (
+            current_job.baseline_regression_item_id is not None
+        )
+        if (
+            not is_baseline_regression
+            and (
+                result.confidence is None
+                or result.confidence < low_confidence_threshold
+            )
+        ):
             review_policy = db.get(ReviewWorkflowPolicy, 1)
             db.add(
                 ReviewPanel(
@@ -757,9 +767,12 @@ async def evaluate_job(job_id: int) -> None:
                     status="collecting",
                 )
             )
-        db.execute(
-            update(Asset).where(Asset.id == asset.id).values(status="evaluated")
-        )
+        if not is_baseline_regression:
+            db.execute(
+                update(Asset)
+                .where(Asset.id == asset.id)
+                .values(status="evaluated")
+            )
         db.execute(
             update(EvaluationJob)
             .where(EvaluationJob.id == job_id)
@@ -844,6 +857,12 @@ async def evaluate_job(job_id: int) -> None:
                 complete_regression_item(
                     db, current_job.regression_item_id, result
                 )
+        if current_job.baseline_regression_item_id:
+            complete_baseline_item(
+                db,
+                item_id=current_job.baseline_regression_item_id,
+                result=result,
+            )
 
 
 def _technical_failure_from_exception(exc: BaseException) -> TechnicalFailure:
@@ -1001,6 +1020,9 @@ def _handle_technical_failure(
                     prompt_a_id=parent.prompt_a_id,
                     prompt_b_id=parent.prompt_b_id,
                     regression_item_id=parent.regression_item_id,
+                    baseline_regression_item_id=(
+                        parent.baseline_regression_item_id
+                    ),
                     strategy_bundle_id=parent.strategy_bundle_id,
                     loop_attempt_id=parent.loop_attempt_id,
                     parent_job_id=parent.id,
@@ -1032,6 +1054,13 @@ def _handle_technical_failure(
                     db,
                     parent.regression_item_id,
                     f"technical:{failure.error_type}",
+                )
+            if parent.baseline_regression_item_id:
+                fail_baseline_item(
+                    db,
+                    item_id=parent.baseline_regression_item_id,
+                    error_code=f"technical:{failure.error_type}",
+                    job_id=parent.id,
                 )
             return False
     except IntegrityError:
