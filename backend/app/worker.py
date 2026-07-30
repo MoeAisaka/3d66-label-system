@@ -96,7 +96,7 @@ class JobInterrupted(RuntimeError):
 
 
 def aesthetic_grade_collapse(aesthetic: dict[str, object] | None) -> bool:
-    """Return true when six or more of the eight aesthetic dimensions share one grade."""
+    """Return true when five or more of the eight aesthetic dimensions share one grade."""
     if not aesthetic:
         return False
     dimensions = aesthetic.get("dimensions")
@@ -107,7 +107,7 @@ def aesthetic_grade_collapse(aesthetic: dict[str, object] | None) -> bool:
         if not isinstance(item, dict) or not isinstance(item.get("grade"), int):
             return False
         grades.append(item["grade"])
-    return max(Counter(grades).values(), default=0) >= 6
+    return max(Counter(grades).values(), default=0) >= 5
 
 
 def _prompt_for_job(stage: str, prompt_id: int | None) -> PromptVersion:
@@ -605,7 +605,7 @@ async def evaluate_job(job_id: int) -> None:
             _set_job(job_id, stage="aesthetic_repair", progress=68)
             repair_user = (
                 user_b
-                + "\n\n上一次输出未通过系统校验：八个维度中至少六个等级相同，出现评分坍缩。"
+                + "\n\n上一次输出未通过系统校验：八个维度中至少五个等级相同，出现评分坍缩。"
                 + "请重新查看图片，逐维对照优势与缺陷，至少形成两个有独立证据支持的等级档位。"
                 + "不得为了制造差异而随意改分；每次升降都必须对应图片中的具体证据。"
                 + "\n\n上一次输出：\n"

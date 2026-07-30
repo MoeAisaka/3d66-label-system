@@ -82,29 +82,84 @@ def test_combined_response_applies_declared_level_cap() -> None:
     assert scoring["caps"][-1]["reason"] == "现场记录图最高 L3"
 
 
-def test_partial_space_is_not_normal_or_professional_in_business_rules() -> None:
-    precheck = {
-        "scene_scope": {"type": "partial_space"},
+def professional_precheck(
+    *,
+    evidence: list[str],
+    quality_severity: str = "normal",
+    scene_scope: str = "full_space",
+) -> dict:
+    return {
+        "scene_scope": {"type": scene_scope},
         "media_form": {
             "real_photo": {"status": "yes"},
             "rendering": {"status": "no"},
             "ai_generated": {"status": "no"},
-            "professional_photography": {"status": "yes"},
+            "professional_photography": {
+                "status": "yes",
+                "evidence": evidence,
+            },
             "documentary_record": {"status": "no"},
             "casual_snapshot": {"status": "no"},
         },
         "image_quality": {
-            "quality_severity": "normal",
+            "quality_severity": quality_severity,
             "capture_quality": "good",
             "issues": [],
             "evidence": [],
         },
         "display_flags": {"watermark": False, "decorative_border": False},
     }
-    normalized = normalize_precheck_business_rules(precheck)
-    assert normalized["image_quality"]["quality_severity"] == "slight"
-    assert normalized["image_quality"]["capture_quality"] == "acceptable"
+
+
+def test_three_professional_evidence_items_are_accepted() -> None:
+    normalized = normalize_precheck_business_rules(
+        professional_precheck(evidence=["机位与透视", "边缘与裁切", "光线控制"])
+    )
+    assert normalized["media_form"]["professional_photography"]["status"] == "yes"
+    assert normalized["media_form"]["documentary_record"]["status"] == "no"
+
+
+def test_two_professional_evidence_items_are_rejected() -> None:
+    normalized = normalize_precheck_business_rules(
+        professional_precheck(evidence=["机位与透视", "光线控制"])
+    )
     assert normalized["media_form"]["professional_photography"]["status"] == "no"
+    assert normalized["media_form"]["professional_photography"]["evidence"] == [
+        "系统规则：专业摄影缺少三类互不重复的可见证据"
+    ]
+    assert normalized["media_form"]["documentary_record"]["status"] == "yes"
+
+
+def test_slight_quality_does_not_reject_professional_photography() -> None:
+    normalized = normalize_precheck_business_rules(
+        professional_precheck(
+            evidence=["机位与透视", "边缘与裁切", "光线控制"],
+            quality_severity="slight",
+        )
+    )
+    assert normalized["media_form"]["professional_photography"]["status"] == "yes"
+
+
+def test_moderate_quality_rejects_professional_photography() -> None:
+    normalized = normalize_precheck_business_rules(
+        professional_precheck(
+            evidence=["机位与透视", "边缘与裁切", "光线控制"],
+            quality_severity="moderate",
+        )
+    )
+    assert normalized["media_form"]["professional_photography"]["status"] == "no"
+
+
+def test_partial_space_does_not_inject_quality_issue_or_reject_professional() -> None:
+    precheck = professional_precheck(
+        evidence=["机位与透视", "边缘与裁切", "光线控制"],
+        scene_scope="partial_space",
+    )
+    normalized = normalize_precheck_business_rules(precheck)
+    assert normalized["image_quality"]["quality_severity"] == "normal"
+    assert normalized["image_quality"]["capture_quality"] == "good"
+    assert "presentation_incomplete" not in normalized["image_quality"]["issues"]
+    assert normalized["media_form"]["professional_photography"]["status"] == "yes"
     assert normalized["media_form"]["documentary_record"]["status"] == "yes"
 
 
@@ -128,4 +183,5 @@ def test_rendering_with_watermark_is_not_professional_or_normal() -> None:
     normalized = normalize_precheck_business_rules(precheck)
     assert normalized["image_quality"]["quality_severity"] == "slight"
     assert normalized["image_quality"]["render_fidelity"] == "acceptable"
+    assert "watermark_or_border" in normalized["image_quality"]["issues"]
     assert normalized["media_form"]["professional_photography"]["status"] == "no"

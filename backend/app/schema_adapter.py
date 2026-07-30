@@ -76,8 +76,8 @@ def normalize_precheck_business_rules(precheck: dict[str, Any]) -> dict[str, Any
     professional_evidence = (
         professional.get("evidence") if isinstance(professional, dict) else []
     )
-    if is_yes("professional_photography") and len(professional_evidence or []) < 4:
-        force_not_professional("系统规则：专业摄影缺少四类互不重复的可见证据")
+    if is_yes("professional_photography") and len(professional_evidence or []) < 3:
+        force_not_professional("系统规则：专业摄影缺少三类互不重复的可见证据")
         if is_yes("real_photo") and not is_yes("casual_snapshot"):
             force_documentary("系统规则：实景图的专业摄影证据不足，按现场记录处理")
     if is_yes("professional_photography") and is_yes("documentary_record"):
@@ -85,11 +85,6 @@ def normalize_precheck_business_rules(precheck: dict[str, Any]) -> dict[str, Any
 
     scene_scope = precheck.get("scene_scope")
     if isinstance(scene_scope, dict) and scene_scope.get("type") == "partial_space":
-        ensure_quality_issue(
-            "presentation_incomplete",
-            "系统规则：当前仅呈现局部空间，素材呈现完整性未达到画质正常标准",
-        )
-        force_not_professional("系统规则：局部空间记录不标记为专业摄影")
         if is_yes("real_photo") and not is_yes("casual_snapshot"):
             force_documentary("系统规则：局部空间实景按现场记录处理")
 
@@ -108,7 +103,8 @@ def normalize_precheck_business_rules(precheck: dict[str, Any]) -> dict[str, Any
             "系统规则：可见未完工区域使当前素材呈现质量至少为轻微问题",
         )
 
-    if str(quality.get("quality_severity") or "normal") != "normal":
+    quality_severity = str(quality.get("quality_severity") or "normal")
+    if QUALITY_RANK.get(quality_severity, 1) >= QUALITY_RANK["moderate"]:
         force_not_professional("系统规则：存在画质或呈现问题，不标记为专业摄影")
 
     return precheck
