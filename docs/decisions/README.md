@@ -29,6 +29,7 @@
 | [0014](0014-staged-human-review-and-prompt-release-gate.md) | Superseded | 分阶段人工审核、历史纠偏预览与提示词发布前门禁 |
 | [0015](0015-material-packages-panel-consensus-and-dual-pipeline.md) | Accepted | 素材包、初审组共识与实验台—生产平台双流水线 |
 | [0016](0016-safe-automation-feedback-and-model-benchmark.md) | Accepted | 安全自动优化、不可变生产回流与三模型横评 |
+| [0018](0018-adr16-real-executors-and-rollout.md) | Accepted | ADR-0016 真实执行器、预算结算与分阶段启用 |
 
 ## 新增 ADR 的规则
 
