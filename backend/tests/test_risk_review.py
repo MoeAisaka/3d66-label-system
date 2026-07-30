@@ -1,5 +1,10 @@
+from app.dimension_schema_registry import (
+    ACTIVE_V13_VERSION,
+    space_schema_definition_for_version,
+)
 from app.risk_review import (
     apply_risk_review,
+    build_risk_review_system_prompt,
     build_risk_review_user_prompt,
     risk_review_reasons,
 )
@@ -85,3 +90,70 @@ def test_low_risk_result_does_not_trigger_extra_call() -> None:
     }
     aesthetic = _aesthetic([2, 3, 3, 3, 3, 3, 2, 2])
     assert risk_review_reasons(precheck, aesthetic, {"level": "L2", "score": 55}) == []
+
+
+def test_non_eight_schema_limits_risk_review_to_bound_dimensions() -> None:
+    schema = space_schema_definition_for_version(ACTIVE_V13_VERSION)
+    keys = [
+        "visual_hierarchy",
+        "inspiration_reference",
+        "presentation_integrity",
+    ]
+    schema["dimensions"] = [
+        item for item in schema["dimensions"] if item["key"] in keys
+    ]
+    schema["output_contract"]["dimension_output_keys"] = keys
+    schema["risk_review"]["dimension_keys"] = keys
+    aesthetic = {
+        "dimensions": {
+            "visual_hierarchy": {"grade": 5, "evidence": ["a", "b"]},
+            "inspiration_reference": {
+                "grade": 4,
+                "evidence": ["a", "b"],
+            },
+            "presentation_integrity": {
+                "grade": 4,
+                "evidence": ["a", "b"],
+            },
+        },
+        "decision_rules": {"level_cap": "none"},
+        "needs_review": False,
+    }
+    precheck = {
+        "media_form": {
+            "professional_photography": {"status": "no"},
+            "documentary_record": {"status": "no"},
+        },
+        "image_quality": {"quality_severity": "normal"},
+    }
+
+    assert risk_review_reasons(
+        precheck,
+        aesthetic,
+        {"level": "L3"},
+        dimension_schema=schema,
+    ) == ["存在1个5级维度"]
+    system_prompt = build_risk_review_system_prompt(schema)
+    assert '"visual_hierarchy": 1' in system_prompt
+    assert "composition_viewpoint" not in system_prompt
+
+    report = apply_risk_review(
+        precheck,
+        aesthetic,
+        {
+            "verdict": "downgrade",
+            "risk_reasons": ["层级证据不足"],
+            "dimension_grades": {
+                "visual_hierarchy": 3,
+                "composition_viewpoint": 1,
+            },
+            "level_cap": "none",
+            "confidence": 0.9,
+        },
+        dimension_schema=schema,
+    )
+    assert aesthetic["dimensions"]["visual_hierarchy"]["grade"] == 3
+    assert all(
+        correction["field"] != "dimensions.composition_viewpoint"
+        for correction in report["corrections"]
+    )

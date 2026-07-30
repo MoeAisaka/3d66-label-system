@@ -1,6 +1,11 @@
 import json
 from types import SimpleNamespace
 
+from app.dimension_schema_registry import (
+    ACTIVE_V13_VERSION,
+    canonical_hash,
+    space_schema_definition_for_version,
+)
 from app.review_sampling import build_review_sampling
 
 
@@ -116,3 +121,72 @@ def test_configurable_thresholds_and_policy_version_are_applied() -> None:
     assert "low_confidence" in reason_codes(decision)
     assert "new_combination" not in reason_codes(decision)
     assert "high_level" not in reason_codes(decision)
+
+
+def _three_dimension_snapshot() -> tuple[dict, str]:
+    schema = space_schema_definition_for_version(ACTIVE_V13_VERSION)
+    keys = [
+        "visual_hierarchy",
+        "inspiration_reference",
+        "presentation_integrity",
+    ]
+    schema["dimensions"] = [
+        item for item in schema["dimensions"] if item["key"] in keys
+    ]
+    schema["output_contract"]["dimension_output_keys"] = keys
+    schema["risk_review"]["dimension_keys"] = keys
+    snapshot = {
+        "schema_version": "strategy-bundle-v2",
+        "resolved_dimension_schema_hash": canonical_hash(schema),
+        "resolved_dimensions_snapshot": schema,
+    }
+    return schema, json.dumps(snapshot, ensure_ascii=False)
+
+
+def test_sampling_uses_result_bound_non_eight_schema() -> None:
+    _, snapshot = _three_dimension_snapshot()
+    grades = {
+        key: {"grade": 4}
+        for key in (
+            "visual_hierarchy",
+            "inspiration_reference",
+            "presentation_integrity",
+        )
+    }
+    result = result_stub(
+        strategy_snapshot_json=snapshot,
+        aesthetic_json=json.dumps({"dimensions": grades}),
+    )
+
+    collapsed = build_review_sampling(result, combination_index=12)
+    assert collapsed["tier"] == "required"
+    assert "grade_collapse" in reason_codes(collapsed)
+    assert any(
+        reason["label"] == "3个维度完全同分"
+        for reason in collapsed["reasons"]
+    )
+
+    grades.pop("visual_hierarchy")
+    result.aesthetic_json = json.dumps({"dimensions": grades})
+    incomplete = build_review_sampling(result, combination_index=12)
+    assert "incomplete_dimensions" in reason_codes(incomplete)
+    assert any(
+        reason["label"] == "3个美感维度结果不完整"
+        for reason in incomplete["reasons"]
+    )
+
+
+def test_sampling_fails_closed_for_tampered_dimension_snapshot() -> None:
+    _, snapshot = _three_dimension_snapshot()
+    payload = json.loads(snapshot)
+    payload["resolved_dimension_schema_hash"] = "f" * 64
+    decision = build_review_sampling(
+        result_stub(
+            strategy_snapshot_json=json.dumps(payload),
+        ),
+        combination_index=12,
+    )
+
+    assert decision["tier"] == "required"
+    assert decision["priority"] == 100
+    assert "dimension_contract_invalid" in reason_codes(decision)

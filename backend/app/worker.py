@@ -70,9 +70,9 @@ from .regression import (
     fail_regression_item,
 )
 from .risk_review import (
-    RISK_REVIEW_SYSTEM_PROMPT,
     RISK_REVIEW_VERSION,
     apply_risk_review,
+    build_risk_review_system_prompt,
     build_risk_review_user_prompt,
     risk_review_reasons,
 )
@@ -651,7 +651,12 @@ async def evaluate_job(job_id: int) -> None:
         aesthetic,
         dimension_schema=dimension_definition,
     )
-    trigger_reasons = risk_review_reasons(precheck, aesthetic, preliminary_scoring)
+    trigger_reasons = risk_review_reasons(
+        precheck,
+        aesthetic,
+        preliminary_scoring,
+        dimension_schema=dimension_definition,
+    )
     risk_review_enabled = bool(model_config.high_risk_review_enabled)
     if frozen_bundle is not None:
         risk_review_enabled = (
@@ -662,13 +667,25 @@ async def evaluate_job(job_id: int) -> None:
         _set_job(job_id, stage="risk_review", progress=76)
         try:
             risk_response = await client.chat_json(
-                RISK_REVIEW_SYSTEM_PROMPT,
-                build_risk_review_user_prompt(precheck, aesthetic, preliminary_scoring),
+                build_risk_review_system_prompt(
+                    dimension_definition
+                ),
+                build_risk_review_user_prompt(
+                    precheck,
+                    aesthetic,
+                    preliminary_scoring,
+                    dimension_schema=dimension_definition,
+                ),
                 image_path=image_path,
                 mime_type=asset.mime_type,
             )
             risk_review_raw = risk_response.raw_payload
-            risk_review_report = apply_risk_review(precheck, aesthetic, risk_response.parsed)
+            risk_review_report = apply_risk_review(
+                precheck,
+                aesthetic,
+                risk_response.parsed,
+                dimension_schema=dimension_definition,
+            )
             risk_review_report["trigger_reasons"] = trigger_reasons
             precheck = normalize_precheck_business_rules(precheck)
         except Exception as exc:

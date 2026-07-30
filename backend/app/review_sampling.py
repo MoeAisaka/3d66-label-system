@@ -4,6 +4,10 @@ import hashlib
 import json
 from typing import Any
 
+from .scoring import (
+    DimensionScoringContractError,
+    dimension_schema_from_strategy_snapshot,
+)
 
 SMART_SAMPLING_VERSION = "smart-sampling-v1.1"
 DEFAULT_SAMPLE_RATE = 10
@@ -84,6 +88,35 @@ def build_review_sampling(
     media = precheck.get("media_form") or {}
     quality = precheck.get("image_quality") or {}
     dimensions = aesthetic.get("dimensions") or {}
+    try:
+        dimension_schema = dimension_schema_from_strategy_snapshot(
+            getattr(result, "strategy_snapshot_json", None),
+            aesthetic=aesthetic,
+        )
+        output_contract = dimension_schema.get("output_contract")
+        dimension_keys = (
+            output_contract.get("dimension_output_keys")
+            if isinstance(output_contract, dict)
+            else None
+        )
+        if (
+            not isinstance(dimension_keys, list)
+            or not dimension_keys
+            or len(dimension_keys) != len(set(dimension_keys))
+            or not all(
+                isinstance(key, str) and key for key in dimension_keys
+            )
+        ):
+            raise DimensionScoringContractError(
+                "DimensionSchema 输出维度合同不完整"
+            )
+        resolved_dimension_keys = tuple(dimension_keys)
+        dimension_contract_error = None
+    except (DimensionScoringContractError, ValueError) as exc:
+        resolved_dimension_keys = tuple(
+            key for key in dimensions if isinstance(key, str) and key
+        )
+        dimension_contract_error = str(exc)
     scope_status = classification.get("scope_status")
     quality_severity = str(quality.get("quality_severity") or "uncertain")
 
@@ -104,6 +137,12 @@ def build_review_sampling(
             sampled.append({"code": code, "label": label})
         sampled_priority = max(sampled_priority, priority)
 
+    if dimension_contract_error is not None:
+        require(
+            "dimension_contract_invalid",
+            "结果绑定的维度合同无法解析，需要人工复核",
+            100,
+        )
     if latest_review and latest_review.decision == "rejected":
         require("human_rejected", "人工已退回，等待重新确认", 100)
     if is_golden:
@@ -151,13 +190,35 @@ def build_review_sampling(
 
     grades = [
         int((dimensions.get(key) or {}).get("grade") or 0)
-        for key in DIMENSION_KEYS
+        for key in resolved_dimension_keys
     ]
     valid_grades = [grade for grade in grades if 1 <= grade <= 5]
-    if scope_status != "out_of_scope" and len(valid_grades) < len(DIMENSION_KEYS):
-        require("incomplete_dimensions", "八个美感维度结果不完整", 98)
-    elif len(valid_grades) == len(DIMENSION_KEYS) and len(set(valid_grades)) == 1:
-        require("grade_collapse", "八个维度完全同分", 90)
+    dimension_count = len(resolved_dimension_keys)
+    dimension_count_label = (
+        "八个"
+        if dimension_count == len(DIMENSION_KEYS)
+        and resolved_dimension_keys == DIMENSION_KEYS
+        else f"{dimension_count}个"
+    )
+    if (
+        scope_status != "out_of_scope"
+        and len(valid_grades) < dimension_count
+    ):
+        require(
+            "incomplete_dimensions",
+            f"{dimension_count_label}美感维度结果不完整",
+            98,
+        )
+    elif (
+        dimension_count > 0
+        and len(valid_grades) == dimension_count
+        and len(set(valid_grades)) == 1
+    ):
+        require(
+            "grade_collapse",
+            f"{dimension_count_label}维度完全同分",
+            90,
+        )
 
     if scope_status == "boundary":
         sample("scope_boundary", "素材范围判定处于边界", 58)
