@@ -599,7 +599,9 @@ def test_paired_regression_passes_then_requires_separate_human_approval() -> Non
             "published": False,
         }
         seed.db.expire_all()
-        assert seed.db.get(PromptRegressionRun, run_id).approval_status == "approved"
+        approved_run = seed.db.get(PromptRegressionRun, run_id)
+        assert approved_run.approval_status == "approved"
+        assert approved_run.approved_by == seed.user.username
         assert seed.db.get(PromptVersion, seed.prompts["candidate_a"].id).status == "draft"
         assert seed.db.get(PromptVersion, seed.prompts["candidate_b"].id).status == "draft"
     finally:

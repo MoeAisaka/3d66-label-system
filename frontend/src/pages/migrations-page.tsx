@@ -8,7 +8,7 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { api, jsonBody } from "@/lib/api"
-import type { MigrationContext, MigrationDetail, MigrationItem, MigrationSummary } from "@/lib/types"
+import type { MigrationContext, MigrationDetail, MigrationItem, MigrationSummary, User } from "@/lib/types"
 
 
 const statusLabel: Record<MigrationSummary["status"], string> = {
@@ -18,7 +18,7 @@ const statusLabel: Record<MigrationSummary["status"], string> = {
   regressed: "发现回退样本",
 }
 
-export function MigrationsPage() {
+export function MigrationsPage({ user }: { user: User }) {
   const queryClient = useQueryClient()
   const context = useQuery({
     queryKey: ["migration-context"],
@@ -34,7 +34,7 @@ export function MigrationsPage() {
   const [sampleSize, setSampleSize] = useState(200)
   const [sampleSetId, setSampleSetId] = useState("")
   const [name, setName] = useState("")
-  const [reviewer, setReviewer] = useState("")
+  const reviewer = user.username
 
   useEffect(() => {
     if (!baseline && context.data?.baselines.length) {
@@ -146,7 +146,7 @@ export function MigrationsPage() {
           </aside>
 
           <main className="min-w-0">
-            {detail.data ? <MigrationRunDetail detail={detail.data} reviewer={reviewer} setReviewer={setReviewer} onReview={(itemId, verdict) => review.mutate({ itemId, verdict })} reviewing={review.isPending} reviewItems={reviewItems} /> : <div className="flex min-h-80 items-center justify-center border-y border-[var(--line)] bg-white text-sm text-[var(--muted)]">选择或创建一个迁移批次</div>}
+            {detail.data ? <MigrationRunDetail detail={detail.data} reviewer={reviewer} onReview={(itemId, verdict) => review.mutate({ itemId, verdict })} reviewing={review.isPending} reviewItems={reviewItems} /> : <div className="flex min-h-80 items-center justify-center border-y border-[var(--line)] bg-white text-sm text-[var(--muted)]">选择或创建一个迁移批次</div>}
           </main>
         </div>
       </div>
@@ -154,7 +154,7 @@ export function MigrationsPage() {
   )
 }
 
-function MigrationRunDetail({ detail, reviewer, setReviewer, onReview, reviewing, reviewItems }: { detail: MigrationDetail; reviewer: string; setReviewer: (value: string) => void; onReview: (itemId: number, verdict: string) => void; reviewing: boolean; reviewItems: MigrationItem[] }) {
+function MigrationRunDetail({ detail, reviewer, onReview, reviewing, reviewItems }: { detail: MigrationDetail; reviewer: string; onReview: (itemId: number, verdict: string) => void; reviewing: boolean; reviewItems: MigrationItem[] }) {
   const summary = detail.summary
   return <>
     <div className="flex flex-wrap items-end justify-between gap-4"><div><p className="font-data text-xs text-[var(--muted)]">RUN #{String(summary.id).padStart(4, "0")}</p><h2 className="font-editorial mt-2 text-3xl font-bold">{summary.name}</h2></div><Badge tone={summary.status === "accepted" ? "success" : summary.status === "regressed" ? "danger" : "warning"}>{statusLabel[summary.status]}</Badge></div>
@@ -171,19 +171,19 @@ function MigrationRunDetail({ detail, reviewer, setReviewer, onReview, reviewing
       <span>新模型更好 <strong className="font-data ml-1">{summary.verdicts.candidate_better}</strong></span>
       <span className="text-[var(--muted)]">出现人工确认的旧模型更好样本时，批次会标记为“发现回退样本”。</span>
     </div>
-    <div className="mt-6 flex flex-wrap items-center justify-between gap-4"><div><h3 className="font-editorial text-xl font-bold">差异与抽检队列</h3><p className="mt-1 text-sm text-[var(--muted)]">只展示等级/分类变化、低置信度和约 5% 的一致样本抽检。</p></div><label className="w-52"><span className="mb-2 block text-xs font-semibold">审核姓名</span><Input value={reviewer} onChange={(event) => setReviewer(event.target.value)} placeholder="填写后可提交" /></label></div>
+    <div className="mt-6 flex flex-wrap items-center justify-between gap-4"><div><h3 className="font-editorial text-xl font-bold">差异与抽检队列</h3><p className="mt-1 text-sm text-[var(--muted)]">只展示等级/分类变化、低置信度和约 5% 的一致样本抽检。</p></div><label className="w-52"><span className="mb-2 block text-xs font-semibold">审核账号（当前登录）</span><Input value={reviewer} readOnly /></label></div>
     <div className="mt-4 border-y border-[var(--line-strong)] bg-white">
       {summary.pending > 0 && <div className="flex items-center gap-3 border-b border-[var(--line)] bg-[#fafbf8] px-4 py-3 text-sm"><CircleNotch className="status-pulse" />候选模型仍在处理 {summary.pending} 张样本</div>}
-      {reviewItems.length ? reviewItems.map((item) => <MigrationReviewRow key={item.id} item={item} reviewer={reviewer} reviewing={reviewing} onReview={onReview} />) : <div className="px-6 py-14 text-center"><Check size={28} className="mx-auto" /><p className="mt-3 text-sm font-semibold">暂无需要人工介入的样本</p></div>}
+      {reviewItems.length ? reviewItems.map((item) => <MigrationReviewRow key={item.id} item={item} reviewing={reviewing} onReview={onReview} />) : <div className="px-6 py-14 text-center"><Check size={28} className="mx-auto" /><p className="mt-3 text-sm font-semibold">暂无需要人工介入的样本</p></div>}
     </div>
     <p className="mt-4 flex items-start gap-2 text-xs leading-5 text-[var(--muted)]"><WarningCircle className="mt-0.5 shrink-0" />“样本验收通过”表示本次分层样本未发现人工确认的回退，不等于对全部未来图片做绝对保证；上线后仍建议保留小比例漂移抽检。</p>
   </>
 }
 
-function MigrationReviewRow({ item, reviewer, reviewing, onReview }: { item: MigrationItem; reviewer: string; reviewing: boolean; onReview: (itemId: number, verdict: string) => void }) {
+function MigrationReviewRow({ item, reviewing, onReview }: { item: MigrationItem; reviewing: boolean; onReview: (itemId: number, verdict: string) => void }) {
   return <div className="grid gap-4 border-b border-[var(--line)] p-4 last:border-0 md:grid-cols-[72px_1fr_auto] md:items-center">
     <img src={item.image_url} alt="" className="size-[72px] border border-[var(--line)] bg-white object-cover" />
     <div className="min-w-0"><p className="file-name truncate text-sm">{item.asset_name}</p><div className="font-data mt-2 flex flex-wrap items-center gap-2 text-xs"><span>旧 {item.comparison?.baseline_level ?? "—"}</span><span className="text-[var(--muted)]">→</span><span>新 {item.comparison?.candidate_level ?? "—"}</span><span className="text-[var(--muted)]">{item.comparison?.baseline_score ?? "—"} → {item.comparison?.candidate_score ?? "—"}</span></div><p className="mt-2 text-xs leading-5 text-[var(--muted)]">{item.comparison?.reasons.join("；") || "等待比较"}</p>{item.human_verdict && <Badge className="mt-2" tone={item.human_verdict === "baseline_better" ? "danger" : "success"}>已复核：{item.human_verdict}</Badge>}</div>
-    {!item.human_verdict && item.candidate && <div className="flex flex-wrap gap-2 md:max-w-52 md:justify-end"><Button size="sm" variant="secondary" disabled={!reviewer || reviewing} onClick={() => onReview(item.id, "baseline_better")}>旧模型更好</Button><Button size="sm" variant="secondary" disabled={!reviewer || reviewing} onClick={() => onReview(item.id, "same")}>效果相当</Button><Button size="sm" disabled={!reviewer || reviewing} onClick={() => onReview(item.id, "candidate_better")}>新模型更好</Button></div>}
+    {!item.human_verdict && item.candidate && <div className="flex flex-wrap gap-2 md:max-w-52 md:justify-end"><Button size="sm" variant="secondary" disabled={reviewing} onClick={() => onReview(item.id, "baseline_better")}>旧模型更好</Button><Button size="sm" variant="secondary" disabled={reviewing} onClick={() => onReview(item.id, "same")}>效果相当</Button><Button size="sm" disabled={reviewing} onClick={() => onReview(item.id, "candidate_better")}>新模型更好</Button></div>}
   </div>
 }

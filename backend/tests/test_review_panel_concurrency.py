@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 import app.main as main_module
+from fastapi import Header
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, event, func, select
 from sqlalchemy.engine import Engine
@@ -157,7 +158,7 @@ def _concurrent_clients(
         cursor.execute("PRAGMA busy_timeout=10000")
         cursor.close()
 
-    user, evaluation_id = _seed_concurrent_review_database(engine)
+    _user, evaluation_id = _seed_concurrent_review_database(engine)
 
     def override_db():
         db = Session(engine, expire_on_commit=False)
@@ -167,10 +168,29 @@ def _concurrent_clients(
             db.close()
 
     app.dependency_overrides[get_db] = override_db
-    app.dependency_overrides[current_user] = lambda: user
+    def override_current_user(
+        test_reviewer: str = Header(alias="X-Test-Reviewer"),
+    ) -> User:
+        return User(
+            username=test_reviewer,
+            password_hash="unused",
+            display_name="并发测试审核员",
+            is_active=True,
+            is_admin=True,
+        )
+
+    app.dependency_overrides[current_user] = override_current_user
     clients = (
-        TestClient(app, raise_server_exceptions=False),
-        TestClient(app, raise_server_exceptions=False),
+        TestClient(
+            app,
+            raise_server_exceptions=False,
+            headers={"X-Test-Reviewer": "concurrent-reviewer-a"},
+        ),
+        TestClient(
+            app,
+            raise_server_exceptions=False,
+            headers={"X-Test-Reviewer": "concurrent-reviewer-b"},
+        ),
     )
     return engine, clients, evaluation_id
 
@@ -298,7 +318,7 @@ def test_concurrent_panel_votes_have_one_cas_winner_and_retry_without_loss(
                 select(HumanReview.reviewer_name)
                 .where(HumanReview.panel_id == panel.id)
                 .order_by(HumanReview.reviewer_name)
-            ).all() == ["并发审核员乙", "并发审核员甲"]
+            ).all() == ["concurrent-reviewer-a", "concurrent-reviewer-b"]
             assert db.get(EvaluationResult, evaluation_id).review_revision == 2
     finally:
         _close_concurrent_clients(engine, clients)
@@ -331,8 +351,9 @@ def test_concurrent_lead_adjudications_finalize_and_enqueue_exactly_once(
             )
             voted = clients[0].post(
                 f"/api/evaluations/{evaluation_id}/review-panel/votes",
+                headers={"X-Test-Reviewer": f"blind-reviewer-{index}"},
                 json={
-                    "reviewer_name": f"盲审员{index}",
+                    "reviewer_name": "伪造盲审员",
                     "decision": decision,
                     "expected_panel_revision": index,
                     "note": "形成主审裁决状态",
@@ -395,6 +416,12 @@ def test_concurrent_lead_adjudications_finalize_and_enqueue_exactly_once(
             assert panel.status == "completed"
             assert panel.revision == 4
             assert panel.final_review_id is not None
+            assert db.get(
+                HumanReview, panel.final_review_id
+            ).reviewer_name in {
+                "concurrent-reviewer-a",
+                "concurrent-reviewer-b",
+            }
             assert db.scalar(
                 select(func.count(HumanReview.id)).where(
                     HumanReview.evaluation_id == evaluation_id

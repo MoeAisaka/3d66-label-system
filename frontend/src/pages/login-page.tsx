@@ -70,7 +70,7 @@ export function LoginPage({ user }: { user?: User }) {
           </div>
           <p className="font-data text-xs text-[var(--muted)]">SECURE SIGN IN</p>
           <h2 className="font-editorial mt-3 text-4xl font-bold leading-tight">登录评测工作台</h2>
-          <p className="mt-3 text-sm leading-6 text-[var(--muted)]">使用管理员账号进入。审核员可在进入后填写自己的审核姓名。</p>
+          <p className="mt-3 text-sm leading-6 text-[var(--muted)]">使用管理员账号进入。审核操作会自动记录当前登录账号。</p>
 
           <form
             className="mt-9 space-y-5"

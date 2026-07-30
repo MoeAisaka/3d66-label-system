@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 
 import pytest
+from fastapi import Header
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.exc import IntegrityError
@@ -19,6 +20,8 @@ from app.models import (
     HumanReview,
     MaterialPackage,
     MaterialPackageItem,
+    MigrationItem,
+    MigrationRun,
     ModelConfig,
     PromptVersion,
     ReviewPanel,
@@ -26,6 +29,7 @@ from app.models import (
     SamplingPolicy,
     User,
 )
+from app.security import hash_password
 from app.strategy_bundle import build_strategy_snapshot, get_or_create_bundle
 
 
@@ -145,7 +149,22 @@ def _client_with_result():
         yield db
 
     app.dependency_overrides[get_db] = override_db
-    app.dependency_overrides[current_user] = lambda: user
+    def override_current_user(
+        test_reviewer: str | None = Header(
+            default=None, alias="X-Test-Reviewer"
+        ),
+    ) -> User:
+        if test_reviewer is None:
+            return user
+        return User(
+            username=test_reviewer,
+            password_hash="unused",
+            display_name="测试审核员",
+            is_active=True,
+            is_admin=True,
+        )
+
+    app.dependency_overrides[current_user] = override_current_user
     return engine, db, TestClient(app), result
 
 
@@ -216,6 +235,65 @@ def test_single_reviewer_vote_finishes_initial_review_without_second_round() -> 
         _close(engine, db)
 
 
+def test_login_session_identity_overrides_spoofed_vote_and_query_name() -> None:
+    engine, db, client, result = _client_with_result()
+    try:
+        user = db.query(User).filter_by(username="workflow-owner").one()
+        user.password_hash = hash_password("fixture-password")
+        policy = db.get(ReviewWorkflowPolicy, 1)
+        assert policy is not None
+        policy.initial_reviewers = 3
+        db.commit()
+        app.dependency_overrides.pop(current_user)
+
+        login = client.post(
+            "/api/auth/login",
+            json={
+                "username": "workflow-owner",
+                "password": "fixture-password",
+            },
+        )
+        assert login.status_code == 200, login.text
+        assert login.json()["username"] == "workflow-owner"
+        opened = client.post(
+            f"/api/evaluations/{result.id}/review-panel/open",
+            json={},
+        )
+        assert opened.status_code == 200, opened.text
+
+        voted = client.post(
+            f"/api/evaluations/{result.id}/review-panel/votes",
+            json={
+                "reviewer_name": "伪造审核员",
+                "decision": "approved",
+                "expected_panel_revision": 0,
+                "note": "真实登录会话提交",
+                "corrections": [],
+            },
+        )
+        assert voted.status_code == 200, voted.text
+        assert voted.json()["my_vote"]["decision"] == "approved"
+
+        db.expire_all()
+        panel = db.query(ReviewPanel).filter_by(
+            evaluation_id=result.id
+        ).one()
+        stored_vote = db.query(HumanReview).filter_by(
+            panel_id=panel.id
+        ).one()
+        assert stored_vote.reviewer_name == "workflow-owner"
+
+        fetched = client.get(
+            f"/api/evaluations/{result.id}/review-panel",
+            params={"reviewer_name": "伪造审核员"},
+        )
+        assert fetched.status_code == 200, fetched.text
+        assert fetched.json()["my_vote"]["id"] == stored_vote.id
+        assert fetched.json()["votes"] == []
+    finally:
+        _close(engine, db)
+
+
 def test_panel_size_is_snapshotted_when_global_policy_changes() -> None:
     engine, db, client, result = _client_with_result()
     try:
@@ -263,11 +341,12 @@ def test_three_reviewer_panel_waits_for_all_votes_then_uses_majority() -> None:
         assert opened.status_code == 200
         assert opened.json()["required_reviewers"] == 3
 
-        for index, reviewer in enumerate(("审核员甲", "审核员乙", "审核员丙")):
+        for index, reviewer in enumerate(("reviewer-a", "reviewer-b", "reviewer-c")):
             response = client.post(
                 f"/api/evaluations/{result.id}/review-panel/votes",
+                headers={"X-Test-Reviewer": reviewer},
                 json={
-                    "reviewer_name": reviewer,
+                    "reviewer_name": "伪造姓名",
                     "decision": "approved",
                     "expected_panel_revision": index,
                     "note": "多人盲审确认",
@@ -317,9 +396,9 @@ def test_unresolved_panel_stays_in_initial_workbench_for_lead_adjudication() -> 
 
         for index, (reviewer, decision) in enumerate(
             (
-                ("审核员甲", "approved"),
-                ("审核员乙", "rejected"),
-                ("审核员丙", "corrected"),
+                ("reviewer-a", "approved"),
+                ("reviewer-b", "rejected"),
+                ("reviewer-c", "corrected"),
             )
         ):
             corrections = (
@@ -338,8 +417,9 @@ def test_unresolved_panel_stays_in_initial_workbench_for_lead_adjudication() -> 
             )
             response = client.post(
                 f"/api/evaluations/{result.id}/review-panel/votes",
+                headers={"X-Test-Reviewer": reviewer},
                 json={
-                    "reviewer_name": reviewer,
+                    "reviewer_name": "伪造姓名",
                     "decision": decision,
                     "expected_panel_revision": index,
                     "note": "独立盲审",
@@ -354,8 +434,9 @@ def test_unresolved_panel_stays_in_initial_workbench_for_lead_adjudication() -> 
 
         adjudicated = client.post(
             f"/api/evaluations/{result.id}/review-panel/lead-adjudication",
+            headers={"X-Test-Reviewer": "workflow-lead"},
             json={
-                "lead_reviewer_name": "主审",
+                "lead_reviewer_name": "伪造主审",
                 "decision": "approved",
                 "expected_panel_revision": 3,
                 "note": "主审在初审工作台裁决",
@@ -370,6 +451,47 @@ def test_unresolved_panel_stays_in_initial_workbench_for_lead_adjudication() -> 
         ).one()
         assert db.get(HumanReview, panel.final_review_id).stage == "initial"
         assert panel.evaluation.review_stage == "completed"
+        assert db.get(HumanReview, panel.final_review_id).reviewer_name == (
+            "workflow-lead"
+        )
+    finally:
+        _close(engine, db)
+
+
+def test_migration_review_uses_authenticated_username() -> None:
+    engine, db, client, result = _client_with_result()
+    try:
+        run = MigrationRun(
+            name="审核身份迁移测试",
+            baseline_model_id="baseline-model",
+            candidate_model_id="candidate-model",
+            sample_size=1,
+            created_by="workflow-owner",
+        )
+        db.add(run)
+        db.flush()
+        item = MigrationItem(
+            run_id=run.id,
+            asset_id=result.asset_id,
+            baseline_result_id=result.id,
+            candidate_result_id=result.id,
+            status="review",
+            requires_review=True,
+        )
+        db.add(item)
+        db.commit()
+
+        reviewed = client.post(
+            f"/api/migrations/{run.id}/items/{item.id}/review",
+            json={
+                "verdict": "same",
+                "reviewer_name": "伪造迁移审核员",
+                "note": "身份应取当前登录账号",
+            },
+        )
+        assert reviewed.status_code == 200, reviewed.text
+        db.refresh(item)
+        assert item.reviewer_name == "workflow-owner"
     finally:
         _close(engine, db)
 

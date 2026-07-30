@@ -224,6 +224,10 @@ def test_legacy_secondary_agreement_completes_and_stale_is_409() -> None:
         assert secondary.status_code == 200, secondary.text
         assert secondary.json()["review_stage"] == "completed"
         assert db.query(HumanReview).filter_by(evaluation_id=result.id).count() == 2
+        assert db.query(HumanReview).filter_by(
+            evaluation_id=result.id,
+            stage="secondary",
+        ).one().reviewer_name == "review-owner"
     finally:
         _close(engine, db)
 

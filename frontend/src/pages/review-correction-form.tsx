@@ -57,7 +57,6 @@ export function ReviewCorrectionForm({
   scoring,
   pending,
   editable = true,
-  reviewerReady,
   onSubmit,
 }: {
   dimensions: Record<string, any>
@@ -65,7 +64,6 @@ export function ReviewCorrectionForm({
   scoring: Record<string, any>
   pending: boolean
   editable?: boolean
-  reviewerReady: boolean
   onSubmit: (payload: { note: string; corrections: ReviewCorrection[] }) => void
 }) {
   const dimensionKeys = Object.keys(dimensionLabels)
@@ -146,10 +144,6 @@ export function ReviewCorrectionForm({
   }
 
   function submit() {
-    if (!reviewerReady) {
-      setError("请先填写审核姓名")
-      return
-    }
     if (!changedKeys.length) {
       setError("请至少修改一个维度分数")
       return

@@ -3738,7 +3738,7 @@ def open_review_panel(
 def get_review_panel(
     evaluation_id: int,
     reviewer_name: str | None = None,
-    _user: User = Depends(current_user),
+    user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     panel = db.scalar(
@@ -3748,7 +3748,8 @@ def get_review_panel(
     )
     if not panel:
         raise HTTPException(status_code=404, detail="该结果没有初审组")
-    return _panel_payload(panel, reviewer_name=reviewer_name)
+    # reviewer_name remains parseable for old clients but never selects identity.
+    return _panel_payload(panel, reviewer_name=user.username)
 
 
 @app.get("/api/review-panels")
@@ -3780,7 +3781,7 @@ def list_review_panels(
 def submit_review_panel_vote(
     evaluation_id: int,
     payload: ReviewPanelVoteRequest,
-    _user: User = Depends(current_user),
+    user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     evaluation = db.get(EvaluationResult, evaluation_id)
@@ -3800,7 +3801,7 @@ def submit_review_panel_vote(
     if db.scalar(
         select(HumanReview).where(
             HumanReview.panel_id == panel.id,
-            HumanReview.reviewer_name == payload.reviewer_name,
+            HumanReview.reviewer_name == user.username,
         )
     ):
         raise HTTPException(status_code=409, detail="当前审核员已经提交盲审")
@@ -3832,7 +3833,7 @@ def submit_review_panel_vote(
         evaluation_id=evaluation.id,
         panel_id=panel.id,
         panel_revision=payload.expected_panel_revision,
-        reviewer_name=payload.reviewer_name,
+        reviewer_name=user.username,
         stage="initial",
         decision=payload.decision,
         corrected_level=corrected_level,
@@ -3900,14 +3901,14 @@ def submit_review_panel_vote(
     db.commit()
     db.expire(evaluation, ["reviews"])
     db.refresh(panel)
-    return _panel_payload(panel, reviewer_name=payload.reviewer_name)
+    return _panel_payload(panel, reviewer_name=user.username)
 
 
 @app.post("/api/evaluations/{evaluation_id}/review-panel/lead-adjudication")
 def adjudicate_review_panel(
     evaluation_id: int,
     payload: ReviewPanelAdjudicationRequest,
-    _user: User = Depends(current_user),
+    user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     evaluation = db.get(EvaluationResult, evaluation_id)
@@ -3931,7 +3932,7 @@ def adjudicate_review_panel(
         expected_panel_revision=payload.expected_panel_revision,
         decision=payload.decision,
         corrections=[item.model_dump() for item in payload.corrections],
-        reviewer_name=payload.lead_reviewer_name,
+        reviewer_name=user.username,
         note=payload.note or "初审工作台主审裁决",
         final_stage="initial",
         resolution_mode="lead_adjudication",
@@ -3952,7 +3953,7 @@ def adjudicate_review_panel(
     )
     db.commit()
     db.refresh(panel)
-    return _panel_payload(panel, reviewer_name=payload.lead_reviewer_name)
+    return _panel_payload(panel, reviewer_name=user.username)
 
 
 @app.get("/api/optimization-cases")
@@ -4840,7 +4841,7 @@ def list_audit_events(
 def create_review(
     evaluation_id: int,
     payload: ReviewRequest,
-    _user: User = Depends(current_user),
+    user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     evaluation = db.get(EvaluationResult, evaluation_id)
@@ -4976,7 +4977,7 @@ def create_review(
     review = HumanReview(
         evaluation_id=evaluation_id,
         stage=payload.expected_stage,
-        reviewer_name=payload.reviewer_name,
+        reviewer_name=user.username,
         decision=payload.decision,
         note=payload.note,
         corrected_level=corrected_level,
@@ -5889,7 +5890,7 @@ def attach_paired_regression_results(
 def approve_paired_regression(
     run_id: int,
     payload: PairedRegressionApprovalRequest,
-    _user: User = Depends(current_user),
+    user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     run = db.get(PromptRegressionRun, run_id)
@@ -5904,7 +5905,7 @@ def approve_paired_regression(
     if run.approval_status != "pending":
         if (
             run.approval_status == payload.status
-            and run.approved_by == payload.reviewer_name
+            and run.approved_by == user.username
             and run.approval_note == payload.note
         ):
             return {
@@ -5914,7 +5915,7 @@ def approve_paired_regression(
             }
         raise HTTPException(status_code=409, detail="人工批准结论已经冻结")
     run.approval_status = payload.status
-    run.approved_by = payload.reviewer_name
+    run.approved_by = user.username
     run.approval_note = payload.note
     run.approved_at = datetime.now(timezone.utc)
     db.commit()
@@ -6418,7 +6419,7 @@ def review_migration_item(
     run_id: int,
     item_id: int,
     payload: MigrationReviewRequest,
-    _user: User = Depends(current_user),
+    user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ) -> dict[str, bool]:
     item = db.scalar(
@@ -6427,7 +6428,7 @@ def review_migration_item(
     if not item or item.candidate_result_id is None:
         raise HTTPException(status_code=404, detail="迁移样本尚未生成候选结果")
     item.human_verdict = payload.verdict
-    item.reviewer_name = payload.reviewer_name
+    item.reviewer_name = user.username
     item.review_note = payload.note
     item.reviewed_at = datetime.now(timezone.utc)
     item.status = "reviewed"

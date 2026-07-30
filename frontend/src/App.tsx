@@ -80,17 +80,17 @@ export default function App() {
             <Route path="workflow/materials/packages" element={<AssetsPage view="packages" />} />
             <Route path="workflow/materials/assets" element={<AssetsPage view="assets" />} />
             <Route path="workflow/materials/jobs" element={<JobsPage />} />
-            <Route path="workflow/review/:reviewView" element={<Suspense fallback={<RouteLoading />}><ReviewPage /></Suspense>} />
+            <Route path="workflow/review/:reviewView" element={<Suspense fallback={<RouteLoading />}><ReviewPage user={user} /></Suspense>} />
             <Route path="workflow/optimization/cases" element={<Suspense fallback={<RouteLoading />}><OptimizationCasesPage /></Suspense>} />
             <Route path="workflow/optimization/automation" element={<Suspense fallback={<RouteLoading />}><AutomationControlPage /></Suspense>} />
             <Route path="workflow/optimization/feedback" element={<Suspense fallback={<RouteLoading />}><ProductionFeedbackPage /></Suspense>} />
             <Route path="workflow/optimization/candidates" element={<Suspense fallback={<RouteLoading />}><PromptCandidatesPage /></Suspense>} />
-            <Route path="workflow/optimization/paired-regression" element={<Suspense fallback={<RouteLoading />}><PairedRegressionPage /></Suspense>} />
+            <Route path="workflow/optimization/paired-regression" element={<Suspense fallback={<RouteLoading />}><PairedRegressionPage user={user} /></Suspense>} />
             <Route path="workflow/releases/decisions" element={<Suspense fallback={<RouteLoading />}><ReleaseWorkspacePage view="decisions" /></Suspense>} />
             <Route path="workflow/releases/metrics" element={<Suspense fallback={<RouteLoading />}><ReleaseWorkspacePage view="metrics" /></Suspense>} />
             <Route path="workflow/releases/history" element={<Suspense fallback={<RouteLoading />}><ReleaseWorkspacePage view="history" /></Suspense>} />
             <Route path="workflow/models/benchmark" element={<Suspense fallback={<RouteLoading />}><BenchmarkPage /></Suspense>} />
-            <Route path="workflow/models/migration" element={<MigrationsPage />} />
+            <Route path="workflow/models/migration" element={<MigrationsPage user={user} />} />
             <Route path="workflow/models/candidates" element={<Suspense fallback={<RouteLoading />}><CapabilityStatusPage kind="candidates" /></Suspense>} />
             <Route path="workflow/governance/model-config" element={<ModelPage />} />
             <Route path="workflow/governance/canary" element={<Suspense fallback={<RouteLoading />}><CanaryRunsPage /></Suspense>} />
@@ -106,7 +106,7 @@ export default function App() {
             <Route path="historical-corrections" element={<Navigate to="/legacy/historical-corrections" replace />} />
             <Route path="migrations" element={<Navigate to="/workflow/models/migration" replace />} />
             <Route path="canary-runs" element={<Navigate to="/workflow/governance/canary" replace />} />
-            <Route path="legacy/review/:reviewStage" element={<Suspense fallback={<RouteLoading />}><ReviewPage /></Suspense>} />
+            <Route path="legacy/review/:reviewStage" element={<Suspense fallback={<RouteLoading />}><ReviewPage user={user} /></Suspense>} />
             <Route path="legacy/sample-sets" element={<Suspense fallback={<RouteLoading />}><SampleSetsPage /></Suspense>} />
             <Route path="legacy/historical-corrections" element={<Suspense fallback={<RouteLoading />}><HistoricalCorrectionsPage /></Suspense>} />
           </Route>

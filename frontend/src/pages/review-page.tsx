@@ -18,7 +18,7 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { api, jsonBody } from "@/lib/api"
-import type { EvaluationRecord, ReviewCorrection, ReviewPanelSummary, ReviewStage } from "@/lib/types"
+import type { EvaluationRecord, ReviewCorrection, ReviewPanelSummary, ReviewStage, User } from "@/lib/types"
 import { dimensionLabels, ReviewCorrectionForm } from "@/pages/review-correction-form"
 import {
   filterReviewAssets,
@@ -44,7 +44,7 @@ function samplingTone(tier: EvaluationRecord["sampling"]["tier"]) {
   return "neutral" as const
 }
 
-export function ReviewPage() {
+export function ReviewPage({ user }: { user: User }) {
   const { reviewStage: requestedStage, reviewView: requestedView } = useParams()
   const reviewView = normalizeReviewView(requestedView)
   const reviewStage = reviewView === "completed"
@@ -56,7 +56,7 @@ export function ReviewPage() {
   const requestedEvaluationId = Number(searchParams.get("evaluation") || 0)
   const legacyAssetId = Number(searchParams.get("asset") || 0)
   const [zoom, setZoom] = useState(100)
-  const [reviewer, setReviewer] = useState(() => localStorage.getItem("3d66-reviewer") || "")
+  const reviewer = user.username
   const [note, setNote] = useState("")
   const queryClient = useQueryClient()
   const evaluations = useQuery({
@@ -156,7 +156,6 @@ export function ReviewPage() {
       const nextEvaluation =
         filteredAssets[currentIndex + 1]?.evaluation ??
         filteredAssets[currentIndex - 1]?.evaluation
-      localStorage.setItem("3d66-reviewer", reviewer)
       setNote("")
       toast.success(variables.decision === "corrected" ? "人工维度纠错和最终结果已保存" : variables.decision === "approved" ? "已确认模型结果" : "已退回复核")
       await Promise.all([
@@ -344,16 +343,15 @@ export function ReviewPage() {
                     </details>
                   )}
                   <div className="grid grid-cols-2 gap-3 px-5 pt-5">
-                    <label><span className="mb-2 block text-xs font-semibold">审核姓名</span><Input value={reviewer} onChange={(event) => setReviewer(event.target.value)} placeholder="例如：小陈" /></label>
+                    <label><span className="mb-2 block text-xs font-semibold">审核账号（当前登录）</span><Input value={reviewer} readOnly /></label>
                     <label><span className="mb-2 block text-xs font-semibold">模型置信度</span><div className="font-data flex h-11 items-center border border-[var(--line)] bg-[#fafbf8] px-3">{evaluation.confidence != null ? `${Math.round(evaluation.confidence * 100)}%` : "—"}</div></label>
                   </div>
                   {evaluation.review_stage !== "completed" && <div className="px-5 pb-5"><label className="mt-3 block"><span className="mb-2 block text-xs font-semibold">审核说明（确认或退回时可选）</span><Input value={note} onChange={(event) => setNote(event.target.value)} placeholder="补充判断依据" /></label>
                   <div className="mt-3 grid grid-cols-2 gap-2">
-                    <Button variant="secondary" onClick={() => review.mutate({ decision: "rejected", corrected_level: null, reviewNote: note.trim() })} disabled={!reviewer || review.isPending}>退回复核</Button>
-                    <Button onClick={() => review.mutate({ decision: "approved", corrected_level: null, reviewNote: note.trim() })} disabled={!reviewer || review.isPending}><Check weight="bold" />确认结果</Button>
+                    <Button variant="secondary" onClick={() => review.mutate({ decision: "rejected", corrected_level: null, reviewNote: note.trim() })} disabled={review.isPending}>退回复核</Button>
+                    <Button onClick={() => review.mutate({ decision: "approved", corrected_level: null, reviewNote: note.trim() })} disabled={review.isPending}><Check weight="bold" />确认结果</Button>
                   </div></div>}
-                  <ReviewCorrectionForm key={`${evaluation.id}-${evaluation.review_revision}`} dimensions={dimensions} precheck={evaluation?.precheck ?? {}} scoring={scoring ?? {}} pending={review.isPending} editable={evaluation.review_stage !== "completed"} reviewerReady={Boolean(reviewer.trim())} onSubmit={({ note: correctionNote, corrections }) => {
-                    if (!reviewer.trim()) { toast.error("请先填写审核姓名"); return }
+                  <ReviewCorrectionForm key={`${evaluation.id}-${evaluation.review_revision}`} dimensions={dimensions} precheck={evaluation?.precheck ?? {}} scoring={scoring ?? {}} pending={review.isPending} editable={evaluation.review_stage !== "completed"} onSubmit={({ note: correctionNote, corrections }) => {
                     review.mutate({ decision: "corrected", corrected_level: null, reviewNote: correctionNote, corrections })
                   }} />
                 </div>

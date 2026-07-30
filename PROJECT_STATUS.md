@@ -11,6 +11,36 @@
 - 远程仓库：`origin = https://github.com/chishiyu07-max/3d66-label-system.git`
 - 分支关系：每次交付以 `git status -sb` 的实时结果为准。
 
+## 最新完成：审核身份自动取当前登录账号（2026-07-30）
+
+> 隔离工作树：`/Users/yukina/OpenClaw/labellab-ux`；分支：
+> `ux-single-reviewer`；指定基线：`f057aaf013bdda85fca5df0430fb3f086b85af60`。
+> 本次未推送、未部署，也未修改正式数据、生产目录或其他工作树。
+
+已实现：
+
+- 评测审核、模型迁移和配对回归三个实际可编辑入口改为只读展示
+  `/api/auth/me` 返回的当前登录账号，不再使用独立审核姓名或
+  `localStorage` 缓存。基线中“例如：小陈”精确 placeholder 实际只有
+  `frontend/src/pages/review-page.tsx` 一处，不是历史盘点的四处；另外两处
+  分别使用“填写后可提交”和无 placeholder。
+- 历史二审/仲裁、初审盲审、主审裁决、配对回归审批和模型迁移复核全部从
+  `current_user.username` 写入审核身份。旧 `reviewer_name` /
+  `lead_reviewer_name` 字段继续解析，但不参与查重、落库或幂等判断。
+- 初审组详情的旧 `reviewer_name` 查询参数不再决定“我的票”，防止通过
+  客户端姓名读取其他审核员尚未公开的盲审票。长期决策见 ADR-0019。
+- 多人投票测试改用不同认证账号；ReviewPanel 仍收齐全部冻结席位后按既有
+  B 口径结算。
+
+已通过验证：
+
+- 审核身份与相关工作流专项：`28 passed, 1 warning`。
+- MacBook 控制面使用临时 `DATA_DIR` 执行后端全量：
+  `405 passed, 1 skipped, 1 warning`，退出码 0。
+- 前端 `npm run lint`：退出码 0；`npm run build`：退出码 0。
+- `git diff --check`：通过；
+  `git grep -n 'placeholder="例如：小陈"' -- frontend/src`：0 命中。
+
 ## 最新完成：ADR-0016 真实执行器与生产回流对接件（2026-07-30）
 
 > 隔离工作树：`/Users/yukina/OpenClaw/labellab-adr16`；分支：

@@ -9,7 +9,7 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { api, jsonBody } from "@/lib/api"
-import type { RegressionDetail, RegressionSummary } from "@/lib/types"
+import type { RegressionDetail, RegressionSummary, User } from "@/lib/types"
 
 type PairedRegressionItem = RegressionDetail["items"][number] & {
   sample_role?: "target_error" | "stable_control" | "blind_holdout"
@@ -25,10 +25,10 @@ const roleNames: Record<NonNullable<PairedRegressionItem["sample_role"]>, string
   blind_holdout: "锁定盲测",
 }
 
-export function PairedRegressionPage() {
+export function PairedRegressionPage({ user }: { user: User }) {
   const queryClient = useQueryClient()
   const [searchParams, setSearchParams] = useSearchParams()
-  const [reviewer, setReviewer] = useState(() => localStorage.getItem("3d66-reviewer") || "")
+  const reviewer = user.username
   const [note, setNote] = useState("")
   const regressions = useQuery({
     queryKey: ["prompt-regressions"],
@@ -80,7 +80,6 @@ export function PairedRegressionPage() {
         }),
       }),
     onSuccess: async (_data, status) => {
-      localStorage.setItem("3d66-reviewer", reviewer.trim())
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ["prompt-regressions"] }),
         queryClient.invalidateQueries({ queryKey: ["prompt-regression", selectedRunId] }),
@@ -234,8 +233,8 @@ export function PairedRegressionPage() {
                 {summary.approval_status === "pending" && (
                   <div className="mt-5 grid gap-3 lg:grid-cols-[220px_minmax(0,1fr)_auto_auto] lg:items-end">
                     <label>
-                      <span className="mb-2 block text-xs font-semibold">审核人</span>
-                      <Input value={reviewer} onChange={(event) => setReviewer(event.target.value)} />
+                      <span className="mb-2 block text-xs font-semibold">审核账号（当前登录）</span>
+                      <Input value={reviewer} readOnly />
                     </label>
                     <label>
                       <span className="mb-2 block text-xs font-semibold">人工结论说明（必填）</span>
