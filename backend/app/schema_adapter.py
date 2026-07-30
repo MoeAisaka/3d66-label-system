@@ -6,6 +6,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from .dimension_schema_registry import SPACE_INPUT_DIMENSION_ALIASES
 from .models import EvaluationResult
 from .scoring import ENGINE_VERSION, calculate_score
 
@@ -114,11 +115,7 @@ def normalize_precheck_business_rules(precheck: dict[str, Any]) -> dict[str, Any
     return precheck
 
 
-COMBINED_DIMENSION_ALIASES = {
-    "spatial_design_coherence": "spatial_design_furnishing",
-    "detail_finish": "detail_completion",
-    "contemporary_relevance": "inspiration_reference",
-}
+COMBINED_DIMENSION_ALIASES = SPACE_INPUT_DIMENSION_ALIASES
 
 
 def is_combined_aesthetic_response(payload: dict[str, Any]) -> bool:

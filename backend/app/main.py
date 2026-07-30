@@ -161,7 +161,11 @@ from .review_panel import (
 )
 from .review_sampling import build_review_sampling
 from .risk_review import RISK_REVIEW_VERSION
-from .scoring import ENGINE_VERSION, calculate_corrected_score
+from .scoring import (
+    ENGINE_VERSION,
+    calculate_corrected_score,
+    dimension_schema_from_strategy_snapshot,
+)
 from .strategy_bundle import (
     build_strategy_snapshot,
     get_or_create_bundle,
@@ -3625,6 +3629,20 @@ def _claim_review_panel_revision_or_409(
         ) from None
 
 
+def _evaluation_aesthetic_and_dimension_schema(
+    evaluation: EvaluationResult,
+) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    aesthetic = (
+        json.loads(evaluation.aesthetic_json)
+        if evaluation.aesthetic_json
+        else None
+    )
+    return aesthetic, dimension_schema_from_strategy_snapshot(
+        evaluation.strategy_snapshot_json,
+        aesthetic=aesthetic,
+    )
+
+
 def _finalize_review_panel(
     db: Session,
     *,
@@ -3645,18 +3663,18 @@ def _finalize_review_panel(
     corrected_score = None
     corrected_level = None
     if decision == "corrected":
+        aesthetic, dimension_schema = (
+            _evaluation_aesthetic_and_dimension_schema(evaluation)
+        )
         recalculated = calculate_corrected_score(
             json.loads(evaluation.precheck_json),
-            (
-                json.loads(evaluation.aesthetic_json)
-                if evaluation.aesthetic_json
-                else None
-            ),
+            aesthetic,
             [
                 correction
                 for correction in corrections
                 if correction.get("target_type") == "dimension"
             ],
+            dimension_schema=dimension_schema,
         )
         corrected_score = recalculated.get("score")
         corrected_level = recalculated.get("level")
@@ -3859,14 +3877,14 @@ def submit_review_panel_vote(
     correction_data = [item.model_dump() for item in payload.corrections]
     if payload.decision == "corrected":
         try:
+            aesthetic, dimension_schema = (
+                _evaluation_aesthetic_and_dimension_schema(evaluation)
+            )
             recalculated = calculate_corrected_score(
                 json.loads(evaluation.precheck_json),
-                (
-                    json.loads(evaluation.aesthetic_json)
-                    if evaluation.aesthetic_json
-                    else None
-                ),
+                aesthetic,
                 correction_data,
+                dimension_schema=dimension_schema,
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -4933,10 +4951,14 @@ def create_review(
     corrected_level = None
     if payload.decision == "corrected":
         try:
+            aesthetic, dimension_schema = (
+                _evaluation_aesthetic_and_dimension_schema(evaluation)
+            )
             recalculated = calculate_corrected_score(
                 json.loads(evaluation.precheck_json),
-                json.loads(evaluation.aesthetic_json) if evaluation.aesthetic_json else None,
+                aesthetic,
                 correction_data,
+                dimension_schema=dimension_schema,
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc

@@ -61,6 +61,9 @@ from .schema_adapter import (
     is_combined_aesthetic_response,
     normalize_precheck_business_rules,
 )
+from .dimension_schema_registry import (
+    space_schema_definition_for_scoring_profile,
+)
 from .regression import (
     complete_paired_regression_item,
     complete_regression_item,
@@ -75,9 +78,11 @@ from .risk_review import (
 )
 from .seed import seed_defaults
 from .strategy_bundle import (
+    STRATEGY_SCHEMA_VERSION,
     build_evaluation_strategy_snapshot,
     build_strategy_snapshot,
     get_or_create_bundle,
+    resolve_frozen_dimension_entry,
 )
 from .baseline_regression import complete_baseline_item, fail_baseline_item
 
@@ -627,7 +632,25 @@ async def evaluate_job(job_id: int) -> None:
 
     risk_review_report = None
     risk_review_raw = None
-    preliminary_scoring = calculate_score(precheck, aesthetic)
+    dimension_definition = (
+        resolve_frozen_dimension_entry(
+            bundle=frozen_bundle,
+            aesthetic=aesthetic,
+        )["definition"]
+        if frozen_bundle is not None
+        and frozen_bundle.strategy_schema_version
+        == STRATEGY_SCHEMA_VERSION
+        else space_schema_definition_for_scoring_profile(
+            aesthetic.get("scoring_profile")
+            if isinstance(aesthetic, dict)
+            else None
+        )
+    )
+    preliminary_scoring = calculate_score(
+        precheck,
+        aesthetic,
+        dimension_schema=dimension_definition,
+    )
     trigger_reasons = risk_review_reasons(precheck, aesthetic, preliminary_scoring)
     risk_review_enabled = bool(model_config.high_risk_review_enabled)
     if frozen_bundle is not None:
@@ -664,7 +687,27 @@ async def evaluate_job(job_id: int) -> None:
 
     _set_job(job_id, stage="scoring", progress=86)
     _ensure_job_processing(job_id)
-    scoring = calculate_score(precheck, aesthetic)
+    if frozen_bundle is not None and (
+        frozen_bundle.strategy_schema_version
+        == STRATEGY_SCHEMA_VERSION
+    ):
+        dimension_definition = resolve_frozen_dimension_entry(
+            bundle=frozen_bundle,
+            aesthetic=aesthetic,
+        )["definition"]
+    elif frozen_bundle is None:
+        dimension_definition = (
+            space_schema_definition_for_scoring_profile(
+                aesthetic.get("scoring_profile")
+                if isinstance(aesthetic, dict)
+                else None
+            )
+        )
+    scoring = calculate_score(
+        precheck,
+        aesthetic,
+        dimension_schema=dimension_definition,
+    )
     now = datetime.now(timezone.utc)
     with session_scope() as db:
         current_job = db.get(EvaluationJob, job_id)

@@ -11,6 +11,11 @@ SPACE_SCHEMA_KEY = "space_aesthetic"
 SPACE_PACKAGE_VERSION = "v1"
 HISTORICAL_DEFAULT_VERSION = "1.0.0-legacy-default"
 ACTIVE_V13_VERSION = "1.3.0"
+SPACE_INPUT_DIMENSION_ALIASES = {
+    "spatial_design_coherence": "spatial_design_furnishing",
+    "detail_finish": "detail_completion",
+    "contemporary_relevance": "inspiration_reference",
+}
 
 _GRADE_POINTS = {"1": 20.0, "2": 45.0, "3": 65.0, "4": 82.0, "5": 95.0}
 _LEVEL_THRESHOLDS = {"L2": 40.0, "L3": 60.0, "L4": 75.0, "L5": 90.0}
@@ -290,6 +295,26 @@ _MATERIALIZED_SCHEMAS = (
         ),
     },
 )
+
+
+def space_schema_definition_for_version(version: str) -> dict[str, Any]:
+    """Return an isolated copy of one materialized space scoring contract."""
+    for row in _MATERIALIZED_SCHEMAS:
+        if row["version"] == version:
+            return deepcopy(row["definition"])
+    raise ValueError(f"未知的空间维度兼容修订：{version}")
+
+
+def space_schema_definition_for_scoring_profile(
+    scoring_profile: object,
+) -> dict[str, Any]:
+    """Resolve the P1 compatibility revision without changing routing behavior."""
+    version = (
+        ACTIVE_V13_VERSION
+        if scoring_profile == "space_aesthetic_v1.3"
+        else HISTORICAL_DEFAULT_VERSION
+    )
+    return space_schema_definition_for_version(version)
 
 
 def materialized_space_schema_rows() -> list[dict[str, Any]]:

@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from copy import deepcopy
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
@@ -1070,7 +1071,91 @@ def build_evaluation_strategy_snapshot(
     if snapshot["schema_version"] == LEGACY_STRATEGY_SCHEMA_VERSION:
         return _canonical_json(snapshot)
 
-    dimension_set = snapshot.get("dimension_schema_set")
+    selected = resolve_frozen_dimension_entry(
+        bundle=bundle,
+        aesthetic=aesthetic,
+    )
+    schema = db.scalar(
+        select(DimensionSchema).where(
+            DimensionSchema.schema_key == selected["schema_key"],
+            DimensionSchema.version == selected["version"],
+            DimensionSchema.canonical_hash == selected["canonical_hash"],
+            DimensionSchema.status.in_(("published", "retired")),
+        )
+    )
+    if schema is None:
+        raise ValueError("冻结 DimensionSchema 在注册表中不存在")
+    definition = json.loads(schema.definition_json)
+    if (
+        selected.get("definition") != definition
+        or _compute_canonical_hash(definition) != schema.canonical_hash
+    ):
+        raise ValueError("冻结 DimensionSchema 与注册表定义不一致")
+
+    prompt_b_hash = (
+        _compute_canonical_hash(_build_prompt_definition(prompt_b))
+        if prompt_b is not None
+        else None
+    )
+    scoring_profile = (
+        aesthetic.get("scoring_profile")
+        if isinstance(aesthetic, dict)
+        else None
+    )
+    route_decision = {
+        "policy_id": bundle.dimension_route_policy_id,
+        "family_key": schema.family_key,
+        "dimension_schema_id": schema.id,
+        "dimension_schema_key": schema.schema_key,
+        "dimension_schema_version": schema.version,
+        "dimension_schema_hash": schema.canonical_hash,
+        "input": {"scoring_profile": scoring_profile},
+        "reason": (
+            "scoring_profile_matches_active_v1_3"
+            if schema.version == ACTIVE_V13_VERSION
+            else "historical_default_compatibility"
+        ),
+        "needs_review": False,
+    }
+    resolution = {
+        "resolved_dimension_schema_id": schema.id,
+        "resolved_dimension_schema_key": schema.schema_key,
+        "resolved_dimension_schema_version": schema.version,
+        "resolved_dimension_schema_hash": schema.canonical_hash,
+        "resolved_dimensions_snapshot": definition,
+        "resolved_prompt_b_hash": prompt_b_hash,
+        "route_decision_snapshot": route_decision,
+    }
+    snapshot.update(resolution)
+    snapshot["resolved_snapshot_hash"] = _compute_canonical_hash(
+        resolution
+    )
+    _assert_no_sensitive_material(snapshot)
+    return _canonical_json(snapshot)
+
+
+def resolve_frozen_dimension_entry(
+    *,
+    bundle: StrategyBundle,
+    aesthetic: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Resolve one definition only from the bundle's immutable candidate set."""
+    schema_version = (
+        bundle.strategy_schema_version
+        or LEGACY_STRATEGY_SCHEMA_VERSION
+    )
+    if schema_version == LEGACY_STRATEGY_SCHEMA_VERSION:
+        raise ValueError(
+            "strategy-bundle-v1 没有冻结 DimensionSchema"
+        )
+    if schema_version != STRATEGY_SCHEMA_VERSION:
+        raise ValueError("不支持的 StrategyBundle 快照版本")
+    try:
+        dimension_set = json.loads(
+            bundle.dimension_schema_set_snapshot or ""
+        )
+    except json.JSONDecodeError as exc:
+        raise ValueError("StrategyBundle 冻结维度集合已损坏") from exc
     entries = (
         dimension_set.get("schemas")
         if isinstance(dimension_set, dict)
@@ -1101,59 +1186,14 @@ def build_evaluation_strategy_snapshot(
     )
     if selected is None:
         raise ValueError("冻结维度集合缺少所需空间兼容修订")
-
-    schema = db.scalar(
-        select(DimensionSchema).where(
-            DimensionSchema.schema_key == selected["schema_key"],
-            DimensionSchema.version == selected["version"],
-            DimensionSchema.canonical_hash == selected["canonical_hash"],
-            DimensionSchema.status.in_(("published", "retired")),
-        )
-    )
-    if schema is None:
-        raise ValueError("冻结 DimensionSchema 在注册表中不存在")
-    definition = json.loads(schema.definition_json)
+    definition = selected.get("definition")
     if (
-        selected.get("definition") != definition
-        or _compute_canonical_hash(definition) != schema.canonical_hash
+        not isinstance(definition, dict)
+        or _compute_canonical_hash(definition)
+        != selected.get("canonical_hash")
     ):
-        raise ValueError("冻结 DimensionSchema 与注册表定义不一致")
-
-    prompt_b_hash = (
-        _compute_canonical_hash(_build_prompt_definition(prompt_b))
-        if prompt_b is not None
-        else None
-    )
-    route_decision = {
-        "policy_id": bundle.dimension_route_policy_id,
-        "family_key": schema.family_key,
-        "dimension_schema_id": schema.id,
-        "dimension_schema_key": schema.schema_key,
-        "dimension_schema_version": schema.version,
-        "dimension_schema_hash": schema.canonical_hash,
-        "input": {"scoring_profile": scoring_profile},
-        "reason": (
-            "scoring_profile_matches_active_v1_3"
-            if resolved_version == ACTIVE_V13_VERSION
-            else "historical_default_compatibility"
-        ),
-        "needs_review": False,
-    }
-    resolution = {
-        "resolved_dimension_schema_id": schema.id,
-        "resolved_dimension_schema_key": schema.schema_key,
-        "resolved_dimension_schema_version": schema.version,
-        "resolved_dimension_schema_hash": schema.canonical_hash,
-        "resolved_dimensions_snapshot": definition,
-        "resolved_prompt_b_hash": prompt_b_hash,
-        "route_decision_snapshot": route_decision,
-    }
-    snapshot.update(resolution)
-    snapshot["resolved_snapshot_hash"] = _compute_canonical_hash(
-        resolution
-    )
-    _assert_no_sensitive_material(snapshot)
-    return _canonical_json(snapshot)
+        raise ValueError("冻结 DimensionSchema 规范哈希无法复算")
+    return deepcopy(selected)
 
 
 def safe_strategy_snapshot_payload(
