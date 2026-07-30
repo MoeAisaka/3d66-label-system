@@ -221,6 +221,31 @@ def test_other_platforms_fail_closed(monkeypatch: pytest.MonkeyPatch) -> None:
         security.unprotect_secret("keychain:v1:model-config")
 
 
+def test_non_windows_dpapi_guard_rejects_before_loading_windows_libraries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    windows_library_calls: list[str] = []
+
+    def fail_if_windows_library_is_loaded(name: str, **_kwargs: object) -> object:
+        windows_library_calls.append(name)
+        raise AssertionError("non-Windows test must not load a Windows library")
+
+    monkeypatch.setattr(security.sys, "platform", "linux")
+    monkeypatch.setattr(
+        security.ctypes,
+        "WinDLL",
+        fail_if_windows_library_is_loaded,
+        raising=False,
+    )
+
+    with pytest.raises(security.SecretStorageError, match="只能在 Windows"):
+        security._get_windows_dpapi()
+    with pytest.raises(security.SecretStorageError, match="只能在 Windows"):
+        security._WindowsDPAPI()
+
+    assert windows_library_calls == []
+
+
 def test_windows_new_dpapi_prefix_and_legacy_unprefixed_ciphertext_are_supported(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -404,6 +429,12 @@ def test_macos_keychain_real_isolated_round_trip_update_and_cleanup() -> None:
 
     try:
         keychain.delete_secret(account, missing_ok=True)
+    except security.SecretStorageError as exc:
+        if "OSStatus -50" in str(exc):
+            pytest.skip("当前执行沙箱不允许访问登录 Keychain")
+        raise
+
+    try:
         keychain.set_secret(account, FAKE_SECRET_V1)
         assert keychain.get_secret(account) == FAKE_SECRET_V1
 

@@ -103,6 +103,8 @@ def _to_blob(data: bytes) -> tuple[_DataBlob, ctypes.Array[ctypes.c_char]]:
 
 class _WindowsDPAPI:
     def __init__(self) -> None:
+        if sys.platform != "win32":
+            raise SecretStorageError("Windows DPAPI 只能在 Windows 上初始化")
         try:
             crypt32 = ctypes.WinDLL("crypt32", use_last_error=True)
             kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -555,6 +557,8 @@ class _MacOSKeychain:
 
 
 def _get_windows_dpapi() -> _WindowsDPAPI:
+    if sys.platform != "win32":
+        raise SecretStorageError("Windows DPAPI 只能在 Windows 上调用")
     return _WindowsDPAPI()
 
 
