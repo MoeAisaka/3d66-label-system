@@ -11,39 +11,6 @@
 - 远程仓库：`origin = https://github.com/chishiyu07-max/3d66-label-system.git`
 - 分支关系：每次交付以 `git status -sb` 的实时结果为准。
 
-## 最新完成：lite.3 服务端约束与提示词校准对齐（2026-07-30）
-
-> 隔离工作树：`/Volumes/OC-PRIMARY-4T/OpenClawProjects/wt-lite3-server-20260730`；
-> 分支：`lite3-server-alignment`；起始基线：`261d18f`。交付提交的精确哈希
-> 见本次最终 `__RESULT__`。本次未推送、未部署、未调用模型，未修改提示词、
-> 前端、A/B 指针、正式数据或其他工作树。
-
-已完成：
-
-- `schema_adapter.py` 的专业摄影证据门由四条降为三条；三条证据保留
-  `professional_photography=yes`，两条仍由服务端否决并转现场记录。
-- 画质自动否决专业摄影改为从实际枚举的 `moderate`（提示词定义为“明显问题”）
-  起触发；`slight` 不再连带否决，`severe/unusable` 仍因高于门槛而否决。
-- `partial_space` 不再自动注入 `presentation_incomplete`、抬高画质严重度或
-  否决专业摄影；实景且非随拍时转 `documentary_record=yes` 的原分支保持不变。
-- lite/split.3 的八维坍缩重评门槛由六个同档降为五个同档，重评提示语同步为
-  “至少五个”；四个同档不触发。
-- 旧语义断言已按新合同显式更新，并新增/保留各边界的正反向回归用例。
-
-验证：
-
-- 服务端约束与坍缩专项：`10 passed`。
-- 使用隔离临时 `DATA_DIR` 执行全量 backend pytest：
-  `412 passed, 1 skipped, 2 warnings`，退出码 0。
-- `git diff --check`：通过。
-- 两条 warning 为 TestClient/httpx 弃用提示及 baseline regression 的既有
-  SQLAlchemy NULL identity 警告；本次无前端改动，按合同未执行前端构建或浏览器验收。
-
-当前进行中与下一步：
-
-- 本合同范围内无遗留实现项；后续由 Owner 使用锁定样本复测 lite.3 候选组合。
-- A/B 指针、提示词发布、部署和真实模型调用仍保持未执行状态。
-
 ## 最新完成：审核身份自动取当前登录账号（2026-07-30）
 
 > 隔离工作树：`/Users/yukina/OpenClaw/labellab-ux`；分支：

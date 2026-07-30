@@ -22,9 +22,10 @@ def aesthetic_with_grades(grades: list[int]) -> dict[str, object]:
     }
 
 
-def test_grade_collapse_detects_five_matching_dimensions() -> None:
-    assert aesthetic_grade_collapse(aesthetic_with_grades([3] * 5 + [2, 4, 5])) is True
+def test_grade_collapse_detects_uniform_and_seven_to_one_results() -> None:
+    assert aesthetic_grade_collapse(aesthetic_with_grades([3] * 8)) is True
+    assert aesthetic_grade_collapse(aesthetic_with_grades([3] * 7 + [4])) is True
 
 
-def test_grade_collapse_allows_at_most_four_matching_dimensions() -> None:
+def test_grade_collapse_allows_evidence_based_spread() -> None:
     assert aesthetic_grade_collapse(aesthetic_with_grades([2, 2, 2, 3, 3, 3, 3, 4])) is False
