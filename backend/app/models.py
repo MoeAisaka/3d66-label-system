@@ -532,6 +532,118 @@ class StrategyBundle(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
+class DimensionSchema(Base):
+    __tablename__ = "dimension_schemas"
+    __table_args__ = (
+        CheckConstraint(
+            "length(trim(schema_key)) > 0",
+            name="ck_dimension_schemas_schema_key",
+        ),
+        CheckConstraint(
+            "length(trim(version)) > 0",
+            name="ck_dimension_schemas_version",
+        ),
+        CheckConstraint(
+            "schema_type IN ('core','family_pack','extension')",
+            name="ck_dimension_schemas_schema_type",
+        ),
+        CheckConstraint(
+            "family_key IN ('space','product','graphic','intent','common')",
+            name="ck_dimension_schemas_family_key",
+        ),
+        CheckConstraint(
+            "status IN ('draft','candidate','published','retired')",
+            name="ck_dimension_schemas_status",
+        ),
+        CheckConstraint(
+            "json_valid(definition_json) "
+            "AND json_type(definition_json, '$') = 'object'",
+            name="ck_dimension_schemas_definition_json",
+        ),
+        CheckConstraint(
+            "length(canonical_hash) = 64 "
+            "AND canonical_hash = lower(canonical_hash) "
+            "AND canonical_hash NOT GLOB '*[^0-9a-f]*'",
+            name="ck_dimension_schemas_canonical_hash",
+        ),
+        CheckConstraint(
+            "parent_schema_id IS NULL OR parent_schema_id <> id",
+            name="ck_dimension_schemas_parent_not_self",
+        ),
+        CheckConstraint(
+            "core_schema_id IS NULL OR core_schema_id <> id",
+            name="ck_dimension_schemas_core_not_self",
+        ),
+        CheckConstraint(
+            "((status IN ('published','retired')) "
+            "AND published_by IS NOT NULL AND published_at IS NOT NULL) "
+            "OR ((status IN ('draft','candidate')) "
+            "AND published_by IS NULL AND published_at IS NULL)",
+            name="ck_dimension_schemas_publish_audit",
+        ),
+        CheckConstraint(
+            "(status = 'retired' AND retired_at IS NOT NULL) "
+            "OR (status <> 'retired' AND retired_at IS NULL)",
+            name="ck_dimension_schemas_retired_at",
+        ),
+        UniqueConstraint(
+            "schema_key",
+            "version",
+            name="uq_dimension_schemas_key_version",
+        ),
+        UniqueConstraint(
+            "canonical_hash",
+            name="uq_dimension_schemas_canonical_hash",
+        ),
+        Index(
+            "ix_dimension_schemas_registry",
+            "schema_type",
+            "family_key",
+            "status",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    schema_key: Mapped[str] = mapped_column(String(80), index=True)
+    version: Mapped[str] = mapped_column(String(64), index=True)
+    schema_type: Mapped[str] = mapped_column(String(20), index=True)
+    family_key: Mapped[str] = mapped_column(String(20), index=True)
+    display_name: Mapped[str] = mapped_column(String(160))
+    status: Mapped[str] = mapped_column(String(20), default="draft", index=True)
+    parent_schema_id: Mapped[int | None] = mapped_column(
+        ForeignKey("dimension_schemas.id", ondelete="RESTRICT"),
+        nullable=True,
+        index=True,
+    )
+    core_schema_id: Mapped[int | None] = mapped_column(
+        ForeignKey("dimension_schemas.id", ondelete="RESTRICT"),
+        nullable=True,
+        index=True,
+    )
+    definition_json: Mapped[str] = mapped_column(Text)
+    canonical_hash: Mapped[str] = mapped_column(String(64), index=True)
+    source_optimization_run_id: Mapped[int | None] = mapped_column(
+        ForeignKey("prompt_optimization_runs.id", ondelete="RESTRICT"),
+        nullable=True,
+        index=True,
+    )
+    created_by: Mapped[str] = mapped_column(String(80), default="system")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utcnow,
+        server_default=sql_text("CURRENT_TIMESTAMP"),
+    )
+    published_by: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    published_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    retired_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+
 class LoopRun(Base):
     __tablename__ = "loop_runs"
     __table_args__ = (
@@ -795,6 +907,10 @@ class StrategyBundleImmutableError(ValueError):
     """Raised when persisted strategy history is changed in place."""
 
 
+class DimensionSchemaImmutableError(ValueError):
+    """Raised when a published dimension schema is changed in place."""
+
+
 class StrategySnapshotRequiredError(ValueError):
     """Raised when a new result lacks its complete strategy binding."""
 
@@ -1047,6 +1163,48 @@ def _prevent_strategy_bundle_delete(
     _mapper: object, _connection: Connection, _target: StrategyBundle
 ) -> None:
     raise StrategyBundleImmutableError("StrategyBundle 是永久审计记录，禁止删除")
+
+
+def _persisted_dimension_schema_status(
+    connection: Connection,
+    target: DimensionSchema,
+) -> str | None:
+    if target.id is None:
+        return None
+    return connection.exec_driver_sql(
+        "SELECT status FROM dimension_schemas WHERE id = ?",
+        (target.id,),
+    ).scalar_one_or_none()
+
+
+@event.listens_for(DimensionSchema, "before_update")
+def _prevent_published_dimension_schema_update(
+    _mapper: object,
+    connection: Connection,
+    target: DimensionSchema,
+) -> None:
+    if _persisted_dimension_schema_status(connection, target) in {
+        "published",
+        "retired",
+    }:
+        raise DimensionSchemaImmutableError(
+            "已发布的 DimensionSchema 禁止原地更新；请创建新版本"
+        )
+
+
+@event.listens_for(DimensionSchema, "before_delete")
+def _prevent_published_dimension_schema_delete(
+    _mapper: object,
+    connection: Connection,
+    target: DimensionSchema,
+) -> None:
+    if _persisted_dimension_schema_status(connection, target) in {
+        "published",
+        "retired",
+    }:
+        raise DimensionSchemaImmutableError(
+            "已发布的 DimensionSchema 是永久审计记录，禁止删除"
+        )
 
 
 @event.listens_for(EvaluationResult, "before_insert")

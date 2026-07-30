@@ -3480,6 +3480,200 @@ def _migration_025_add_baseline_regression_and_repair_prompt_fk(
         )
 
 
+def _migration_026_add_dimension_schemas(connection: Connection) -> None:
+    from ..dimension_schema_registry import materialized_space_schema_rows
+
+    tables = {
+        row[0]
+        for row in connection.exec_driver_sql(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )
+    }
+    source_optimization_column = (
+        "source_optimization_run_id INTEGER "
+        "REFERENCES prompt_optimization_runs(id) ON DELETE RESTRICT"
+        if "prompt_optimization_runs" in tables
+        else "source_optimization_run_id INTEGER"
+    )
+    connection.exec_driver_sql(f"""
+        CREATE TABLE IF NOT EXISTS dimension_schemas (
+            id INTEGER PRIMARY KEY,
+            schema_key VARCHAR(80) NOT NULL,
+            version VARCHAR(64) NOT NULL,
+            schema_type VARCHAR(20) NOT NULL,
+            family_key VARCHAR(20) NOT NULL,
+            display_name VARCHAR(160) NOT NULL,
+            status VARCHAR(20) NOT NULL DEFAULT 'draft',
+            parent_schema_id INTEGER
+                REFERENCES dimension_schemas(id) ON DELETE RESTRICT,
+            core_schema_id INTEGER
+                REFERENCES dimension_schemas(id) ON DELETE RESTRICT,
+            definition_json TEXT NOT NULL,
+            canonical_hash VARCHAR(64) NOT NULL,
+            {source_optimization_column},
+            created_by VARCHAR(80) NOT NULL DEFAULT 'system',
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            published_by VARCHAR(80),
+            published_at DATETIME,
+            retired_at DATETIME,
+            CONSTRAINT ck_dimension_schemas_schema_key
+                CHECK(length(trim(schema_key)) > 0),
+            CONSTRAINT ck_dimension_schemas_version
+                CHECK(length(trim(version)) > 0),
+            CONSTRAINT ck_dimension_schemas_schema_type
+                CHECK(schema_type IN ('core','family_pack','extension')),
+            CONSTRAINT ck_dimension_schemas_family_key
+                CHECK(family_key IN (
+                    'space','product','graphic','intent','common'
+                )),
+            CONSTRAINT ck_dimension_schemas_status
+                CHECK(status IN (
+                    'draft','candidate','published','retired'
+                )),
+            CONSTRAINT ck_dimension_schemas_definition_json
+                CHECK(
+                    json_valid(definition_json)
+                    AND json_type(definition_json, '$') = 'object'
+                ),
+            CONSTRAINT ck_dimension_schemas_canonical_hash
+                CHECK(
+                    length(canonical_hash) = 64
+                    AND canonical_hash = lower(canonical_hash)
+                    AND canonical_hash NOT GLOB '*[^0-9a-f]*'
+                ),
+            CONSTRAINT ck_dimension_schemas_parent_not_self
+                CHECK(parent_schema_id IS NULL OR parent_schema_id <> id),
+            CONSTRAINT ck_dimension_schemas_core_not_self
+                CHECK(core_schema_id IS NULL OR core_schema_id <> id),
+            CONSTRAINT ck_dimension_schemas_publish_audit
+                CHECK(
+                    (
+                        status IN ('published','retired')
+                        AND published_by IS NOT NULL
+                        AND published_at IS NOT NULL
+                    )
+                    OR
+                    (
+                        status IN ('draft','candidate')
+                        AND published_by IS NULL
+                        AND published_at IS NULL
+                    )
+                ),
+            CONSTRAINT ck_dimension_schemas_retired_at
+                CHECK(
+                    (status = 'retired' AND retired_at IS NOT NULL)
+                    OR (status <> 'retired' AND retired_at IS NULL)
+                ),
+            CONSTRAINT uq_dimension_schemas_key_version
+                UNIQUE(schema_key, version),
+            CONSTRAINT uq_dimension_schemas_canonical_hash
+                UNIQUE(canonical_hash)
+        )
+    """)
+    for statement in (
+        "CREATE INDEX IF NOT EXISTS ix_dimension_schemas_schema_key "
+        "ON dimension_schemas(schema_key)",
+        "CREATE INDEX IF NOT EXISTS ix_dimension_schemas_version "
+        "ON dimension_schemas(version)",
+        "CREATE INDEX IF NOT EXISTS ix_dimension_schemas_schema_type "
+        "ON dimension_schemas(schema_type)",
+        "CREATE INDEX IF NOT EXISTS ix_dimension_schemas_family_key "
+        "ON dimension_schemas(family_key)",
+        "CREATE INDEX IF NOT EXISTS ix_dimension_schemas_status "
+        "ON dimension_schemas(status)",
+        "CREATE INDEX IF NOT EXISTS ix_dimension_schemas_parent_schema_id "
+        "ON dimension_schemas(parent_schema_id)",
+        "CREATE INDEX IF NOT EXISTS ix_dimension_schemas_core_schema_id "
+        "ON dimension_schemas(core_schema_id)",
+        "CREATE INDEX IF NOT EXISTS "
+        "ix_dimension_schemas_source_optimization_run_id "
+        "ON dimension_schemas(source_optimization_run_id)",
+        "CREATE INDEX IF NOT EXISTS ix_dimension_schemas_canonical_hash "
+        "ON dimension_schemas(canonical_hash)",
+        "CREATE INDEX IF NOT EXISTS ix_dimension_schemas_registry "
+        "ON dimension_schemas(schema_type, family_key, status)",
+    ):
+        connection.exec_driver_sql(statement)
+
+    for row in materialized_space_schema_rows():
+        existing = connection.exec_driver_sql(
+            """
+            SELECT schema_type, family_key, display_name, status,
+                   definition_json, canonical_hash
+            FROM dimension_schemas
+            WHERE schema_key = ? AND version = ?
+            """,
+            (row["schema_key"], row["version"]),
+        ).mappings().first()
+        expected = {
+            key: row[key]
+            for key in (
+                "schema_type",
+                "family_key",
+                "display_name",
+                "status",
+                "definition_json",
+                "canonical_hash",
+            )
+        }
+        if existing is not None:
+            if dict(existing) != expected:
+                raise RuntimeError(
+                    "已存在的 DimensionSchema 兼容修订与迁移定义不一致"
+                )
+            continue
+        connection.exec_driver_sql(
+            """
+            INSERT INTO dimension_schemas (
+                schema_key, version, schema_type, family_key,
+                display_name, status, definition_json, canonical_hash,
+                created_by, published_by, published_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            """,
+            (
+                row["schema_key"],
+                row["version"],
+                row["schema_type"],
+                row["family_key"],
+                row["display_name"],
+                row["status"],
+                row["definition_json"],
+                row["canonical_hash"],
+                "system:dimension-schema-bootstrap",
+                "system:dimension-schema-bootstrap",
+            ),
+        )
+
+    connection.exec_driver_sql("""
+        CREATE TRIGGER IF NOT EXISTS trg_dimension_schemas_published_no_update
+        BEFORE UPDATE ON dimension_schemas
+        WHEN OLD.status IN ('published','retired')
+        BEGIN
+            SELECT RAISE(
+                ABORT,
+                'Published DimensionSchema is immutable; create a new version'
+            );
+        END
+    """)
+    connection.exec_driver_sql("""
+        CREATE TRIGGER IF NOT EXISTS trg_dimension_schemas_published_no_delete
+        BEFORE DELETE ON dimension_schemas
+        WHEN OLD.status IN ('published','retired')
+        BEGIN
+            SELECT RAISE(
+                ABORT,
+                'Published DimensionSchema cannot be deleted'
+            );
+        END
+    """)
+
+    violations = connection.exec_driver_sql("PRAGMA foreign_key_check").all()
+    if violations:
+        raise RuntimeError(
+            f"DimensionSchema 迁移 foreign_key_check 失败：{violations[:3]}"
+        )
+
+
 MIGRATIONS = [
     Migration(1, "add_sample_expected_level", _migration_001_add_sample_expected_level),
     Migration(2, "add_review_corrections", _migration_002_add_review_corrections),
@@ -3561,6 +3755,11 @@ MIGRATIONS = [
         25,
         "add_baseline_regression_and_repair_prompt_fk",
         _migration_025_add_baseline_regression_and_repair_prompt_fk,
+    ),
+    Migration(
+        26,
+        "add_dimension_schemas",
+        _migration_026_add_dimension_schemas,
     ),
 ]
 

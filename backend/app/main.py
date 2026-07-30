@@ -46,6 +46,7 @@ from .models import (
     BaselineSet,
     BaselineSetItem,
     CircuitBreaker,
+    DimensionSchema,
     EvaluationControl,
     EvaluationJob,
     EvaluationResult,
@@ -6065,6 +6066,83 @@ def list_strategy_bundles(
             for bundle in bundles
         ]
     }
+
+
+def _dimension_schema_payload(
+    schema: DimensionSchema,
+    *,
+    include_definition: bool,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "id": schema.id,
+        "schema_key": schema.schema_key,
+        "version": schema.version,
+        "schema_type": schema.schema_type,
+        "family_key": schema.family_key,
+        "display_name": schema.display_name,
+        "status": schema.status,
+        "parent_schema_id": schema.parent_schema_id,
+        "core_schema_id": schema.core_schema_id,
+        "canonical_hash": schema.canonical_hash,
+        "source_optimization_run_id": schema.source_optimization_run_id,
+        "created_by": schema.created_by,
+        "created_at": schema.created_at,
+        "published_by": schema.published_by,
+        "published_at": schema.published_at,
+        "retired_at": schema.retired_at,
+    }
+    if include_definition:
+        payload["definition"] = json.loads(schema.definition_json)
+    return payload
+
+
+@app.get("/api/dimension-schemas")
+def list_dimension_schemas(
+    schema_key: str | None = None,
+    schema_type: str | None = None,
+    family_key: str | None = None,
+    status: str | None = None,
+    _user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    statement = select(DimensionSchema).order_by(
+        DimensionSchema.schema_key,
+        DimensionSchema.created_at.desc(),
+        DimensionSchema.id.desc(),
+    )
+    for column, value in (
+        (DimensionSchema.schema_key, schema_key),
+        (DimensionSchema.schema_type, schema_type),
+        (DimensionSchema.family_key, family_key),
+        (DimensionSchema.status, status),
+    ):
+        if value is not None:
+            statement = statement.where(column == value)
+    schemas = db.scalars(statement.limit(200)).all()
+    return {
+        "items": [
+            _dimension_schema_payload(schema, include_definition=False)
+            for schema in schemas
+        ]
+    }
+
+
+@app.get("/api/dimension-schemas/{schema_key}/versions/{version}")
+def get_dimension_schema_version(
+    schema_key: str,
+    version: str,
+    _user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    schema = db.scalar(
+        select(DimensionSchema).where(
+            DimensionSchema.schema_key == schema_key,
+            DimensionSchema.version == version,
+        )
+    )
+    if schema is None:
+        raise HTTPException(status_code=404, detail="维度 Schema 版本不存在")
+    return _dimension_schema_payload(schema, include_definition=True)
 
 
 def _paired_metric_rules(payload: PairedRegressionCreateRequest) -> dict[str, Any]:

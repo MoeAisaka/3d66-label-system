@@ -11,6 +11,50 @@
 - 远程仓库：`origin = https://github.com/chishiyu07-max/3d66-label-system.git`
 - 分支关系：每次交付以 `git status -sb` 的实时结果为准。
 
+## 最新完成：维度管理器 P1 第一棒数据层（2026-07-30）
+
+> 隔离工作树：
+> `/Volumes/OC-PRIMARY-4T/OpenClawProjects/wt-dim-p1-s1-20260730`；
+> 分支：`dim-p1-s1`；起始基线：`9a7898b`。交付提交见本次最终
+> `__RESULT__`。本棒未修改评分、Worker、复核、抽样、回归、优化器、
+> 前端、A/B 调用时序、提示词、部署或正式数据。
+
+已完成：
+
+- 新增一等、版本化 `DimensionSchema` 实体，包含稳定业务键/版本、类型与
+  素材族、父包/L0/候选来源引用、完整定义 JSON、规范哈希和创建/发布/停用
+  审计；数据库约束覆盖枚举、JSON 对象、哈希格式、发布审计、自引用和唯一性，
+  并建立注册表查询索引。
+- 已发布或已停用 Schema 的 UPDATE/DELETE 同时由 SQLAlchemy 持久化事件和
+  SQLite 触发器拒绝；草稿/候选仍可正常创建、修改和删除，变更发布内容只能
+  新建版本。
+- 物化空间包 v1 的“历史默认修订”与“现役 v1.3 修订”。八个稳定键、两套
+  权重、1～5 级换算、L1～L5 阈值、Engine 与 risk-review 版本/键/排序常量
+  均以静态规范 JSON 和 SHA-256 身份保存；测试逐项对照当前
+  `scoring.py`/`risk_review.py`，未接入任何现役评分读取路径。
+- 新增只读认证 API：`GET /api/dimension-schemas` 支持按业务键、类型、素材族
+  和状态过滤；`GET /api/dimension-schemas/{schema_key}/versions/{version}`
+  返回指定版本的完整定义。
+- 新增 schema migration version 26。完整库对候选来源建立真实外键；缺少
+  中间父表的历史分叉库保留可迁移字段，避免 SQLite 对不存在父表的 NULL
+  写入失败。迁移末尾执行 `PRAGMA foreign_key_check`，新增旧库升级、真实
+  父子 Schema INSERT 和二次 FK 检查冒烟。
+- 按中枢增补授权，仅机械更新既有迁移测试的迁移名清单和最高版本断言；
+  未修改该文件其他断言或任何其他既有测试。
+
+验证：
+
+- DimensionSchema 与全迁移定向：`30 passed, 2 warnings`。
+- 全量 backend pytest 最终复跑：`417 passed, 1 skipped, 2 warnings`；
+  两条 warning 为既有 TestClient/httpx 弃用提示和 baseline regression
+  的 SQLAlchemy NULL identity 提示。
+- Python `py_compile` 与 `git diff --check`：通过。
+- 本棒无前端与执行路径行为变化，按合同未执行前端构建或浏览器验收。
+
+当前进行中与下一步：
+
+- 本棒范围内无待实现项；后续棒再按 ADR-0020 接入执行路径、结果/真值快照
+  和前端维度管理器。本棒新增注册表保持只读且不被现役评分链读取。
 ## 最新完成：审核身份自动取当前登录账号（2026-07-30）
 
 > 隔离工作树：`/Users/yukina/OpenClaw/labellab-ux`；分支：
