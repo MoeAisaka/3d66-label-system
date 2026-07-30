@@ -5,10 +5,13 @@
 
 ## 仓库状态
 
-- 项目目录：`D:\3d66-label-system`
-- 当前分支：`main`
-- 当前功能基线：以 `main` 分支最新提交为准，精确提交号请执行 `git log -1` 查看。
-- 远程仓库：`origin = https://github.com/chishiyu07-max/3d66-label-system.git`
+- Windows 正式服务器目标目录：`D:\3d66-label-system`；当前研发仓库为本文件
+  所在的 MacBook 工作目录。
+- 当前分支：`windows-deploy`
+- 当前 HEAD：`a8018a9f53c7614c7e02745e587ea86a026e6c29`。当前执行沙箱只允许读取
+  `.git`，无法创建 `index.lock`，因此本任务逻辑提交尚未写入；未改写 `main`。
+- 远程仓库：当前 checkout 的 `origin = git://192.168.50.166/labellab-hub.git`；
+  本任务未访问或 push 远端。
 - 分支关系：每次交付以 `git status -sb` 的实时结果为准。
 
 ## 最新完成：审核身份自动取当前登录账号（2026-07-30）
@@ -79,6 +82,64 @@
 真实浏览器关键路径和 `git diff --check` 的最终结果更新；测试全程使用假执行器，
 禁止真实模型网络调用。
 
+## 最新完成：Windows 公司服务器受控部署生命周期（2026-07-30）
+
+> 基线提交：`a8018a9f53c7614c7e02745e587ea86a026e6c29`；开发分支：
+> `windows-deploy`。只修改当前研发仓库，未部署、未 push、未访问生产目录、
+> 生产数据、真实 DPAPI 凭据或真实模型。决策见 ADR-0017。
+
+已完成：
+
+- 新增 `scripts/windows/install.ps1`、`doctor.ps1`、`start.ps1`、
+  `backup.ps1`、`restore.ps1`。五脚本使用严格模式、UTF-8/CJK 参数数组、
+  脚本位置解析仓库、显式原生退出码和仓库内 Python `-X utf8`；不提权、
+  不安装系统软件、不修改注册表/服务/防火墙/计划任务。
+- 安装门禁固定 Python 3.11/3.12、Node 20～26、npm 10/11；只创建仓库内
+  `.venv`、安装既有 requirements、执行 `npm ci` 和生产构建，不写业务
+  数据或启动服务。`-Check`/`-DryRun` 不安装、不构建、不联网。
+- doctor 按“显式参数 → 进程 `DATA_DIR` → 仓库 `.env` →
+  `%LOCALAPPDATA%\3d66-label-system`”解析，只读检查仓库、运行时、构建、
+  现有父目录、SQLite 和 Windows 凭据引用；拒绝相对路径、仓库内路径及
+  symlink/junction/reparse point，不调用 DPAPI。
+- start 必须先通过 doctor，默认进程未显式设置 `APP_HOST` 时强制
+  `127.0.0.1`，前台运行现有 launcher，不注册服务或后台任务。
+- 新增 `backend/app/windows_deploy.py`：正式备份通过 SQLite backup API
+  生成一致副本，清空会话和主/优化模型凭据，排除 logs/环境文件，生成独立
+  Windows v1 manifest、大小和 SHA-256；拒绝 NTFS ADS、设备名、大小写重复、
+  未声明文件、额外根入口、未来迁移、篡改和全部 reparse point。
+- restore 自动先 dry-run，拒绝服务端口占用，在目标同一父目录建立 staging
+  与 rollback snapshot，分入口原子替换 database/images，失败自动补偿；
+  不恢复或迁移 DPAPI/Keychain/API Key。
+- `start-3d66.cmd`、`启动3d66标签系统.cmd` 和审计中发现的
+  `首次安装.cmd` 已收敛为参数/退出码透传壳，不再保留 `npm install` 或直接
+  launcher 等第二套逻辑。
+- DPAPI 底层构造器与工厂增加 Windows 双层平台守卫；非 Windows 测试证明在
+  加载 `crypt32`/`kernel32` 前拒绝，真实 DPAPI 回环继续只在 Windows 执行。
+- ADR-0016 默认安全值未修改：自动消费者仍默认关闭、dry-run、零预算，部署
+  脚本不触发真实自动化、模型调用或发布。
+
+验证：
+
+- Windows 生命周期专项：`29 passed`。
+- 安全层专项：`15 passed, 2 skipped`；跳过项分别是 Windows-only 真实
+  DPAPI，以及当前 macOS 执行沙箱返回 `OSStatus -50` 的真实登录 Keychain。
+- 全后端隔离临时 `DATA_DIR`：`420 passed, 2 skipped, 1 warning`；warning
+  为既有 Starlette TestClient/httpx 弃用提示。
+- Python 3.12 `py_compile`、脚本危险命令/严格模式/UTF-8/参数和退出码静态
+  回归、`git diff --check`：通过。
+- 当前 MacBook 未安装 `pwsh`，未做 PowerShell parser 语法机检；没有安装
+  PowerShell，待真实 Windows/获批 pwsh 环境验收。
+
+明确未完成：
+
+- 本分支未在真实 Windows 或 Windows Server 上执行。无管理员全新安装、
+  Python/Node/npm 版本矩阵、中文/空格路径、四级 DATA_DIR、Ctrl+C、默认
+  loopback、活跃 WAL 备份、restore 故障回滚、junction/reparse point 和
+  DPAPI 当前用户/跨机器边界仍需按 ADR-0017 清单实机回归。
+- 公司脚本签名/ExecutionPolicy、正式备份盘和 NTFS ACL、局域网暴露/TLS/
+  防火墙方案仍为待决项；当前代码不绕过或擅自配置。
+- 当前沙箱禁止写 `.git`，尚未形成用户要求的三个逻辑提交；工作树内容与测试
+  已完成，需在具备 Git 写权限的同一 `windows-deploy` 分支完成提交核验。
 ## 最新完成：部署前置第三棒收口（2026-07-29）
 
 > 起始基线：`cc3d254`。本棒完整保留 Phase A/B 与前两棒工作树，不推送、
@@ -556,6 +617,7 @@
 | 初审人数弹性机制 | 当前工作树已完成 | 初期默认 1 人即时定案；支持切换 3/5/7/9 人，收齐全部冻结席位后计算多数共识；面板创建时冻结人数 |
 | P0-E 金丝雀前端编排 | 工作树已完成 | 已接 E3 认证 API；只登记门禁证据，不执行导入、下载、模型、Gold 或发布 |
 | macOS 部署生命周期 | 离线能力已完成 | 安装/诊断/前台启动/脱敏备份恢复已测试；目标 MacBook 尚未实际部署 |
+| Windows 部署生命周期 | macOS 离线验证完成 | 五脚本、CMD 收敛、脱敏备份恢复与 DPAPI 平台守卫已完成；Windows 实机待验收 |
 
 ## 本地数据快照
 
@@ -571,8 +633,9 @@
 
 ### P0
 
-1. 在目标 MacBook 按 ADR-0013 做首次安装、启动、登录、Keychain 页面保存
-   和脱敏备份恢复演练，再接公司内网真实模型；同时继续推进 Windows 部署。
+1. 按 ADR-0017 在公司 Windows 服务器完成无管理员安装、doctor、启动、
+   DPAPI、活跃 SQLite 备份和故障恢复全清单；按 ADR-0013 在目标 MacBook
+   完成对应 Keychain 与灾备演练，再接公司内网真实模型。
 2. 为 P0-E 接入真实且受控的 XLSX/冻结执行器证据来源；继续保持下载、模型、
    Gold 和发布的独立门禁。
 3. 补做抽样策略配置 v1.1 的真实浏览器验收。
@@ -598,6 +661,18 @@
 - 中英文双语。
 
 ## 最近验证基线
+
+2026-07-30（`windows-deploy` Windows 生命周期工作树，未在 Windows 实机运行）：
+
+```text
+Windows 生命周期专项：29 passed
+安全层专项：15 passed, 2 skipped
+全后端回归：420 passed, 2 skipped, 1 warning（隔离临时 DATA_DIR）
+Python 3.12 py_compile：通过
+脚本静态安全/参数/退出码回归：通过
+git diff --check：通过
+PowerShell parser：当前 MacBook 无 pwsh，未机检
+```
 
 2026-07-29（当前双流水线重构工作树，尚未提交或部署）：
 

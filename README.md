@@ -4,9 +4,9 @@
 
 ## 当前能力
 
-- 生产目标仍是 Windows 主机运行、局域网审核员通过浏览器共同使用；当前
-  已增加离线可测的 macOS 安装、诊断、前台启动、备份和恢复工具，但目标
-  MacBook 的实际安装部署仍未执行。
+- 生产目标仍是 Windows 主机运行；当前已增加与 macOS 同级的 Windows
+  安装、诊断、前台启动、脱敏备份和恢复工具，但尚未在真实 Windows 公司
+  服务器执行，默认也不对局域网开放。
 - 图片上传、去重、永久本地保存、任务排队和后台处理。
 - 豆包与提示词优化模型配置全部在后台管理。Windows 使用当前用户的
   DPAPI；macOS 使用当前登录用户的 Keychain。数据库只保存版本化密文或
@@ -25,11 +25,13 @@
 
 ## 在当前电脑启动
 
-依赖已安装且前端已构建时，双击：
+Windows 依赖已安装且前端已构建时，双击：
 
 `启动3d66标签系统.cmd`
 
-启动成功后会自动打开默认浏览器。若中文文件名入口在某台电脑上被安全软件拦截，也可以双击纯英文备用入口 `start-3d66.cmd`。
+两个 CMD 都只是 `scripts/windows/start.ps1` 的兼容壳；正式启动一定先执行
+doctor。若中文文件名入口在某台电脑上被安全软件拦截，也可以双击纯英文备用
+入口 `start-3d66.cmd`。
 
 看到“3d66 标签系统已启动”但浏览器没有自动出现时，手动打开：
 
@@ -39,14 +41,70 @@
 
 ## 到公司电脑重新配置
 
-1. 从 Git 克隆项目到非 OneDrive 目录，建议 `D:\3d66-label-system`。
-2. 安装 Python 3.11/3.12 和 Node.js LTS；安装 Python 时勾选加入 PATH。
-3. 双击 `首次安装.cmd`，等待四个步骤完成。
-4. 双击 `启动3d66标签系统.cmd`。
+1. 从 Git 克隆项目到非 OneDrive、非 junction/reparse point 目录，建议
+   `D:\3d66-label-system`。
+2. 由公司软件分发准备 Python 3.11/3.12、Node.js 20～26 和 npm 10/11；
+   仓库脚本不会安装系统软件。
+3. 以普通用户运行 `scripts\windows\install.ps1`；`首次安装.cmd` 只是同一
+   脚本的兼容壳。
+4. 运行 `scripts\windows\doctor.ps1`，通过后再运行
+   `scripts\windows\start.ps1` 或双击启动 CMD。
 5. 登录后进入“模型配置”，填写公司电脑上的豆包 API Key，保存并测试连接。
 6. 重新上传图片、创建评测任务。Demo 阶段不需要迁移家里电脑的数据。
 
 Git 只保存代码、提示词和配置结构；`.venv`、`node_modules`、构建产物、数据库、图片、日志和 `.env` 都已排除。
+
+## Windows 受控部署生命周期
+
+Windows 唯一受控实现位于 `scripts/windows/`，要求普通用户权限，不修改
+注册表、Windows 服务、防火墙、计划任务或 PowerShell 执行策略：
+
+```powershell
+.\scripts\windows\install.ps1 -Check
+.\scripts\windows\install.ps1 -DryRun
+.\scripts\windows\install.ps1
+.\scripts\windows\doctor.ps1
+.\scripts\windows\start.ps1
+```
+
+安装门禁固定为 Python 3.11/3.12、Node.js 20.x～26.x 和 npm 10.x/11.x。
+实际安装只创建仓库内 `.venv`，按既有 requirements 安装依赖，再执行
+`npm ci` 和正式前端构建；不创建或修改业务数据，也不启动服务。
+
+`DATA_DIR` 优先级是显式 `-DataDir`、进程环境变量、仓库 `.env`、最后
+`%LOCALAPPDATA%\3d66-label-system`。前三者必须是绝对路径，且任何解析结果
+都不能位于代码仓库内。doctor 只读检查现有父目录、SQLite 完整性/迁移版本和
+Windows 凭据引用，不创建数据目录、不调用 DPAPI 解密。
+
+`start.ps1` 默认强制 `127.0.0.1`。只有本次调用前显式设置进程环境变量才会
+改变监听地址，例如：
+
+```powershell
+$env:APP_HOST = '0.0.0.0'
+.\scripts\windows\start.ps1
+```
+
+对外监听前必须单独完成公司网络、TLS、身份和防火墙审批；脚本不会替操作员
+修改系统配置。
+
+创建脱敏备份和只读验证/实际恢复：
+
+```powershell
+.\scripts\windows\backup.ps1
+.\scripts\windows\backup.ps1 -BackupDir 'E:\3d66 backups'
+.\scripts\windows\restore.ps1 -Backup 'E:\3d66 backups\3d66-backup-v1-YYYYMMDDTHHMMSSZ' -DryRun
+.\scripts\windows\restore.ps1 -Backup 'E:\3d66 backups\3d66-backup-v1-YYYYMMDDTHHMMSSZ'
+```
+
+Windows 正式备份使用 SQLite backup API，不直接复制活跃数据库；会清空登录
+会话和主/优化模型凭据字段，排除 logs、`.env` 和 DPAPI/Keychain 内容，并用
+Windows v1 manifest 保存迁移版本、文件大小和 SHA-256。恢复拒绝路径穿越、
+NTFS 特殊路径、symlink/junction/reparse point、篡改、未来迁移和仍在使用的
+服务端口；实际替换前创建同卷 rollback snapshot，失败时自动补偿。
+
+以上能力只在 macOS 上以临时假数据做过自动测试和静态审查，尚未完成真实
+Windows/Windows Server、PowerShell parser、Ctrl+C、junction 和 DPAPI
+当前用户范围实机验收。完整清单见 ADR-0017。
 
 ## macOS 凭据安全层状态
 
@@ -150,12 +208,14 @@ launchd、系统配置或防火墙修改。
 
 ## 局域网访问
 
-启动窗口会显示两条地址：
+launcher 可能显示本机和局域网地址，但是否可达由实际绑定地址决定：
 
 - 当前电脑：`http://127.0.0.1:8080`
 - 同一局域网：例如 `http://192.168.1.20:8080`
 
-其他审核员使用局域网地址访问。首次启动若 Windows 防火墙询问，只允许“专用网络”。主机需要保持开机，启动窗口不能关闭。
+受控脚本默认绑定 `127.0.0.1`，因此局域网地址默认不可达。只有显式完成安全
+审批并设置进程 `APP_HOST` 后，其他审核员才可使用局域网地址；本仓库脚本不
+修改防火墙。主机需要保持开机，启动窗口不能关闭。
 
 ## 日常操作
 
@@ -227,9 +287,13 @@ cd backend
 ..\.venv\Scripts\python.exe -X utf8 -m pytest -q
 ```
 
-当前 macOS 部署生命周期专项：`20 passed`；全后端
-`348 passed, 1 skipped, 1 warning`。五个 shell 脚本 `bash -n`、
-Python `compileall`、`install.sh --check/--dry-run` 与
-`git diff --check` 通过。本阶段只使用 `tmp_path` 明显假数据，未部署、
-未访问外网、未读取真实 Keychain、未调用真实模型，也未重新执行前端构建
-或浏览器验收。
+当前 Windows 生命周期专项：`29 passed`；安全层专项：
+`15 passed, 2 skipped`；全后端：`420 passed, 2 skipped, 1 warning`。
+Python 3.12 编译、脚本严格模式/UTF-8/参数/退出码/危险命令静态回归和
+`git diff --check` 通过。当前 MacBook 没有 `pwsh`，未做 PowerShell parser
+机检；本阶段未修改前端源码，未重新执行前端构建或浏览器验收。
+
+全部新增数据测试只使用临时目录和明显假数据。未部署、未访问真实 Windows
+目录或生产数据、未读取 DPAPI、未调用真实模型。Windows-only DPAPI 实机
+用例在 macOS 跳过；当前执行沙箱不允许访问登录 Keychain（OSStatus -50），
+该真实 Keychain 用例也明确跳过，其他错误仍会失败。

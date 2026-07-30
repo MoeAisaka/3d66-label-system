@@ -1,11 +1,12 @@
 # 3d66 标签系统｜新对话开发交接
 
-> 更新时间：2026-07-29
+> 更新时间：2026-07-30
 > 项目目录：Windows 为 `D:\3d66-label-system`；macOS 研发仓库见当前工作目录
-> 当前分支：`main`
-> 功能基线提交：以 `git log -1` 的实时结果为准
-> 当前工作树：内联纠偏、分阶段审核、历史纠偏安全预览及提示词发布前回归门禁
-> 已完成编码与自动化验证；部署状态以 `PROJECT_STATUS.md` 最新段落为准
+> 当前分支：`windows-deploy`
+> 分支基线：`a8018a9f53c7614c7e02745e587ea86a026e6c29`
+> 当前 HEAD：以 `git log -1 --oneline` 的实时结果为准
+> 当前工作树：Windows 受控部署生命周期、DPAPI 平台守卫与 ADR-0017 已完成
+> 编码和 macOS 自动验证；Windows 实机及提交状态见 `PROJECT_STATUS.md` 最新段落
 
 ## 0. 新对话应当如何接手
 
@@ -381,7 +382,50 @@ OpenAPI 路径核验均通过。E3 前端新增后，`npm run lint` 与
 
 边界：未在目标 MacBook 安装或启动，未登录或通过页面保存真实 Keychain
 凭据，未访问外网，未调用真实模型，未接 XLSX/图片冻结执行器，未形成 Gold
-或发布。Windows 部署与真实 DPAPI 回归仍待完成。
+或发布。这是 ADR-0013 阶段的历史状态；Windows 仓库内生命周期已由下节
+ADR-0017 补齐，真实 Windows 与 DPAPI 实机回归仍待完成。
+
+### 4.15 Windows 公司服务器受控部署生命周期
+
+`windows-deploy` 分支在指定基线
+`a8018a9f53c7614c7e02745e587ea86a026e6c29` 上完成 ADR-0017 的仓库内实现：
+
+- `scripts/windows/install.ps1`、`doctor.ps1`、`start.ps1`、`backup.ps1`、
+  `restore.ps1` 是唯一 Windows 生命周期实现；全部严格模式、UTF-8、脚本位置
+  解析仓库、Python `-X utf8` 和显式原生退出码，不请求管理员权限或修改
+  注册表/服务/防火墙/计划任务。
+- 安装只接受 Python 3.11/3.12、Node 20～26、npm 10/11，只创建仓库内
+  `.venv`、安装既有 requirements、执行 `npm ci` 和生产构建，不写
+  `DATA_DIR` 或启动服务。
+- DATA_DIR 优先级为显式参数、进程环境、仓库 `.env`、
+  `%LOCALAPPDATA%\3d66-label-system`。前三者必须绝对，所有结果均拒绝仓库内
+  路径和任意 symlink/junction/reparse point；doctor 不创建首次启动目录，
+  不解密 DPAPI。
+- start 必须先 doctor，默认强制 `127.0.0.1`，只有本次调用前显式设置进程
+  `APP_HOST` 才可改变；保持 launcher 前台和原生 Ctrl+C/退出码路径。
+- `backend/app/windows_deploy.py` 使用 SQLite backup API 创建一致、脱敏副本，
+  Windows v1 manifest 记录迁移/大小/SHA-256；恢复先 dry-run，再做同卷
+  staging、database/images 分入口原子替换和 rollback 补偿。路径穿越、NTFS
+  ADS/设备名、大小写重复、未声明内容、篡改、未来迁移和 reparse point 全部
+  fail-closed。
+- 根目录两个启动 CMD 及旧 `首次安装.cmd` 已变成参数和退出码透传壳，不再
+  维护第二套安装/启动逻辑。
+- DPAPI 工厂和底层构造器增加 Windows 双层守卫；非 Windows 在加载系统库前
+  拒绝，Windows-only 真实回环测试继续由 pytest 自动跳过非 Windows。
+- 自动化验证：Windows 生命周期 `29 passed`；安全层
+  `15 passed, 2 skipped`；全后端隔离临时 DATA_DIR
+  `420 passed, 2 skipped, 1 warning`。第二个 skip 是当前执行沙箱无法访问
+  登录 Keychain（OSStatus -50），可访问环境仍执行完整回环。
+
+边界：本分支从未在真实 Windows/Windows Server 执行；当前 MacBook 没有
+`pwsh`，未做 PowerShell parser 机检。公司服务器无管理员安装、版本矩阵、
+CJK/空格路径、四级 DATA_DIR、loopback、Ctrl+C、活跃 WAL 备份、restore
+故障回滚、junction/reparse point 和 DPAPI 当前用户/跨机器边界必须按
+ADR-0017 清单验收。脚本签名/ExecutionPolicy、正式备份盘 ACL 和局域网暴露
+仍是待决项，代码没有绕过或擅自配置。
+
+当前沙箱只读 `.git`，无法创建 `index.lock`；因此逻辑提交尚未写入，`main`
+未移动且没有 push。不得通过替代 Git 目录、reset 或改写既有提交规避此限制。
 
 ## 5. 美感维度和评分约束
 
@@ -466,10 +510,22 @@ OpenAPI 路径核验均通过。E3 前端新增后，`npm run lint` 与
 
 ### 启动
 
-依赖和前端已构建时，双击：
+Windows 受控安装、诊断和启动优先使用：
+
+```powershell
+.\scripts\windows\install.ps1
+.\scripts\windows\doctor.ps1
+.\scripts\windows\start.ps1
+```
+
+依赖和前端已构建时也可双击兼容壳：
 
 - `启动3d66标签系统.cmd`
 - 或英文备用入口 `start-3d66.cmd`
+
+两个 CMD 都统一转发到 `start.ps1`，不能绕过 doctor。受控入口默认只监听
+`127.0.0.1`；窗口显示的局域网地址只有在另行批准并显式设置本次进程
+`APP_HOST` 后才可达。
 
 访问：
 
@@ -498,14 +554,16 @@ macOS 默认数据目录：
 
 数据库、图片、日志、`.env`、`.venv`、`node_modules` 和构建产物都不进
 Git。Windows DPAPI 密文绑定当前用户；macOS 运行数据库只有当前用户
-Keychain 引用。ADR-0013 正式备份会连引用一并清空，因此恢复后必须重新
-登录并填写 API Key；禁止跨平台迁移 Keychain 或 DPAPI。
+Keychain 引用。ADR-0013/0017 正式备份都会连引用一并清空，因此恢复后必须
+重新登录并填写 API Key；禁止跨平台迁移 Keychain 或 DPAPI。
 
 ### Git 状态
 
-- 当前是本地 Git 仓库，分支 `main`。
-- `origin` 已配置为私有项目既有远程；当前 `main` 相对 `origin/main`
-  领先 6 个提交。本阶段按任务要求不 commit、不 push。
+- 当前是本地 Git 仓库，分支 `windows-deploy`，HEAD 为
+  `a8018a9f53c7614c7e02745e587ea86a026e6c29`；`main` 仍为
+  `cc3d2545b9a1a1e4b5dc60ca4db8397e9e88a37c`。
+- 当前 checkout 的 `origin` 为公司内网 Hub。本任务未访问或 push 远端；
+  当前沙箱禁止写 `.git`，Windows 生命周期的三个逻辑提交尚未形成。
 - 后续推送前仍必须确认工作树只包含本次相关文件，不得公开秘密或无关修改。
 
 ## 9. 最近完成的重要提交
@@ -609,20 +667,23 @@ d6902bf fix: calibrate aesthetic grades and result states
 7. 测试计数随里程碑变化；以当前命令结果为准。2026-07-28 macOS 部署
    生命周期阶段全后端为 `348 passed, 1 skipped, 1 warning`。
 8. 测试有一条 FastAPI TestClient/httpx 兼容性弃用警告，不影响当前运行，但未来升级依赖时需处理。
-9. 本地 Git 暂无 remote，机器损坏会丢失未备份代码。
+9. 当前有公司内网 Hub remote，但本任务禁止 push，且执行沙箱暂时禁止写
+   `.git`；未提交工作树在操作员回收前仍有丢失风险。
 10. 不要在输出、日志、截图、Git 或 Markdown 中展示真实 API Key。
 
 ## 12. 当前验证基线
 
-最近一次完整后端验证（macOS 部署生命周期阶段）：
+最近一次完整后端验证（Windows 生命周期工作树）：
 
-- 部署专项：`20 passed`。
-- 全后端（隔离临时 `DATA_DIR`）：`348 passed, 1 skipped, 1 warning`。
-- 五个 shell 脚本 `bash -n`、Python `compileall`、
-  `install.sh --check/--dry-run` 与 `git diff --check` 通过。
-- 本阶段没有修改前端，未重新执行前端构建、服务启动或浏览器验收。
-- 未部署、未访问外网、未读取真实 Keychain、未使用真实 API Key 或调用
-  真实模型；目标 MacBook 与 Windows 部署均尚未验收。
+- Windows 生命周期专项：`29 passed`。
+- 安全层专项：`15 passed, 2 skipped`。
+- 全后端（隔离临时 `DATA_DIR`）：`420 passed, 2 skipped, 1 warning`。
+- Python 3.12 编译、脚本严格模式/UTF-8/参数/退出码/危险命令静态回归、
+  `git diff --check` 通过。
+- 当前 MacBook 未安装 `pwsh`，未做 PowerShell parser 机检；未修改前端源码，
+  未重新执行前端构建、服务启动或浏览器验收。
+- 未部署、未访问生产目录或数据、未读取 DPAPI、未使用真实 API Key 或调用
+  真实模型；真实 Windows/Windows Server 生命周期尚未验收。
 
 验证命令：
 
