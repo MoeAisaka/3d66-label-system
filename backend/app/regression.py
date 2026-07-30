@@ -7,6 +7,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from .dimension_schema_registry import canonical_hash
 from .models import (
     EvaluationResult,
     HumanReview,
@@ -14,18 +15,11 @@ from .models import (
     PromptRegressionRun,
     SampleSetItem,
 )
-
-
-DIMENSION_KEYS = (
-    "composition_viewpoint",
-    "lighting_atmosphere",
-    "color_material",
-    "spatial_design_furnishing",
-    "visual_hierarchy",
-    "detail_completion",
-    "inspiration_reference",
-    "presentation_integrity",
+from .scoring import (
+    DimensionScoringContractError,
+    dimension_schema_from_strategy_snapshot,
 )
+
 
 MEDIA_KEYS = (
     "real_photo",
@@ -63,6 +57,7 @@ SAMPLE_ROLES = (
 _CAP_RANK = {"L1": 1, "L2": 2, "L3": 3, "L4": 4, "L5": 5, "none": 6}
 
 _CRITICAL_FIELD_PREFIXES = (
+    "dimension_schema.",
     "scope_status",
     "primary_category",
     "media_type.",
@@ -98,6 +93,7 @@ _FAILURE_MESSAGES = {
     "hard_gate_missed": "新增硬门槛漏判",
     "level_cap_missed": "新增等级封顶漏判",
     "comparison_error": "样本配对比较失败",
+    "dimension_schema_mismatch": "比较结果使用了不同的维度规则",
 }
 
 
@@ -144,20 +140,83 @@ def _effective_level_cap(
     return min(candidates, key=lambda value: _CAP_RANK[value]) if candidates else "none"
 
 
+def dimension_contract_for_result(
+    result: EvaluationResult,
+) -> tuple[dict[str, Any], tuple[str, ...], dict[str, Any] | None]:
+    """Resolve the exact dimension definition and optional v2 identity."""
+    aesthetic = _loads(result.aesthetic_json, {})
+    definition = dimension_schema_from_strategy_snapshot(
+        result.strategy_snapshot_json,
+        aesthetic=aesthetic,
+    )
+    output_contract = definition.get("output_contract")
+    dimension_keys = (
+        output_contract.get("dimension_output_keys")
+        if isinstance(output_contract, dict)
+        else None
+    )
+    if (
+        not isinstance(dimension_keys, list)
+        or not dimension_keys
+        or len(dimension_keys) != len(set(dimension_keys))
+        or not all(
+            isinstance(key, str) and key for key in dimension_keys
+        )
+    ):
+        raise DimensionScoringContractError(
+            "DimensionSchema 输出维度合同不完整"
+        )
+
+    payload = _loads(result.strategy_snapshot_json, {})
+    if payload.get("schema_version") != "strategy-bundle-v2":
+        return definition, tuple(dimension_keys), None
+
+    identity_fields = {
+        "schema_id": payload.get("resolved_dimension_schema_id"),
+        "schema_key": payload.get("resolved_dimension_schema_key"),
+        "version": payload.get("resolved_dimension_schema_version"),
+        "canonical_hash": payload.get("resolved_dimension_schema_hash"),
+    }
+    if (
+        not isinstance(identity_fields["schema_id"], int)
+        or identity_fields["schema_id"] <= 0
+        or not all(
+            isinstance(identity_fields[key], str)
+            and bool(identity_fields[key])
+            for key in ("schema_key", "version")
+        )
+        or not isinstance(identity_fields["canonical_hash"], str)
+        or len(identity_fields["canonical_hash"]) != 64
+    ):
+        raise DimensionScoringContractError(
+            "结果策略快照缺少完整 DimensionSchema 身份"
+        )
+    identity = {
+        "binding_version": "dimension-truth-binding-v1",
+        **identity_fields,
+        "definition": definition,
+    }
+    return definition, tuple(dimension_keys), identity
+
+
 def result_fields(result: EvaluationResult) -> dict[str, Any]:
     """Return the auditable field contract used by paired regression."""
     precheck = _loads(result.precheck_json, {})
     aesthetic = _loads(result.aesthetic_json, {})
     scoring = _loads(result.scoring_json, {})
+    _, dimension_keys, dimension_identity = (
+        dimension_contract_for_result(result)
+    )
     classification = precheck.get("classification") or {}
     quality = precheck.get("image_quality") or {}
     decision_rules = aesthetic.get("decision_rules") or {}
     dimensions: dict[str, int] = {}
-    for key in DIMENSION_KEYS:
+    for key in dimension_keys:
         grade = ((aesthetic.get("dimensions") or {}).get(key) or {}).get("grade")
         if isinstance(grade, int) and 1 <= grade <= 5:
             dimensions[key] = grade
     return {
+        "dimension_schema": dimension_identity,
         "scope_status": classification.get("scope_status") or "out_of_scope",
         "primary_category": classification.get("primary_category") or "无法判断",
         "media_type": _media_statuses(precheck, MEDIA_TYPE_KEYS),
@@ -214,20 +273,26 @@ def truth_from_result(result: EvaluationResult, expected_level: str | None = Non
         level = latest_review.corrected_level or level
 
     dimensions = dict(fields["dimensions"])
+    _, bound_dimension_keys, _ = dimension_contract_for_result(result)
+    dimension_keys = set(bound_dimension_keys)
     if latest_review:
         for correction in _loads(latest_review.corrections_json, []):
             if correction.get("target_type") != "dimension":
                 continue
             key = str(correction.get("field_key") or "")
             value = correction.get("human_value")
-            if key in DIMENSION_KEYS and isinstance(value, int) and 1 <= value <= 5:
+            if (
+                key in dimension_keys
+                and isinstance(value, int)
+                and 1 <= value <= 5
+            ):
                 dimensions[key] = value
 
     media_form = {
         **fields["media_type"],
         **fields["shooting_method"],
     }
-    return {
+    truth = {
         "level": level,
         "scope_status": fields["scope_status"],
         "category": fields["primary_category"],
@@ -240,6 +305,9 @@ def truth_from_result(result: EvaluationResult, expected_level: str | None = Non
         "level_cap": fields["level_cap"],
         "dimensions": dimensions,
     }
+    if fields["dimension_schema"] is not None:
+        truth["dimension_schema"] = fields["dimension_schema"]
+    return truth
 
 
 def reviewed_truth_snapshot(
@@ -257,9 +325,14 @@ def reviewed_truth_snapshot(
         raise ValueError("target_error 必须来自人工纠偏结果")
     if role == "stable_control" and review.decision != "approved":
         raise ValueError("stable_control 必须来自人工确认正确的结果")
+    truth = truth_from_result(result)
     snapshot = {
-        "schema_version": "paired-truth-v1",
-        "truth": truth_from_result(result),
+        "schema_version": (
+            "paired-truth-v2"
+            if truth.get("dimension_schema") is not None
+            else "paired-truth-v1"
+        ),
+        "truth": truth,
         "source": {
             "evaluation_id": result.id,
             "review_id": review.id,
@@ -293,7 +366,65 @@ def _flatten_contract_fields(fields: dict[str, Any]) -> dict[str, Any]:
     for group in ("media_type", "shooting_method", "dimensions"):
         for key, value in (fields.get(group) or {}).items():
             flattened[f"{group}.{key}"] = value
+    dimension_identity = fields.get("dimension_schema")
+    if isinstance(dimension_identity, dict):
+        for key in ("schema_id", "schema_key", "version", "canonical_hash"):
+            flattened[f"dimension_schema.{key}"] = dimension_identity.get(key)
     return flattened
+
+
+def _dimension_schema_mismatches(
+    truth: dict[str, Any],
+    baseline_fields: dict[str, Any],
+    candidate_fields: dict[str, Any],
+) -> list[str]:
+    expected = truth.get("dimension_schema")
+    if not isinstance(expected, dict):
+        return []
+    mismatches: list[str] = []
+    for side, fields in (
+        ("baseline", baseline_fields),
+        ("candidate", candidate_fields),
+    ):
+        actual = fields.get("dimension_schema")
+        for key in ("schema_id", "schema_key", "version", "canonical_hash"):
+            if (
+                not isinstance(actual, dict)
+                or actual.get(key) != expected.get(key)
+            ):
+                mismatches.append(f"{side}.dimension_schema.{key}")
+    return mismatches
+
+
+def _validate_truth_dimension_identity(
+    truth: dict[str, Any],
+    *,
+    required: bool = False,
+) -> dict[str, Any] | None:
+    identity = truth.get("dimension_schema")
+    if identity is None and not required:
+        return None
+    if not isinstance(identity, dict):
+        raise DimensionScoringContractError(
+            "回归真值缺少 DimensionSchema 身份"
+        )
+    definition = identity.get("definition")
+    expected_hash = identity.get("canonical_hash")
+    if (
+        not isinstance(identity.get("schema_id"), int)
+        or identity["schema_id"] <= 0
+        or not isinstance(identity.get("schema_key"), str)
+        or not identity["schema_key"]
+        or not isinstance(identity.get("version"), str)
+        or not identity["version"]
+        or not isinstance(definition, dict)
+        or not isinstance(expected_hash, str)
+        or canonical_hash(definition) != expected_hash
+    ):
+        raise DimensionScoringContractError(
+            "回归真值的 DimensionSchema 身份无法复算"
+        )
+    return identity
 
 
 def _assessment(truth: dict[str, Any], fields: dict[str, Any]) -> dict[str, Any]:
@@ -389,8 +520,23 @@ def compare_paired_results(
 ) -> dict[str, Any]:
     """Compare two immutable strategy results against one frozen human truth."""
     truth = truth_snapshot.get("truth") or {}
+    truth_version = (
+        truth_snapshot.get("schema_version")
+        or "paired-truth-v1"
+    )
+    if truth_version not in {"paired-truth-v1", "paired-truth-v2"}:
+        raise ValueError("配对回归真值版本不受支持")
+    _validate_truth_dimension_identity(
+        truth,
+        required=truth_version == "paired-truth-v2",
+    )
     baseline_fields = result_fields(baseline)
     candidate_fields = result_fields(candidate)
+    schema_mismatches = _dimension_schema_mismatches(
+        truth,
+        baseline_fields,
+        candidate_fields,
+    )
     baseline_assessment = _assessment(truth, baseline_fields)
     candidate_assessment = _assessment(truth, candidate_fields)
     baseline_severe = {
@@ -449,11 +595,21 @@ def compare_paired_results(
         else None
     )
     item_passed = (
-        not critical_regressions
+        not schema_mismatches
+        and not critical_regressions
         and not new_severe
         and (target_improved is not False)
     )
     failure_reasons: list[dict[str, Any]] = []
+    if schema_mismatches:
+        failure_reasons.append(
+            {
+                "code": "dimension_schema_mismatch",
+                "severity": "P0",
+                "fields": schema_mismatches,
+                "message": _FAILURE_MESSAGES["dimension_schema_mismatch"],
+            }
+        )
     if target_improved is False:
         failure_reasons.append(
             {
@@ -500,6 +656,7 @@ def compare_paired_results(
         "diffs": diffs,
         "target_error_improved": target_improved,
         "critical_regressions": critical_regressions,
+        "dimension_schema_mismatches": schema_mismatches,
         "new_severe_errors": new_severe,
         "passed": item_passed,
         "failed": not item_passed,
@@ -796,6 +953,7 @@ def compare_truth(truth: dict[str, Any], result: EvaluationResult) -> dict[str, 
     precheck = _loads(result.precheck_json, {})
     aesthetic = _loads(result.aesthetic_json, {})
     actual_dimensions = aesthetic.get("dimensions") or {}
+    actual_fields = result_fields(result)
     checks: list[dict[str, Any]] = []
 
     def add_check(field: str, expected: Any, actual: Any, passed: bool, critical: bool = True) -> None:
@@ -812,6 +970,22 @@ def compare_truth(truth: dict[str, Any], result: EvaluationResult) -> dict[str, 
         )
 
     add_check("level", truth.get("level"), result.level, truth.get("level") == result.level)
+    truth_dimension_schema = _validate_truth_dimension_identity(truth)
+    if truth_dimension_schema is not None:
+        actual_dimension_schema = actual_fields.get("dimension_schema")
+        for key in ("schema_id", "schema_key", "version", "canonical_hash"):
+            expected = truth_dimension_schema.get(key)
+            actual = (
+                actual_dimension_schema.get(key)
+                if isinstance(actual_dimension_schema, dict)
+                else None
+            )
+            add_check(
+                f"dimension_schema.{key}",
+                expected,
+                actual,
+                expected == actual,
+            )
     actual_category = (precheck.get("classification") or {}).get("primary_category")
     add_check(
         "category",

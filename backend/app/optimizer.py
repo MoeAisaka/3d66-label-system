@@ -12,9 +12,13 @@ from sqlalchemy import select
 
 from .config import get_settings
 from .database import SessionLocal
+from .dimension_schema_registry import canonical_hash
 from .doubao import DoubaoClient, DoubaoError, DoubaoResponse
 from .models import OptimizerConfig, PromptOptimizationRun
-from .regression import latest_review_for_result
+from .regression import (
+    dimension_contract_for_result,
+    latest_review_for_result,
+)
 
 
 DIAGNOSTIC_OUTPUT_BUDGET = 2048
@@ -43,18 +47,6 @@ _AUDIT_STATUSES = {
 }
 _SAFE_IDENTIFIER = re.compile(r"^[A-Za-z0-9._:/-]{1,200}$")
 _SAFE_ERROR_TYPE = re.compile(r"^[a-z0-9_.-]{1,80}$")
-
-
-DIMENSION_LABELS = {
-    "composition_viewpoint": "构图与机位",
-    "lighting_atmosphere": "光影与氛围",
-    "color_material": "色彩与材质",
-    "spatial_design_furnishing": "空间设计与家具软装",
-    "visual_hierarchy": "视觉层级",
-    "detail_completion": "细节完成度",
-    "inspiration_reference": "灵感与参考价值",
-    "presentation_integrity": "画面呈现完整性",
-}
 
 
 @dataclass(frozen=True)
@@ -298,6 +290,44 @@ def _review_record(item: Any) -> dict[str, Any] | None:
     if not review or review.decision not in {"approved", "corrected"}:
         return None
     aesthetic = json.loads(result.aesthetic_json) if result.aesthetic_json else {}
+    definition, dimension_keys, identity = (
+        dimension_contract_for_result(result)
+    )
+    definitions_by_key = {
+        dimension.get("key"): dimension
+        for dimension in definition.get("dimensions") or []
+        if isinstance(dimension, dict)
+    }
+    dimension_names = {
+        key: definitions_by_key.get(key, {}).get("label")
+        for key in dimension_keys
+    }
+    if not all(
+        isinstance(label, str) and bool(label)
+        for label in dimension_names.values()
+    ):
+        raise ValueError("DimensionSchema 缺少优化器所需的维度名称")
+    dimension_schema = (
+        {
+            key: identity[key]
+            for key in (
+                "schema_id",
+                "schema_key",
+                "version",
+                "canonical_hash",
+            )
+        }
+        if identity is not None
+        else {
+            "schema_id": None,
+            "schema_key": "dimension.space.compatibility",
+            "version": str(
+                definition.get("compatibility_revision")
+                or "legacy-derived"
+            ),
+            "canonical_hash": canonical_hash(definition),
+        }
+    )
     corrections = json.loads(review.corrections_json or "[]")
     return {
         "asset_id": item.asset_id,
@@ -312,6 +342,8 @@ def _review_record(item: Any) -> dict[str, Any] | None:
         "human_note": review.note,
         "model_id": result.model_id,
         "prompt_version": result.prompt_b_version,
+        "dimension_schema": dimension_schema,
+        "dimension_names": dimension_names,
     }
 
 
@@ -322,6 +354,16 @@ def _select_records(items: list[Any]) -> tuple[list[tuple[Any, dict[str, Any]]],
         if record:
             eligible.append((item, record))
     eligible.sort(key=lambda pair: pair[0].asset_id)
+    schema_hashes = {
+        str((record.get("dimension_schema") or {}).get("canonical_hash") or "")
+        for _, record in eligible
+    }
+    if "" in schema_hashes:
+        raise ValueError("人工样本缺少可复算的维度规则身份")
+    if len(schema_hashes) > 1:
+        raise ValueError(
+            "同一优化任务不能混用不同 DimensionSchema 的人工样本"
+        )
 
     holdout_ids: list[int] = []
     analysis_pool: list[tuple[Any, dict[str, Any]]] = []
@@ -455,6 +497,8 @@ async def run_prompt_optimization(run_id: int) -> None:
             raise ValueError("样本集中没有已完成人工确认的图片")
         if corrected_count == 0:
             raise ValueError("至少需要一张带有人工纠错的图片，只有确认正确的样本无法定位提示词问题")
+        dimension_schema = selected[0][1]["dimension_schema"]
+        dimension_names = selected[0][1]["dimension_names"]
 
         run.sample_count = eligible_count
         run.corrected_count = corrected_count
@@ -505,7 +549,7 @@ async def run_prompt_optimization(run_id: int) -> None:
             sample_text = json.dumps(
                 {
                     "task": "诊断这张图片的模型判断与人工纠错差异",
-                    "dimension_names": DIMENSION_LABELS,
+                    "dimension_names": dimension_names,
                     "sample": record,
                 },
                 ensure_ascii=False,
@@ -573,6 +617,7 @@ async def run_prompt_optimization(run_id: int) -> None:
                 "stable_control",
                 "blind_holdout",
             ],
+            "dimension_schema": dimension_schema,
         }
         diagnostic_result = diagnostic_response.parsed
         run.diagnosis_json = json.dumps(
@@ -632,6 +677,7 @@ async def run_prompt_optimization(run_id: int) -> None:
                         "stable_control",
                         "blind_holdout",
                     ],
+                    "dimension_schema": dimension_schema,
                     "note": "盲测样本没有发送给提示词生成模型，后续用于豆包回测。",
                 },
                 "batch_diagnoses": [diagnostic_result],
