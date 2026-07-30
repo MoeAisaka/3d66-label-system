@@ -1,7 +1,15 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import os
+import subprocess
+import sys
+import threading
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
@@ -11,18 +19,26 @@ from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
 from app.benchmarking import (
+    OpenAICompatibleBenchmarkAdapter,
     calculate_variant_metrics,
+    run_benchmark_experiment,
     select_benchmark_candidate,
+    snapshot_hash,
 )
+from app.doubao import DoubaoResponse
 from app.database import Base, get_db
+from app import benchmarking, main, optimizer
 from app.main import app, current_user
 from app.migrations import run_migrations
 from app.models import (
     AgentPlanVersion,
     Asset,
+    AuditEvent,
+    AutomationBudgetDay,
     AutomationOptimizationRun,
     AutomationPolicy,
     ModelBenchmarkExperiment,
+    ModelBenchmarkVariant,
     ModelConfig,
     OptimizationCaseQueue,
     ProductionFeedbackEvent,
@@ -33,6 +49,7 @@ from app.models import (
 from app.optimization_automation import (
     AutomationAdapterResult,
     DeterministicOptimizationAdapter,
+    RealOptimizationAdapter,
     consume_optimization_queue_once,
 )
 from app.production_feedback import (
@@ -74,6 +91,7 @@ def _feedback(
     event_id: str,
     severity: str = "P2",
     prompt_version: str = "prompt-b-v1",
+    occurred_at: datetime | None = None,
 ):
     return ingest_production_feedback(
         db,
@@ -81,7 +99,7 @@ def _feedback(
         schema_version="production-feedback-v1",
         event_type="human_correction_finalized",
         source_system="production-labels",
-        occurred_at=datetime.now(timezone.utc),
+        occurred_at=occurred_at or datetime(2026, 1, 1, tzinfo=timezone.utc),
         payload={
             "production_case_id": f"case-{event_id}",
             "prompt_version": prompt_version,
@@ -148,7 +166,9 @@ def test_production_feedback_is_idempotent_and_immutable() -> None:
         _close(engine, db)
 
 
-def test_feedback_api_rejects_malformed_and_conflicting_payloads() -> None:
+def test_feedback_api_requires_machine_token_and_preserves_idempotency(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     engine, db, user = _database()
 
     def override_db():
@@ -158,25 +178,13 @@ def test_feedback_api_rejects_malformed_and_conflicting_payloads() -> None:
     app.dependency_overrides[current_user] = lambda: user
     client = TestClient(app)
     try:
-        malformed = client.post(
-            "/api/production-feedback-events",
-            json={
-                "event_id": "event-api",
-                "schema_version": "production-feedback-v1",
-                "event_type": "human_correction_finalized",
-                "source_system": "production",
-                "occurred_at": datetime.now(timezone.utc).isoformat(),
-                "payload": {"prompt_version": "v1"},
-            },
-        )
-        assert malformed.status_code == 422
-
+        occurred_at = datetime(2026, 1, 2, tzinfo=timezone.utc).isoformat()
         valid_payload = {
             "event_id": "event-api",
             "schema_version": "production-feedback-v1",
             "event_type": "human_correction_finalized",
             "source_system": "production",
-            "occurred_at": datetime.now(timezone.utc).isoformat(),
+            "occurred_at": occurred_at,
             "payload": {
                 "production_case_id": "prod-1",
                 "prompt_version": "v1",
@@ -185,22 +193,64 @@ def test_feedback_api_rejects_malformed_and_conflicting_payloads() -> None:
                 "human_truth": {"level": "L2"},
             },
         }
-        first = client.post(
+        monkeypatch.setattr(
+            main,
+            "settings",
+            replace(main.settings, production_feedback_token=None),
+        )
+        unconfigured = client.post(
             "/api/production-feedback-events", json=valid_payload
+        )
+        assert unconfigured.status_code == 503
+
+        token = "test-only-feedback-token"
+        monkeypatch.setattr(
+            main,
+            "settings",
+            replace(main.settings, production_feedback_token=token),
+        )
+        assert client.post(
+            "/api/production-feedback-events", json=valid_payload
+        ).status_code == 401
+        assert client.post(
+            "/api/production-feedback-events",
+            headers={"Authorization": "Bearer wrong-test-token"},
+            json=valid_payload,
+        ).status_code == 401
+        headers = {"Authorization": f"Bearer {token}"}
+        malformed = client.post(
+            "/api/production-feedback-events",
+            headers=headers,
+            json={
+                "event_id": "event-api",
+                "schema_version": "production-feedback-v1",
+                "event_type": "human_correction_finalized",
+                "source_system": "production",
+                "occurred_at": occurred_at,
+                "payload": {"prompt_version": "v1"},
+            },
+        )
+        assert malformed.status_code == 422
+
+        first = client.post(
+            "/api/production-feedback-events", headers=headers, json=valid_payload
         )
         assert first.status_code == 200
         assert first.json()["duplicate"] is False
         second = client.post(
-            "/api/production-feedback-events", json=valid_payload
+            "/api/production-feedback-events", headers=headers, json=valid_payload
         )
         assert second.status_code == 200
         assert second.json()["duplicate"] is True
         changed = dict(valid_payload)
         changed["payload"] = dict(valid_payload["payload"], severity="P0")
         conflict = client.post(
-            "/api/production-feedback-events", json=changed
+            "/api/production-feedback-events", headers=headers, json=changed
         )
         assert conflict.status_code == 409
+        serialized = json.dumps(first.json(), ensure_ascii=False)
+        assert token not in serialized
+        assert "authorization" not in serialized.casefold()
     finally:
         _close(engine, db)
 
@@ -240,7 +290,19 @@ def test_automation_defaults_disabled_then_dry_run_plans_without_model() -> None
         _close(engine, db)
 
 
-def test_p0_triggers_immediately_but_budget_blocks_live_mode() -> None:
+def test_p0_triggers_immediately_and_live_budget_blocks_before_adapter() -> None:
+    class CountingAdapter:
+        calls = 0
+
+        def estimate_cost_micros(self, *, frozen_input):
+            del frozen_input
+            return 2500
+
+        def optimize(self, *, frozen_input, max_candidates):
+            del frozen_input, max_candidates
+            self.calls += 1
+            raise AssertionError("预算拦截后不应调用执行器")
+
     engine, db, _user = _database()
     try:
         policy = AutomationPolicy(
@@ -266,7 +328,7 @@ def test_p0_triggers_immediately_but_budget_blocks_live_mode() -> None:
         policy.daily_budget_micros = 500
         db.commit()
         blocked = consume_optimization_queue_once(
-            db, worker_id="worker-budget"
+            db, worker_id="worker-budget", adapter=CountingAdapter()
         )
         db.commit()
         assert blocked["status"] == "budget_blocked"
@@ -278,15 +340,24 @@ def test_p0_triggers_immediately_but_budget_blocks_live_mode() -> None:
         )
         assert budget_case.status == "pending"
         assert budget_case.attempt_count == 0
+        assert CountingAdapter.calls == 0
     finally:
         _close(engine, db)
 
 
 def test_automation_failure_sets_backoff_and_expired_lease_recovers() -> None:
+    class RetryableModelError(RuntimeError):
+        technical_error_type = "timeout"
+        retryable = True
+
     class FailingAdapter:
+        def estimate_cost_micros(self, *, frozen_input):
+            del frozen_input
+            return 1000
+
         def optimize(self, *, frozen_input, max_candidates):
             del frozen_input, max_candidates
-            raise RuntimeError("synthetic failure")
+            raise RetryableModelError("sensitive upstream details")
 
     engine, db, _user = _database()
     try:
@@ -313,7 +384,7 @@ def test_automation_failure_sets_backoff_and_expired_lease_recovers() -> None:
         case = db.scalar(select(OptimizationCaseQueue))
         assert case.status == "failed"
         assert case.next_attempt_at is not None
-        assert case.last_error == "synthetic failure"
+        assert case.last_error == "model_timeout"
 
         case.status = "processing"
         case.lease_owner = "dead-worker"
@@ -333,7 +404,7 @@ def test_automation_failure_sets_backoff_and_expired_lease_recovers() -> None:
         _close(engine, db)
 
 
-def test_test_adapter_never_publishes_and_waits_for_release_review() -> None:
+def test_test_adapter_succeeds_with_usage_and_never_publishes() -> None:
     engine, db, _user = _database()
     try:
         policy = AutomationPolicy(
@@ -347,8 +418,12 @@ def test_test_adapter_never_publishes_and_waits_for_release_review() -> None:
         _feedback(db, event_id="adapter-success")
         db.commit()
         adapter = DeterministicOptimizationAdapter(
-            AutomationAdapterResult(
-                candidates=[{"version": "candidate-v1"}],
+                AutomationAdapterResult(
+                candidates=[{
+                    "system_prompt": "candidate system",
+                    "user_prompt": "candidate user",
+                    "change_note": "test candidate only",
+                }],
                 regression={
                     "status": "passed",
                     "target_errors": 1,
@@ -356,17 +431,23 @@ def test_test_adapter_never_publishes_and_waits_for_release_review() -> None:
                     "blind_holdouts": 1,
                 },
                 actual_cost_micros=2500,
+                input_tokens=100,
+                output_tokens=50,
+                total_tokens=150,
             )
         )
         result = consume_optimization_queue_once(
             db, worker_id="worker-test", adapter=adapter
         )
         db.commit()
-        assert result["status"] == "awaiting_release_review"
+        assert result["status"] == "succeeded"
         run = db.get(AutomationOptimizationRun, result["run_id"])
         evidence = json.loads(run.result_json)
         assert evidence["release_requires_human_review"] is True
         assert evidence["publishes_automatically"] is False
+        assert run.input_tokens == 100
+        assert run.output_tokens == 50
+        assert run.total_tokens == 150
         assert db.scalar(select(PromptVersion.id)) is None
     finally:
         _close(engine, db)
@@ -460,6 +541,12 @@ def test_benchmark_api_freezes_snapshot_and_runs_only_test_double() -> None:
             model_id="baseline-model",
             base_url="https://example.test",
             api_path="/chat/completions",
+            encrypted_api_key="test-secret-reference",
+            benchmark_enabled=True,
+            input_micros_per_million_tokens=1_000_000,
+            output_micros_per_million_tokens=1_000_000,
+            max_input_tokens=100,
+            max_tokens=128,
         )
         policy = SamplingPolicy(id=1)
         assets = [
@@ -565,6 +652,25 @@ def test_benchmark_api_freezes_snapshot_and_runs_only_test_double() -> None:
         )
         assert blocked.status_code == 409
 
+        real_payload = dict(
+            create_payload,
+            experiment_key="benchmark-real-budget-blocked",
+            execution_mode="real",
+            max_round_cost_micros=1,
+            quality_gate_approved=True,
+            variants=[
+                {
+                    "model_key": key,
+                    "model_config_id": model.id,
+                    "human_review_cost_micros": 5000,
+                }
+                for key in ("sol", "terra", "luna")
+            ],
+        )
+        real_blocked = client.post("/api/model-benchmarks", json=real_payload)
+        assert real_blocked.status_code == 409
+        assert real_blocked.json()["detail"] == "真实横评预测成本超过单轮上限"
+
         with pytest.raises(IntegrityError):
             db.execute(
                 text(
@@ -579,5 +685,560 @@ def test_benchmark_api_freezes_snapshot_and_runs_only_test_double() -> None:
             ModelBenchmarkExperiment, created_json["id"]
         )
         assert experiment.snapshot_hash == first_hash
+    finally:
+        _close(engine, db)
+
+
+def test_optimizer_usage_missing_stops_before_synthesis(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+
+    class FakeClient:
+        def __init__(self, _config):
+            pass
+
+        async def chat_json(self, *_args, **_kwargs):
+            nonlocal calls
+            calls += 1
+            return DoubaoResponse(parsed={"summary": "test"}, raw_text="{}", raw_payload={})
+
+    monkeypatch.setattr(optimizer, "DoubaoClient", FakeClient)
+    with pytest.raises(RuntimeError, match="optimizer_usage_missing"):
+        asyncio.run(
+            optimizer.generate_automation_candidates(
+                config=SimpleNamespace(),
+                base_prompt=SimpleNamespace(
+                    stage="B",
+                    version="B1",
+                    system_prompt="system",
+                    user_prompt="user",
+                ),
+                frozen_input={"cases": []},
+                max_candidates=1,
+            )
+        )
+    assert calls == 1
+
+
+def test_benchmark_usage_missing_stops_before_next_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+
+    class FakeClient:
+        def __init__(self, _config):
+            pass
+
+        async def chat_json(self, *_args, **_kwargs):
+            nonlocal calls
+            calls += 1
+            return DoubaoResponse(
+                parsed={"classification": {"scope_status": "in_scope"}},
+                raw_text="{}",
+                raw_payload={},
+            )
+
+    monkeypatch.setattr(benchmarking, "DoubaoClient", FakeClient)
+    config = ModelConfig(
+        input_micros_per_million_tokens=1000,
+        output_micros_per_million_tokens=1000,
+    )
+    adapter = OpenAICompatibleBenchmarkAdapter(
+        configs={"sol": config},
+        asset_paths={1: Path("unused-by-test.jpg")},
+        round_cost_limit_micros=1000,
+    )
+    with pytest.raises(RuntimeError, match="benchmark_usage_missing"):
+        adapter.evaluate(
+            model_key="sol",
+            frozen_snapshot={
+                "prompt_a": {"system_prompt": "A", "user_prompt": "A"},
+                "prompt_b": {
+                    "system_prompt": "B",
+                    "user_prompt": "B",
+                    "rubric_version": "R1",
+                },
+                "samples": [{
+                    "asset_id": 1,
+                    "image": {"mime_type": "image/jpeg"},
+                    "truth": {"level": "L1"},
+                }],
+            },
+        )
+    assert calls == 1
+
+
+def test_real_benchmark_rejects_unapproved_or_changed_snapshot_before_adapter() -> None:
+    class CountingAdapter:
+        calls = 0
+
+        def evaluate(self, *, model_key, frozen_snapshot):
+            del model_key, frozen_snapshot
+            self.calls += 1
+            raise AssertionError("质量门或快照失败后不应调用执行器")
+
+    engine, db, _user = _database()
+    try:
+        frozen = {"schema_version": "model-benchmark-v1", "samples": []}
+        experiment = ModelBenchmarkExperiment(
+            experiment_key="real-gate-first",
+            name="real gate first",
+            execution_mode="real",
+            cohort_hash="1" * 64,
+            snapshot_hash=snapshot_hash(frozen),
+            frozen_snapshot_json=json.dumps(frozen),
+            quality_gate_json=json.dumps({
+                "min_quality_accuracy": 0.9,
+                "max_p0_p1_errors": 0,
+                "min_retry_stability": 0.9,
+                "approved_for_real_execution": False,
+            }),
+        )
+        db.add(experiment)
+        db.commit()
+        adapter = CountingAdapter()
+        with pytest.raises(ValueError, match="质量门"):
+            run_benchmark_experiment(
+                db, experiment=experiment, adapter=adapter, actor="test"
+            )
+        experiment.quality_gate_json = json.dumps({
+            "min_quality_accuracy": 0.9,
+            "max_p0_p1_errors": 0,
+            "min_retry_stability": 0.9,
+            "approved_for_real_execution": True,
+        })
+        experiment.snapshot_hash = "0" * 64
+        with pytest.raises(ValueError, match="哈希"):
+            run_benchmark_experiment(
+                db, experiment=experiment, adapter=adapter, actor="test"
+            )
+        assert adapter.calls == 0
+    finally:
+        _close(engine, db)
+
+
+def test_benchmark_failures_store_only_sanitized_error_codes() -> None:
+    sentinel = "test-only-sensitive-key"
+
+    class FailingAdapter:
+        def evaluate(self, *, model_key, frozen_snapshot):
+            del model_key, frozen_snapshot
+            raise RuntimeError(f"provider failed with {sentinel}")
+
+    engine, db, _user = _database()
+    try:
+        frozen = {"schema_version": "model-benchmark-v1", "samples": []}
+        experiment = ModelBenchmarkExperiment(
+            experiment_key="sanitized-failure",
+            name="sanitized failure",
+            execution_mode="real",
+            cohort_hash="2" * 64,
+            snapshot_hash=snapshot_hash(frozen),
+            frozen_snapshot_json=json.dumps(frozen),
+            quality_gate_json=json.dumps({
+                "min_quality_accuracy": 0.9,
+                "max_p0_p1_errors": 0,
+                "min_retry_stability": 0.9,
+                "approved_for_real_execution": True,
+            }),
+        )
+        db.add(experiment)
+        db.flush()
+        db.add(ModelBenchmarkVariant(
+            experiment_id=experiment.id,
+            model_key="sol",
+            provider="test",
+            model_id="test",
+            pricing_json="{}",
+        ))
+        db.commit()
+        with pytest.raises(RuntimeError):
+            run_benchmark_experiment(
+                db, experiment=experiment, adapter=FailingAdapter(), actor="test"
+            )
+        variant = db.scalar(select(ModelBenchmarkVariant))
+        audit = db.scalar(select(AuditEvent).where(AuditEvent.category == "model_benchmark"))
+        assert variant.error_message == "benchmark_executor_failed"
+        assert sentinel not in variant.error_message
+        assert sentinel not in audit.payload_json
+    finally:
+        _close(engine, db)
+
+
+def test_expired_lease_recovers_once_and_charges_reserved_budget() -> None:
+    engine, db, _user = _database()
+    try:
+        now = datetime(2026, 1, 3, tzinfo=timezone.utc)
+        policy = AutomationPolicy(id=1, enabled=False, dry_run=False)
+        db.add(policy)
+        _event, case, _duplicate = _feedback(db, event_id="lease-expired")
+        run = AutomationOptimizationRun(
+            run_key="expired-run",
+            base_prompt_version="prompt-b-v1",
+            policy_revision=1,
+            status="processing",
+            dry_run=False,
+            trigger_reason="case_threshold",
+            case_ids_json="[]",
+            frozen_input_json="{}",
+            estimated_cost_micros=1000,
+        )
+        db.add(run)
+        db.flush()
+        case.status = "processing"
+        case.automation_run_id = run.id
+        case.lease_owner = "dead-worker"
+        case.lease_token = "expired-token"
+        case.lease_expires_at = now - timedelta(seconds=1)
+        db.add(AutomationBudgetDay(
+            budget_date=now.date().isoformat(), reserved_micros=1000
+        ))
+        db.commit()
+
+        first = consume_optimization_queue_once(db, worker_id="recovery", now=now)
+        db.commit()
+        second = consume_optimization_queue_once(db, worker_id="recovery", now=now)
+        db.commit()
+        budget = db.get(AutomationBudgetDay, now.date().isoformat())
+        assert first["recovered_leases"] == 1
+        assert second["recovered_leases"] == 0
+        assert run.status == "failed"
+        assert run.retryable is True
+        assert case.status == "failed"
+        assert budget.reserved_micros == 0
+        assert budget.spent_micros == 1000
+    finally:
+        _close(engine, db)
+
+
+def test_concurrent_workers_only_invoke_one_optimizer(tmp_path) -> None:
+    engine = create_engine(
+        f"sqlite:///{tmp_path / 'lease-race.db'}",
+        connect_args={"check_same_thread": False},
+    )
+    Base.metadata.create_all(engine)
+    with engine.begin() as connection:
+        run_migrations(connection)
+    with Session(engine, expire_on_commit=False) as seed:
+        seed.add(AutomationPolicy(
+            id=1,
+            enabled=True,
+            dry_run=False,
+            case_threshold=1,
+            daily_budget_micros=10_000,
+        ))
+        _feedback(seed, event_id="lease-race")
+        seed.commit()
+
+    started = threading.Event()
+    release = threading.Event()
+    calls = 0
+    worker_result: dict[str, object] = {}
+    worker_error: list[BaseException] = []
+
+    class BlockingAdapter:
+        def estimate_cost_micros(self, *, frozen_input):
+            del frozen_input
+            return 1000
+
+        def optimize(self, *, frozen_input, max_candidates):
+            nonlocal calls
+            del frozen_input, max_candidates
+            calls += 1
+            started.set()
+            assert release.wait(timeout=5)
+            return AutomationAdapterResult(
+                candidates=[{
+                    "system_prompt": "candidate system",
+                    "user_prompt": "candidate user",
+                    "change_note": "test only",
+                }],
+                regression={},
+                actual_cost_micros=500,
+                input_tokens=10,
+                output_tokens=5,
+                total_tokens=15,
+            )
+
+    def first_worker() -> None:
+        try:
+            with Session(engine, expire_on_commit=False) as session:
+                worker_result.update(consume_optimization_queue_once(
+                    session, worker_id="worker-1", adapter=BlockingAdapter()
+                ))
+                session.commit()
+        except BaseException as exc:  # pragma: no cover - asserted below
+            worker_error.append(exc)
+
+    thread = threading.Thread(target=first_worker)
+    thread.start()
+    assert started.wait(timeout=5)
+    try:
+        with Session(engine, expire_on_commit=False) as contender:
+            second = consume_optimization_queue_once(
+                contender, worker_id="worker-2", adapter=BlockingAdapter()
+            )
+            contender.commit()
+        assert second["status"] == "idle"
+    finally:
+        release.set()
+        thread.join(timeout=5)
+        engine.dispose()
+    assert not thread.is_alive()
+    assert worker_error == []
+    assert worker_result["status"] == "succeeded"
+    assert calls == 1
+
+
+def test_real_optimizer_materializes_new_draft_with_three_role_regression(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine, db, _user = _database()
+    try:
+        model = ModelConfig(
+            name="baseline",
+            model_id="baseline-model",
+            base_url="https://example.test",
+            api_path="/chat/completions",
+        )
+        prompt_a = PromptVersion(
+            stage="A",
+            name="A",
+            version="automation-a-v1",
+            system_prompt="A system",
+            user_prompt="A user",
+            rubric_version="R1",
+            status="published",
+        )
+        prompt_b = PromptVersion(
+            stage="B",
+            name="B",
+            version="automation-b-v1",
+            system_prompt="B system",
+            user_prompt="B user",
+            rubric_version="R1",
+            status="published",
+        )
+        policy = SamplingPolicy(id=1)
+        db.add_all([model, prompt_a, prompt_b, policy])
+        db.flush()
+        baseline = get_or_create_bundle(
+            db=db,
+            model_config=model,
+            prompt_a=prompt_a,
+            prompt_b=prompt_b,
+            rubric_version="R1",
+            engine_version="E1",
+            risk_review_version="risk-v1",
+            sampling_policy=policy,
+        )
+        run = AutomationOptimizationRun(
+            run_key="materialize-run",
+            base_prompt_version=prompt_b.version,
+            policy_revision=1,
+            status="processing",
+            dry_run=False,
+            trigger_reason="case_threshold",
+            case_ids_json="[1]",
+            frozen_input_json=json.dumps({
+                "regression_binding": {
+                    "sample_set_id": 9,
+                    "baseline_strategy_bundle_id": baseline.id,
+                    "samples": [
+                        {"sample_item_id": 11, "role": "target_error"},
+                        {"sample_item_id": 12, "role": "stable_control"},
+                        {"sample_item_id": 13, "role": "blind_holdout"},
+                    ],
+                }
+            }),
+            estimated_cost_micros=1000,
+        )
+        db.add(run)
+        db.flush()
+        captured = []
+        expected_db = db
+
+        def fake_create(payload, user, db, *, commit):
+            assert db is expected_db
+            assert user.username == "worker-test"
+            assert commit is False
+            captured.append(payload)
+            return {"id": 77}
+
+        monkeypatch.setattr(main, "_create_paired_regression", fake_create)
+        adapter = RealOptimizationAdapter(
+            config=SimpleNamespace(), base_prompt=prompt_b
+        )
+        materialized = adapter.materialize(
+            db,
+            run=run,
+            result=AutomationAdapterResult(
+                candidates=[{
+                    "system_prompt": "candidate system",
+                    "user_prompt": "candidate user",
+                    "change_note": "minimal correction",
+                }],
+                regression={},
+            ),
+            worker_id="worker-test",
+        )
+        candidate = db.get(PromptVersion, materialized["prompt_ids"][0])
+        assert candidate.status == "draft"
+        assert candidate.source == "optimizer"
+        assert candidate.source_automation_run_id == run.id
+        assert prompt_b.status == "published"
+        assert materialized["regression_ids"] == [77]
+        assert [sample.role for sample in captured[0].samples] == [
+            "target_error",
+            "stable_control",
+            "blind_holdout",
+        ]
+    finally:
+        _close(engine, db)
+
+
+def test_model_config_api_never_returns_or_persists_plaintext_key() -> None:
+    engine, db, user = _database()
+    try:
+        plaintext = "test-only-plaintext-key"
+        reference = "keychain:v1:test-model-config"
+        config = ModelConfig(
+            name="safe config",
+            model_id="safe-model",
+            encrypted_api_key=reference,
+        )
+        db.add(config)
+        db.commit()
+
+        def override_db():
+            yield db
+
+        app.dependency_overrides[get_db] = override_db
+        app.dependency_overrides[current_user] = lambda: user
+        response = TestClient(app).get("/api/model-configs")
+        assert response.status_code == 200
+        serialized = response.text
+        assert plaintext not in serialized
+        assert reference not in serialized
+        assert "encrypted_api_key" not in serialized
+        assert config.encrypted_api_key == reference
+        assert config.encrypted_api_key != plaintext
+    finally:
+        _close(engine, db)
+
+
+def test_feedback_sender_example_defaults_to_safe_dry_run(tmp_path) -> None:
+    sentinel = "test-only-payload-secret"
+    event_path = tmp_path / "event.json"
+    event_path.write_text(json.dumps({
+        "event_id": "production-review:test-1",
+        "schema_version": "production-feedback-v1",
+        "event_type": "human_correction_finalized",
+        "source_system": "test-production",
+        "occurred_at": "2026-01-01T00:00:00Z",
+        "payload": {
+            "production_case_id": "case-1",
+            "prompt_version": "B1",
+            "severity": "P1",
+            "model_output": {"private": sentinel},
+            "human_truth": {"private": sentinel},
+        },
+    }), encoding="utf-8")
+    script = (
+        Path(__file__).resolve().parents[2]
+        / "scripts/integration/production_feedback_sender_example.py"
+    )
+    environment = dict(os.environ)
+    environment.pop("LABELLAB_FEEDBACK_URL", None)
+    environment.pop("LABELLAB_FEEDBACK_TOKEN", None)
+    dry_run = subprocess.run(
+        [sys.executable, str(script), str(event_path)],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+    assert dry_run.returncode == 0
+    assert '"mode":"dry-run"' in dry_run.stdout
+    assert sentinel not in dry_run.stdout
+    assert "Authorization" not in dry_run.stdout
+
+    blocked_send = subprocess.run(
+        [sys.executable, str(script), str(event_path), "--send"],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+    assert blocked_send.returncode == 2
+    assert "LABELLAB_FEEDBACK_URL" in blocked_send.stderr
+    assert sentinel not in blocked_send.stderr
+
+
+def test_dangerous_defaults_and_non_admin_server_guards() -> None:
+    policy_request = main.AutomationPolicyUpdate()
+    request = main.BenchmarkCreateRequest(
+        experiment_key="default-mode",
+        name="default mode",
+        cohort_asset_ids=[1],
+        strategy_bundle_id=1,
+        variants=[
+            main.BenchmarkVariantRequest(
+                model_key=key,
+                provider="test",
+                model_id=f"test-{key}",
+                human_review_cost_micros=0,
+            )
+            for key in ("sol", "terra", "luna")
+        ],
+    )
+    assert policy_request.enabled is False
+    assert policy_request.dry_run is True
+    assert policy_request.daily_budget_micros == 0
+    assert request.execution_mode == "test"
+    assert request.max_round_cost_micros == 0
+    assert request.quality_gate_approved is False
+
+    engine, db, user = _database()
+    try:
+        persisted_policy = AutomationPolicy(id=1)
+        db.add(persisted_policy)
+        db.flush()
+        assert persisted_policy.enabled is False
+        assert persisted_policy.dry_run is True
+        assert persisted_policy.daily_budget_micros == 0
+        user.is_admin = False
+        db.commit()
+
+        def override_db():
+            yield db
+
+        app.dependency_overrides[get_db] = override_db
+        app.dependency_overrides[current_user] = lambda: user
+        client = TestClient(app)
+        real_payload = {
+            "experiment_key": "forbidden-real",
+            "name": "forbidden real",
+            "execution_mode": "real",
+            "cohort_asset_ids": [1],
+            "strategy_bundle_id": 1,
+            "variants": [
+                {
+                    "model_key": key,
+                    "model_config_id": 1,
+                    "human_review_cost_micros": 0,
+                }
+                for key in ("sol", "terra", "luna")
+            ],
+            "max_round_cost_micros": 1,
+            "quality_gate_approved": True,
+        }
+        assert client.post(
+            "/api/model-benchmarks", json=real_payload
+        ).status_code == 403
+        assert client.post("/api/model-config/test").status_code == 403
+        assert client.post("/api/optimizer-config/test").status_code == 403
+        assert client.post("/api/automation-runs/consume").status_code == 403
     finally:
         _close(engine, db)

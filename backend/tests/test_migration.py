@@ -37,6 +37,7 @@ MIGRATION_NAMES = [
     "add_prompt_metric_snapshots",
     "add_phase_b_automation_feedback_benchmarks",
     "enforce_material_package_immutability",
+    "add_real_executor_safety",
 ]
 
 
@@ -1765,6 +1766,233 @@ def test_v19_backfills_staged_review_state_and_keeps_history_append_only(
                 connection.exec_driver_sql(
                     "UPDATE human_reviews SET decision = 'approved' WHERE id = 3"
                 )
+    finally:
+        engine.dispose()
+
+
+def test_v23_real_executor_migration_preserves_rows_and_adds_safe_defaults(
+    tmp_path,
+) -> None:
+    engine = _engine(tmp_path, "v23-to-v24-real-executors.db")
+    try:
+        with engine.begin() as connection:
+            connection.exec_driver_sql("CREATE TABLE users (id INTEGER PRIMARY KEY)")
+            connection.exec_driver_sql("CREATE TABLE model_configs (id INTEGER PRIMARY KEY)")
+            connection.exec_driver_sql("CREATE TABLE optimizer_configs (id INTEGER PRIMARY KEY)")
+            connection.exec_driver_sql("CREATE TABLE prompt_versions (id INTEGER PRIMARY KEY)")
+            connection.exec_driver_sql("CREATE TABLE evaluation_results (id INTEGER PRIMARY KEY)")
+            connection.exec_driver_sql("CREATE TABLE human_reviews (id INTEGER PRIMARY KEY)")
+            connection.exec_driver_sql("CREATE TABLE production_feedback_events (id INTEGER PRIMARY KEY)")
+            connection.exec_driver_sql("""
+                CREATE TABLE automation_optimization_runs (
+                    id INTEGER PRIMARY KEY,
+                    run_key VARCHAR(160) NOT NULL UNIQUE,
+                    base_prompt_version VARCHAR(40) NOT NULL,
+                    policy_revision INTEGER NOT NULL,
+                    status VARCHAR(40) NOT NULL DEFAULT 'planned'
+                        CHECK(status IN (
+                            'planned','awaiting_executor','running',
+                            'awaiting_release_review','failed','cancelled'
+                        )),
+                    dry_run BOOLEAN NOT NULL DEFAULT 1,
+                    trigger_reason VARCHAR(80) NOT NULL,
+                    case_ids_json TEXT NOT NULL,
+                    frozen_input_json TEXT NOT NULL,
+                    result_json TEXT NOT NULL DEFAULT '{}',
+                    candidate_count INTEGER NOT NULL DEFAULT 0,
+                    estimated_cost_micros INTEGER NOT NULL DEFAULT 0,
+                    actual_cost_micros INTEGER NOT NULL DEFAULT 0,
+                    error_message TEXT NOT NULL DEFAULT '',
+                    created_by VARCHAR(80) NOT NULL DEFAULT 'automation',
+                    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    finished_at DATETIME,
+                    CHECK(estimated_cost_micros >= 0 AND actual_cost_micros >= 0)
+                )
+            """)
+            connection.exec_driver_sql("""
+                CREATE TABLE optimization_case_queue (
+                    id INTEGER PRIMARY KEY,
+                    idempotency_key VARCHAR(160) NOT NULL UNIQUE,
+                    evaluation_id INTEGER REFERENCES evaluation_results(id),
+                    final_review_id INTEGER REFERENCES human_reviews(id),
+                    source_type VARCHAR(30) NOT NULL DEFAULT 'human_review',
+                    source_event_id INTEGER UNIQUE REFERENCES production_feedback_events(id),
+                    prompt_version VARCHAR(40) NOT NULL,
+                    severity VARCHAR(10) NOT NULL DEFAULT 'P2'
+                        CHECK(severity IN ('P0','P1','P2','P3')),
+                    case_json TEXT NOT NULL,
+                    status VARCHAR(30) NOT NULL DEFAULT 'pending'
+                        CHECK(status IN ('pending','batched','processing','completed','failed')),
+                    lease_owner VARCHAR(120),
+                    lease_token VARCHAR(80),
+                    lease_expires_at DATETIME,
+                    attempt_count INTEGER NOT NULL DEFAULT 0,
+                    next_attempt_at DATETIME,
+                    last_error TEXT NOT NULL DEFAULT '',
+                    automation_run_id INTEGER REFERENCES automation_optimization_runs(id),
+                    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    CHECK(
+                        (source_type = 'human_review' AND evaluation_id IS NOT NULL
+                         AND final_review_id IS NOT NULL AND source_event_id IS NULL)
+                        OR
+                        (source_type = 'production_feedback' AND evaluation_id IS NULL
+                         AND final_review_id IS NULL AND source_event_id IS NOT NULL)
+                    )
+                )
+            """)
+            connection.exec_driver_sql("""
+                CREATE TABLE model_benchmark_experiments (
+                    id INTEGER PRIMARY KEY,
+                    experiment_key VARCHAR(160) NOT NULL UNIQUE,
+                    name VARCHAR(200) NOT NULL,
+                    status VARCHAR(20) NOT NULL DEFAULT 'draft'
+                        CHECK(status IN ('draft','running','completed','failed','cancelled')),
+                    execution_mode VARCHAR(20) NOT NULL DEFAULT 'disabled'
+                        CHECK(execution_mode IN ('disabled','test')),
+                    cohort_hash VARCHAR(64) NOT NULL,
+                    snapshot_hash VARCHAR(64) NOT NULL,
+                    frozen_snapshot_json TEXT NOT NULL,
+                    quality_gate_json TEXT NOT NULL,
+                    decision_json TEXT NOT NULL DEFAULT '{}',
+                    created_by VARCHAR(80) NOT NULL DEFAULT 'system',
+                    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    started_at DATETIME,
+                    finished_at DATETIME
+                )
+            """)
+            connection.exec_driver_sql("""
+                CREATE TABLE model_benchmark_variants (
+                    id INTEGER PRIMARY KEY,
+                    experiment_id INTEGER NOT NULL REFERENCES model_benchmark_experiments(id),
+                    model_key VARCHAR(80) NOT NULL,
+                    provider VARCHAR(80) NOT NULL,
+                    model_id VARCHAR(200) NOT NULL,
+                    pricing_json TEXT NOT NULL,
+                    status VARCHAR(20) NOT NULL DEFAULT 'pending'
+                        CHECK(status IN ('pending','running','completed','failed')),
+                    metrics_json TEXT NOT NULL DEFAULT '{}',
+                    observations_json TEXT NOT NULL DEFAULT '[]',
+                    error_message TEXT NOT NULL DEFAULT '',
+                    started_at DATETIME,
+                    finished_at DATETIME,
+                    UNIQUE(experiment_id, model_key)
+                )
+            """)
+            connection.exec_driver_sql("""
+                CREATE TABLE schema_migrations (
+                    version INTEGER PRIMARY KEY,
+                    name VARCHAR(200) NOT NULL,
+                    applied_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            for version, name in enumerate(MIGRATION_NAMES[:23], start=1):
+                connection.exec_driver_sql(
+                    "INSERT INTO schema_migrations(version, name) VALUES (?, ?)",
+                    (version, name),
+                )
+            connection.exec_driver_sql(
+                "INSERT INTO users(id) VALUES (1)"
+            )
+            connection.exec_driver_sql(
+                "INSERT INTO model_configs(id) VALUES (1)"
+            )
+            connection.exec_driver_sql(
+                "INSERT INTO optimizer_configs(id) VALUES (1)"
+            )
+            connection.exec_driver_sql(
+                "INSERT INTO prompt_versions(id) VALUES (1)"
+            )
+            connection.exec_driver_sql(
+                "INSERT INTO evaluation_results(id) VALUES (1)"
+            )
+            connection.exec_driver_sql(
+                "INSERT INTO human_reviews(id) VALUES (1)"
+            )
+            connection.exec_driver_sql("""
+                INSERT INTO automation_optimization_runs (
+                    id, run_key, base_prompt_version, policy_revision, status,
+                    trigger_reason, case_ids_json, frozen_input_json
+                ) VALUES (1, 'legacy-run', 'B1', 2, 'awaiting_executor',
+                          'case_threshold', '[1]', '{}')
+            """)
+            connection.exec_driver_sql("""
+                INSERT INTO optimization_case_queue (
+                    id, idempotency_key, evaluation_id, final_review_id,
+                    source_type, prompt_version, case_json, status,
+                    automation_run_id
+                ) VALUES (1, 'legacy-case', 1, 1, 'human_review',
+                          'B1', '{}', 'batched', 1)
+            """)
+            connection.exec_driver_sql("""
+                INSERT INTO model_benchmark_experiments (
+                    id, experiment_key, name, execution_mode, cohort_hash,
+                    snapshot_hash, frozen_snapshot_json, quality_gate_json
+                ) VALUES (1, 'legacy-benchmark', 'legacy', 'test',
+                          'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                          'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+                          '{}', '{}')
+            """)
+            connection.exec_driver_sql("""
+                INSERT INTO model_benchmark_variants (
+                    id, experiment_id, model_key, provider, model_id, pricing_json
+                ) VALUES (1, 1, 'sol', 'test', 'legacy-model', '{}')
+            """)
+
+            run_migrations(connection)
+            run_migrations(connection)
+
+            assert connection.exec_driver_sql(
+                "SELECT run_key, status, input_tokens, retryable "
+                "FROM automation_optimization_runs WHERE id=1"
+            ).one() == ("legacy-run", "awaiting_executor", None, 0)
+            assert connection.exec_driver_sql(
+                "SELECT idempotency_key, status, automation_run_id "
+                "FROM optimization_case_queue WHERE id=1"
+            ).one() == ("legacy-case", "batched", 1)
+            assert connection.exec_driver_sql(
+                "SELECT experiment_key, execution_mode, max_round_cost_micros "
+                "FROM model_benchmark_experiments WHERE id=1"
+            ).one() == ("legacy-benchmark", "test", 0)
+            assert connection.exec_driver_sql(
+                "SELECT model_id, model_config_id, actual_cost_micros "
+                "FROM model_benchmark_variants WHERE id=1"
+            ).one() == ("legacy-model", None, 0)
+            assert connection.exec_driver_sql(
+                "SELECT is_admin FROM users WHERE id=1"
+            ).scalar_one() == 1
+            assert connection.exec_driver_sql(
+                "SELECT input_micros_per_million_tokens, benchmark_enabled "
+                "FROM model_configs WHERE id=1"
+            ).one() == (0, 0)
+            assert connection.exec_driver_sql(
+                "SELECT input_micros_per_million_tokens "
+                "FROM optimizer_configs WHERE id=1"
+            ).scalar_one() == 0
+            connection.exec_driver_sql("""
+                INSERT INTO model_benchmark_experiments (
+                    id, experiment_key, name, execution_mode, cohort_hash,
+                    snapshot_hash, frozen_snapshot_json, quality_gate_json
+                ) VALUES (2, 'real-benchmark', 'real', 'real',
+                          'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc',
+                          'dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd',
+                          '{}', '{}')
+            """)
+            connection.exec_driver_sql("""
+                INSERT INTO automation_optimization_runs (
+                    id, run_key, base_prompt_version, policy_revision, status,
+                    trigger_reason, case_ids_json, frozen_input_json
+                ) VALUES (2, 'processing-run', 'B1', 2, 'processing',
+                          'case_threshold', '[]', '{}')
+            """)
+            with pytest.raises(IntegrityError, match="immutable"):
+                connection.exec_driver_sql(
+                    "UPDATE model_benchmark_experiments "
+                    "SET max_round_cost_micros=999 WHERE id=2"
+                )
+            assert connection.exec_driver_sql(
+                "SELECT max(version) FROM schema_migrations"
+            ).scalar_one() == 24
     finally:
         engine.dispose()
 

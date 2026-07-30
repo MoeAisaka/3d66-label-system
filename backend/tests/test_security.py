@@ -365,6 +365,20 @@ def test_model_and_optimizer_config_writes_use_different_stable_accounts(
     assert optimizer_db.committed is True
 
 
+def test_numbered_model_config_accounts_are_allowed_but_other_accounts_fail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dpapi = FakeDPAPI()
+    monkeypatch.setattr(security.sys, "platform", "win32")
+    monkeypatch.setattr(security, "_get_windows_dpapi", lambda: dpapi)
+    reference = security.protect_secret(
+        FAKE_SECRET_V1, account="model-config-17"
+    )
+    assert reference.startswith(security.DPAPI_REFERENCE_PREFIX)
+    with pytest.raises(security.SecretStorageError, match="不支持"):
+        security.protect_secret(FAKE_SECRET_V1, account="model-config-0")
+
+
 @pytest.mark.skipif(sys.platform != "win32", reason="仅在 Windows 验证真实 DPAPI")
 def test_windows_dpapi_real_round_trip_and_legacy_compatibility() -> None:
     reference = security.protect_secret(
