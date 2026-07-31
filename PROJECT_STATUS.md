@@ -16,7 +16,8 @@
 
 ## 最新修复：Windows 非空 API Key 安全存储（2026-07-31）
 
-> 主干修复提交：`7bd96be`。故障目标是公司内网 Windows 实例
+> 主干修复提交：`7bd96be`；Windows 启动门禁提交：`0fa1e65`。故障目标是
+> 公司内网 Windows 实例
 > `http://192.168.1.35:8081/`；用户实际输入了非空 Key，服务端在 Windows
 > 安全存储阶段返回“API Key 安全存储失败”。此前把该故障归因为空 Key 合同
 > 是错误诊断，空 Key 兼容修复属于另一条独立问题。
@@ -38,12 +39,13 @@
 
 - 安全专项：`26 passed, 1 skipped`；跳过项仅限原生 Windows 实机 DPAPI。
 - 主干全后端：`479 passed, 1 skipped, 1 warning`。
+- Windows 分支全后端：`510 passed, 1 skipped, 1 warning`。
+- Windows 五个 PowerShell 脚本通过 PowerShell 7.6.4 官方解析器；
+  前端 `npm run lint` 和正式 `npm run build` 通过。
 - Python `compileall` 与 `git diff --check`：通过。
 
 仍待完成：
 
-- `windows-deploy` 分支需合入主干修复，并把 `doctor.ps1`/`start.ps1` 接到
-  真实 DPAPI 回环后执行 Windows 分支全量测试与 PowerShell 语法门禁。
 - 公司内网实例尚未部署本修复，真实根因必须以新 doctor 或保存接口返回的
   脱敏错误码确认；在真实 Windows 回环及非空 Key 保存/连接测试通过前，不得
   宣称线上故障已经修复。
