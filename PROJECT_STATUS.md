@@ -8,8 +8,21 @@
 - 项目目录：`D:\3d66-label-system`
 - 当前分支：`main`
 - 当前功能基线：以 `main` 分支最新提交为准，精确提交号请执行 `git log -1` 查看。
-- 远程仓库：`origin = https://github.com/chishiyu07-max/3d66-label-system.git`
+- 远程仓库：`origin = https://codeup.aliyun.com/3d66/tepeng/3d66.label-system.git`
 - 分支关系：每次交付以 `git status -sb` 的实时结果为准。
+
+## 共享测试环境发布入口（2026-07-31）
+
+- 测试服务器：`192.168.1.35`。
+- 测试访问地址：`http://192.168.1.35:8081`。
+- 健康检查：`http://192.168.1.35:8081/api/health`。
+- 发布目标固定为 Codeup `main`，发布前制作临时 Git bundle，通过 SSH 上传，
+  服务器脚本构建并检查健康状态，失败自动回滚上一个提交。
+- Windows 双击 `部署测试环境.cmd`；macOS 执行
+  `./部署测试环境.command`；两者都调用同一个 `scripts/deploy-test.py`。
+- 当前不需要 Jenkins。需要自动触发、审批或发布记录时，可在云效流水线中调用
+  同一个脚本，继续复用服务器端的发布保护和回滚逻辑。
+- 脚本默认要求人工输入 `DEPLOY` 确认；仅在已确认目标提交时才使用 `--yes`。
 
 ## 最新修复：Windows 非空 API Key 安全存储（2026-07-31）
 
