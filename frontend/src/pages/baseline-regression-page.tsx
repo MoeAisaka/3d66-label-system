@@ -606,7 +606,7 @@ export function BaselineRegressionPage() {
                     <p className="mt-2 text-sm text-[var(--muted)]">{selectedSet.data.summary.description}</p>
                   )}
                 </div>
-                <div className="mt-5 grid gap-3 border-y border-[var(--line)] bg-[#fafbf8] px-4 py-4 xl:grid-cols-[180px_minmax(220px,1fr)_minmax(220px,1fr)_minmax(250px,1fr)_auto] xl:items-end">
+                <div className="mt-5 grid gap-3 border-y border-[var(--line)] bg-[#fafbf8] px-4 py-4 xl:grid-cols-[minmax(0,150px)_minmax(0,1fr)_minmax(0,1fr)] xl:items-end min-[1750px]:grid-cols-[minmax(0,150px)_minmax(0,1fr)_minmax(0,1fr)_minmax(0,1fr)_auto]">
                   <label>
                     <span className="mb-2 block text-xs font-semibold">提示词取值方式</span>
                     <select
@@ -867,7 +867,7 @@ function RegressionResults({
         </div>
       )}
 
-      <section className="mt-7 grid gap-7 xl:grid-cols-[minmax(420px,0.8fr)_minmax(520px,1.2fr)]">
+      <section className="mt-7 grid gap-7 min-[1750px]:grid-cols-[minmax(0,0.8fr)_minmax(0,1.2fr)]">
         <div className="min-w-0">
           <div className="mb-3">
             <h3 className="font-editorial text-2xl font-bold">L1–L5 混淆矩阵</h3>
