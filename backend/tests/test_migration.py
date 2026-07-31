@@ -43,6 +43,7 @@ MIGRATION_NAMES = [
     "bind_dimension_contract_to_strategy",
     "add_dimension_route_policies",
     "add_routed_strategy_bundles",
+    "add_dimension_calibration_results",
 ]
 
 

@@ -794,6 +794,229 @@ class DimensionRoutePolicy(Base):
     )
 
 
+class DimensionCalibrationRun(Base):
+    __tablename__ = "dimension_calibration_runs"
+    __table_args__ = (
+        CheckConstraint(
+            "length(trim(run_key)) > 0",
+            name="ck_dimension_calibration_runs_key",
+        ),
+        CheckConstraint(
+            "status IN ("
+            "'queued','running','completed','partial_failed','failed'"
+            ")",
+            name="ck_dimension_calibration_runs_status",
+        ),
+        CheckConstraint(
+            "total BETWEEN 1 AND 100",
+            name="ck_dimension_calibration_runs_total",
+        ),
+        CheckConstraint(
+            "processing >= 0 AND completed >= 0 "
+            "AND core_fallback >= 0 AND blocked >= 0 "
+            "AND unassessable >= 0 AND failed >= 0 "
+            "AND processing + completed + core_fallback + blocked "
+            "+ unassessable + failed <= total",
+            name="ck_dimension_calibration_runs_counts",
+        ),
+        CheckConstraint(
+            "length(strategy_bundle_hash) = 64 "
+            "AND strategy_bundle_hash = lower(strategy_bundle_hash) "
+            "AND strategy_bundle_hash NOT GLOB '*[^0-9a-f]*'",
+            name="ck_dimension_calibration_runs_bundle_hash",
+        ),
+        CheckConstraint(
+            "length(definition_hash) = 64 "
+            "AND definition_hash = lower(definition_hash) "
+            "AND definition_hash NOT GLOB '*[^0-9a-f]*'",
+            name="ck_dimension_calibration_runs_definition_hash",
+        ),
+        CheckConstraint(
+            "json_valid(strategy_snapshot_json) "
+            "AND json_type(strategy_snapshot_json, '$') = 'object'",
+            name="ck_dimension_calibration_runs_strategy_snapshot",
+        ),
+        CheckConstraint(
+            "json_valid(asset_manifest_json) "
+            "AND json_type(asset_manifest_json, '$') = 'object'",
+            name="ck_dimension_calibration_runs_asset_manifest",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    run_key: Mapped[str] = mapped_column(
+        String(120), unique=True, index=True
+    )
+    strategy_bundle_id: Mapped[int] = mapped_column(
+        ForeignKey("strategy_bundles.id", ondelete="RESTRICT"),
+        index=True,
+    )
+    strategy_bundle_hash: Mapped[str] = mapped_column(
+        String(64), index=True
+    )
+    strategy_snapshot_json: Mapped[str] = mapped_column(Text)
+    asset_manifest_json: Mapped[str] = mapped_column(Text)
+    definition_hash: Mapped[str] = mapped_column(String(64), index=True)
+    status: Mapped[str] = mapped_column(
+        String(30), default="queued", index=True
+    )
+    total: Mapped[int] = mapped_column(Integer)
+    processing: Mapped[int] = mapped_column(Integer, default=0)
+    completed: Mapped[int] = mapped_column(Integer, default=0)
+    core_fallback: Mapped[int] = mapped_column(Integer, default=0)
+    blocked: Mapped[int] = mapped_column(Integer, default=0)
+    unassessable: Mapped[int] = mapped_column(Integer, default=0)
+    failed: Mapped[int] = mapped_column(Integer, default=0)
+    created_by: Mapped[str] = mapped_column(
+        String(80), default="system"
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    strategy_bundle: Mapped[StrategyBundle] = relationship()
+    items: Mapped[list["DimensionCalibrationItem"]] = relationship(
+        back_populates="run",
+        cascade="all, delete-orphan",
+        order_by="DimensionCalibrationItem.id",
+    )
+
+
+class DimensionCalibrationItem(Base):
+    __tablename__ = "dimension_calibration_items"
+    __table_args__ = (
+        UniqueConstraint(
+            "run_id",
+            "asset_id",
+            name="uq_dimension_calibration_run_asset",
+        ),
+        CheckConstraint(
+            "status IN ("
+            "'queued','processing','completed','core_fallback',"
+            "'blocked','unassessable','failed'"
+            ")",
+            name="ck_dimension_calibration_items_status",
+        ),
+        CheckConstraint(
+            "json_valid(asset_snapshot_json) "
+            "AND json_type(asset_snapshot_json, '$') = 'object'",
+            name="ck_dimension_calibration_items_asset_snapshot",
+        ),
+        CheckConstraint(
+            "resolution_snapshot_json IS NULL OR "
+            "(json_valid(resolution_snapshot_json) "
+            "AND json_type(resolution_snapshot_json, '$') = 'object')",
+            name="ck_dimension_calibration_items_resolution",
+        ),
+        CheckConstraint(
+            "precheck_json IS NULL OR "
+            "(json_valid(precheck_json) "
+            "AND json_type(precheck_json, '$') = 'object')",
+            name="ck_dimension_calibration_items_precheck",
+        ),
+        CheckConstraint(
+            "aesthetic_json IS NULL OR "
+            "(json_valid(aesthetic_json) "
+            "AND json_type(aesthetic_json, '$') = 'object')",
+            name="ck_dimension_calibration_items_aesthetic",
+        ),
+        CheckConstraint(
+            "scoring_json IS NULL OR "
+            "(json_valid(scoring_json) "
+            "AND json_type(scoring_json, '$') = 'object')",
+            name="ck_dimension_calibration_items_scoring",
+        ),
+        CheckConstraint(
+            "level IS NULL OR level IN ('L1','L2','L3','L4','L5')",
+            name="ck_dimension_calibration_items_level",
+        ),
+        CheckConstraint(
+            "(status = 'queued' AND worker_id IS NULL "
+            "AND started_at IS NULL AND finished_at IS NULL) "
+            "OR (status = 'processing' AND length(trim(worker_id)) > 0 "
+            "AND started_at IS NOT NULL AND finished_at IS NULL) "
+            "OR (status IN ("
+            "'completed','core_fallback','blocked','unassessable','failed'"
+            ") AND length(trim(worker_id)) > 0 "
+            "AND started_at IS NOT NULL AND finished_at IS NOT NULL)",
+            name="ck_dimension_calibration_items_lifecycle",
+        ),
+        CheckConstraint(
+            "(status = 'completed' "
+            "AND resolution_snapshot_json IS NOT NULL "
+            "AND precheck_json IS NOT NULL "
+            "AND aesthetic_json IS NOT NULL "
+            "AND scoring_json IS NOT NULL "
+            "AND score IS NOT NULL AND level IS NOT NULL "
+            "AND confidence IS NOT NULL "
+            "AND error_type IS NULL AND error_message = '') "
+            "OR (status IN ('core_fallback','blocked','unassessable') "
+            "AND resolution_snapshot_json IS NOT NULL "
+            "AND precheck_json IS NOT NULL "
+            "AND aesthetic_json IS NULL AND scoring_json IS NULL "
+            "AND score IS NULL AND level IS NULL AND confidence IS NULL "
+            "AND error_type IS NULL AND error_message = '') "
+            "OR (status = 'failed' AND length(trim(error_type)) > 0 "
+            "AND length(trim(error_message)) > 0 "
+            "AND aesthetic_json IS NULL AND scoring_json IS NULL "
+            "AND score IS NULL AND level IS NULL AND confidence IS NULL) "
+            "OR status IN ('queued','processing')",
+            name="ck_dimension_calibration_items_terminal_payload",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    run_id: Mapped[int] = mapped_column(
+        ForeignKey("dimension_calibration_runs.id", ondelete="RESTRICT"),
+        index=True,
+    )
+    asset_id: Mapped[int] = mapped_column(
+        ForeignKey("assets.id", ondelete="RESTRICT"), index=True
+    )
+    asset_snapshot_json: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(
+        String(30), default="queued", index=True
+    )
+    worker_id: Mapped[str | None] = mapped_column(
+        String(120), nullable=True, index=True
+    )
+    resolution_snapshot_json: Mapped[str | None] = mapped_column(
+        Text, nullable=True
+    )
+    precheck_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    aesthetic_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    scoring_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    raw_response_a: Mapped[str | None] = mapped_column(Text, nullable=True)
+    raw_response_b: Mapped[str | None] = mapped_column(Text, nullable=True)
+    score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    level: Mapped[str | None] = mapped_column(
+        String(10), nullable=True, index=True
+    )
+    confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    needs_review: Mapped[bool] = mapped_column(Boolean, default=False)
+    error_type: Mapped[str | None] = mapped_column(
+        String(40), nullable=True, index=True
+    )
+    error_message: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow
+    )
+    started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    run: Mapped[DimensionCalibrationRun] = relationship(
+        back_populates="items"
+    )
+    asset: Mapped[Asset] = relationship()
+
+
 class LoopRun(Base):
     __tablename__ = "loop_runs"
     __table_args__ = (
@@ -1067,6 +1290,10 @@ class DimensionRoutePolicyImmutableError(ValueError):
 
 class DimensionRoutePolicyContractError(ValueError):
     """Raised when a route policy definition and hash disagree."""
+
+
+class DimensionCalibrationFrozenError(ValueError):
+    """Raised when an isolated calibration audit record is changed."""
 
 
 class StrategySnapshotRequiredError(ValueError):
@@ -1649,6 +1876,133 @@ def _prevent_published_dimension_route_policy_delete(
         raise DimensionRoutePolicyImmutableError(
             "已发布的 DimensionRoutePolicy 是永久审计记录，禁止删除"
         )
+
+
+_CALIBRATION_RUN_FROZEN_FIELDS = (
+    "run_key",
+    "strategy_bundle_id",
+    "strategy_bundle_hash",
+    "strategy_snapshot_json",
+    "asset_manifest_json",
+    "definition_hash",
+    "total",
+    "created_by",
+    "created_at",
+)
+_CALIBRATION_ITEM_FROZEN_FIELDS = (
+    "run_id",
+    "asset_id",
+    "asset_snapshot_json",
+    "created_at",
+)
+_CALIBRATION_RUN_TERMINAL_STATUSES = {
+    "completed",
+    "partial_failed",
+    "failed",
+}
+_CALIBRATION_ITEM_TERMINAL_STATUSES = {
+    "completed",
+    "core_fallback",
+    "blocked",
+    "unassessable",
+    "failed",
+}
+
+
+def _persisted_calibration_status(
+    connection: Connection,
+    *,
+    table_name: str,
+    row_id: int | None,
+) -> str | None:
+    if row_id is None:
+        return None
+    return connection.exec_driver_sql(
+        f"SELECT status FROM {table_name} WHERE id = ?",
+        (row_id,),
+    ).scalar_one_or_none()
+
+
+def _changed_fields(target: object, names: tuple[str, ...]) -> set[str]:
+    return {
+        name
+        for name in names
+        if attributes.get_history(target, name).has_changes()
+    }
+
+
+@event.listens_for(DimensionCalibrationRun, "before_update")
+def _protect_dimension_calibration_run_update(
+    _mapper: object,
+    connection: Connection,
+    target: DimensionCalibrationRun,
+) -> None:
+    persisted_status = _persisted_calibration_status(
+        connection,
+        table_name="dimension_calibration_runs",
+        row_id=target.id,
+    )
+    if persisted_status in _CALIBRATION_RUN_TERMINAL_STATUSES:
+        raise DimensionCalibrationFrozenError(
+            "维度校准运行进入终态后禁止更新"
+        )
+    changed = _changed_fields(
+        target,
+        _CALIBRATION_RUN_FROZEN_FIELDS,
+    )
+    if changed:
+        raise DimensionCalibrationFrozenError(
+            "维度校准运行冻结字段禁止更新："
+            + "、".join(sorted(changed))
+        )
+
+
+@event.listens_for(DimensionCalibrationRun, "before_delete")
+def _protect_dimension_calibration_run_delete(
+    _mapper: object,
+    _connection: Connection,
+    _target: DimensionCalibrationRun,
+) -> None:
+    raise DimensionCalibrationFrozenError(
+        "维度校准运行是永久审计记录，禁止删除"
+    )
+
+
+@event.listens_for(DimensionCalibrationItem, "before_update")
+def _protect_dimension_calibration_item_update(
+    _mapper: object,
+    connection: Connection,
+    target: DimensionCalibrationItem,
+) -> None:
+    persisted_status = _persisted_calibration_status(
+        connection,
+        table_name="dimension_calibration_items",
+        row_id=target.id,
+    )
+    if persisted_status in _CALIBRATION_ITEM_TERMINAL_STATUSES:
+        raise DimensionCalibrationFrozenError(
+            "维度校准项进入终态后禁止更新"
+        )
+    changed = _changed_fields(
+        target,
+        _CALIBRATION_ITEM_FROZEN_FIELDS,
+    )
+    if changed:
+        raise DimensionCalibrationFrozenError(
+            "维度校准项冻结字段禁止更新："
+            + "、".join(sorted(changed))
+        )
+
+
+@event.listens_for(DimensionCalibrationItem, "before_delete")
+def _protect_dimension_calibration_item_delete(
+    _mapper: object,
+    _connection: Connection,
+    _target: DimensionCalibrationItem,
+) -> None:
+    raise DimensionCalibrationFrozenError(
+        "维度校准项是永久审计记录，禁止删除"
+    )
 
 
 @event.listens_for(EvaluationResult, "before_insert")

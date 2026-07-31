@@ -15,11 +15,11 @@ from .dimension_schema_registry import (
 
 ROUTE_POLICY_DEFINITION_FORMAT_VERSION = "dimension-route-policy-definition-v1"
 ROUTE_POLICY_KEY = "material-family-routing"
-ROUTE_POLICY_VERSION = "0.1.0-candidate"
+ROUTE_POLICY_VERSION = "0.1.1-candidate"
 CORE_SCHEMA_KEY = "common_core"
 CORE_SCHEMA_VERSION = "1.0.0"
 PRODUCT_SCHEMA_KEY = "product_aesthetic"
-PRODUCT_SCHEMA_VERSION = "0.1.0-candidate"
+PRODUCT_SCHEMA_VERSION = "0.1.1-candidate"
 
 CORE_DIMENSION_KEYS = (
     "presentation_integrity",
@@ -188,8 +188,8 @@ def product_candidate_definition() -> dict[str, Any]:
     return {
         "format_version": DEFINITION_FORMAT_VERSION,
         "package_key": "product",
-        "package_version": "v0.1-candidate",
-        "compatibility_revision": "first_product_calibration_candidate",
+        "package_version": "v0.1.1-candidate",
+        "compatibility_revision": "executable_product_calibration_candidate",
         "core_schema_ref": {
             "schema_key": CORE_SCHEMA_KEY,
             "version": CORE_SCHEMA_VERSION,
@@ -206,14 +206,19 @@ def product_candidate_definition() -> dict[str, Any]:
             "collapse_rule": {
                 "same_grade_ratio_for_review": 0.75,
                 "minimum_dimension_count": 3,
+                "all_equal_minimum_grade": 4,
+                "same_grade_count_for_review": 6,
             },
             "high_evidence_rule": {
                 "high_grade_minimum": 4,
                 "insufficient_evidence_ratio_for_cap": 0.25,
+                "minimum_evidence": 2,
+                "dimensions_for_l3_cap": 2,
                 "cap_level": "L3",
             },
             "top_level_rule": {
                 "grade_five_ratio_minimum": 0.6,
+                "grade_five_minimum_count": 5,
                 "other_dimension_minimum_grade": 4,
                 "minimum_confidence": 0.9,
                 "requires_no_model_review": True,
@@ -396,7 +401,7 @@ def materialized_p2_dimension_schema_rows() -> list[dict[str, Any]]:
             "version": PRODUCT_SCHEMA_VERSION,
             "schema_type": "family_pack",
             "family_key": "product",
-            "display_name": "单品包 v0.1｜人工校准候选",
+            "display_name": "单品包 v0.1.1｜可执行校准候选",
             "status": "candidate",
             "core_schema_ref": {
                 "schema_key": CORE_SCHEMA_KEY,
@@ -420,7 +425,7 @@ def materialized_route_policy_rows() -> list[dict[str, Any]]:
         {
             "policy_key": ROUTE_POLICY_KEY,
             "version": ROUTE_POLICY_VERSION,
-            "display_name": "四素材族路由策略 v0.1｜校准候选",
+            "display_name": "四素材族路由策略 v0.1.1｜校准候选",
             "status": "candidate",
             "definition_json": canonical_json(definition),
             "canonical_hash": canonical_hash(definition),

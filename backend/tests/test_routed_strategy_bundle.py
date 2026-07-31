@@ -410,7 +410,9 @@ def test_migration_29_upgrades_real_v2_shape_without_rewriting(
                     applied_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
                 )
             """)
-            for migration in MIGRATIONS[:-1]:
+            for migration in MIGRATIONS:
+                if migration.version >= 29:
+                    break
                 connection.exec_driver_sql(
                     "INSERT INTO schema_migrations(version, name) "
                     "VALUES (?, ?)",
@@ -456,8 +458,15 @@ def test_migration_29_upgrades_real_v2_shape_without_rewriting(
                 )
             """, ("a" * 64,))
 
-            run_migrations(connection)
-            run_migrations(connection)
+            migration_29 = next(
+                item for item in MIGRATIONS if item.version == 29
+            )
+            migration_29.up(connection)
+            connection.exec_driver_sql(
+                "INSERT INTO schema_migrations(version, name) VALUES (?, ?)",
+                (migration_29.version, migration_29.name),
+            )
+            migration_29.up(connection)
 
             columns = {
                 row[1]

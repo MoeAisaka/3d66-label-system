@@ -171,6 +171,22 @@ def test_materialized_core_and_product_candidate_contracts(engine) -> None:
         ],
     }
     assert product_definition["prompt_contract"]["publishing_blocked"] is True
+    assert product_definition["aggregation"]["collapse_rule"] == {
+        "same_grade_ratio_for_review": 0.75,
+        "minimum_dimension_count": 3,
+        "all_equal_minimum_grade": 4,
+        "same_grade_count_for_review": 6,
+    }
+    assert product_definition["aggregation"]["high_evidence_rule"] == {
+        "high_grade_minimum": 4,
+        "insufficient_evidence_ratio_for_cap": 0.25,
+        "minimum_evidence": 2,
+        "dimensions_for_l3_cap": 2,
+        "cap_level": "L3",
+    }
+    assert product_definition["aggregation"]["top_level_rule"][
+        "grade_five_minimum_count"
+    ] == 5
 
     with Session(engine) as db:
         core = db.scalar(
