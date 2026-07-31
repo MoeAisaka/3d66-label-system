@@ -333,7 +333,27 @@ Python 3.12 编译、脚本严格模式/UTF-8/参数/退出码/危险命令静�
 `git diff --check` 通过。当前 MacBook 没有 `pwsh`，未做 PowerShell parser
 机检；本阶段未修改前端源码，未重新执行前端构建或浏览器验收。
 
-全部新增数据测试只使用临时目录和明显假数据。未部署、未访问真实 Windows
-目录或生产数据、未读取 DPAPI、未调用真实模型。Windows-only DPAPI 实机
-用例在 macOS 跳过；当前执行沙箱不允许访问登录 Keychain（OSStatus -50），
+以上 macOS 侧自动化测试全部只使用临时目录和明显假数据，未部署、未访问真实
+Windows 目录或生产数据、未读取 DPAPI、未调用真实模型。Windows-only DPAPI
+实机用例在 macOS 跳过；当前执行沙箱不允许访问登录 Keychain（OSStatus -50），
 该真实 Keychain 用例也明确跳过，其他错误仍会失败。
+
+### 原生 Windows 实机验收（2026-07-31）
+
+上面跳过的 Windows-only 部分已在一台原生 Windows 11 验证机（PowerShell
+5.1.26100.8115 Desktop、Python 3.11.4、Node v24.15.0）上单独跑过：
+`doctor.ps1` 全量门禁 9/9 通过 ×3 轮（`CurrentUser`、`LocalMachine`、默认
+`DATA_DIR`），含真实 DPAPI 内存回环；非空 API Key 保存后落库为 `dpapi:v1:` /
+`dpapi-machine:v1:` 引用，明文不进数据库、不进接口响应、不进日志；解密结果
+经字节级比对与原文一致；`current-user` 写入的引用在 `local-machine` 运行时下
+仍能正常解密，即**切换 DPAPI 范围不会锁死既有凭据**。
+
+两点必须注意：
+
+- 该验收**绕过了 `install.ps1` 与 `start.ps1`**（手工复制其安装与启动步骤），
+  因为这两个脚本在 PowerShell 5.1 上实测不可用——`start.ps1` 无论怎么调都起
+  不了服务。仓库根三个 `.cmd` 入口都调 `powershell.exe`（即 5.1），所以在修掉
+  缺陷或统一要求 PowerShell 7 之前，操作员双击 `.cmd` 的路径走不通。
+- PowerShell 脚本层 `-DpapiScope` 默认 `LocalMachine`，而 Python 层
+  `API_KEY_DPAPI_SCOPE` 默认 `current-user`；两层默认值相反，靠启动脚本注入
+  环境变量才对齐。直接运行 `python -m app.launcher` 得到的是 `current-user`。

@@ -148,13 +148,57 @@
 - Windows 分支全后端：`510 passed, 1 skipped, 1 warning`。
 - Windows 五个 PowerShell 脚本通过 PowerShell 7.6.4 官方解析器；
   前端 `npm run lint` 和正式 `npm run build` 通过。
+  注意：该口径**只是语法解析且是 7.x**，不覆盖 5.1 运行期行为，
+  实机已在 5.1 上发现四个运行期缺陷，见下节。
 - Python `compileall` 与 `git diff --check`：通过。
+
+### 原生 Windows 实机验收（2026-07-31，13600K）
+
+验证机：原生 Windows 11 `10.0.26200`，PowerShell `5.1.26100.8115` Desktop，
+Python 3.11.4，Node v24.15.0，npm 11.12.1。被测提交
+`windows-deploy@f8d57893ca0faa679d50f4920faf9da9079b7a7c`。
+
+已通过（均有实机证据）：
+
+- `doctor.ps1` 全量门禁 **9/9 通过 ×3 轮**：`CurrentUser`、`LocalMachine`、
+  以及默认 `DATA_DIR`（`%LOCALAPPDATA%\3d66-label-system`）。含真实
+  「Windows DPAPI 内存回环」，两个范围各验一次。另确认 doctor **只读**——
+  三轮跑完 `DATA_DIR` 仍不存在。
+- ADR-0023 API Key 保护链闭环：非空 Key 保存后落库形态为
+  `dpapi:v1:`（current-user，361 字节）/ `dpapi-machine:v1:`（local-machine，
+  345 字节），**前缀随范围正确切换**；SQLite 全库字节扫描、GET 响应与
+  `worker.log` 均无明文（接口只回 `api_key_mask`）；空 Key 重提交保留既有
+  引用，不误删凭据。
+- **解密正确性有字节级证据**：经本地回显端点比对 sha256，累计 4 次上游调用
+  全部与原文哈希一致，且以 `Bearer` 正确送达。对真实模型仅超时只能证明
+  「请求已发出」，故未采信。
+- **切换 DPAPI 范围不会锁死既有凭据**：current-user 写入的引用在
+  local-machine 运行时下照样解密出原文。`_decode_dpapi_reference` 同时接受
+  两种前缀，且解密不传范围，依赖 Windows `CryptUnprotectData` 自解析。
+
+未通过 / 边界（不得计入「已验证」）：
+
+- **`start.ps1` 在 PS 5.1 上无法启动服务**，`install.ps1` 同样必然失败；
+  本次验收**绕过了这两个脚本**（手工复制其安装与启动步骤），因此
+  「`install.ps1` / `start.ps1` 可用」仍为未验证/失败项。
+  四个缺陷详见 `DEFECTS-powershell-51.md`（另库归档），其中
+  `start.ps1` 用数组 splat 调 doctor 一条最致命，且可能不限于 5.1。
+- 两层 DPAPI 范围默认值相反：PS 脚本层 `-DpapiScope` 默认 `LocalMachine`，
+  Python 层 `API_KEY_DPAPI_SCOPE` 默认 `current-user`；靠脚本注入环境变量才
+  对齐，建议统一。
+- 低危：非 ASCII API Key 在 PUT 阶段不校验（返回 200），此后每次使用都因
+  HTTP header 限制失败；可通过重写合法 Key 恢复，且错误报文只暴露该字符与
+  偏移、不含完整 Key、不入日志。建议在 `ModelConfigUpdate.api_key` 加 ASCII
+  校验并停止回显底层异常原文。
 
 仍待完成：
 
-- 公司内网实例尚未部署本修复，真实根因必须以新 doctor 或保存接口返回的
-  脱敏错误码确认；在真实 Windows 回环及非空 Key 保存/连接测试通过前，不得
-  宣称线上故障已经修复。
+- 公司内网实例尚未部署本修复；线上故障是否解决仍须在该实例上以新 doctor 或
+  保存接口的脱敏错误码确认。本次 13600K 验收证明的是**代码侧安全链成立**，
+  不等于公司实例已修复。
+- 操作员双击 `.cmd` 的路径当前走不通（缺陷 4）；在修掉四条缺陷或统一要求
+  PS7（建议五个脚本加 `#Requires -Version 7`）之前，不能交付给前端工程师
+  自助部署。
 
 ## 最新完成：素材包主链与基准回归整包闭环（2026-07-31）
 
@@ -410,13 +454,19 @@
   回归、`git diff --check`：通过。
 - 当前 MacBook 未安装 `pwsh`，未做 PowerShell parser 语法机检；没有安装
   PowerShell，待真实 Windows/获批 pwsh 环境验收。
+  已部分解除：2026-07-31 在 13600K 原生 Windows（PowerShell 5.1）完成
+  doctor 门禁与 ADR-0023 端到端实机验收，详见前文「原生 Windows 实机验收」。
 
 明确未完成：
 
-- 本分支未在真实 Windows 或 Windows Server 上执行。无管理员全新安装、
-  Python/Node/npm 版本矩阵、中文/空格路径、四级 DATA_DIR、Ctrl+C、默认
-  loopback、活跃 WAL 备份、restore 故障回滚、junction/reparse point 和
-  DPAPI 当前用户/跨机器边界仍需按 ADR-0017 清单实机回归。
+- 本分支的 `install.ps1` 与 `start.ps1` **在 PowerShell 5.1 上实测不可用**
+  （四个运行期缺陷，`start.ps1` 无论怎么调都起不了服务）。2026-07-31 的
+  13600K 验收是绕过这两个脚本完成的，二者仍未验证。
+- 13600K 实机已覆盖：doctor 九项门禁（两个 DPAPI 范围 + 默认 DATA_DIR）、
+  DPAPI 真实回环、非空/空 Key 保存、解密正确性、跨范围解密兼容。
+  仍未覆盖：管理员全新安装、Python/Node/npm 版本矩阵、中文/空格路径、
+  四级 DATA_DIR、Ctrl+C、活跃 WAL 备份、restore 故障回滚、
+  junction/reparse point 的完整 ADR-0017 清单，以及 Windows Server 环境。
 - 公司脚本签名/ExecutionPolicy、正式备份盘和 NTFS ACL、局域网暴露/TLS/
   防火墙方案仍为待决项；当前代码不绕过或擅自配置。
 - 当前沙箱禁止写 `.git`，尚未形成用户要求的三个逻辑提交；工作树内容与测试
@@ -898,7 +948,7 @@
 | 初审人数弹性机制 | 当前工作树已完成 | 初期默认 1 人即时定案；支持切换 3/5/7/9 人，收齐全部冻结席位后计算多数共识；面板创建时冻结人数 |
 | P0-E 金丝雀前端编排 | 工作树已完成 | 已接 E3 认证 API；只登记门禁证据，不执行导入、下载、模型、Gold 或发布 |
 | macOS 部署生命周期 | 离线能力已完成 | 安装/诊断/前台启动/脱敏备份恢复已测试；目标 MacBook 尚未实际部署 |
-| Windows 部署生命周期 | macOS 离线验证完成 | 五脚本、CMD 收敛、脱敏备份恢复与 DPAPI 平台守卫已完成；Windows 实机待验收 |
+| Windows 部署生命周期 | 部分实机验收通过，wrapper 脚本待修 | doctor 门禁 9/9（两个 DPAPI 范围）与 ADR-0023 API Key 链已在 13600K 原生 Windows 实机验收；`install.ps1`/`start.ps1` 在 PowerShell 5.1 上实测不可用（四个缺陷），操作员 `.cmd` 路径待修复后重验 |
 
 ## 本地数据快照
 
@@ -942,6 +992,23 @@
 - 中英文双语。
 
 ## 最近验证基线
+
+2026-07-31（`windows-deploy@f8d5789`，**13600K 原生 Windows 11 实机**，
+PowerShell 5.1.26100.8115 Desktop）：
+
+```text
+doctor.ps1 全量门禁：9/9 通过 ×3 轮（CurrentUser / LocalMachine / 默认 DATA_DIR）
+Windows DPAPI 真实内存回环：两个范围均通过
+doctor 只读校验：三轮后 DATA_DIR 仍不存在
+API Key 落库形态：dpapi:v1: / dpapi-machine:v1:（前缀随范围切换）
+明文泄漏扫描：SQLite 全库 / GET 响应 / worker.log 均无命中
+解密正确性：4 次上游调用 sha256 全部字节级匹配
+跨范围兼容：current-user 引用在 local-machine 运行时下正常解密
+空 Key 重提交：保留既有引用，不误删凭据
+manual install：venv 10s / pip 27s / npm ci 34s / vite build 17s
+install.ps1：PowerShell 5.1 下必然失败（已绕过，未验证）
+start.ps1：PowerShell 5.1 下无法启动服务（缺陷 4，FAIL）
+```
 
 2026-07-30（`windows-deploy` Windows 生命周期工作树，未在 Windows 实机运行）：
 
