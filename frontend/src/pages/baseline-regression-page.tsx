@@ -423,7 +423,7 @@ export function BaselineRegressionPage() {
                 整包加入，无需逐张勾选
               </label>
             </div>
-            <div className="grid gap-4 px-5 py-5 xl:grid-cols-[minmax(200px,1fr)_minmax(220px,1fr)_160px_auto] xl:items-end">
+            <div className="grid gap-4 px-5 py-5 min-[1280px]:grid-cols-[minmax(0,1fr)_minmax(0,1fr)] min-[1280px]:items-end min-[1750px]:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(0,160px)_auto]">
               <label>
                 <span className="mb-2 block text-xs font-semibold">基准集名称</span>
                 <Input
