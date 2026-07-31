@@ -48,13 +48,16 @@
 - 隔离数据库上的登录、路由策略列表/详情、单品候选包详情和前端 SPA 深链
   均为 HTTP 200；候选包实测为 7 维，发布门为 0/50，且
   `calibration_only` 与两项阻塞原因均按定义返回。
+- Windows 隔离候选 `windows-deploy-p2-candidate @ 26dd211`：
+  后端 `504 passed, 1 skipped, 2 warnings`，前端合同/lint/build 通过，
+  PowerShell 五脚本语法 5/5 通过；正式 `windows-deploy` 未改变。
 
 下一步：
 
 - 浏览器运行时当前未提供可用浏览器实例；待浏览器可用后补真实视觉验收，
   确认候选/阻塞/回落信息可见且无失败请求，不能用源码检查冒充通过。
-- 形成隔离提交和 Windows 部署候选；未经 Owner 新授权，不合入
-  `main`、不修改 `windows-deploy`、不部署生产。
+- 视觉门禁全绿后再申请集成授权；未经 Owner 新授权，不合入 `main`、
+  不修改 `windows-deploy`、不部署生产。
 
 ## 最新完成：维度管理器 P1 执行链与前端合同（2026-07-30）
 
