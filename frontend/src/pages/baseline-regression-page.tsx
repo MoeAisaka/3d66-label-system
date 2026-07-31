@@ -1,8 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from "react"
 import {
   ArrowClockwise,
+  Check,
   CheckSquare,
   CloudArrowUp,
+  PencilSimple,
   Play,
   Square,
   WarningCircle,
@@ -14,7 +16,8 @@ import { PageHeader } from "@/components/app-shell"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
-import { baselineRegressionApi } from "@/lib/api"
+import { api, baselineRegressionApi } from "@/lib/api"
+import { submitReviewDecision } from "@/lib/review-submit"
 import type {
   Asset,
   BaselineLevel,
@@ -22,9 +25,19 @@ import type {
   BaselineRegressionRun,
   MaterialPackage,
   PromptVersion,
+  ReviewCorrection,
+  User,
 } from "@/lib/types"
+import { ReviewCorrectionForm } from "@/pages/review-correction-form"
 
 const levels: BaselineLevel[] = ["L1", "L2", "L3", "L4", "L5"]
+const levelNames: Record<BaselineLevel, string> = {
+  L1: "好",
+  L2: "中等",
+  L3: "中差",
+  L4: "极差",
+  L5: "过滤",
+}
 
 export function BaselineRegressionPage() {
   const queryClient = useQueryClient()
@@ -153,6 +166,14 @@ export function BaselineRegressionPage() {
         items.forEach((item) => next.add(item.id))
         return next
       })
+      setExpectedByAsset((current) => ({
+        ...current,
+        ...Object.fromEntries(
+          items
+            .filter((item) => item.suggested_expected_level)
+            .map((item) => [item.id, item.suggested_expected_level]),
+        ),
+      }))
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ["baseline-assets"] }),
         queryClient.invalidateQueries({ queryKey: ["baseline-packages"] }),
@@ -163,21 +184,54 @@ export function BaselineRegressionPage() {
     onError: (error) => toast.error(error.message),
   })
 
+  useEffect(() => {
+    if (!assets.data?.items.length) return
+    setExpectedByAsset((current) => {
+      const next = { ...current }
+      for (const asset of assets.data.items) {
+        if (next[asset.id] === undefined && asset.suggested_expected_level) {
+          next[asset.id] = asset.suggested_expected_level
+        }
+      }
+      return next
+    })
+  }, [assets.data?.items])
+
   const createSet = useMutation({
-    mutationFn: () => baselineRegressionApi.createSet({
-      name: name.trim(),
-      description: description.trim(),
-      default_expected_level: defaultLevel,
-      ...(useWholePackage && selectedPackageId
-        ? { source_package_id: selectedPackageId, items: [] }
-        : {
-            items: Array.from(selectedAssetIds).map((assetId) => ({
-              asset_id: assetId,
-              expected_level: expectedByAsset[assetId] ?? defaultLevel,
-              source_package_id: selectedPackageId || undefined,
-            })),
-          }),
-    }),
+    mutationFn: () => {
+      const visibleAssets = assets.data?.items ?? []
+      const expectedLevelOverrides = Object.fromEntries(
+        visibleAssets
+          .filter((asset) => {
+            const value = expectedByAsset[asset.id]
+            return value && value !== (asset.suggested_expected_level ?? defaultLevel)
+          })
+          .map((asset) => [asset.id, expectedByAsset[asset.id]]),
+      )
+      return baselineRegressionApi.createSet({
+        name: name.trim(),
+        description: description.trim(),
+        default_expected_level: defaultLevel,
+        ...(useWholePackage && selectedPackageId
+          ? {
+              source_package_id: selectedPackageId,
+              expected_level_overrides: expectedLevelOverrides,
+              items: [],
+            }
+          : {
+              items: Array.from(selectedAssetIds).map((assetId) => {
+                const asset = visibleAssets.find((item) => item.id === assetId)
+                return {
+                  asset_id: assetId,
+                  expected_level: expectedByAsset[assetId]
+                    ?? asset?.suggested_expected_level
+                    ?? defaultLevel,
+                  source_package_id: selectedPackageId || undefined,
+                }
+              }),
+            }),
+      })
+    },
     onSuccess: async (created) => {
       setSelectedSetId(created.id)
       setSelectedRunId(0)
@@ -427,20 +481,27 @@ export function BaselineRegressionPage() {
                 <Button
                   variant="secondary"
                   size="sm"
-                  disabled={useWholePackage || !selectedAssetIds.size}
+                  disabled={
+                    useWholePackage
+                      ? !assets.data?.items.length
+                      : !selectedAssetIds.size
+                  }
                   onClick={() => {
                     const next: Record<number, BaselineLevel> = {}
-                    selectedAssetIds.forEach((assetId) => { next[assetId] = defaultLevel })
+                    const assetIds = useWholePackage
+                      ? assets.data?.items.map((asset) => asset.id) ?? []
+                      : Array.from(selectedAssetIds)
+                    assetIds.forEach((assetId) => { next[assetId] = defaultLevel })
                     setExpectedByAsset((current) => ({ ...current, ...next }))
                   }}
                 >
-                  全部声明为 {defaultLevel}
+                  当前{useWholePackage ? "预览" : "所选"}全部改为 {defaultLevel}
                 </Button>
               </div>
             </div>
             {useWholePackage && (
               <div className="border-t border-[var(--line)] bg-[#f6f9dc] px-5 py-3 text-xs font-semibold">
-                已启用整包模式：下方仅供预览，创建时由服务端直接冻结素材包内全部可用素材，不受页面 1000 条预览上限影响。
+                已启用整包模式：系统先按文件名中的 L1–L5 / 好 / 中等 / 中差 / 极差 / 过滤预填；下方可逐张修改。未显示的素材同样由服务端解析，不受页面 1000 条预览上限影响。
               </div>
             )}
             <div className="max-h-[440px] overflow-auto">
@@ -458,7 +519,13 @@ export function BaselineRegressionPage() {
                   </thead>
                   <tbody>
                     {assets.data.items.map((asset) => {
-                      const checked = selectedAssetIds.has(asset.id)
+                      const checked = useWholePackage || selectedAssetIds.has(asset.id)
+                      const suggestedLevel = asset.suggested_expected_level
+                      const effectiveLevel = expectedByAsset[asset.id]
+                        ?? suggestedLevel
+                        ?? defaultLevel
+                      const manuallyChanged = expectedByAsset[asset.id] !== undefined
+                        && expectedByAsset[asset.id] !== (suggestedLevel ?? defaultLevel)
                       return (
                         <tr
                           key={asset.id}
@@ -484,7 +551,16 @@ export function BaselineRegressionPage() {
                               />
                               <div className="min-w-0">
                                 <p className="file-name max-w-lg truncate text-sm">{asset.name}</p>
-                                <p className="font-data mt-1 text-[0.68rem] text-[var(--muted)]">素材 #{asset.id}</p>
+                                <div className="mt-1 flex flex-wrap items-center gap-2">
+                                  <p className="font-data text-[0.68rem] text-[var(--muted)]">素材 #{asset.id}</p>
+                                  <Badge tone={manuallyChanged ? "active" : suggestedLevel ? "success" : "neutral"}>
+                                    {manuallyChanged
+                                      ? "已手动调整"
+                                      : suggestedLevel
+                                        ? `文件名预填 ${suggestedLevel}`
+                                        : `整批默认 ${defaultLevel}`}
+                                  </Badge>
+                                </div>
                               </div>
                             </div>
                           </td>
@@ -495,8 +571,8 @@ export function BaselineRegressionPage() {
                             <select
                               aria-label={`${asset.name}期望等级`}
                               className="h-9 w-full rounded-[4px] border border-[var(--line-strong)] bg-white px-2 text-sm disabled:bg-[#f1f3ef] disabled:text-[var(--muted)]"
-                              disabled={useWholePackage || !checked}
-                              value={expectedByAsset[asset.id] ?? defaultLevel}
+                              disabled={!checked}
+                              value={effectiveLevel}
                               onChange={(event) => setExpectedByAsset((current) => ({
                                 ...current,
                                 [asset.id]: event.target.value as BaselineLevel,
@@ -655,6 +731,10 @@ function RegressionResults({
   loading: boolean
 }) {
   const queryClient = useQueryClient()
+  const me = useQuery({
+    queryKey: ["me"],
+    queryFn: () => api<User>("/api/auth/me"),
+  })
   const availableDeviationIds = useMemo(
     () => items
       .filter((item) => (
@@ -668,6 +748,8 @@ function RegressionResults({
   const [selectedDeviationIds, setSelectedDeviationIds] = useState<Set<number>>(
     new Set(),
   )
+  const [reviewingItemId, setReviewingItemId] = useState<number | null>(null)
+  const [reviewNotes, setReviewNotes] = useState<Record<number, string>>({})
 
   useEffect(() => {
     setSelectedDeviationIds(new Set(availableDeviationIds))
@@ -688,6 +770,49 @@ function RegressionResults({
         result.created
           ? `已将 ${result.created} 张偏差样本加入找补队列`
           : "所选偏差样本已在找补队列中",
+      )
+    },
+    onError: (error) => toast.error(error.message),
+  })
+  const reviewResult = useMutation({
+    mutationFn: ({
+      item,
+      decision,
+      note,
+      corrections = [],
+    }: {
+      item: BaselineRegressionItem
+      decision: "approved" | "corrected" | "rejected"
+      note: string
+      corrections?: ReviewCorrection[]
+    }) => {
+      if (!item.evaluation) throw new Error("该回归结果没有可审核的评测记录")
+      if (!me.data) throw new Error("当前登录账号尚未加载")
+      return submitReviewDecision({
+        evaluation: item.evaluation,
+        reviewer: me.data.username,
+        decision,
+        note,
+        corrections,
+      })
+    },
+    onSuccess: async (_result, variables) => {
+      await Promise.all([
+        queryClient.invalidateQueries({
+          queryKey: ["baseline-regression", run.id],
+        }),
+        queryClient.invalidateQueries({ queryKey: ["evaluations"] }),
+        queryClient.invalidateQueries({ queryKey: ["dashboard"] }),
+        queryClient.invalidateQueries({ queryKey: ["optimization-cases"] }),
+      ])
+      setReviewNotes((current) => ({ ...current, [variables.item.id]: "" }))
+      setReviewingItemId(null)
+      toast.success(
+        variables.decision === "corrected"
+          ? "人工纠偏与最终等级已保存"
+          : variables.decision === "approved"
+            ? "已确认模型结果"
+            : "已退回复核",
       )
     },
     onError: (error) => toast.error(error.message),
@@ -784,7 +909,7 @@ function RegressionResults({
           <div className="mb-3 flex flex-wrap items-end justify-between gap-3">
             <div>
               <h3 className="font-editorial text-2xl font-bold">逐张预测对照</h3>
-              <p className="mt-1 text-xs text-[var(--muted)]">保留失败、偏差与 fallback 分级标记。</p>
+              <p className="mt-1 text-xs text-[var(--muted)]">每张展示冻结评测理由，并可原位确认、纠偏或退回。</p>
             </div>
             <div className="flex flex-wrap items-center gap-2">
               <Badge>{items.length} 张</Badge>
@@ -825,61 +950,149 @@ function RegressionResults({
               <div className="divide-y divide-[var(--line)]">
                 {items.map((item) => {
                   const fallback = gradedByFallback(item.stage_a)
+                  const reviewing = reviewingItemId === item.id
+                  const evaluation = item.evaluation
+                  const humanStatus = reviewStatus(evaluation)
                   return (
                     <div
                       key={item.id}
-                      className="grid gap-3 px-4 py-4 sm:grid-cols-[64px_minmax(0,1fr)_auto] sm:items-center"
+                      className="bg-white"
                     >
-                      <img src={item.image_url} alt="" className="size-14 border border-[var(--line)] object-cover" />
-                      <div className="min-w-0">
-                        <p className="file-name truncate text-sm">{item.asset.name}</p>
-                        <p className="font-data mt-1 text-[0.68rem] text-[var(--muted)]">
-                          素材 #{item.asset_id} · 评测 #{item.evaluation_id ?? "—"} · 分数 {item.authoritative_score ?? "—"}
-                        </p>
-                        {item.error_message && (
-                          <p className="mt-1 text-xs text-[#8d2924]">{item.error_message}</p>
-                        )}
+                      <div className="grid gap-3 px-4 py-4 sm:grid-cols-[64px_minmax(0,1fr)_auto] sm:items-center">
+                        <img src={item.image_url} alt="" className="size-14 border border-[var(--line)] object-cover" />
+                        <div className="min-w-0">
+                          <p className="file-name truncate text-sm">{item.asset.name}</p>
+                          <p className="font-data mt-1 text-[0.68rem] text-[var(--muted)]">
+                            素材 #{item.asset_id} · 评测 #{item.evaluation_id ?? "—"} · 分数 {item.authoritative_score ?? "—"}
+                          </p>
+                          <p className="mt-2 line-clamp-2 text-xs leading-5 text-[var(--muted)]">
+                            {levelExplanationSummary(item)}
+                          </p>
+                          {item.error_message && (
+                            <p className="mt-1 text-xs text-[#8d2924]">{item.error_message}</p>
+                          )}
+                        </div>
+                        <div className="flex flex-wrap items-center gap-2 sm:max-w-72 sm:justify-end">
+                          {fallback && <Badge tone="warning">fallback 分级</Badge>}
+                          {item.optimization_case_id !== null && (
+                            <Badge tone="success">已入找补队列</Badge>
+                          )}
+                          {humanStatus && (
+                            <Badge tone={humanStatus.tone}>{humanStatus.label}</Badge>
+                          )}
+                          {item.status === "completed"
+                            && item.deviation
+                            && item.optimization_case_id === null && (
+                            <button
+                              type="button"
+                              className="flex size-8 items-center justify-center rounded-[4px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+                              aria-label={`${
+                                selectedDeviationIds.has(item.id)
+                                  ? "取消找补"
+                                  : "选择找补"
+                              }${item.asset.name}`}
+                              onClick={() => {
+                                setSelectedDeviationIds((current) => {
+                                  const next = new Set(current)
+                                  if (next.has(item.id)) next.delete(item.id)
+                                  else next.add(item.id)
+                                  return next
+                                })
+                              }}
+                            >
+                              {selectedDeviationIds.has(item.id)
+                                ? <CheckSquare size={20} weight="fill" />
+                                : <Square size={20} />}
+                            </button>
+                          )}
+                          {item.status === "failed" ? (
+                            <Badge tone="danger"><WarningCircle />失败</Badge>
+                          ) : item.status === "queued" ? (
+                            <Badge tone="active">等待预测</Badge>
+                          ) : (
+                            <Badge tone={item.deviation ? "danger" : "success"}>
+                              预测 {item.predicted_level ?? "—"} / 期望 {item.expected_level}
+                            </Badge>
+                          )}
+                          {evaluation && (
+                            <Button
+                              size="sm"
+                              variant={reviewing ? "secondary" : "ghost"}
+                              onClick={() => setReviewingItemId(
+                                reviewing ? null : item.id,
+                              )}
+                            >
+                              <PencilSimple />
+                              {evaluation.review_stage === "completed"
+                                ? "查看人工标记"
+                                : "确认或纠偏"}
+                            </Button>
+                          )}
+                        </div>
                       </div>
-                      <div className="flex flex-wrap items-center gap-2 sm:justify-end">
-                        {fallback && <Badge tone="warning">graded_by=fallback</Badge>}
-                        {item.optimization_case_id !== null && (
-                          <Badge tone="success">已入找补队列</Badge>
-                        )}
-                        {item.status === "completed"
-                          && item.deviation
-                          && item.optimization_case_id === null && (
-                          <button
-                            type="button"
-                            className="flex size-8 items-center justify-center rounded-[4px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
-                            aria-label={`${
-                              selectedDeviationIds.has(item.id)
-                                ? "取消找补"
-                                : "选择找补"
-                            }${item.asset.name}`}
-                            onClick={() => {
-                              setSelectedDeviationIds((current) => {
-                                const next = new Set(current)
-                                if (next.has(item.id)) next.delete(item.id)
-                                else next.add(item.id)
-                                return next
-                              })
-                            }}
-                          >
-                            {selectedDeviationIds.has(item.id)
-                              ? <CheckSquare size={20} weight="fill" />
-                              : <Square size={20} />}
-                          </button>
-                        )}
-                        {item.status === "failed" ? (
-                          <Badge tone="danger"><WarningCircle />失败</Badge>
-                        ) : item.status === "queued" ? (
-                          <Badge tone="active">等待预测</Badge>
-                        ) : (
-                          <Badge tone={item.deviation ? "danger" : "success"}>
-                            预测 {item.predicted_level ?? "—"} / 期望 {item.expected_level}
-                          </Badge>
-                        )}
-                      </div>
+                      <details className="border-t border-[var(--line)] bg-[#fafbf8]">
+                        <summary className="cursor-pointer px-4 py-3 text-xs font-semibold">
+                          展开完整评测理由
+                        </summary>
+                        <LevelExplanation item={item} />
+                      </details>
+                      {reviewing && evaluation && (
+                        <div className="border-t border-[var(--line-strong)] bg-white">
+                          <div className="grid gap-4 px-5 py-4 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-end">
+                            <label>
+                              <span className="mb-2 block text-xs font-semibold">人工说明（可选）</span>
+                              <Input
+                                value={reviewNotes[item.id] ?? ""}
+                                disabled={evaluation.review_stage === "completed"}
+                                placeholder="补充确认或退回依据"
+                                onChange={(event) => setReviewNotes((current) => ({
+                                  ...current,
+                                  [item.id]: event.target.value,
+                                }))}
+                              />
+                            </label>
+                            {evaluation.review_stage !== "completed" && (
+                              <div className="flex flex-wrap gap-2">
+                                <Button
+                                  variant="secondary"
+                                  disabled={reviewResult.isPending}
+                                  onClick={() => reviewResult.mutate({
+                                    item,
+                                    decision: "rejected",
+                                    note: reviewNotes[item.id]?.trim() ?? "",
+                                  })}
+                                >
+                                  退回复核
+                                </Button>
+                                <Button
+                                  disabled={reviewResult.isPending}
+                                  onClick={() => reviewResult.mutate({
+                                    item,
+                                    decision: "approved",
+                                    note: reviewNotes[item.id]?.trim() ?? "",
+                                  })}
+                                >
+                                  <Check weight="bold" />确认结果
+                                </Button>
+                              </div>
+                            )}
+                          </div>
+                          <ReviewCorrectionForm
+                            key={`${evaluation.id}-${evaluation.review_revision}`}
+                            dimensions={evaluation.aesthetic?.dimensions ?? {}}
+                            dimensionSchema={evaluation.dimension_schema}
+                            scoring={evaluation.scoring ?? {}}
+                            pending={reviewResult.isPending}
+                            editable={evaluation.review_stage !== "completed"}
+                            onSubmit={({ note, corrections }) => reviewResult.mutate({
+                              item,
+                              decision: "corrected",
+                              note,
+                              corrections,
+                            })}
+                          />
+                        </div>
+                      )}
                     </div>
                   )
                 })}
@@ -894,6 +1107,120 @@ function RegressionResults({
       </section>
     </>
   )
+}
+
+function LevelExplanation({ item }: { item: BaselineRegressionItem }) {
+  const explanation = item.level_explanation
+  const labels = Object.fromEntries(
+    item.evaluation?.dimension_schema.definition?.dimensions.map((dimension) => [
+      dimension.key,
+      dimension.label,
+    ]) ?? [],
+  )
+  if (explanation.status === "unavailable_historical") {
+    return (
+      <p className="border-t border-[var(--line)] px-4 py-4 text-xs text-[var(--muted)]">
+        {explanation.message ?? "历史结果未冻结评测理由"}
+      </p>
+    )
+  }
+  const dimensionRows = [
+    ...explanation.strong_dimensions.map((dimension) => ({
+      ...dimension,
+      kind: "主要优势",
+    })),
+    ...explanation.weak_dimensions.map((dimension) => ({
+      ...dimension,
+      kind: "主要短板",
+    })),
+  ].filter(
+    (dimension, index, all) =>
+      all.findIndex((candidate) => candidate.key === dimension.key) === index,
+  )
+  return (
+    <div className="border-t border-[var(--line)] px-4 py-4">
+      <p className="text-sm font-semibold">
+        服务端结论：{explanation.predicted_level ?? "未形成等级"} ·
+        {" "}{explanation.authoritative_score ?? "无有效分数"} 分
+      </p>
+      {explanation.status === "out_of_scope" && (
+        <p className="mt-2 text-xs text-[#8d2924]">素材超出评测范围，未形成正式美感等级。</p>
+      )}
+      {dimensionRows.length > 0 && (
+        <div className="mt-4 divide-y divide-[var(--line)] border-y border-[var(--line)]">
+          {dimensionRows.map((dimension) => (
+            <div
+              key={dimension.key}
+              className="grid gap-2 py-3 text-xs sm:grid-cols-[88px_120px_minmax(0,1fr)]"
+            >
+              <span className="font-semibold text-[var(--muted)]">{dimension.kind}</span>
+              <span className="font-semibold">
+                {labels[dimension.key] ?? dimension.key} · {dimension.grade} 级
+              </span>
+              <span className="leading-5 text-[var(--muted)]">
+                {[...dimension.evidence, ...dimension.defects].join("；") || "未返回可展示证据"}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+      {explanation.caps.length > 0 && (
+        <p className="mt-3 text-xs leading-5 text-[#7d4308]">
+          等级限制：{explanation.caps.map((cap) => {
+            const level = typeof cap.cap === "string" ? cap.cap : ""
+            const reason = typeof cap.reason === "string" ? cap.reason : "触发等级限制"
+            return [level, reason].filter(Boolean).join(" · ")
+          }).join("；")}
+        </p>
+      )}
+      {explanation.review_reasons.length > 0 && (
+        <p className="mt-2 text-xs leading-5 text-[var(--muted)]">
+          建议人工复核：{explanation.review_reasons.join("；")}
+        </p>
+      )}
+    </div>
+  )
+}
+
+function levelExplanationSummary(item: BaselineRegressionItem) {
+  const explanation = item.level_explanation
+  if (explanation.status === "unavailable_historical") {
+    return explanation.message ?? "历史结果未冻结评测理由"
+  }
+  if (explanation.status === "out_of_scope") {
+    return "超出评测范围，未形成正式等级"
+  }
+  const weakest = explanation.weak_dimensions[0]
+  const weakEvidence = weakest
+    ? [...weakest.defects, ...weakest.evidence][0]
+    : null
+  const cap = explanation.caps[0]
+  const capReason = cap && typeof cap.reason === "string" ? cap.reason : null
+  return capReason
+    ? `等级受限：${capReason}`
+    : weakEvidence
+      ? `主要短板：${weakEvidence}`
+      : `服务端按 ${explanation.authoritative_score ?? "—"} 分判定为 ${explanation.predicted_level ?? "未定级"}`
+}
+
+function reviewStatus(evaluation: BaselineRegressionItem["evaluation"]) {
+  if (!evaluation) return null
+  const decision = evaluation.human_review?.decision
+  if (decision === "approved") return { label: "已确认", tone: "success" as const }
+  if (decision === "corrected") {
+    return {
+      label: `已纠偏 · 人工 ${evaluation.final_level ?? "维度"}`,
+      tone: "warning" as const,
+    }
+  }
+  if (decision === "rejected") return { label: "已退回", tone: "danger" as const }
+  if (evaluation.review_panel) {
+    return {
+      label: `审核中 ${evaluation.review_panel.submitted_count}/${evaluation.review_panel.required_reviewers}`,
+      tone: "active" as const,
+    }
+  }
+  return { label: "待审核", tone: "neutral" as const }
 }
 
 function LevelSelect({
@@ -913,7 +1240,9 @@ function LevelSelect({
         value={value}
         onChange={(event) => onChange(event.target.value as BaselineLevel)}
       >
-        {levels.map((level) => <option key={level} value={level}>{level}</option>)}
+        {levels.map((level) => (
+          <option key={level} value={level}>{level} · {levelNames[level]}</option>
+        ))}
       </select>
     </label>
   )

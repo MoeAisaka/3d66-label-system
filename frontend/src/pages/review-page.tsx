@@ -18,11 +18,12 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { api, jsonBody } from "@/lib/api"
+import { submitReviewDecision } from "@/lib/review-submit"
 import {
   dimensionKeys as dimensionKeysForSchema,
   dimensionLabels as dimensionLabelsForSchema,
 } from "@/lib/dimension-schema"
-import type { EvaluationRecord, ReviewCorrection, ReviewPanelSummary, ReviewStage, User } from "@/lib/types"
+import type { EvaluationRecord, ReviewCorrection, ReviewStage, User } from "@/lib/types"
 import { ReviewCorrectionForm } from "@/pages/review-correction-form"
 import {
   filterReviewAssets,
@@ -125,46 +126,14 @@ export function ReviewPage({ user }: { user: User }) {
   const review = useMutation({
     mutationFn: async ({ decision, corrected_level, reviewNote, corrections = [] }: { decision: "approved" | "corrected" | "rejected"; corrected_level: string | null; reviewNote: string; corrections?: ReviewCorrection[] }) => {
       if (!evaluation) throw new Error("评测结果尚未加载")
-      const submitPanelReview = (panel: ReviewPanelSummary) => {
-        const adjudicating = panel.status === "lead_adjudication"
-        return api(
-          `/api/evaluations/${evaluation.id}/review-panel/${adjudicating ? "lead-adjudication" : "votes"}`,
-          {
-            method: "POST",
-            ...jsonBody({
-              ...(adjudicating
-                ? { lead_reviewer_name: reviewer }
-                : { reviewer_name: reviewer }),
-              decision,
-              note: reviewNote || (adjudicating ? "主审在初审工作台裁决" : ""),
-              corrections,
-              expected_panel_revision: panel.revision,
-            }),
-          },
-        )
-      }
-      if (evaluation.review_panel) {
-        return submitPanelReview(evaluation.review_panel)
-      }
-      if (evaluation.review_stage === "initial") {
-        const openedPanel = await api<ReviewPanelSummary>(
-          `/api/evaluations/${evaluation.id}/review-panel/open`,
-          { method: "POST", ...jsonBody({}) },
-        )
-        return submitPanelReview(openedPanel)
-      }
-      return api(`/api/evaluations/${evaluation?.id}/review`, {
-          method: "POST",
-          ...jsonBody({
-            reviewer_name: reviewer,
-            decision,
-            corrected_level,
-            note: reviewNote,
-            corrections,
-            expected_stage: evaluation?.review_stage,
-            expected_review_revision: evaluation?.review_revision,
-          }),
-        })
+      return submitReviewDecision({
+        evaluation,
+        reviewer,
+        decision,
+        correctedLevel: corrected_level,
+        note: reviewNote,
+        corrections,
+      })
     },
     onSuccess: async (_data, variables) => {
       const nextEvaluation =

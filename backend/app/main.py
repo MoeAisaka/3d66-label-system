@@ -100,6 +100,7 @@ from .baseline_regression import (
     canonical_json as baseline_canonical_json,
     compute_level_metrics,
     fail_baseline_item,
+    filename_level_suggestion,
     run_comparison,
 )
 from .benchmarking import (
@@ -618,6 +619,9 @@ class BaselineSetCreateRequest(BaseModel):
     items: list[BaselineSetItemCreateRequest] = Field(
         default_factory=list, max_length=10_000
     )
+    expected_level_overrides: dict[
+        int, Literal["L1", "L2", "L3", "L4", "L5"]
+    ] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def validate_unique_assets(self) -> "BaselineSetCreateRequest":
@@ -625,6 +629,8 @@ class BaselineSetCreateRequest(BaseModel):
             raise ValueError("请选择素材包或至少一张素材")
         if self.source_package_id is not None and self.items:
             raise ValueError("整包创建与逐张选择不能同时提交")
+        if self.source_package_id is None and self.expected_level_overrides:
+            raise ValueError("逐张等级覆盖仅用于整包创建")
         asset_ids = [item.asset_id for item in self.items]
         if len(asset_ids) != len(set(asset_ids)):
             raise ValueError("基准集不能包含重复素材")
@@ -1004,16 +1010,24 @@ def production_feedback_sender(
 app.include_router(build_canary_router(current_user))
 
 
-def _asset_payload(asset: Asset) -> dict[str, Any]:
+def _asset_payload(
+    asset: Asset,
+    *,
+    display_name: str | None = None,
+) -> dict[str, Any]:
+    name = display_name or asset.original_name
+    suggestion = filename_level_suggestion(name)
     return {
         "id": asset.id,
-        "name": asset.original_name,
+        "name": name,
         "mime_type": asset.mime_type,
         "size_bytes": asset.size_bytes,
         "width": asset.width,
         "height": asset.height,
         "created_at": asset.created_at,
         "image_url": f"/api/assets/{asset.id}/file",
+        "suggested_expected_level": suggestion["suggested_level"],
+        "level_suggestion": suggestion,
     }
 
 
@@ -2125,7 +2139,7 @@ def _store_package_asset(
             )
         )
         return {
-            **_asset_payload(existing),
+            **_asset_payload(existing, display_name=normalized_name),
             "duplicate": True,
             "restored": restored,
         }
@@ -2160,7 +2174,7 @@ def _store_package_asset(
         )
     )
     return {
-        **_asset_payload(asset),
+        **_asset_payload(asset, display_name=normalized_name),
         "duplicate": False,
         "restored": False,
     }
@@ -2621,6 +2635,18 @@ def list_assets(
     assets = db.scalars(
         statement.order_by(Asset.created_at.desc(), Asset.id.desc())
     ).unique().all()
+    package_names: dict[int, str] = {}
+    if package_id is not None:
+        package_items = db.scalars(
+            select(MaterialPackageItem)
+            .where(MaterialPackageItem.package_id == package_id)
+            .order_by(MaterialPackageItem.position.asc())
+        ).all()
+        for package_item in package_items:
+            package_names.setdefault(
+                package_item.asset_id,
+                package_item.original_name,
+            )
     payloads = []
     for asset in assets:
         evaluation_status = _asset_evaluation_status(
@@ -2634,7 +2660,10 @@ def list_assets(
             continue
         payloads.append(
             {
-                **_asset_payload(asset),
+                **_asset_payload(
+                    asset,
+                    display_name=package_names.get(asset.id),
+                ),
                 "evaluation_status": evaluation_status,
             }
         )
@@ -5856,6 +5885,7 @@ def create_baseline_set(
         raise HTTPException(status_code=409, detail="基准集名称已存在")
 
     requested_items = list(payload.items)
+    expected_sources: dict[int, tuple[str, dict[str, Any]]] = {}
     if payload.source_package_id is not None:
         source_package = db.get(MaterialPackage, payload.source_package_id)
         if source_package is None:
@@ -5869,10 +5899,28 @@ def create_baseline_set(
             ):
                 continue
             seen_asset_ids.add(package_item.asset_id)
+            suggestion = filename_level_suggestion(package_item.original_name)
+            override = payload.expected_level_overrides.get(
+                package_item.asset_id
+            )
+            suggested_level = suggestion["suggested_level"]
+            expected_level = (
+                override
+                or suggested_level
+                or payload.default_expected_level
+            )
+            expected_sources[package_item.asset_id] = (
+                "manual_override"
+                if override
+                else "filename"
+                if suggested_level
+                else "batch_default",
+                suggestion,
+            )
             requested_items.append(
                 BaselineSetItemCreateRequest(
                     asset_id=package_item.asset_id,
-                    expected_level=payload.default_expected_level,
+                    expected_level=expected_level,
                     source_package_id=source_package.id,
                 )
             )
@@ -5882,6 +5930,14 @@ def create_baseline_set(
             raise HTTPException(
                 status_code=400,
                 detail="单个基准集最多包含 10000 张唯一素材",
+            )
+        unknown_override_ids = (
+            set(payload.expected_level_overrides) - seen_asset_ids
+        )
+        if unknown_override_ids:
+            raise HTTPException(
+                status_code=400,
+                detail="逐张等级覆盖包含不属于所选素材包的素材",
             )
 
     asset_ids = [item.asset_id for item in requested_items]
@@ -5901,9 +5957,10 @@ def create_baseline_set(
     frozen_items: list[dict[str, Any]] = []
     for requested in requested_items:
         asset = assets_by_id[requested.asset_id]
+        source_name = asset.original_name
         if requested.source_package_id is not None:
             package_item = db.scalar(
-                select(MaterialPackageItem.id)
+                select(MaterialPackageItem)
                 .where(
                     MaterialPackageItem.package_id
                     == requested.source_package_id,
@@ -5916,19 +5973,36 @@ def create_baseline_set(
                     status_code=400,
                     detail=f"素材 #{asset.id} 不属于所选素材包",
                 )
+            source_name = package_item.original_name
+        suggestion = filename_level_suggestion(source_name)
+        level_source, frozen_suggestion = expected_sources.get(
+            asset.id,
+            (
+                "manual_override"
+                if requested.expected_level
+                else "filename"
+                if suggestion["suggested_level"]
+                else "batch_default",
+                suggestion,
+            ),
+        )
         expected_level = (
-            requested.expected_level or payload.default_expected_level
+            requested.expected_level
+            or suggestion["suggested_level"]
+            or payload.default_expected_level
         )
         asset_snapshot = {
             "schema_version": "baseline-asset-v1",
             "asset_id": asset.id,
-            "name": asset.original_name,
+            "name": source_name,
             "sha256": asset.sha256,
             "mime_type": asset.mime_type,
             "size_bytes": asset.size_bytes,
             "width": asset.width,
             "height": asset.height,
             "source_package_id": requested.source_package_id,
+            "expected_level_source": level_source,
+            "filename_level_suggestion": frozen_suggestion,
             "created_at": asset.created_at.isoformat(),
         }
         frozen_items.append(
@@ -6260,6 +6334,22 @@ def baseline_run_detail(
             item.baseline_set_item.asset_snapshot_json
         )
         queue_case = queue_cases.get(item.id)
+        frozen_explanation = snapshot.get("level_explanation")
+        if not isinstance(frozen_explanation, dict):
+            frozen_explanation = {
+                "schema_version": "baseline-level-explanation-v1",
+                "status": "unavailable_historical",
+                "predicted_level": actual,
+                "authoritative_score": snapshot.get(
+                    "authoritative_score"
+                ),
+                "scope_status": None,
+                "strong_dimensions": [],
+                "weak_dimensions": [],
+                "caps": [],
+                "review_reasons": [],
+                "message": "历史结果未冻结评测理由",
+            }
         item_payloads.append(
             {
                 "id": item.id,
@@ -6272,10 +6362,16 @@ def baseline_run_detail(
                 "authoritative_score": snapshot.get("authoritative_score"),
                 "cap_reasons": snapshot.get("cap_reasons") or [],
                 "stage_a": snapshot.get("stage_a") or {},
+                "level_explanation": frozen_explanation,
                 "status": item.status,
                 "deviation": deviation,
                 "error_message": item.error_message,
                 "evaluation_id": item.evaluation_id,
+                "evaluation": (
+                    _result_payload(item.evaluation)
+                    if item.evaluation is not None
+                    else None
+                ),
                 "job_id": item.job_id,
                 "run_id": run.id,
                 "optimization_case_id": queue_case.id if queue_case else None,
