@@ -6,6 +6,7 @@ import type {
   BaselineSetDetail,
   BaselineSetSummary,
   MaterialPackage,
+  PromptVersion,
 } from "@/lib/types"
 
 export type ApiErrorDetail = {
@@ -113,9 +114,14 @@ export const baselineRegressionApi = {
     method: "POST",
     ...jsonBody(payload),
   }),
-  createRun: (setId: number) => api<BaselineRegressionRun & { job_ids: number[] }>(
+  listPrompts: () => api<{ items: PromptVersion[] }>("/api/prompts"),
+  createRun: (setId: number, payload: {
+    prompt_a_id?: number
+    prompt_b_id?: number
+    dimension_schema_id?: number
+  } = {}) => api<BaselineRegressionRun & { job_ids: number[] }>(
     `/api/baseline-sets/${setId}/runs`,
-    { method: "POST" },
+    { method: "POST", ...jsonBody(payload) },
   ),
   getRun: (runId: number) => api<BaselineRegressionDetail>(
     `/api/baseline-regressions/${runId}`,

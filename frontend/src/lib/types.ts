@@ -184,6 +184,27 @@ export type BaselineLevelMetrics = {
   confusion_matrix: Record<BaselineLevel, Record<BaselineLevel, number>>
 }
 
+export type BaselinePromptSelection = {
+  id: number | null
+  stage: "A" | "B"
+  name: string | null
+  version: string | null
+  rubric_version: string | null
+}
+
+export type BaselineDimensionSelection = {
+  mode: "strategy_snapshot"
+  manual_selection_supported: false
+  route_policy_id: string | null
+  schemas: Array<{
+    schema_key: string | null
+    version: string | null
+    schema_type: string | null
+    family_key: string | null
+    canonical_hash: string | null
+  }>
+}
+
 export type BaselineRegressionRun = {
   id: number
   baseline_set_id: number
@@ -197,6 +218,12 @@ export type BaselineRegressionRun = {
   valid_predictions: number
   failed: number
   metrics: BaselineLevelMetrics
+  selection: {
+    schema_version: "baseline-run-selection-v1"
+    prompt_a: BaselinePromptSelection | null
+    prompt_b: BaselinePromptSelection | null
+    dimension: BaselineDimensionSelection
+  }
   created_by: string
   created_at: string
   finished_at: string | null
