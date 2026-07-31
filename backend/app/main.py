@@ -7,13 +7,25 @@ import io
 import json
 import mimetypes
 import uuid
+import zipfile
 from collections import Counter
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Annotated, Any, Literal
 
-from fastapi import BackgroundTasks, Cookie, Depends, FastAPI, File, Header, HTTPException, Response, UploadFile
+from fastapi import (
+    BackgroundTasks,
+    Cookie,
+    Depends,
+    FastAPI,
+    File,
+    Form,
+    Header,
+    HTTPException,
+    Response,
+    UploadFile,
+)
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import (
@@ -179,7 +191,12 @@ from .strategy_bundle import (
 settings = get_settings()
 COOKIE_NAME = "3d66_session"
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024
+MAX_UPLOAD_FILES = 1000
+MAX_ARCHIVE_IMAGES = 10_000
+MAX_ARCHIVE_UNCOMPRESSED_BYTES = 30 * 1024 * 1024 * 1024
+MAX_ARCHIVE_COMPRESSION_RATIO = 200
 ALLOWED_MIME = {"image/jpeg", "image/png", "image/webp"}
+ALLOWED_IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp"}
 
 
 def _protected_api_key(
@@ -364,6 +381,17 @@ class BenchmarkRunRequest(BaseModel):
     def validate_test_models(self) -> "BenchmarkRunRequest":
         if set(self.test_observations) != set(MODEL_KEYS):
             raise ValueError("测试观测必须覆盖 Sol、Terra、Luna")
+        return self
+
+
+class MaterialPackageCreateRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    asset_ids: list[int] = Field(min_length=1, max_length=1000)
+
+    @model_validator(mode="after")
+    def validate_unique_assets(self) -> "MaterialPackageCreateRequest":
+        if len(self.asset_ids) != len(set(self.asset_ids)):
+            raise ValueError("素材包不能包含重复素材")
         return self
 
 
@@ -559,12 +587,17 @@ class BaselineSetCreateRequest(BaseModel):
     name: str = Field(min_length=1, max_length=160)
     description: str = Field(default="", max_length=2000)
     default_expected_level: Literal["L1", "L2", "L3", "L4", "L5"]
+    source_package_id: int | None = Field(default=None, ge=1)
     items: list[BaselineSetItemCreateRequest] = Field(
-        min_length=1, max_length=1000
+        default_factory=list, max_length=10_000
     )
 
     @model_validator(mode="after")
     def validate_unique_assets(self) -> "BaselineSetCreateRequest":
+        if self.source_package_id is None and not self.items:
+            raise ValueError("请选择素材包或至少一张素材")
+        if self.source_package_id is not None and self.items:
+            raise ValueError("整包创建与逐张选择不能同时提交")
         asset_ids = [item.asset_id for item in self.items]
         if len(asset_ids) != len(set(asset_ids)):
             raise ValueError("基准集不能包含重复素材")
@@ -1931,7 +1964,9 @@ def me(user: User = Depends(current_user)) -> dict[str, Any]:
 
 @app.get("/api/dashboard")
 def dashboard(_user: User = Depends(current_user), db: Session = Depends(get_db)) -> dict[str, Any]:
-    asset_count = db.scalar(select(func.count()).select_from(Asset)) or 0
+    asset_count = db.scalar(
+        select(func.count()).select_from(Asset).where(Asset.status != "deleted")
+    ) or 0
     queued = db.scalar(
         select(func.count()).select_from(EvaluationJob).where(EvaluationJob.status == "queued")
     ) or 0
@@ -1966,77 +2001,138 @@ def dashboard(_user: User = Depends(current_user), db: Session = Depends(get_db)
     }
 
 
-@app.post("/api/assets/upload")
-async def upload_assets(
-    files: list[UploadFile] = File(...),
-    user: User = Depends(current_user),
-    db: Session = Depends(get_db),
-) -> dict[str, Any]:
-    if len(files) > 100:
-        raise HTTPException(status_code=400, detail="单次最多上传 100 张图片")
-    package = MaterialPackage(
-        package_key=f"upload:{uuid.uuid4().hex}",
-        name=f"素材包 {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')}",
-        source="manual_upload",
-        created_by=user.username,
-    )
-    db.add(package)
-    db.flush()
-    uploaded: list[dict[str, Any]] = []
-    for position, upload in enumerate(files, start=1):
-        data = await upload.read()
-        if not data or len(data) > MAX_UPLOAD_BYTES:
-            raise HTTPException(status_code=400, detail=f"{upload.filename} 为空或超过 25MB")
-        try:
-            image = Image.open(io.BytesIO(data))
+def _upload_package_name(value: str | None, *, fallback: str) -> str:
+    normalized = (value or "").strip()
+    if not normalized:
+        normalized = fallback
+    if len(normalized) > 200:
+        raise HTTPException(status_code=422, detail="素材包名称不能超过 200 个字符")
+    return normalized
+
+
+def _validate_image_bytes(
+    data: bytes,
+    *,
+    filename: str,
+    content_type: str | None,
+) -> tuple[str, int, int]:
+    if not data or len(data) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=400, detail=f"{filename} 为空或超过 25MB")
+    try:
+        with Image.open(io.BytesIO(data)) as image:
             image.verify()
-            image = Image.open(io.BytesIO(data))
+        with Image.open(io.BytesIO(data)) as image:
             width, height = image.size
-            detected_mime = Image.MIME.get(image.format or "", upload.content_type or "")
-        except (UnidentifiedImageError, OSError) as exc:
-            raise HTTPException(status_code=400, detail=f"{upload.filename} 不是有效图片") from exc
-        mime_type = detected_mime or upload.content_type or "application/octet-stream"
-        if mime_type not in ALLOWED_MIME:
-            raise HTTPException(status_code=400, detail=f"{upload.filename} 仅支持 JPG、PNG、WebP")
-        digest = hashlib.sha256(data).hexdigest()
-        existing = db.scalar(select(Asset).where(Asset.sha256 == digest).order_by(Asset.id.desc()))
-        if existing:
-            db.add(
-                MaterialPackageItem(
-                    package_id=package.id,
-                    asset_id=existing.id,
-                    original_name=upload.filename or existing.original_name,
-                    duplicate=True,
-                    position=position,
-                )
+            detected_mime = Image.MIME.get(
+                image.format or "",
+                content_type or "",
             )
-            uploaded.append({**_asset_payload(existing), "duplicate": True})
-            continue
-        extension = mimetypes.guess_extension(mime_type) or Path(upload.filename or "image").suffix or ".jpg"
-        stored_name = f"{uuid.uuid4().hex}{extension.lower()}"
-        (settings.upload_dir / stored_name).write_bytes(data)
-        asset = Asset(
-            original_name=upload.filename or stored_name,
-            stored_name=stored_name,
-            mime_type=mime_type,
-            size_bytes=len(data),
-            width=width,
-            height=height,
-            sha256=digest,
+    except (UnidentifiedImageError, OSError) as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{filename} 不是有效图片",
+        ) from exc
+    mime_type = detected_mime or content_type or "application/octet-stream"
+    if mime_type not in ALLOWED_MIME:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{filename} 仅支持 JPG、PNG、WebP",
         )
-        db.add(asset)
-        db.flush()
+    return mime_type, width, height
+
+
+def _store_package_asset(
+    *,
+    db: Session,
+    package: MaterialPackage,
+    position: int,
+    filename: str,
+    content_type: str | None,
+    data: bytes,
+    actor: str,
+    created_paths: list[Path],
+) -> dict[str, Any]:
+    normalized_name = (filename.strip() or f"image-{position}")[:500]
+    mime_type, width, height = _validate_image_bytes(
+        data,
+        filename=normalized_name,
+        content_type=content_type,
+    )
+    digest = hashlib.sha256(data).hexdigest()
+    existing = db.scalar(
+        select(Asset).where(Asset.sha256 == digest).order_by(Asset.id.desc())
+    )
+    if existing is not None:
+        restored = existing.status == "deleted"
+        if restored:
+            existing.status = "uploaded"
+            append_audit_event(
+                db,
+                category="materials",
+                action="asset_restored_by_upload",
+                subject_type="asset",
+                subject_id=existing.id,
+                actor=actor,
+                payload={"package_id": package.id, "sha256": digest},
+                event_key=f"asset:{existing.id}:restored:package:{package.id}",
+            )
         db.add(
             MaterialPackageItem(
                 package_id=package.id,
-                asset_id=asset.id,
-                original_name=upload.filename or stored_name,
-                duplicate=False,
+                asset_id=existing.id,
+                original_name=normalized_name,
+                duplicate=True,
                 position=position,
             )
         )
-        uploaded.append({**_asset_payload(asset), "duplicate": False})
-    db.commit()
+        return {
+            **_asset_payload(existing),
+            "duplicate": True,
+            "restored": restored,
+        }
+
+    extension = (
+        mimetypes.guess_extension(mime_type)
+        or Path(normalized_name).suffix
+        or ".jpg"
+    )
+    stored_name = f"{uuid.uuid4().hex}{extension.lower()}"
+    stored_path = settings.upload_dir / stored_name
+    stored_path.write_bytes(data)
+    created_paths.append(stored_path)
+    asset = Asset(
+        original_name=normalized_name,
+        stored_name=stored_name,
+        mime_type=mime_type,
+        size_bytes=len(data),
+        width=width,
+        height=height,
+        sha256=digest,
+    )
+    db.add(asset)
+    db.flush()
+    db.add(
+        MaterialPackageItem(
+            package_id=package.id,
+            asset_id=asset.id,
+            original_name=normalized_name,
+            duplicate=False,
+            position=position,
+        )
+    )
+    return {
+        **_asset_payload(asset),
+        "duplicate": False,
+        "restored": False,
+    }
+
+
+def _upload_result(
+    package: MaterialPackage,
+    uploaded: list[dict[str, Any]],
+    *,
+    ignored_count: int = 0,
+) -> dict[str, Any]:
     return {
         "items": uploaded,
         "package": {
@@ -2045,11 +2141,223 @@ async def upload_assets(
             "name": package.name,
             "source": package.source,
             "item_count": len(uploaded),
-            "duplicate_count": sum(1 for item in uploaded if item["duplicate"]),
+            "unique_asset_count": len({item["id"] for item in uploaded}),
+            "duplicate_count": sum(
+                1 for item in uploaded if item["duplicate"]
+            ),
+            "restored_count": sum(
+                1 for item in uploaded if item.get("restored")
+            ),
+            "ignored_count": ignored_count,
             "created_by": package.created_by,
             "created_at": package.created_at,
         },
     }
+
+
+def _cleanup_failed_upload(db: Session, created_paths: list[Path]) -> None:
+    db.rollback()
+    for path in created_paths:
+        path.unlink(missing_ok=True)
+
+
+@app.post("/api/assets/upload")
+async def upload_assets(
+    files: list[UploadFile] = File(...),
+    package_name: str | None = Form(default=None),
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    if not files:
+        raise HTTPException(status_code=422, detail="至少选择一张图片")
+    if len(files) > MAX_UPLOAD_FILES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"图片/文件夹单次最多上传 {MAX_UPLOAD_FILES} 张；更多素材请使用 ZIP",
+        )
+    package = MaterialPackage(
+        package_key=f"upload:{uuid.uuid4().hex}",
+        name=_upload_package_name(
+            package_name,
+            fallback=(
+                "素材包 "
+                f"{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')}"
+            ),
+        ),
+        source="manual_upload",
+        created_by=user.username,
+    )
+    db.add(package)
+    db.flush()
+    uploaded: list[dict[str, Any]] = []
+    created_paths: list[Path] = []
+    try:
+        for position, upload in enumerate(files, start=1):
+            uploaded.append(
+                _store_package_asset(
+                    db=db,
+                    package=package,
+                    position=position,
+                    filename=upload.filename or f"image-{position}",
+                    content_type=upload.content_type,
+                    data=await upload.read(),
+                    actor=user.username,
+                    created_paths=created_paths,
+                )
+            )
+        append_audit_event(
+            db,
+            category="materials",
+            action="material_package_uploaded",
+            subject_type="material_package",
+            subject_id=package.id,
+            actor=user.username,
+            payload={
+                "item_count": len(uploaded),
+                "duplicate_count": sum(
+                    1 for item in uploaded if item["duplicate"]
+                ),
+                "input_mode": "files_or_folder",
+            },
+            event_key=f"material-package:{package.id}:uploaded",
+        )
+        db.commit()
+    except Exception:
+        _cleanup_failed_upload(db, created_paths)
+        raise
+    return _upload_result(package, uploaded)
+
+
+@app.post("/api/material-packages/import-archive")
+async def import_material_package_archive(
+    archive: UploadFile = File(...),
+    package_name: str | None = Form(default=None),
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    filename = archive.filename or "archive.zip"
+    if Path(filename).suffix.lower() != ".zip":
+        raise HTTPException(status_code=400, detail="压缩包仅支持 ZIP 格式")
+    await archive.seek(0)
+    if not zipfile.is_zipfile(archive.file):
+        raise HTTPException(status_code=400, detail="上传文件不是有效 ZIP 压缩包")
+    await archive.seek(0)
+    package = MaterialPackage(
+        package_key=f"archive:{uuid.uuid4().hex}",
+        name=_upload_package_name(
+            package_name,
+            fallback=Path(filename).stem or "ZIP 素材包",
+        ),
+        source="manual_upload",
+        created_by=user.username,
+    )
+    db.add(package)
+    db.flush()
+    uploaded: list[dict[str, Any]] = []
+    created_paths: list[Path] = []
+    ignored_count = 0
+    try:
+        with zipfile.ZipFile(archive.file) as bundle:
+            file_infos = [item for item in bundle.infolist() if not item.is_dir()]
+            if len(file_infos) > MAX_ARCHIVE_IMAGES * 2:
+                raise HTTPException(
+                    status_code=400,
+                    detail="ZIP 文件条目过多，请拆分素材包",
+                )
+            image_infos: list[zipfile.ZipInfo] = []
+            total_uncompressed = 0
+            for info in file_infos:
+                normalized_path = info.filename.replace("\\", "/")
+                path = PurePosixPath(normalized_path)
+                if path.is_absolute() or ".." in path.parts:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"ZIP 包含不安全路径：{info.filename}",
+                    )
+                if (
+                    "__MACOSX" in path.parts
+                    or path.name in {".DS_Store", "Thumbs.db"}
+                    or path.suffix.lower() not in ALLOWED_IMAGE_SUFFIXES
+                ):
+                    ignored_count += 1
+                    continue
+                if info.flag_bits & 0x1:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"ZIP 内图片不能加密：{info.filename}",
+                    )
+                if info.file_size <= 0 or info.file_size > MAX_UPLOAD_BYTES:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"{info.filename} 为空或超过 25MB",
+                    )
+                ratio = info.file_size / max(info.compress_size, 1)
+                if (
+                    info.file_size > 1024 * 1024
+                    and ratio > MAX_ARCHIVE_COMPRESSION_RATIO
+                ):
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"ZIP 压缩比异常：{info.filename}",
+                    )
+                total_uncompressed += info.file_size
+                if total_uncompressed > MAX_ARCHIVE_UNCOMPRESSED_BYTES:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="ZIP 解压后总大小超过 30GB，请拆分素材包",
+                    )
+                image_infos.append(info)
+            if not image_infos:
+                raise HTTPException(status_code=400, detail="ZIP 中没有可用图片")
+            if len(image_infos) > MAX_ARCHIVE_IMAGES:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"单个 ZIP 最多包含 {MAX_ARCHIVE_IMAGES} 张图片",
+                )
+            for position, info in enumerate(image_infos, start=1):
+                with bundle.open(info) as source:
+                    data = source.read(MAX_UPLOAD_BYTES + 1)
+                uploaded.append(
+                    _store_package_asset(
+                        db=db,
+                        package=package,
+                        position=position,
+                        filename=info.filename,
+                        content_type=mimetypes.guess_type(info.filename)[0],
+                        data=data,
+                        actor=user.username,
+                        created_paths=created_paths,
+                    )
+                )
+        append_audit_event(
+            db,
+            category="materials",
+            action="material_package_uploaded",
+            subject_type="material_package",
+            subject_id=package.id,
+            actor=user.username,
+            payload={
+                "item_count": len(uploaded),
+                "duplicate_count": sum(
+                    1 for item in uploaded if item["duplicate"]
+                ),
+                "ignored_count": ignored_count,
+                "input_mode": "zip_archive",
+            },
+            event_key=f"material-package:{package.id}:uploaded",
+        )
+        db.commit()
+    except (zipfile.BadZipFile, RuntimeError) as exc:
+        _cleanup_failed_upload(db, created_paths)
+        raise HTTPException(status_code=400, detail="ZIP 压缩包无法读取") from exc
+    except Exception:
+        _cleanup_failed_upload(db, created_paths)
+        raise
+    return _upload_result(
+        package,
+        uploaded,
+        ignored_count=ignored_count,
+    )
 
 
 def _asset_evaluation_status(
@@ -2093,6 +2401,84 @@ def _asset_evaluation_status(
     return "not_evaluated"
 
 
+@app.post("/api/material-packages")
+def create_material_package_from_assets(
+    payload: MaterialPackageCreateRequest,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    asset_ids = payload.asset_ids
+    assets = db.scalars(
+        select(Asset).where(
+            Asset.id.in_(asset_ids),
+            Asset.status != "deleted",
+        )
+    ).all()
+    assets_by_id = {asset.id: asset for asset in assets}
+    if set(assets_by_id) != set(asset_ids):
+        raise HTTPException(
+            status_code=404,
+            detail="部分素材不存在或已删除，请刷新后重试",
+        )
+    package = MaterialPackage(
+        package_key=f"selection:{uuid.uuid4().hex}",
+        name=payload.name.strip(),
+        source="manual_upload",
+        created_by=user.username,
+    )
+    db.add(package)
+    db.flush()
+    for position, asset_id in enumerate(asset_ids, start=1):
+        asset = assets_by_id[asset_id]
+        db.add(
+            MaterialPackageItem(
+                package_id=package.id,
+                asset_id=asset.id,
+                original_name=asset.original_name,
+                duplicate=False,
+                position=position,
+            )
+        )
+    append_audit_event(
+        db,
+        category="materials",
+        action="material_package_created_from_selection",
+        subject_type="material_package",
+        subject_id=package.id,
+        actor=user.username,
+        payload={
+            "item_count": len(asset_ids),
+            "asset_ids": asset_ids,
+        },
+        event_key=f"material-package:{package.id}:selection-created",
+    )
+    db.commit()
+    return {
+        "id": package.id,
+        "package_key": package.package_key,
+        "name": package.name,
+        "source": package.source,
+        "item_count": len(asset_ids),
+        "unique_asset_count": len(asset_ids),
+        "active_asset_count": len(asset_ids),
+        "removed_asset_count": 0,
+        "duplicate_count": 0,
+        "created_by": package.created_by,
+        "created_at": package.created_at,
+        "status_summary": {
+            status: 0
+            for status in (
+                "not_evaluated",
+                "evaluated_old",
+                "evaluated_current",
+                "queued",
+                "running",
+                "failed",
+            )
+        },
+    }
+
+
 @app.get("/api/material-packages")
 def list_material_packages(
     created_from: datetime | None = None,
@@ -2115,7 +2501,10 @@ def list_material_packages(
     items = []
     for package in packages:
         status_summary: Counter[str] = Counter()
-        for package_item in package.items:
+        active_package_items = [
+            item for item in package.items if item.asset.status != "deleted"
+        ]
+        for package_item in active_package_items:
             status_summary[
                 _asset_evaluation_status(
                     db,
@@ -2134,6 +2523,16 @@ def list_material_packages(
                 "item_count": len(package.items),
                 "unique_asset_count": len(
                     {item.asset_id for item in package.items}
+                ),
+                "active_asset_count": len(
+                    {item.asset_id for item in active_package_items}
+                ),
+                "removed_asset_count": len(
+                    {
+                        item.asset_id
+                        for item in package.items
+                        if item.asset.status == "deleted"
+                    }
                 ),
                 "duplicate_count": sum(
                     1 for item in package.items if item.duplicate
@@ -2170,7 +2569,7 @@ def list_assets(
     _user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    statement = select(Asset)
+    statement = select(Asset).where(Asset.status != "deleted")
     if package_id is not None:
         statement = statement.join(
             MaterialPackageItem,
@@ -2234,6 +2633,58 @@ def asset_detail(
     return _asset_payload(asset)
 
 
+@app.delete("/api/assets/{asset_id}")
+def delete_asset(
+    asset_id: int,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    asset = db.get(Asset, asset_id)
+    if asset is None:
+        raise HTTPException(status_code=404, detail="图片不存在")
+    if asset.status == "deleted":
+        return {
+            "id": asset.id,
+            "deleted": True,
+            "history_retained": True,
+        }
+    active_job = db.scalar(
+        select(EvaluationJob.id)
+        .where(
+            EvaluationJob.asset_id == asset.id,
+            EvaluationJob.status.in_(("queued", "processing", "paused")),
+        )
+        .limit(1)
+    )
+    if active_job is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="素材仍有排队或运行中的任务，请先取消任务再删除",
+        )
+    previous_status = asset.status
+    asset.status = "deleted"
+    append_audit_event(
+        db,
+        category="materials",
+        action="asset_deleted",
+        subject_type="asset",
+        subject_id=asset.id,
+        actor=user.username,
+        payload={
+            "previous_status": previous_status,
+            "history_retained": True,
+            "binary_retained": True,
+        },
+        event_key=f"asset:{asset.id}:deleted",
+    )
+    db.commit()
+    return {
+        "id": asset.id,
+        "deleted": True,
+        "history_retained": True,
+    }
+
+
 @app.get("/api/evaluations")
 def list_evaluations(
     limit: int = 100,
@@ -2276,9 +2727,14 @@ def enqueue_jobs(
     _user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    assets = db.scalars(select(Asset).where(Asset.id.in_(payload.asset_ids))).all()
+    assets = db.scalars(
+        select(Asset).where(
+            Asset.id.in_(payload.asset_ids),
+            Asset.status != "deleted",
+        )
+    ).all()
     if len(assets) != len(set(payload.asset_ids)):
-        raise HTTPException(status_code=404, detail="部分图片不存在")
+        raise HTTPException(status_code=404, detail="部分图片不存在或已删除")
 
     def selected_prompt(stage: str, prompt_id: int | None) -> PromptVersion:
         if prompt_id is not None:
@@ -5304,14 +5760,52 @@ def create_baseline_set(
     name = payload.name.strip()
     if db.scalar(select(BaselineSet.id).where(BaselineSet.name == name)):
         raise HTTPException(status_code=409, detail="基准集名称已存在")
-    asset_ids = [item.asset_id for item in payload.items]
-    assets = db.scalars(select(Asset).where(Asset.id.in_(asset_ids))).all()
+
+    requested_items = list(payload.items)
+    if payload.source_package_id is not None:
+        source_package = db.get(MaterialPackage, payload.source_package_id)
+        if source_package is None:
+            raise HTTPException(status_code=404, detail="所选素材包不存在")
+        seen_asset_ids: set[int] = set()
+        requested_items = []
+        for package_item in source_package.items:
+            if (
+                package_item.asset.status == "deleted"
+                or package_item.asset_id in seen_asset_ids
+            ):
+                continue
+            seen_asset_ids.add(package_item.asset_id)
+            requested_items.append(
+                BaselineSetItemCreateRequest(
+                    asset_id=package_item.asset_id,
+                    expected_level=payload.default_expected_level,
+                    source_package_id=source_package.id,
+                )
+            )
+        if not requested_items:
+            raise HTTPException(status_code=400, detail="所选素材包没有可用素材")
+        if len(requested_items) > 10_000:
+            raise HTTPException(
+                status_code=400,
+                detail="单个基准集最多包含 10000 张唯一素材",
+            )
+
+    asset_ids = [item.asset_id for item in requested_items]
+    assets = db.scalars(
+        select(Asset).where(
+            Asset.id.in_(asset_ids),
+            Asset.status != "deleted",
+        )
+    ).all()
     assets_by_id = {asset.id: asset for asset in assets}
     if set(assets_by_id) != set(asset_ids):
-        raise HTTPException(status_code=404, detail="部分基准素材不存在")
+        raise HTTPException(
+            status_code=404,
+            detail="部分基准素材不存在或已删除",
+        )
 
     frozen_items: list[dict[str, Any]] = []
-    for requested in payload.items:
+    for requested in requested_items:
         asset = assets_by_id[requested.asset_id]
         if requested.source_package_id is not None:
             package_item = db.scalar(
@@ -5392,6 +5886,7 @@ def create_baseline_set(
             "fingerprint": fingerprint,
             "item_count": len(frozen_items),
             "default_expected_level": payload.default_expected_level,
+            "source_package_id": payload.source_package_id,
         },
         event_key=f"baseline-set:{baseline_set.id}:created",
     )
