@@ -53,10 +53,12 @@ class FakeMacOSSecurityFramework:
 class FakeDPAPI:
     def __init__(self) -> None:
         self.protected: list[bytes] = []
+        self.protection_scopes: list[bool] = []
         self.unprotected: list[bytes] = []
 
-    def protect(self, cleartext: bytes) -> bytes:
+    def protect(self, cleartext: bytes, *, local_machine: bool = False) -> bytes:
         self.protected.append(cleartext)
+        self.protection_scopes.append(local_machine)
         return b"\x00fake-dpapi-ciphertext\xff"
 
     def unprotect(self, ciphertext: bytes) -> bytes:
@@ -200,6 +202,8 @@ def test_wrong_platform_references_fail_closed(monkeypatch: pytest.MonkeyPatch) 
     with pytest.raises(security.SecretStorageError, match="Windows DPAPI"):
         security.unprotect_secret("dpapi:v1:ZmFrZQ==")
     with pytest.raises(security.SecretStorageError, match="Windows DPAPI"):
+        security.unprotect_secret("dpapi-machine:v1:ZmFrZQ==")
+    with pytest.raises(security.SecretStorageError, match="Windows DPAPI"):
         security.unprotect_secret("ZmFrZS1sZWdhY3k=")
 
     monkeypatch.setattr(security.sys, "platform", "win32")
@@ -239,8 +243,73 @@ def test_windows_new_dpapi_prefix_and_legacy_unprefixed_ciphertext_are_supported
     assert security.unprotect_secret(reference) == FAKE_SECRET_V1
     assert security.unprotect_secret(legacy) == FAKE_SECRET_V1
     assert dpapi.protected == [FAKE_SECRET_V1.encode("utf-8")]
+    assert dpapi.protection_scopes == [False]
     expected_ciphertext = base64.b64decode(legacy.encode("ascii"), validate=True)
     assert dpapi.unprotected == [expected_ciphertext, expected_ciphertext]
+
+
+def test_windows_local_machine_scope_has_explicit_reference_and_round_trips(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dpapi = FakeDPAPI()
+    monkeypatch.setattr(security.sys, "platform", "win32")
+    monkeypatch.setattr(security, "_get_windows_dpapi", lambda: dpapi)
+    monkeypatch.setenv(security.DPAPI_SCOPE_ENV, "local-machine")
+
+    reference = security.protect_secret(
+        FAKE_SECRET_V1,
+        account=security.MODEL_CONFIG_KEYCHAIN_ACCOUNT,
+    )
+
+    assert reference.startswith(security.DPAPI_MACHINE_REFERENCE_PREFIX)
+    assert FAKE_SECRET_V1 not in reference
+    assert security.unprotect_secret(reference) == FAKE_SECRET_V1
+    assert dpapi.protection_scopes == [True]
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("current-user", security.DPAPI_SCOPE_CURRENT_USER),
+        ("user", security.DPAPI_SCOPE_CURRENT_USER),
+        ("local_machine", security.DPAPI_SCOPE_LOCAL_MACHINE),
+        ("machine", security.DPAPI_SCOPE_LOCAL_MACHINE),
+    ],
+)
+def test_windows_dpapi_scope_aliases(
+    raw: str,
+    expected: str,
+) -> None:
+    assert security._dpapi_scope({security.DPAPI_SCOPE_ENV: raw}) == expected
+
+
+def test_windows_dpapi_scope_rejects_unknown_value() -> None:
+    with pytest.raises(
+        security.SecretStorageError,
+        match=security.DPAPI_SCOPE_ENV,
+    ) as error:
+        security._dpapi_scope({security.DPAPI_SCOPE_ENV: "automatic"})
+
+    assert error.value.reason == "DPAPI_SCOPE_INVALID"
+
+
+def test_windows_dpapi_probe_uses_configured_scope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class RoundTripDPAPI(FakeDPAPI):
+        def unprotect(self, ciphertext: bytes) -> bytes:
+            self.unprotected.append(ciphertext)
+            return self.protected[-1]
+
+    dpapi = RoundTripDPAPI()
+    monkeypatch.setattr(security.sys, "platform", "win32")
+    monkeypatch.setattr(security, "_get_windows_dpapi", lambda: dpapi)
+    monkeypatch.setenv(security.DPAPI_SCOPE_ENV, "machine")
+
+    assert security.probe_windows_dpapi() == security.DPAPI_SCOPE_LOCAL_MACHINE
+    assert dpapi.protection_scopes == [True]
+    assert len(dpapi.protected) == 1
+    assert len(dpapi.protected[0]) == 32
 
 
 def test_invalid_dpapi_ciphertext_is_rejected_without_calling_dpapi(
@@ -292,6 +361,34 @@ def test_config_request_repr_masks_secret_and_storage_error_is_sanitized(
             account=security.MODEL_CONFIG_KEYCHAIN_ACCOUNT,
         )
     assert error.value.detail == "API Key 安全存储失败"
+    assert FAKE_SECRET_V1 not in str(error.value)
+
+
+def test_config_storage_error_exposes_only_safe_dpapi_diagnostic(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from fastapi import HTTPException
+
+    from app import main
+    from pydantic import SecretStr
+
+    def fail_storage(_secret: str, *, account: str) -> str:
+        raise security.SecretStorageError(
+            f"safe diagnostic for {account}",
+            reason="DPAPI_PROTECT_FAILED",
+            system_error=2148073483,
+        )
+
+    monkeypatch.setattr(main, "protect_secret", fail_storage)
+    with pytest.raises(HTTPException) as error:
+        main._protected_api_key(
+            SecretStr(FAKE_SECRET_V1),
+            account=security.MODEL_CONFIG_KEYCHAIN_ACCOUNT,
+        )
+
+    assert error.value.detail == (
+        "API Key 安全存储失败（Windows DPAPI 加密失败，系统错误 2148073483）"
+    )
     assert FAKE_SECRET_V1 not in str(error.value)
 
 

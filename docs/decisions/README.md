@@ -33,6 +33,7 @@
 | [0019](0019-session-derived-reviewer-identity.md) | Accepted | 审核身份由服务端登录会话派生 |
 | [0021](0021-material-package-lifecycle-and-baseline-package-selection.md) | Accepted | 素材包生命周期、素材入口合并与基准回归整包选择 |
 | [0022](0022-baseline-prompt-version-selection.md) | Accepted | 基准回归手选提示词版本与维度版本预留 |
+| [0023](0023-windows-server-dpapi-scope-and-health-gate.md) | Accepted | Windows Server DPAPI 显式存储范围、真实回环门禁与脱敏诊断 |
 
 ## 新增 ADR 的规则
 
