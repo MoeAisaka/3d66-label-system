@@ -3,6 +3,9 @@
 - 状态：Accepted
 - 日期：2026-07-28
 
+> Windows Server 的存储范围和启动门禁已由 ADR-0023 补充；本记录保留最初
+> 采用当前用户 DPAPI 及版本化引用的历史背景。
+
 ## 背景
 
 系统原先只支持 Windows DPAPI，并把 DPAPI 密文字节的 Base64 文本直接存入

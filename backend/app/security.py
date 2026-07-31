@@ -10,6 +10,7 @@ import os
 import re
 import secrets
 import sys
+from collections.abc import Mapping
 from ctypes import wintypes
 from typing import Final, Protocol
 
@@ -24,6 +25,10 @@ OPTIMIZER_CONFIG_KEYCHAIN_ACCOUNT: Final = "optimizer-config"
 KEYCHAIN_SERVICE: Final = "com.3d66.label-system.api-keys"
 KEYCHAIN_REFERENCE_PREFIX: Final = "keychain:v1:"
 DPAPI_REFERENCE_PREFIX: Final = "dpapi:v1:"
+DPAPI_MACHINE_REFERENCE_PREFIX: Final = "dpapi-machine:v1:"
+DPAPI_SCOPE_ENV: Final = "API_KEY_DPAPI_SCOPE"
+DPAPI_SCOPE_CURRENT_USER: Final = "current-user"
+DPAPI_SCOPE_LOCAL_MACHINE: Final = "local-machine"
 
 _ALLOWED_KEYCHAIN_ACCOUNTS: Final = frozenset(
     {
@@ -36,10 +41,22 @@ _ERR_SEC_DUPLICATE_ITEM: Final = -25299
 _ERR_SEC_ITEM_NOT_FOUND: Final = -25300
 _K_CF_STRING_ENCODING_UTF8: Final = 0x08000100
 _CRYPTPROTECT_UI_FORBIDDEN: Final = 0x1
+_CRYPTPROTECT_LOCAL_MACHINE: Final = 0x4
 
 
 class SecretStorageError(RuntimeError):
     """A credential storage failure whose message never includes credential data."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        reason: str = "SECRET_STORAGE_FAILED",
+        system_error: int | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.reason = reason
+        self.system_error = system_error
 
 
 class SecretNotFoundError(SecretStorageError):
@@ -109,7 +126,10 @@ class _WindowsDPAPI:
             crypt32 = ctypes.WinDLL("crypt32", use_last_error=True)
             kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
         except (AttributeError, OSError) as exc:
-            raise SecretStorageError("Windows DPAPI 初始化失败") from exc
+            raise SecretStorageError(
+                "Windows DPAPI 初始化失败",
+                reason="DPAPI_INIT_FAILED",
+            ) from exc
 
         crypt32.CryptProtectData.argtypes = [
             ctypes.POINTER(_DataBlob),
@@ -143,20 +163,26 @@ class _WindowsDPAPI:
         getter = getattr(ctypes, "get_last_error", None)
         return int(getter()) if getter is not None else 0
 
-    def protect(self, cleartext: bytes) -> bytes:
+    def protect(self, cleartext: bytes, *, local_machine: bool = False) -> bytes:
         in_blob, _buffer = _to_blob(cleartext)
         out_blob = _DataBlob()
+        flags = _CRYPTPROTECT_UI_FORBIDDEN
+        if local_machine:
+            flags |= _CRYPTPROTECT_LOCAL_MACHINE
         if not self._crypt_protect_data(
             ctypes.byref(in_blob),
             None,
             None,
             None,
             None,
-            _CRYPTPROTECT_UI_FORBIDDEN,
+            flags,
             ctypes.byref(out_blob),
         ):
+            system_error = self._last_error_code()
             raise SecretStorageError(
-                f"Windows DPAPI 加密失败（系统错误 {self._last_error_code()}）"
+                f"Windows DPAPI 加密失败（系统错误 {system_error}）",
+                reason="DPAPI_PROTECT_FAILED",
+                system_error=system_error,
             )
         try:
             return ctypes.string_at(out_blob.pbData, out_blob.cbData)
@@ -176,8 +202,11 @@ class _WindowsDPAPI:
             _CRYPTPROTECT_UI_FORBIDDEN,
             ctypes.byref(out_blob),
         ):
+            system_error = self._last_error_code()
             raise SecretStorageError(
-                f"Windows DPAPI 解密失败（系统错误 {self._last_error_code()}）"
+                f"Windows DPAPI 解密失败（系统错误 {system_error}）",
+                reason="DPAPI_UNPROTECT_FAILED",
+                system_error=system_error,
             )
         try:
             return ctypes.string_at(out_blob.pbData, out_blob.cbData)
@@ -582,12 +611,34 @@ def _keychain_account_from_reference(reference: str) -> str:
     return _validate_account(account)
 
 
+def _dpapi_scope(env: Mapping[str, str] | None = None) -> str:
+    effective_env = os.environ if env is None else env
+    raw = effective_env.get(DPAPI_SCOPE_ENV, DPAPI_SCOPE_CURRENT_USER)
+    normalized = str(raw).strip().casefold().replace("_", "-")
+    aliases = {
+        "user": DPAPI_SCOPE_CURRENT_USER,
+        "current-user": DPAPI_SCOPE_CURRENT_USER,
+        "currentuser": DPAPI_SCOPE_CURRENT_USER,
+        "machine": DPAPI_SCOPE_LOCAL_MACHINE,
+        "local-machine": DPAPI_SCOPE_LOCAL_MACHINE,
+        "localmachine": DPAPI_SCOPE_LOCAL_MACHINE,
+    }
+    scope = aliases.get(normalized)
+    if scope is None:
+        raise SecretStorageError(
+            f"{DPAPI_SCOPE_ENV} 只允许 current-user 或 local-machine",
+            reason="DPAPI_SCOPE_INVALID",
+        )
+    return scope
+
+
 def _decode_dpapi_reference(reference: str) -> bytes:
-    payload = (
-        reference.removeprefix(DPAPI_REFERENCE_PREFIX)
-        if reference.startswith(DPAPI_REFERENCE_PREFIX)
-        else reference
-    )
+    if reference.startswith(DPAPI_REFERENCE_PREFIX):
+        payload = reference.removeprefix(DPAPI_REFERENCE_PREFIX)
+    elif reference.startswith(DPAPI_MACHINE_REFERENCE_PREFIX):
+        payload = reference.removeprefix(DPAPI_MACHINE_REFERENCE_PREFIX)
+    else:
+        payload = reference
     if not payload:
         raise SecretStorageError("DPAPI 密文为空")
     try:
@@ -605,9 +656,21 @@ def protect_secret(secret: str, *, account: str) -> str:
         _get_macos_keychain().set_secret(account, secret)
         return f"{KEYCHAIN_REFERENCE_PREFIX}{account}"
     if sys.platform == "win32":
-        encrypted = _get_windows_dpapi().protect(secret.encode("utf-8"))
-        return f"{DPAPI_REFERENCE_PREFIX}{base64.b64encode(encrypted).decode('ascii')}"
-    raise SecretStorageError("当前操作系统不支持安全的 API Key 存储")
+        scope = _dpapi_scope()
+        encrypted = _get_windows_dpapi().protect(
+            secret.encode("utf-8"),
+            local_machine=scope == DPAPI_SCOPE_LOCAL_MACHINE,
+        )
+        prefix = (
+            DPAPI_MACHINE_REFERENCE_PREFIX
+            if scope == DPAPI_SCOPE_LOCAL_MACHINE
+            else DPAPI_REFERENCE_PREFIX
+        )
+        return f"{prefix}{base64.b64encode(encrypted).decode('ascii')}"
+    raise SecretStorageError(
+        "当前操作系统不支持安全的 API Key 存储",
+        reason="SECURE_STORAGE_PLATFORM_UNSUPPORTED",
+    )
 
 
 def unprotect_secret(reference: str) -> str:
@@ -615,7 +678,11 @@ def unprotect_secret(reference: str) -> str:
         raise SecretStorageError("API Key 引用不能为空")
 
     if sys.platform == "darwin":
-        if reference.startswith(DPAPI_REFERENCE_PREFIX) or ":" not in reference:
+        if (
+            reference.startswith(DPAPI_REFERENCE_PREFIX)
+            or reference.startswith(DPAPI_MACHINE_REFERENCE_PREFIX)
+            or ":" not in reference
+        ):
             raise SecretStorageError("Windows DPAPI 密文不能在 macOS 上读取")
         account = _keychain_account_from_reference(reference)
         return _get_macos_keychain().get_secret(account)
@@ -623,7 +690,11 @@ def unprotect_secret(reference: str) -> str:
     if sys.platform == "win32":
         if reference.startswith(KEYCHAIN_REFERENCE_PREFIX):
             raise SecretStorageError("macOS Keychain 引用不能在 Windows 上读取")
-        if ":" in reference and not reference.startswith(DPAPI_REFERENCE_PREFIX):
+        if (
+            ":" in reference
+            and not reference.startswith(DPAPI_REFERENCE_PREFIX)
+            and not reference.startswith(DPAPI_MACHINE_REFERENCE_PREFIX)
+        ):
             raise SecretStorageError("未知的 API Key 引用格式")
         cleartext = _get_windows_dpapi().unprotect(_decode_dpapi_reference(reference))
         try:
@@ -634,7 +705,33 @@ def unprotect_secret(reference: str) -> str:
             raise SecretStorageError("DPAPI 解密结果为空")
         return secret
 
-    raise SecretStorageError("当前操作系统不支持安全的 API Key 读取")
+    raise SecretStorageError(
+        "当前操作系统不支持安全的 API Key 读取",
+        reason="SECURE_STORAGE_PLATFORM_UNSUPPORTED",
+    )
+
+
+def probe_windows_dpapi() -> str:
+    """Run an in-memory DPAPI round trip and return the configured scope."""
+    if sys.platform != "win32":
+        raise SecretStorageError(
+            "Windows DPAPI 探针只能在原生 Windows Python 中运行",
+            reason="SECURE_STORAGE_PLATFORM_UNSUPPORTED",
+        )
+    scope = _dpapi_scope()
+    sentinel = secrets.token_bytes(32)
+    dpapi = _get_windows_dpapi()
+    encrypted = dpapi.protect(
+        sentinel,
+        local_machine=scope == DPAPI_SCOPE_LOCAL_MACHINE,
+    )
+    recovered = dpapi.unprotect(encrypted)
+    if not hmac.compare_digest(sentinel, recovered):
+        raise SecretStorageError(
+            "Windows DPAPI 回环结果不一致",
+            reason="DPAPI_ROUND_TRIP_MISMATCH",
+        )
+    return scope
 
 
 def delete_secret(reference: str) -> bool:

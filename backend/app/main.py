@@ -5,6 +5,7 @@ import hashlib
 import hmac
 import io
 import json
+import logging
 import mimetypes
 import uuid
 import zipfile
@@ -189,6 +190,7 @@ from .strategy_bundle import (
 
 
 settings = get_settings()
+logger = logging.getLogger(__name__)
 COOKIE_NAME = "3d66_session"
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024
 MAX_UPLOAD_FILES = 1000
@@ -217,8 +219,29 @@ def _protected_api_key(
         raise HTTPException(status_code=422, detail="API Key 长度不能超过 1000 个字符")
     try:
         return protect_secret(secret, account=account)
-    except SecretStorageError:
-        raise HTTPException(status_code=500, detail="API Key 安全存储失败") from None
+    except SecretStorageError as error:
+        logger.error(
+            "api_key_storage_failed account=%s reason=%s system_error=%s",
+            account,
+            error.reason,
+            error.system_error,
+        )
+        if error.reason == "SECURE_STORAGE_PLATFORM_UNSUPPORTED":
+            detail = "API Key 安全存储失败（服务未运行在原生 Windows/macOS 安全存储环境）"
+        elif error.reason == "DPAPI_INIT_FAILED":
+            detail = "API Key 安全存储失败（Windows DPAPI 不可用）"
+        elif error.reason == "DPAPI_SCOPE_INVALID":
+            detail = "API Key 安全存储失败（Windows DPAPI 存储范围配置无效）"
+        elif error.reason == "DPAPI_PROTECT_FAILED":
+            suffix = (
+                f"，系统错误 {error.system_error}"
+                if error.system_error is not None
+                else ""
+            )
+            detail = f"API Key 安全存储失败（Windows DPAPI 加密失败{suffix}）"
+        else:
+            detail = "API Key 安全存储失败"
+        raise HTTPException(status_code=500, detail=detail) from None
 
 
 class LoginRequest(BaseModel):
