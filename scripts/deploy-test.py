@@ -192,10 +192,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"Commit: {release.commit} ({release.commit[:8]})")
         if args.dry_run:
             print("Dry run passed. No server connection was made.")
+            print("发布检查通过，未连接测试服务器。")
             return 0
         confirm_deploy(args.yes)
         deploy_release(release)
         print(f"Published: {release.commit}")
+        print("测试环境更新成功！")
         print(f"Test URL: http://192.168.1.35:8081")
         print(f"Health URL: {HEALTH_URL}")
         return 0
