@@ -1054,6 +1054,18 @@ def _validate_routed_bundle_contract(
         raise ValueError("EvaluationProfile 集合缺少合法执行上下文")
 
 
+def validate_routed_bundle_contract(
+    *,
+    route_policy_snapshot: dict[str, Any],
+    profile_set: dict[str, Any],
+) -> None:
+    """Public fail-closed validator for v3 route/profile snapshots."""
+    _validate_routed_bundle_contract(
+        route_policy_snapshot=route_policy_snapshot,
+        profile_set=profile_set,
+    )
+
+
 def _profile_sets_for_legacy_columns(
     profile_set: dict[str, Any],
 ) -> tuple[dict[str, Any], dict[str, Any]]:
