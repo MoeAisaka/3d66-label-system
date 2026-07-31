@@ -66,7 +66,7 @@ tracked_changes=$(git status --porcelain --untracked-files=no) || \
 [ -z "$tracked_changes" ] || fail "server worktree has tracked changes"
 
 previous_commit=$(git rev-parse HEAD) || fail "cannot read current server commit"
-git fetch "$bundle_path" main || fail "cannot import Codeup main bundle"
+git fetch "$bundle_path" "refs/remotes/origin/main" || fail "cannot import Codeup main bundle"
 git cat-file -e "${target_commit}^{commit}" || fail "bundle does not contain requested commit"
 
 printf 'Deploying %s (previous %s)...\n' "$target_commit" "$previous_commit"
