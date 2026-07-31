@@ -197,6 +197,47 @@ def test_explicit_data_dir_still_has_priority(
         config.get_settings.cache_clear()
 
 
+def test_production_feedback_token_loads_from_data_directory_secret_file(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    data_dir = tmp_path / "runtime data"
+    token_file = data_dir / "secrets" / "production-feedback.token"
+    token_file.parent.mkdir(parents=True)
+    token_file.write_text("test-feedback-token\n", encoding="utf-8")
+    monkeypatch.setenv("DATA_DIR", str(data_dir))
+    monkeypatch.delenv("PRODUCTION_FEEDBACK_TOKEN", raising=False)
+    monkeypatch.delenv("PRODUCTION_FEEDBACK_TOKEN_FILE", raising=False)
+    config.get_settings.cache_clear()
+    try:
+        assert (
+            config.get_settings().production_feedback_token
+            == "test-feedback-token"
+        )
+    finally:
+        config.get_settings.cache_clear()
+
+
+def test_production_feedback_environment_token_overrides_secret_file(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    data_dir = tmp_path / "runtime data"
+    token_file = data_dir / "secrets" / "production-feedback.token"
+    token_file.parent.mkdir(parents=True)
+    token_file.write_text("file-token\n", encoding="utf-8")
+    monkeypatch.setenv("DATA_DIR", str(data_dir))
+    monkeypatch.setenv("PRODUCTION_FEEDBACK_TOKEN", "environment-token")
+    config.get_settings.cache_clear()
+    try:
+        assert (
+            config.get_settings().production_feedback_token
+            == "environment-token"
+        )
+    finally:
+        config.get_settings.cache_clear()
+
+
 def test_doctor_accepts_complete_offline_install_without_reading_keychain(
     tmp_path: Path,
 ) -> None:

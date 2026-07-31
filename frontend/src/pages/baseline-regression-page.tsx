@@ -20,6 +20,7 @@ import type {
   BaselineLevel,
   BaselineRegressionItem,
   BaselineRegressionRun,
+  MaterialPackage,
 } from "@/lib/types"
 
 const levels: BaselineLevel[] = ["L1", "L2", "L3", "L4", "L5"]
@@ -32,12 +33,18 @@ export function BaselineRegressionPage() {
   const [defaultLevel, setDefaultLevel] = useState<BaselineLevel>("L1")
   const [name, setName] = useState("")
   const [description, setDescription] = useState("")
+  const [selectedPackageId, setSelectedPackageId] = useState(0)
+  const [useWholePackage, setUseWholePackage] = useState(false)
   const [selectedSetId, setSelectedSetId] = useState(0)
   const [selectedRunId, setSelectedRunId] = useState(0)
 
   const assets = useQuery({
-    queryKey: ["baseline-assets"],
-    queryFn: baselineRegressionApi.listAssets,
+    queryKey: ["baseline-assets", selectedPackageId],
+    queryFn: () => baselineRegressionApi.listAssets(selectedPackageId || undefined),
+  })
+  const packages = useQuery({
+    queryKey: ["baseline-packages"],
+    queryFn: baselineRegressionApi.listPackages,
   })
   const baselineSets = useQuery({
     queryKey: ["baseline-sets"],
@@ -86,15 +93,21 @@ export function BaselineRegressionPage() {
   }, [queryClient, runDetail.data?.summary.status, selectedSetId])
 
   const upload = useMutation({
-    mutationFn: baselineRegressionApi.uploadAssets,
-    onSuccess: async ({ items }) => {
+    mutationFn: (files: File[]) => baselineRegressionApi.uploadAssets(files),
+    onSuccess: async ({ items, package: uploadedPackage }) => {
+      setSelectedPackageId(uploadedPackage.id)
+      setUseWholePackage(true)
       setSelectedAssetIds((current) => {
         const next = new Set(current)
         items.forEach((item) => next.add(item.id))
         return next
       })
-      await queryClient.invalidateQueries({ queryKey: ["baseline-assets"] })
-      toast.success(`已上传并选择 ${items.length} 张素材`)
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["baseline-assets"] }),
+        queryClient.invalidateQueries({ queryKey: ["baseline-packages"] }),
+        queryClient.invalidateQueries({ queryKey: ["material-packages"] }),
+      ])
+      toast.success(`已上传并选中素材包“${uploadedPackage.name}”（${items.length} 张）`)
     },
     onError: (error) => toast.error(error.message),
   })
@@ -104,16 +117,22 @@ export function BaselineRegressionPage() {
       name: name.trim(),
       description: description.trim(),
       default_expected_level: defaultLevel,
-      items: Array.from(selectedAssetIds).map((assetId) => ({
-        asset_id: assetId,
-        expected_level: expectedByAsset[assetId] ?? defaultLevel,
-      })),
+      ...(useWholePackage && selectedPackageId
+        ? { source_package_id: selectedPackageId, items: [] }
+        : {
+            items: Array.from(selectedAssetIds).map((assetId) => ({
+              asset_id: assetId,
+              expected_level: expectedByAsset[assetId] ?? defaultLevel,
+              source_package_id: selectedPackageId || undefined,
+            })),
+          }),
     }),
     onSuccess: async (created) => {
       setSelectedSetId(created.id)
       setSelectedRunId(0)
       setSelectedAssetIds(new Set())
       setExpectedByAsset({})
+      setUseWholePackage(false)
       setName("")
       setDescription("")
       await queryClient.invalidateQueries({ queryKey: ["baseline-sets"] })
@@ -137,6 +156,12 @@ export function BaselineRegressionPage() {
 
   const allSelected = Boolean(assets.data?.items.length)
     && selectedAssetIds.size === assets.data?.items.length
+  const selectedPackage = packages.data?.items.find(
+    (item: MaterialPackage) => item.id === selectedPackageId,
+  )
+  const creationCount = useWholePackage
+    ? selectedPackage?.active_asset_count ?? 0
+    : selectedAssetIds.size
   const selectedRun = selectedSet.data?.runs.find((run) => run.id === selectedRunId)
   const summary = runDetail.data?.summary ?? selectedRun
 
@@ -169,8 +194,11 @@ export function BaselineRegressionPage() {
               accept="image/jpeg,image/png,image/webp"
               multiple
               onChange={(event) => {
-                if (event.target.files?.length) upload.mutate(event.target.files)
+                const files = event.target.files
+                  ? Array.from(event.target.files)
+                  : []
                 event.target.value = ""
+                if (files.length) upload.mutate(files)
               }}
             />
             <Button
@@ -184,6 +212,7 @@ export function BaselineRegressionPage() {
               variant="secondary"
               onClick={() => {
                 assets.refetch()
+                packages.refetch()
                 baselineSets.refetch()
                 if (selectedSetId) selectedSet.refetch()
                 if (selectedRunId) runDetail.refetch()
@@ -244,6 +273,43 @@ export function BaselineRegressionPage() {
                 上传会复用现有素材去重规则。整批等级作为默认真值，也可在入集前逐张覆盖；创建后不可修改。
               </p>
             </div>
+            <div className="grid gap-4 border-b border-[var(--line)] bg-[#fafbf8] px-5 py-4 lg:grid-cols-[minmax(280px,1fr)_auto] lg:items-end">
+              <label>
+                <span className="mb-2 block text-xs font-semibold">从素材包选择（推荐）</span>
+                <select
+                  className="h-11 w-full rounded-[4px] border border-[var(--line-strong)] bg-white px-3 text-sm"
+                  value={selectedPackageId || ""}
+                  onChange={(event) => {
+                    const packageId = event.target.value ? Number(event.target.value) : 0
+                    setSelectedPackageId(packageId)
+                    setUseWholePackage(Boolean(packageId))
+                    setSelectedAssetIds(new Set())
+                    setExpectedByAsset({})
+                  }}
+                >
+                  <option value="">不限定素材包，逐张选择</option>
+                  {(packages.data?.items ?? []).map((item) => (
+                    <option key={item.id} value={item.id}>
+                      {item.name} · {item.active_asset_count} 张可用
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="flex h-11 cursor-pointer items-center gap-2 border border-[var(--line-strong)] bg-white px-3 text-sm font-semibold">
+                <input
+                  type="checkbox"
+                  className="size-4 accent-[#9dbb1c]"
+                  checked={useWholePackage}
+                  disabled={!selectedPackageId}
+                  onChange={(event) => {
+                    setUseWholePackage(event.target.checked)
+                    setSelectedAssetIds(new Set())
+                    setExpectedByAsset({})
+                  }}
+                />
+                整包加入，无需逐张勾选
+              </label>
+            </div>
             <div className="grid gap-4 px-5 py-5 xl:grid-cols-[minmax(200px,1fr)_minmax(220px,1fr)_160px_auto] xl:items-end">
               <label>
                 <span className="mb-2 block text-xs font-semibold">基准集名称</span>
@@ -269,21 +335,25 @@ export function BaselineRegressionPage() {
                 onChange={(value) => setDefaultLevel(value)}
               />
               <Button
-                disabled={!name.trim() || !selectedAssetIds.size || createSet.isPending}
+                disabled={!name.trim() || !creationCount || createSet.isPending}
                 onClick={() => createSet.mutate()}
               >
-                {createSet.isPending ? "正在冻结" : `创建基准集 (${selectedAssetIds.size})`}
+                {createSet.isPending ? "正在冻结" : `创建基准集 (${creationCount})`}
               </Button>
             </div>
             <div className="flex flex-wrap items-center justify-between gap-3 border-t border-[var(--line)] bg-[#fafbf8] px-5 py-3">
               <p className="text-xs text-[var(--muted)]">
-                已选择 <strong className="text-foreground">{selectedAssetIds.size}</strong> / {assets.data?.total ?? 0} 张
+                {useWholePackage ? (
+                  <>将整包加入：<strong className="text-foreground">{selectedPackage?.name}</strong> · {creationCount} 张可用</>
+                ) : (
+                  <>已选择 <strong className="text-foreground">{selectedAssetIds.size}</strong> / {assets.data?.total ?? 0} 张</>
+                )}
               </p>
               <div className="flex flex-wrap gap-2">
                 <Button
                   variant="ghost"
                   size="sm"
-                  disabled={!assets.data?.items.length}
+                  disabled={useWholePackage || !assets.data?.items.length}
                   onClick={() => {
                     setSelectedAssetIds(
                       allSelected
@@ -298,7 +368,7 @@ export function BaselineRegressionPage() {
                 <Button
                   variant="secondary"
                   size="sm"
-                  disabled={!selectedAssetIds.size}
+                  disabled={useWholePackage || !selectedAssetIds.size}
                   onClick={() => {
                     const next: Record<number, BaselineLevel> = {}
                     selectedAssetIds.forEach((assetId) => { next[assetId] = defaultLevel })
@@ -309,6 +379,11 @@ export function BaselineRegressionPage() {
                 </Button>
               </div>
             </div>
+            {useWholePackage && (
+              <div className="border-t border-[var(--line)] bg-[#f6f9dc] px-5 py-3 text-xs font-semibold">
+                已启用整包模式：下方仅供预览，创建时由服务端直接冻结素材包内全部可用素材，不受页面 1000 条预览上限影响。
+              </div>
+            )}
             <div className="max-h-[440px] overflow-auto">
               {assets.isLoading ? (
                 <div className="h-48 animate-pulse bg-white" />
@@ -335,6 +410,7 @@ export function BaselineRegressionPage() {
                               type="button"
                               className="flex size-8 items-center justify-center rounded-[4px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
                               aria-label={`${checked ? "取消选择" : "选择"}${asset.name}`}
+                              disabled={useWholePackage}
                               onClick={() => toggleAsset(asset.id)}
                             >
                               {checked ? <CheckSquare size={20} weight="fill" /> : <Square size={20} />}
@@ -360,7 +436,7 @@ export function BaselineRegressionPage() {
                             <select
                               aria-label={`${asset.name}期望等级`}
                               className="h-9 w-full rounded-[4px] border border-[var(--line-strong)] bg-white px-2 text-sm disabled:bg-[#f1f3ef] disabled:text-[var(--muted)]"
-                              disabled={!checked}
+                              disabled={useWholePackage || !checked}
                               value={expectedByAsset[asset.id] ?? defaultLevel}
                               onChange={(event) => setExpectedByAsset((current) => ({
                                 ...current,
@@ -460,6 +536,45 @@ function RegressionResults({
   items: BaselineRegressionItem[]
   loading: boolean
 }) {
+  const queryClient = useQueryClient()
+  const availableDeviationIds = useMemo(
+    () => items
+      .filter((item) => (
+        item.status === "completed"
+        && item.deviation
+        && item.optimization_case_id === null
+      ))
+      .map((item) => item.id),
+    [items],
+  )
+  const [selectedDeviationIds, setSelectedDeviationIds] = useState<Set<number>>(
+    new Set(),
+  )
+
+  useEffect(() => {
+    setSelectedDeviationIds(new Set(availableDeviationIds))
+  }, [run.id, availableDeviationIds.join(",")])
+
+  const enqueueDeviations = useMutation({
+    mutationFn: () => baselineRegressionApi.enqueueDeviations(
+      run.id,
+      Array.from(selectedDeviationIds),
+    ),
+    onSuccess: async (result) => {
+      await queryClient.invalidateQueries({
+        queryKey: ["baseline-regression", run.id],
+      })
+      queryClient.invalidateQueries({ queryKey: ["optimization-cases"] })
+      setSelectedDeviationIds(new Set())
+      toast.success(
+        result.created
+          ? `已将 ${result.created} 张偏差样本加入找补队列`
+          : "所选偏差样本已在找补队列中",
+      )
+    },
+    onError: (error) => toast.error(error.message),
+  })
+
   const metrics = run.metrics
   return (
     <>
@@ -524,12 +639,42 @@ function RegressionResults({
         </div>
 
         <div className="min-w-0">
-          <div className="mb-3 flex items-end justify-between gap-3">
+          <div className="mb-3 flex flex-wrap items-end justify-between gap-3">
             <div>
               <h3 className="font-editorial text-2xl font-bold">逐张预测对照</h3>
               <p className="mt-1 text-xs text-[var(--muted)]">保留失败、偏差与 fallback 分级标记。</p>
             </div>
-            <Badge>{items.length} 张</Badge>
+            <div className="flex flex-wrap items-center gap-2">
+              <Badge>{items.length} 张</Badge>
+              {availableDeviationIds.length > 0 && (
+                <>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => {
+                      setSelectedDeviationIds(
+                        selectedDeviationIds.size === availableDeviationIds.length
+                          ? new Set()
+                          : new Set(availableDeviationIds),
+                      )
+                    }}
+                  >
+                    {selectedDeviationIds.size === availableDeviationIds.length
+                      ? "取消偏差全选"
+                      : "选择全部偏差"}
+                  </Button>
+                  <Button
+                    size="sm"
+                    disabled={!selectedDeviationIds.size || enqueueDeviations.isPending}
+                    onClick={() => enqueueDeviations.mutate()}
+                  >
+                    {enqueueDeviations.isPending
+                      ? "正在加入找补"
+                      : `加入找补队列 (${selectedDeviationIds.size})`}
+                  </Button>
+                </>
+              )}
+            </div>
           </div>
           <div className="max-h-[620px] overflow-auto border-y border-[var(--line-strong)] bg-white">
             {loading ? (
@@ -555,6 +700,34 @@ function RegressionResults({
                       </div>
                       <div className="flex flex-wrap items-center gap-2 sm:justify-end">
                         {fallback && <Badge tone="warning">graded_by=fallback</Badge>}
+                        {item.optimization_case_id !== null && (
+                          <Badge tone="success">已入找补队列</Badge>
+                        )}
+                        {item.status === "completed"
+                          && item.deviation
+                          && item.optimization_case_id === null && (
+                          <button
+                            type="button"
+                            className="flex size-8 items-center justify-center rounded-[4px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+                            aria-label={`${
+                              selectedDeviationIds.has(item.id)
+                                ? "取消找补"
+                                : "选择找补"
+                            }${item.asset.name}`}
+                            onClick={() => {
+                              setSelectedDeviationIds((current) => {
+                                const next = new Set(current)
+                                if (next.has(item.id)) next.delete(item.id)
+                                else next.add(item.id)
+                                return next
+                              })
+                            }}
+                          >
+                            {selectedDeviationIds.has(item.id)
+                              ? <CheckSquare size={20} weight="fill" />
+                              : <Square size={20} />}
+                          </button>
+                        )}
                         {item.status === "failed" ? (
                           <Badge tone="danger"><WarningCircle />失败</Badge>
                         ) : item.status === "queued" ? (
