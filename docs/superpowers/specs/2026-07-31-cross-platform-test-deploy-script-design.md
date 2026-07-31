@@ -1,10 +1,10 @@
-# Windows 测试环境一键部署脚本设计
+# 跨平台测试环境一键部署脚本设计
 
 ## 目标
 
-让 Windows 同事从本机部署 Codeup `main` 最新提交到测试服务器，无需云效
-Flow 或 Jenkins。脚本只更新测试容器 `3d66-label-system-test`，不修改持久化
-数据目录或旧的 `9093` 容器。
+让 Windows 或 macOS 同事从本机部署 Codeup `main` 最新提交到测试服务器，
+无需云效 Flow 或 Jenkins。脚本只更新测试容器
+`3d66-label-system-test`，不修改持久化数据目录或旧的 `9093` 容器。
 
 ## 固定环境
 
@@ -23,12 +23,18 @@ Flow 或 Jenkins。脚本只更新测试容器 `3d66-label-system-test`，不修
 
 ### `部署测试环境.cmd`
 
-提供可双击的 Windows 入口，定位仓库根目录并调用 PowerShell 脚本。保留窗口，
-让同事能看到成功信息或错误原因。
+提供可双击的 Windows 入口，定位仓库根目录并调用跨平台 Python 脚本。优先
+使用 `py -3`，不可用时回退到 `python`。保留窗口，让同事能看到成功信息或
+错误原因。
 
-### `scripts/deploy-test.ps1`
+### `部署测试环境.command`
 
-负责本机发布编排：
+提供可双击的 macOS 入口，同时允许在终端中直接运行。脚本从自身位置定位仓库
+根目录，并使用 `python3` 调用跨平台 Python 脚本。文件必须带 Git 可执行位。
+
+### `scripts/deploy-test.py`
+
+只使用 Python 标准库，负责 Windows 和 macOS 的本机发布编排：
 
 1. 确认当前目录是目标 Git 仓库。
 2. 确认 `git`、`ssh` 和 `scp` 可用。
@@ -41,7 +47,8 @@ Flow 或 Jenkins。脚本只更新测试容器 `3d66-label-system-test`，不修
 9. 输出已发布提交号、容器状态和测试地址。
 
 脚本不得读取、保存或输出 SSH 密码。身份验证由系统 `ssh` / `scp` 交互完成；
-服务器执行 Docker 时由 `sudo` 自行提示密码。
+服务器执行 Docker 时由 `sudo` 自行提示密码。子进程继承当前终端，确保两个
+平台的密码提示和错误信息均可见。
 
 ### `scripts/deploy-test-server.sh`
 
@@ -76,13 +83,17 @@ Flow 或 Jenkins。脚本只更新测试容器 `3d66-label-system-test`，不修
 
 ## 使用体验
 
-同事先正常克隆 Codeup 仓库，之后双击 `部署测试环境.cmd`。脚本显示待发布的
-短提交号并要求明确输入 `DEPLOY` 后才进入上传和部署阶段。发布过程中可能分别
-出现 `scp`、`ssh` 和 `sudo` 的密码提示；脚本自身不缓存密码。
+同事先正常克隆 Codeup 仓库。Windows 可双击 `部署测试环境.cmd`；macOS 可
+双击 `部署测试环境.command`，也可在终端运行
+`python3 scripts/deploy-test.py`。脚本显示待发布的短提交号并要求明确输入
+`DEPLOY` 后才进入上传和部署阶段。发布过程中可能分别出现 `scp`、`ssh` 和
+`sudo` 的密码提示；脚本自身不缓存密码。
 
 ## 验证标准
 
-- PowerShell 脚本可通过语法解析。
+- Python 脚本可在 Windows 与 macOS 的 Python 3 环境通过语法检查。
+- Windows `.cmd` 和 macOS `.command` 均能从任意当前目录定位仓库根目录。
+- macOS `.command` 保持可执行权限，并通过 `sh -n`。
 - Shell 脚本可通过 `bash -n`。
 - 错误的仓库远端、缺少命令、非法提交号和服务器脏工作区会在构建前失败。
 - dry-run 模式能完成本机检查、获取 `origin/main` 和 bundle 创建，但不连接服务器。
@@ -93,5 +104,5 @@ Flow 或 Jenkins。脚本只更新测试容器 `3d66-label-system-test`，不修
 
 ## 后续扩展
 
-底层脚本稳定后，可以新增 Codex Skill 调用同一脚本完成发布前检查和结果汇报。
-Skill 不复制部署逻辑，也不作为同事日常发布的必要依赖。
+底层脚本稳定后，可以新增 Codex Skill 调用同一 Python 脚本完成发布前检查和
+结果汇报。Skill 不复制部署逻辑，也不作为同事日常发布的必要依赖。
