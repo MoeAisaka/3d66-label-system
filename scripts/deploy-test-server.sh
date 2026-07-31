@@ -3,6 +3,7 @@
 set -u
 
 PROJECT_DIR="/opt/3d66-label-system"
+DEPLOY_USER="yuankangzhi"
 CONTAINER_NAME="3d66-label-system-test"
 HEALTH_URL="http://127.0.0.1:8081/api/health"
 HEALTH_ATTEMPTS=36
@@ -13,8 +14,12 @@ fail() {
   exit 1
 }
 
+git_as_deploy_user() {
+  sudo -u "$DEPLOY_USER" -- git "$@"
+}
+
 compose_up() {
-  sudo docker compose up -d --build
+  docker compose up -d --build
 }
 
 wait_for_health() {
@@ -23,7 +28,7 @@ wait_for_health() {
 
   attempt=1
   while [ "$attempt" -le "$HEALTH_ATTEMPTS" ]; do
-    state=$(sudo docker inspect \
+    state=$(docker inspect \
       --format '{{.State.Status}} {{if .State.Health}}{{.State.Health.Status}}{{end}}' \
       "$CONTAINER_NAME" 2>/dev/null || true)
     if [ "$state" = "running healthy" ] && \
@@ -43,12 +48,13 @@ rollback() {
   local previous_commit=$1
 
   printf 'Rolling back to %s...\n' "$previous_commit" >&2
-  git reset --hard "$previous_commit" || return 1
+  git_as_deploy_user reset --hard "$previous_commit" || return 1
   compose_up || return 1
   wait_for_health || return 1
 }
 
 [ "$#" -eq 2 ] || fail "usage: deploy-test-server.sh <bundle-path> <commit>"
+[ "$(id -u)" -eq 0 ] || fail "server deployment helper must run through sudo"
 bundle_path=$1
 target_commit=$2
 
@@ -61,16 +67,16 @@ esac
 
 cd "$PROJECT_DIR" || fail "cannot enter server project directory"
 
-tracked_changes=$(git status --porcelain --untracked-files=no) || \
+tracked_changes=$(git_as_deploy_user status --porcelain --untracked-files=no) || \
   fail "cannot inspect server worktree"
 [ -z "$tracked_changes" ] || fail "server worktree has tracked changes"
 
-previous_commit=$(git rev-parse HEAD) || fail "cannot read current server commit"
-git fetch "$bundle_path" "refs/remotes/origin/main" || fail "cannot import Codeup main bundle"
-git cat-file -e "${target_commit}^{commit}" || fail "bundle does not contain requested commit"
+previous_commit=$(git_as_deploy_user rev-parse HEAD) || fail "cannot read current server commit"
+git_as_deploy_user fetch "$bundle_path" "refs/remotes/origin/main" || fail "cannot import Codeup main bundle"
+git_as_deploy_user cat-file -e "${target_commit}^{commit}" || fail "bundle does not contain requested commit"
 
 printf 'Deploying %s (previous %s)...\n' "$target_commit" "$previous_commit"
-git reset --hard "$target_commit" || fail "cannot switch server worktree to requested commit"
+git_as_deploy_user reset --hard "$target_commit" || fail "cannot switch server worktree to requested commit"
 
 if ! compose_up || ! wait_for_health; then
   printf 'Deployment failed after updating code.\n' >&2

@@ -17,7 +17,9 @@ from typing import Iterable, Sequence
 CODEUP_URL = "https://codeup.aliyun.com/3d66/tepeng/3d66.label-system.git"
 SERVER = "yuankangzhi@192.168.1.35"
 REMOTE_PROJECT = "/opt/3d66-label-system"
+REMOTE_DEPLOY_SCRIPT = "/usr/local/sbin/deploy-3d66-label-test"
 HEALTH_URL = "http://192.168.1.35:8081/api/health"
+DEFAULT_DEPLOY_KEY = Path.home() / ".ssh" / "3d66_label_test_ed25519"
 
 
 class DeployError(RuntimeError):
@@ -36,16 +38,12 @@ class RemoteCommands:
     def __init__(
         self,
         bundle_remote: str,
-        script_remote: str,
         upload_bundle: list[str],
-        upload_script: list[str],
         invoke: list[str],
         cleanup: list[str],
     ):
         self.bundle_remote = bundle_remote
-        self.script_remote = script_remote
         self.upload_bundle = upload_bundle
-        self.upload_script = upload_script
         self.invoke = invoke
         self.cleanup = cleanup
 
@@ -114,19 +112,33 @@ def cleanup_release(release: Release) -> None:
 
 
 def build_remote_commands(
-    bundle_path: Path, server_script: Path, commit: str, process_id: int
+    bundle_path: Path, commit: str, process_id: int, key_path: Path
 ) -> RemoteCommands:
     validate_commit(commit)
     suffix = f"{commit[:8]}-{process_id}"
     bundle_remote = f"/tmp/3d66-label-main-{suffix}.bundle"
-    script_remote = f"/tmp/3d66-label-deploy-{suffix}.sh"
+    ssh_options = [
+        "-i",
+        str(key_path),
+        "-o",
+        "IdentitiesOnly=yes",
+        "-o",
+        "BatchMode=yes",
+    ]
     return RemoteCommands(
         bundle_remote=bundle_remote,
-        script_remote=script_remote,
-        upload_bundle=["scp", str(bundle_path), f"{SERVER}:{bundle_remote}"],
-        upload_script=["scp", str(server_script), f"{SERVER}:{script_remote}"],
-        invoke=["ssh", SERVER, "bash", script_remote, bundle_remote, commit],
-        cleanup=["ssh", SERVER, "rm", "-f", "--", bundle_remote, script_remote],
+        upload_bundle=["scp", *ssh_options, str(bundle_path), f"{SERVER}:{bundle_remote}"],
+        invoke=[
+            "ssh",
+            *ssh_options,
+            SERVER,
+            "sudo",
+            "-n",
+            REMOTE_DEPLOY_SCRIPT,
+            bundle_remote,
+            commit,
+        ],
+        cleanup=["ssh", *ssh_options, SERVER, "rm", "-f", "--", bundle_remote],
     )
 
 
@@ -139,17 +151,18 @@ def confirm_deploy(assume_yes: bool) -> None:
 
 
 def deploy_release(release: Release) -> None:
-    server_script = release.repo_root / "scripts" / "deploy-test-server.sh"
-    if not server_script.is_file():
-        raise DeployError(f"server deployment script not found: {server_script}")
+    key_path = Path(os.environ.get("THREED66_DEPLOY_KEY", DEFAULT_DEPLOY_KEY))
+    if not key_path.is_file():
+        raise DeployError(
+            f"SSH deploy key not found: {key_path}. "
+            "Configure the server key before publishing."
+        )
     commands = build_remote_commands(
-        release.bundle_path, server_script, release.commit, os.getpid()
+        release.bundle_path, release.commit, os.getpid(), key_path
     )
     try:
         print("Uploading release bundle...")
         run_interactive(commands.upload_bundle, release.repo_root)
-        print("Uploading server deployment helper...")
-        run_interactive(commands.upload_script, release.repo_root)
         print("Starting guarded server deployment...")
         run_interactive(commands.invoke, release.repo_root)
     finally:
