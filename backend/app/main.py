@@ -46,6 +46,7 @@ from .models import (
     BaselineSet,
     BaselineSetItem,
     CircuitBreaker,
+    DimensionRoutePolicy,
     DimensionSchema,
     EvaluationControl,
     EvaluationJob,
@@ -6241,6 +6242,87 @@ def get_dimension_schema_version(
     if schema is None:
         raise HTTPException(status_code=404, detail="维度 Schema 版本不存在")
     return _dimension_schema_payload(schema, include_definition=True)
+
+
+def _dimension_route_policy_payload(
+    policy: DimensionRoutePolicy,
+    *,
+    include_definition: bool,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "id": policy.id,
+        "policy_key": policy.policy_key,
+        "version": policy.version,
+        "display_name": policy.display_name,
+        "status": policy.status,
+        "canonical_hash": policy.canonical_hash,
+        "created_by": policy.created_by,
+        "created_at": policy.created_at,
+        "published_by": policy.published_by,
+        "published_at": policy.published_at,
+        "retired_at": policy.retired_at,
+    }
+    if include_definition:
+        payload["definition"] = json.loads(policy.definition_json)
+    return payload
+
+
+@app.get("/api/dimension-route-policies")
+def list_dimension_route_policies(
+    policy_key: str | None = None,
+    status: str | None = None,
+    _user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    statement = select(DimensionRoutePolicy).order_by(
+        DimensionRoutePolicy.policy_key,
+        DimensionRoutePolicy.created_at.desc(),
+        DimensionRoutePolicy.id.desc(),
+    )
+    if policy_key is not None:
+        statement = statement.where(
+            DimensionRoutePolicy.policy_key == policy_key
+        )
+    if status is not None:
+        statement = statement.where(
+            DimensionRoutePolicy.status == status
+        )
+    policies = db.scalars(statement.limit(200)).all()
+    return {
+        "items": [
+            _dimension_route_policy_payload(
+                policy,
+                include_definition=False,
+            )
+            for policy in policies
+        ]
+    }
+
+
+@app.get(
+    "/api/dimension-route-policies/{policy_key}/versions/{version}"
+)
+def get_dimension_route_policy_version(
+    policy_key: str,
+    version: str,
+    _user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    policy = db.scalar(
+        select(DimensionRoutePolicy).where(
+            DimensionRoutePolicy.policy_key == policy_key,
+            DimensionRoutePolicy.version == version,
+        )
+    )
+    if policy is None:
+        raise HTTPException(
+            status_code=404,
+            detail="维度路由策略版本不存在",
+        )
+    return _dimension_route_policy_payload(
+        policy,
+        include_definition=True,
+    )
 
 
 def _paired_metric_rules(payload: PairedRegressionCreateRequest) -> dict[str, Any]:

@@ -692,6 +692,84 @@ class DimensionSchema(Base):
     )
 
 
+class DimensionRoutePolicy(Base):
+    __tablename__ = "dimension_route_policies"
+    __table_args__ = (
+        CheckConstraint(
+            "length(trim(policy_key)) > 0",
+            name="ck_dimension_route_policies_policy_key",
+        ),
+        CheckConstraint(
+            "length(trim(version)) > 0",
+            name="ck_dimension_route_policies_version",
+        ),
+        CheckConstraint(
+            "status IN ('draft','candidate','published','retired')",
+            name="ck_dimension_route_policies_status",
+        ),
+        CheckConstraint(
+            "json_valid(definition_json) "
+            "AND json_type(definition_json, '$') = 'object'",
+            name="ck_dimension_route_policies_definition_json",
+        ),
+        CheckConstraint(
+            "length(canonical_hash) = 64 "
+            "AND canonical_hash = lower(canonical_hash) "
+            "AND canonical_hash NOT GLOB '*[^0-9a-f]*'",
+            name="ck_dimension_route_policies_canonical_hash",
+        ),
+        CheckConstraint(
+            "((status IN ('published','retired')) "
+            "AND published_by IS NOT NULL AND published_at IS NOT NULL) "
+            "OR ((status IN ('draft','candidate')) "
+            "AND published_by IS NULL AND published_at IS NULL)",
+            name="ck_dimension_route_policies_publish_audit",
+        ),
+        CheckConstraint(
+            "(status = 'retired' AND retired_at IS NOT NULL) "
+            "OR (status <> 'retired' AND retired_at IS NULL)",
+            name="ck_dimension_route_policies_retired_at",
+        ),
+        UniqueConstraint(
+            "policy_key",
+            "version",
+            name="uq_dimension_route_policies_key_version",
+        ),
+        UniqueConstraint(
+            "canonical_hash",
+            name="uq_dimension_route_policies_canonical_hash",
+        ),
+        Index(
+            "ix_dimension_route_policies_registry",
+            "policy_key",
+            "status",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    policy_key: Mapped[str] = mapped_column(String(80), index=True)
+    version: Mapped[str] = mapped_column(String(64), index=True)
+    display_name: Mapped[str] = mapped_column(String(160))
+    status: Mapped[str] = mapped_column(String(20), default="draft", index=True)
+    definition_json: Mapped[str] = mapped_column(Text)
+    canonical_hash: Mapped[str] = mapped_column(String(64), index=True)
+    created_by: Mapped[str] = mapped_column(String(80), default="system")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utcnow,
+        server_default=sql_text("CURRENT_TIMESTAMP"),
+    )
+    published_by: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    published_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    retired_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+
 class LoopRun(Base):
     __tablename__ = "loop_runs"
     __table_args__ = (
@@ -957,6 +1035,14 @@ class StrategyBundleImmutableError(ValueError):
 
 class DimensionSchemaImmutableError(ValueError):
     """Raised when a published dimension schema is changed in place."""
+
+
+class DimensionRoutePolicyImmutableError(ValueError):
+    """Raised when a published dimension route policy is changed in place."""
+
+
+class DimensionRoutePolicyContractError(ValueError):
+    """Raised when a route policy definition and hash disagree."""
 
 
 class StrategySnapshotRequiredError(ValueError):
@@ -1460,6 +1546,84 @@ def _prevent_published_dimension_schema_delete(
     }:
         raise DimensionSchemaImmutableError(
             "已发布的 DimensionSchema 是永久审计记录，禁止删除"
+        )
+
+
+def _persisted_dimension_route_policy_status(
+    connection: Connection,
+    target: DimensionRoutePolicy,
+) -> str | None:
+    if target.id is None:
+        return None
+    return connection.exec_driver_sql(
+        "SELECT status FROM dimension_route_policies WHERE id = ?",
+        (target.id,),
+    ).scalar_one_or_none()
+
+
+def _validate_dimension_route_policy_contract(
+    target: DimensionRoutePolicy,
+) -> None:
+    try:
+        definition = json.loads(target.definition_json)
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise DimensionRoutePolicyContractError(
+            "DimensionRoutePolicy 定义不是合法 JSON"
+        ) from exc
+    if not isinstance(definition, dict):
+        raise DimensionRoutePolicyContractError(
+            "DimensionRoutePolicy 定义必须是 JSON 对象"
+        )
+    canonical = json.dumps(
+        definition,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    expected_hash = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    if target.canonical_hash != expected_hash:
+        raise DimensionRoutePolicyContractError(
+            "DimensionRoutePolicy 规范哈希与定义不一致"
+        )
+
+
+@event.listens_for(DimensionRoutePolicy, "before_insert")
+def _validate_dimension_route_policy_insert(
+    _mapper: object,
+    _connection: Connection,
+    target: DimensionRoutePolicy,
+) -> None:
+    _validate_dimension_route_policy_contract(target)
+
+
+@event.listens_for(DimensionRoutePolicy, "before_update")
+def _prevent_published_dimension_route_policy_update(
+    _mapper: object,
+    connection: Connection,
+    target: DimensionRoutePolicy,
+) -> None:
+    if _persisted_dimension_route_policy_status(connection, target) in {
+        "published",
+        "retired",
+    }:
+        raise DimensionRoutePolicyImmutableError(
+            "已发布的 DimensionRoutePolicy 禁止原地更新；请创建新版本"
+        )
+    _validate_dimension_route_policy_contract(target)
+
+
+@event.listens_for(DimensionRoutePolicy, "before_delete")
+def _prevent_published_dimension_route_policy_delete(
+    _mapper: object,
+    connection: Connection,
+    target: DimensionRoutePolicy,
+) -> None:
+    if _persisted_dimension_route_policy_status(connection, target) in {
+        "published",
+        "retired",
+    }:
+        raise DimensionRoutePolicyImmutableError(
+            "已发布的 DimensionRoutePolicy 是永久审计记录，禁止删除"
         )
 
 

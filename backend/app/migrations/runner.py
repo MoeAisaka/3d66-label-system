@@ -4213,6 +4213,258 @@ def _migration_027_bind_dimension_contract_to_strategy(
         )
 
 
+def _migration_028_add_dimension_route_policies(
+    connection: Connection,
+) -> None:
+    from ..dimension_route_registry import (
+        materialized_p2_dimension_schema_rows,
+        materialized_route_policy_rows,
+    )
+
+    schema_rows = materialized_p2_dimension_schema_rows()
+    core_row = next(
+        row for row in schema_rows if row["schema_type"] == "core"
+    )
+    product_row = next(
+        row for row in schema_rows if row["family_key"] == "product"
+    )
+
+    def insert_or_verify_schema(
+        row: dict[str, object],
+        *,
+        core_schema_id: int | None,
+    ) -> int:
+        existing = connection.exec_driver_sql(
+            """
+            SELECT id, schema_type, family_key, display_name, status,
+                   core_schema_id, definition_json, canonical_hash
+            FROM dimension_schemas
+            WHERE schema_key = ? AND version = ?
+            """,
+            (row["schema_key"], row["version"]),
+        ).mappings().first()
+        expected = {
+            "schema_type": row["schema_type"],
+            "family_key": row["family_key"],
+            "display_name": row["display_name"],
+            "status": row["status"],
+            "core_schema_id": core_schema_id,
+            "definition_json": row["definition_json"],
+            "canonical_hash": row["canonical_hash"],
+        }
+        if existing is not None:
+            actual = {key: existing[key] for key in expected}
+            if actual != expected:
+                raise RuntimeError(
+                    "已存在的 P2 DimensionSchema 与迁移定义不一致"
+                )
+            return int(existing["id"])
+        published = row["status"] in {"published", "retired"}
+        published_at = (
+            connection.exec_driver_sql("SELECT CURRENT_TIMESTAMP").scalar_one()
+            if published
+            else None
+        )
+        connection.exec_driver_sql(
+            """
+            INSERT INTO dimension_schemas (
+                schema_key, version, schema_type, family_key,
+                display_name, status, core_schema_id,
+                definition_json, canonical_hash, created_by,
+                published_by, published_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                row["schema_key"],
+                row["version"],
+                row["schema_type"],
+                row["family_key"],
+                row["display_name"],
+                row["status"],
+                core_schema_id,
+                row["definition_json"],
+                row["canonical_hash"],
+                "system:dimension-route-bootstrap",
+                "system:dimension-route-bootstrap" if published else None,
+                published_at,
+            ),
+        )
+        schema_id = connection.exec_driver_sql(
+            """
+            SELECT id FROM dimension_schemas
+            WHERE schema_key = ? AND version = ?
+            """,
+            (row["schema_key"], row["version"]),
+        ).scalar_one()
+        return int(schema_id)
+
+    core_schema_id = insert_or_verify_schema(
+        core_row,
+        core_schema_id=None,
+    )
+    expected_core_ref = product_row.get("core_schema_ref")
+    if (
+        not isinstance(expected_core_ref, dict)
+        or expected_core_ref.get("schema_key") != core_row["schema_key"]
+        or expected_core_ref.get("version") != core_row["version"]
+        or expected_core_ref.get("canonical_hash")
+        != core_row["canonical_hash"]
+    ):
+        raise RuntimeError("单品候选包的 L0 核心维引用不一致")
+    insert_or_verify_schema(
+        product_row,
+        core_schema_id=core_schema_id,
+    )
+
+    connection.exec_driver_sql("""
+        CREATE TABLE IF NOT EXISTS dimension_route_policies (
+            id INTEGER PRIMARY KEY,
+            policy_key VARCHAR(80) NOT NULL,
+            version VARCHAR(64) NOT NULL,
+            display_name VARCHAR(160) NOT NULL,
+            status VARCHAR(20) NOT NULL DEFAULT 'draft',
+            definition_json TEXT NOT NULL,
+            canonical_hash VARCHAR(64) NOT NULL,
+            created_by VARCHAR(80) NOT NULL DEFAULT 'system',
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            published_by VARCHAR(80),
+            published_at DATETIME,
+            retired_at DATETIME,
+            CONSTRAINT ck_dimension_route_policies_policy_key
+                CHECK(length(trim(policy_key)) > 0),
+            CONSTRAINT ck_dimension_route_policies_version
+                CHECK(length(trim(version)) > 0),
+            CONSTRAINT ck_dimension_route_policies_status
+                CHECK(status IN (
+                    'draft','candidate','published','retired'
+                )),
+            CONSTRAINT ck_dimension_route_policies_definition_json
+                CHECK(
+                    json_valid(definition_json)
+                    AND json_type(definition_json, '$') = 'object'
+                ),
+            CONSTRAINT ck_dimension_route_policies_canonical_hash
+                CHECK(
+                    length(canonical_hash) = 64
+                    AND canonical_hash = lower(canonical_hash)
+                    AND canonical_hash NOT GLOB '*[^0-9a-f]*'
+                ),
+            CONSTRAINT ck_dimension_route_policies_publish_audit
+                CHECK(
+                    (
+                        status IN ('published','retired')
+                        AND published_by IS NOT NULL
+                        AND published_at IS NOT NULL
+                    )
+                    OR
+                    (
+                        status IN ('draft','candidate')
+                        AND published_by IS NULL
+                        AND published_at IS NULL
+                    )
+                ),
+            CONSTRAINT ck_dimension_route_policies_retired_at
+                CHECK(
+                    (status = 'retired' AND retired_at IS NOT NULL)
+                    OR (status <> 'retired' AND retired_at IS NULL)
+                ),
+            CONSTRAINT uq_dimension_route_policies_key_version
+                UNIQUE(policy_key, version),
+            CONSTRAINT uq_dimension_route_policies_canonical_hash
+                UNIQUE(canonical_hash)
+        )
+    """)
+    for statement in (
+        "CREATE INDEX IF NOT EXISTS ix_dimension_route_policies_policy_key "
+        "ON dimension_route_policies(policy_key)",
+        "CREATE INDEX IF NOT EXISTS ix_dimension_route_policies_version "
+        "ON dimension_route_policies(version)",
+        "CREATE INDEX IF NOT EXISTS ix_dimension_route_policies_status "
+        "ON dimension_route_policies(status)",
+        "CREATE INDEX IF NOT EXISTS "
+        "ix_dimension_route_policies_canonical_hash "
+        "ON dimension_route_policies(canonical_hash)",
+        "CREATE INDEX IF NOT EXISTS ix_dimension_route_policies_registry "
+        "ON dimension_route_policies(policy_key, status)",
+    ):
+        connection.exec_driver_sql(statement)
+
+    for row in materialized_route_policy_rows():
+        existing = connection.exec_driver_sql(
+            """
+            SELECT display_name, status, definition_json, canonical_hash
+            FROM dimension_route_policies
+            WHERE policy_key = ? AND version = ?
+            """,
+            (row["policy_key"], row["version"]),
+        ).mappings().first()
+        expected = {
+            key: row[key]
+            for key in (
+                "display_name",
+                "status",
+                "definition_json",
+                "canonical_hash",
+            )
+        }
+        if existing is not None:
+            if dict(existing) != expected:
+                raise RuntimeError(
+                    "已存在的 DimensionRoutePolicy 与迁移定义不一致"
+                )
+            continue
+        connection.exec_driver_sql(
+            """
+            INSERT INTO dimension_route_policies (
+                policy_key, version, display_name, status,
+                definition_json, canonical_hash, created_by
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                row["policy_key"],
+                row["version"],
+                row["display_name"],
+                row["status"],
+                row["definition_json"],
+                row["canonical_hash"],
+                "system:dimension-route-bootstrap",
+            ),
+        )
+
+    connection.exec_driver_sql("""
+        CREATE TRIGGER IF NOT EXISTS
+            trg_dimension_route_policies_published_no_update
+        BEFORE UPDATE ON dimension_route_policies
+        WHEN OLD.status IN ('published','retired')
+        BEGIN
+            SELECT RAISE(
+                ABORT,
+                'Published DimensionRoutePolicy is immutable; create a new version'
+            );
+        END
+    """)
+    connection.exec_driver_sql("""
+        CREATE TRIGGER IF NOT EXISTS
+            trg_dimension_route_policies_published_no_delete
+        BEFORE DELETE ON dimension_route_policies
+        WHEN OLD.status IN ('published','retired')
+        BEGIN
+            SELECT RAISE(
+                ABORT,
+                'Published DimensionRoutePolicy cannot be deleted'
+            );
+        END
+    """)
+    violations = connection.exec_driver_sql(
+        "PRAGMA foreign_key_check"
+    ).all()
+    if violations:
+        raise RuntimeError(
+            "DimensionRoutePolicy 迁移 foreign_key_check 失败："
+            f"{violations[:3]}"
+        )
+
+
 MIGRATIONS = [
     Migration(1, "add_sample_expected_level", _migration_001_add_sample_expected_level),
     Migration(2, "add_review_corrections", _migration_002_add_review_corrections),
@@ -4304,6 +4556,11 @@ MIGRATIONS = [
         27,
         "bind_dimension_contract_to_strategy",
         _migration_027_bind_dimension_contract_to_strategy,
+    ),
+    Migration(
+        28,
+        "add_dimension_route_policies",
+        _migration_028_add_dimension_route_policies,
     ),
 ]
 
