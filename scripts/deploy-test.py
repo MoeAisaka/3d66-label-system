@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import shutil
 import subprocess
@@ -29,6 +30,24 @@ class Release:
         self.temp_dir = temp_dir
         self.bundle_path = bundle_path
         self.commit = commit
+
+
+class RemoteCommands:
+    def __init__(
+        self,
+        bundle_remote: str,
+        script_remote: str,
+        upload_bundle: list[str],
+        upload_script: list[str],
+        invoke: list[str],
+        cleanup: list[str],
+    ):
+        self.bundle_remote = bundle_remote
+        self.script_remote = script_remote
+        self.upload_bundle = upload_bundle
+        self.upload_script = upload_script
+        self.invoke = invoke
+        self.cleanup = cleanup
 
 
 def validate_origin(url: str) -> None:
@@ -94,6 +113,49 @@ def cleanup_release(release: Release) -> None:
     shutil.rmtree(release.temp_dir, ignore_errors=True)
 
 
+def build_remote_commands(
+    bundle_path: Path, server_script: Path, commit: str, process_id: int
+) -> RemoteCommands:
+    validate_commit(commit)
+    suffix = f"{commit[:8]}-{process_id}"
+    bundle_remote = f"/tmp/3d66-label-main-{suffix}.bundle"
+    script_remote = f"/tmp/3d66-label-deploy-{suffix}.sh"
+    return RemoteCommands(
+        bundle_remote=bundle_remote,
+        script_remote=script_remote,
+        upload_bundle=["scp", str(bundle_path), f"{SERVER}:{bundle_remote}"],
+        upload_script=["scp", str(server_script), f"{SERVER}:{script_remote}"],
+        invoke=["ssh", SERVER, "bash", script_remote, bundle_remote, commit],
+        cleanup=["ssh", SERVER, "rm", "-f", "--", bundle_remote, script_remote],
+    )
+
+
+def confirm_deploy(assume_yes: bool) -> None:
+    if assume_yes:
+        return
+    answer = input("Type DEPLOY to publish this commit to the shared test server: ")
+    if answer != "DEPLOY":
+        raise DeployError("deployment cancelled")
+
+
+def deploy_release(release: Release) -> None:
+    server_script = release.repo_root / "scripts" / "deploy-test-server.sh"
+    if not server_script.is_file():
+        raise DeployError(f"server deployment script not found: {server_script}")
+    commands = build_remote_commands(
+        release.bundle_path, server_script, release.commit, os.getpid()
+    )
+    try:
+        print("Uploading release bundle...")
+        run_interactive(commands.upload_bundle, release.repo_root)
+        print("Uploading server deployment helper...")
+        run_interactive(commands.upload_script, release.repo_root)
+        print("Starting guarded server deployment...")
+        run_interactive(commands.invoke, release.repo_root)
+    finally:
+        subprocess.run(commands.cleanup, cwd=release.repo_root, check=False)
+
+
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Deploy Codeup main to the shared 3d66 label-system test server."
@@ -118,7 +180,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.dry_run:
             print("Dry run passed. No server connection was made.")
             return 0
-        raise DeployError("server transfer is not implemented yet")
+        confirm_deploy(args.yes)
+        deploy_release(release)
+        print(f"Published: {release.commit}")
+        print(f"Test URL: http://192.168.1.35:8081")
+        print(f"Health URL: {HEALTH_URL}")
+        return 0
     finally:
         cleanup_release(release)
 
