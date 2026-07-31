@@ -7,11 +7,18 @@ from pathlib import Path
 
 import pytest
 
-from app import windows_deploy
+from app import security, windows_deploy
 
 
 FAKE_DPAPI_REFERENCE = "dpapi:v1:ZmFrZS1kcGFwaS1jaXBoZXJ0ZXh0"
+FAKE_DPAPI_MACHINE_REFERENCE = (
+    "dpapi-machine:v1:ZmFrZS1tYWNoaW5lLWRwYXBpLWNpcGhlcnRleHQ="
+)
 FAKE_TOKEN = "f" * 64
+
+
+def _fake_dpapi_probe() -> str:
+    return security.DPAPI_SCOPE_LOCAL_MACHINE
 
 
 def _make_database(
@@ -178,12 +185,13 @@ def test_doctor_checks_complete_install_without_creating_data(tmp_path: Path) ->
         python_version=(3, 12, 4),
         node_version="v26.1.0",
         npm_version="11.2.0",
+        dpapi_probe=_fake_dpapi_probe,
     )
 
     assert report.data_dir == data_dir
     assert report.database_exists is False
     assert not data_dir.exists()
-    assert "未调用或解密 DPAPI 凭据" in report.checks
+    assert "Windows DPAPI local-machine 内存回环" in report.checks
 
 
 def test_doctor_rejects_reparse_point_inside_runtime_tree(tmp_path: Path) -> None:
@@ -233,9 +241,14 @@ def test_doctor_runtime_gates_fail_closed(
     assert error.value.code == expected_code
 
 
-def test_doctor_validates_dpapi_references_without_calling_dpapi(tmp_path: Path) -> None:
+def test_doctor_validates_dpapi_references_and_runs_dpapi_probe(tmp_path: Path) -> None:
     repo = _make_repo(tmp_path)
     data_dir = _make_data(tmp_path / "runtime")
+    probe_calls: list[bool] = []
+
+    def probe() -> str:
+        probe_calls.append(True)
+        return security.DPAPI_SCOPE_CURRENT_USER
 
     report = windows_deploy.doctor(
         repo,
@@ -244,10 +257,13 @@ def test_doctor_validates_dpapi_references_without_calling_dpapi(tmp_path: Path)
         python_version=(3, 11, 9),
         node_version="v20.0.0",
         npm_version="10.0.0",
+        dpapi_probe=probe,
     )
 
     assert report.database_exists is True
     assert report.schema_version == windows_deploy.SUPPORTED_SCHEMA_VERSION
+    assert probe_calls == [True]
+    assert "Windows DPAPI current-user 内存回环" in report.checks
 
     with sqlite3.connect(data_dir / "database" / "app.db") as connection:
         connection.execute(
@@ -261,8 +277,43 @@ def test_doctor_validates_dpapi_references_without_calling_dpapi(tmp_path: Path)
             python_version=(3, 11, 9),
             node_version="v20.0.0",
             npm_version="10.0.0",
+            dpapi_probe=probe,
         )
     assert error.value.code == "CREDENTIAL_REFERENCE_UNSAFE"
+
+
+def test_doctor_accepts_machine_scope_reference_and_rejects_failed_probe(
+    tmp_path: Path,
+) -> None:
+    repo = _make_repo(tmp_path)
+    data_dir = _make_data(tmp_path / "runtime")
+    with sqlite3.connect(data_dir / "database" / "app.db") as connection:
+        connection.execute(
+            "UPDATE model_configs SET encrypted_api_key=?",
+            (FAKE_DPAPI_MACHINE_REFERENCE,),
+        )
+
+    def failed_probe() -> str:
+        raise security.SecretStorageError(
+            "safe DPAPI failure",
+            reason="DPAPI_PROTECT_FAILED",
+            system_error=2148073483,
+        )
+
+    with pytest.raises(windows_deploy.DeployError) as error:
+        windows_deploy.doctor(
+            repo,
+            data_dir=data_dir,
+            platform_name="Windows",
+            python_version=(3, 11, 9),
+            node_version="v20.0.0",
+            npm_version="10.0.0",
+            dpapi_probe=failed_probe,
+        )
+
+    assert error.value.code == "DPAPI_ROUND_TRIP_FAILED"
+    assert "DPAPI_PROTECT_FAILED" in str(error.value)
+    assert "2148073483" in str(error.value)
 
 
 def test_doctor_cli_prints_checklist_summary_and_zero_exit(
@@ -277,6 +328,11 @@ def test_doctor_cli_prints_checklist_summary_and_zero_exit(
         windows_deploy,
         "_command_version",
         lambda command: "v20.1.0" if command == "node.exe" else "10.2.0",
+    )
+    monkeypatch.setattr(
+        windows_deploy,
+        "probe_windows_dpapi",
+        _fake_dpapi_probe,
     )
 
     exit_code = windows_deploy.main(
@@ -561,6 +617,12 @@ def test_windows_scripts_hold_strict_utf8_and_native_exit_contracts() -> None:
     start = (scripts / "start.ps1").read_text(encoding="utf-8")
     assert start.index("doctor.ps1") < start.index("app.launcher")
     assert "$env:APP_HOST = '127.0.0.1'" in start
+    assert "[string]$DpapiScope = 'LocalMachine'" in start
+    assert "$env:API_KEY_DPAPI_SCOPE = 'local-machine'" in start
+    assert "@('-DpapiScope', $DpapiScope)" in start
+    doctor = (scripts / "doctor.ps1").read_text(encoding="utf-8")
+    assert "[string]$DpapiScope = 'LocalMachine'" in doctor
+    assert "$env:API_KEY_DPAPI_SCOPE = 'local-machine'" in doctor
 
 
 def test_cmd_compatibility_launchers_only_forward_arguments_and_exit_code() -> None:

@@ -21,6 +21,14 @@ from pathlib import Path, PurePosixPath
 from typing import Callable, Mapping, Sequence
 
 from .migrations.runner import MIGRATIONS
+from .security import (
+    DPAPI_MACHINE_REFERENCE_PREFIX,
+    DPAPI_REFERENCE_PREFIX,
+    DPAPI_SCOPE_CURRENT_USER,
+    DPAPI_SCOPE_LOCAL_MACHINE,
+    SecretStorageError,
+    probe_windows_dpapi,
+)
 
 
 BACKUP_SCHEMA = "3d66-label-system-windows-backup"
@@ -324,8 +332,10 @@ def _validate_supported_database(connection: sqlite3.Connection) -> int:
 def _decode_dpapi_reference(reference: str) -> bytes:
     if reference.startswith("keychain:"):
         raise DeployError("CREDENTIAL_REFERENCE_UNSAFE", "Windows 数据库含 macOS Keychain 引用")
-    if reference.startswith("dpapi:v1:"):
-        payload = reference.removeprefix("dpapi:v1:")
+    if reference.startswith(DPAPI_REFERENCE_PREFIX):
+        payload = reference.removeprefix(DPAPI_REFERENCE_PREFIX)
+    elif reference.startswith(DPAPI_MACHINE_REFERENCE_PREFIX):
+        payload = reference.removeprefix(DPAPI_MACHINE_REFERENCE_PREFIX)
     elif ":" not in reference:
         payload = reference
     else:
@@ -360,6 +370,7 @@ def doctor(
     python_version: tuple[int, int, int] | None = None,
     node_version: str | None = None,
     npm_version: str | None = None,
+    dpapi_probe: Callable[[], str] | None = None,
 ) -> DoctorReport:
     if (platform_name or platform.system()).casefold() != "windows":
         raise DeployError("PLATFORM_UNSUPPORTED", "该工具只允许在 Windows 上运行")
@@ -407,6 +418,26 @@ def doctor(
         with _sqlite_connect_readonly(database) as connection:
             schema_version = _validate_supported_database(connection)
             _validate_windows_credential_references(connection)
+    try:
+        dpapi_scope = (dpapi_probe or probe_windows_dpapi)()
+    except SecretStorageError as exc:
+        system_error = (
+            f"，系统错误 {exc.system_error}"
+            if exc.system_error is not None
+            else ""
+        )
+        raise DeployError(
+            "DPAPI_ROUND_TRIP_FAILED",
+            f"Windows DPAPI 回环失败（{exc.reason}{system_error}）",
+        ) from exc
+    if dpapi_scope not in {
+        DPAPI_SCOPE_CURRENT_USER,
+        DPAPI_SCOPE_LOCAL_MACHINE,
+    }:
+        raise DeployError(
+            "DPAPI_SCOPE_INVALID",
+            "Windows DPAPI 回环返回了未知存储范围",
+        )
     checks = (
         "Windows 平台",
         "Python 3.11/3.12",
@@ -415,7 +446,7 @@ def doctor(
         "仓库外 DATA_DIR 与 Windows 优先级",
         "路径不含符号链接、junction 或其他重解析点",
         "SQLite 完整性、迁移版本与 DPAPI 引用" if database.exists() else "首次启动数据目录（未创建）",
-        "未调用或解密 DPAPI 凭据",
+        f"Windows DPAPI {dpapi_scope} 内存回环",
     )
     return DoctorReport(effective_data, database.exists(), schema_version, checks)
 

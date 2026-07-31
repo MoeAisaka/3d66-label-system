@@ -23,8 +23,10 @@ junction/reparse point 防护，不能作为公司服务器的受控生命周期
 - `install.ps1`：版本门禁、仓库内 `.venv`、既有 requirements、`npm ci`
   和正式前端构建；`-Check`/`-DryRun` 不安装、不构建、不联网；永不写
   `DATA_DIR` 或启动服务。
-- `doctor.ps1`：只读检查平台、依赖版本、仓库必要文件、`.venv`、前端构建、
-  `DATA_DIR`、路径边界、SQLite 完整性/迁移版本及凭据引用格式，不解密 DPAPI。
+- `doctor.ps1`：检查平台、依赖版本、仓库必要文件、`.venv`、前端构建、
+  `DATA_DIR`、路径边界、SQLite 完整性/迁移版本及凭据引用格式；并按
+  ADR-0023 使用随机内存哨兵执行一次 DPAPI 加密—解密回环，不读取或改写
+  业务凭据。
 - `start.ps1`：必须先通过 doctor，随后用仓库内 Python 和已构建前端以前台
   方式运行现有 launcher；不注册服务或后台任务。
 - `backup.ps1`：调用仓库内标准库备份核心创建一致、脱敏、带清单和校验的
@@ -115,10 +117,20 @@ PowerShell 不创建子后台任务，Ctrl+C 和 launcher 退出码沿原生前�
 
 ### DPAPI 平台边界
 
-DPAPI 继续使用 Windows 当前用户范围和 `CRYPTPROTECT_UI_FORBIDDEN`。业务入口、
-DPAPI 工厂和底层构造器都必须先确认 `sys.platform == "win32"`；非 Windows
-路径在加载 `crypt32`/`kernel32` 前拒绝，真实 DPAPI 回环测试只在 Windows
-运行。既有无前缀 DPAPI 密文继续只在 Windows 兼容读取。
+DPAPI 范围和启动门禁以 ADR-0023 为准。核心安全层保持当前用户范围默认；
+公司 Windows Server 的 `doctor.ps1` 和 `start.ps1` 默认显式设置
+`API_KEY_DPAPI_SCOPE=local-machine`，操作员可用 `-DpapiScope CurrentUser`
+切回当前用户范围。两种范围分别使用 `dpapi:v1:` 和
+`dpapi-machine:v1:` 引用，不得在失败后静默互相降级。
+
+业务入口、DPAPI 工厂和底层构造器都必须先确认 `sys.platform == "win32"`；
+非 Windows 路径在加载 `crypt32`/`kernel32` 前拒绝。doctor 必须在与正式服务
+相同的进程身份和范围下使用随机内存哨兵执行真实 DPAPI 加密—解密回环；回环
+失败即阻止服务启动。既有无前缀 DPAPI 密文继续只在 Windows 兼容读取。
+
+机器范围允许同机且能够读取密文的其他主体调用 DPAPI 解密，因此只适用于受控
+专用服务器，并依赖公司既有 NTFS ACL 保护数据目录。脚本不修改 ACL，也不把
+密文写入日志、备份、响应或 Git。
 
 备份会删除 DPAPI 密文和 Keychain 引用，restore 不复制或转换凭据。换用户、
 换机器或跨平台恢复后必须重新填写 API Key；不实现凭据迁移。
@@ -172,7 +184,9 @@ POSIX mode 语义错误映射为 NTFS ACL。
 10. 对 DATA_DIR、备份根、数据库、图片子目录和目标分别建立 symlink、
     junction 和其他 reparse point，全部必须拒绝且不发生范围外读写。
 11. 同一 Windows 当前用户 DPAPI 新写入、读取和旧无前缀兼容；不同用户、不同
-    机器不可解密；备份/恢复后凭据为空且必须重填。
+    机器不可解密；并验证服务器默认机器范围的新写入、读取和
+    `dpapi-machine:v1:` 引用。两种范围均须先通过 doctor 内存回环，备份/恢复
+    后凭据为空且必须重填。
 12. Windows PowerShell 5.1 与公司批准的更高 PowerShell 版本分别做五脚本
     parser 检查和完整生命周期演练。
 
@@ -196,5 +210,7 @@ POSIX mode 语义错误映射为 NTFS ACL。
   hash、迁移、完整性、reparse point 或回滚门禁。
 - 不得把 DPAPI/Keychain/API Key/登录会话纳入备份或实现跨用户、跨机器、跨
   平台凭据迁移。
+- 不得取消 Windows 启动前真实 DPAPI 回环，不得在回环或凭据写入失败时回退
+  到明文、普通文件或另一个 DPAPI 范围。
 - 不得改变 ADR-0016 的 `enabled=false / dry_run=true /
   daily_budget_micros=0` 默认值，也不得借部署脚本启动真实自动化或模型调用。

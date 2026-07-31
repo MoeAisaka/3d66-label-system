@@ -1,6 +1,8 @@
 ﻿[CmdletBinding()]
 param(
-    [string]$DataDir
+    [string]$DataDir,
+    [ValidateSet('CurrentUser', 'LocalMachine')]
+    [string]$DpapiScope = 'LocalMachine'
 )
 
 Set-StrictMode -Version Latest
@@ -10,6 +12,12 @@ $utf8 = New-Object System.Text.UTF8Encoding($false)
 [Console]::OutputEncoding = $utf8
 $OutputEncoding = $utf8
 $env:PYTHONUTF8 = '1'
+if ($DpapiScope -eq 'LocalMachine') {
+    $env:API_KEY_DPAPI_SCOPE = 'local-machine'
+}
+else {
+    $env:API_KEY_DPAPI_SCOPE = 'current-user'
+}
 
 function Assert-NoReparsePoint {
     param(
