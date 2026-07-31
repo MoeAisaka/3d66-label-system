@@ -515,7 +515,8 @@ class StrategyBundle(Base):
     __table_args__ = (
         CheckConstraint(
             "strategy_schema_version IN ("
-            "'strategy-bundle-v1','strategy-bundle-v2'"
+            "'strategy-bundle-v1','strategy-bundle-v2',"
+            "'strategy-bundle-v3'"
             ")",
             name="ck_strategy_bundles_schema_version",
         ),
@@ -525,7 +526,9 @@ class StrategyBundle(Base):
             "AND dimension_route_policy_id IS NULL "
             "AND dimension_schema_set_snapshot IS NULL "
             "AND label_field_set_snapshot IS NULL "
-            "AND resolved_schema_contract_version IS NULL"
+            "AND resolved_schema_contract_version IS NULL "
+            "AND dimension_route_policy_snapshot IS NULL "
+            "AND evaluation_profile_set_snapshot IS NULL"
             ") OR ("
             "strategy_schema_version = 'strategy-bundle-v2' "
             "AND length(trim(dimension_route_policy_id)) > 0 "
@@ -533,7 +536,22 @@ class StrategyBundle(Base):
             "AND json_type(dimension_schema_set_snapshot, '$') = 'object' "
             "AND json_valid(label_field_set_snapshot) "
             "AND json_type(label_field_set_snapshot, '$') = 'object' "
-            "AND length(trim(resolved_schema_contract_version)) > 0"
+            "AND length(trim(resolved_schema_contract_version)) > 0 "
+            "AND dimension_route_policy_snapshot IS NULL "
+            "AND evaluation_profile_set_snapshot IS NULL"
+            ") OR ("
+            "strategy_schema_version = 'strategy-bundle-v3' "
+            "AND prompt_b_version IS NULL "
+            "AND length(trim(dimension_route_policy_id)) > 0 "
+            "AND json_valid(dimension_schema_set_snapshot) "
+            "AND json_type(dimension_schema_set_snapshot, '$') = 'object' "
+            "AND json_valid(label_field_set_snapshot) "
+            "AND json_type(label_field_set_snapshot, '$') = 'object' "
+            "AND length(trim(resolved_schema_contract_version)) > 0 "
+            "AND json_valid(dimension_route_policy_snapshot) "
+            "AND json_type(dimension_route_policy_snapshot, '$') = 'object' "
+            "AND json_valid(evaluation_profile_set_snapshot) "
+            "AND json_type(evaluation_profile_set_snapshot, '$') = 'object'"
             ")",
             name="ck_strategy_bundles_dimension_contract",
         ),
@@ -576,6 +594,12 @@ class StrategyBundle(Base):
     )
     resolved_schema_contract_version: Mapped[str | None] = mapped_column(
         String(80), nullable=True, index=True
+    )
+    dimension_route_policy_snapshot: Mapped[str | None] = mapped_column(
+        Text, nullable=True
+    )
+    evaluation_profile_set_snapshot: Mapped[str | None] = mapped_column(
+        Text, nullable=True
     )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 

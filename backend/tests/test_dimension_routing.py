@@ -457,7 +457,7 @@ def test_migration_28_old_database_smoke(tmp_path) -> None:
             run_migrations(connection)
             assert connection.exec_driver_sql(
                 "SELECT max(version) FROM schema_migrations"
-            ).scalar_one() == 28
+            ).scalar_one() == len(MIGRATIONS)
             assert connection.exec_driver_sql(
                 "PRAGMA foreign_key_check"
             ).all() == []

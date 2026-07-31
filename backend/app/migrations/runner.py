@@ -4465,6 +4465,209 @@ def _migration_028_add_dimension_route_policies(
         )
 
 
+def _install_v3_strategy_bundle_trigger(connection: Connection) -> None:
+    connection.exec_driver_sql(
+        "DROP TRIGGER IF EXISTS trg_strategy_bundles_contract_insert"
+    )
+    connection.exec_driver_sql("""
+        CREATE TRIGGER trg_strategy_bundles_contract_insert
+        BEFORE INSERT ON strategy_bundles
+        WHEN NEW.strategy_schema_version NOT IN (
+                'strategy-bundle-v1',
+                'strategy-bundle-v2',
+                'strategy-bundle-v3'
+             )
+          OR (
+              NEW.strategy_schema_version = 'strategy-bundle-v1'
+              AND (
+                  NEW.dimension_route_policy_id IS NOT NULL
+                  OR NEW.dimension_schema_set_snapshot IS NOT NULL
+                  OR NEW.label_field_set_snapshot IS NOT NULL
+                  OR NEW.resolved_schema_contract_version IS NOT NULL
+                  OR NEW.dimension_route_policy_snapshot IS NOT NULL
+                  OR NEW.evaluation_profile_set_snapshot IS NOT NULL
+              )
+          )
+          OR (
+              NEW.strategy_schema_version = 'strategy-bundle-v2'
+              AND (
+                  NEW.dimension_route_policy_id IS NULL
+                  OR length(trim(NEW.dimension_route_policy_id)) = 0
+                  OR json_valid(NEW.dimension_schema_set_snapshot) = 0
+                  OR json_type(
+                      NEW.dimension_schema_set_snapshot, '$'
+                  ) <> 'object'
+                  OR json_type(
+                      NEW.dimension_schema_set_snapshot, '$.schemas'
+                  ) <> 'array'
+                  OR json_array_length(
+                      NEW.dimension_schema_set_snapshot, '$.schemas'
+                  ) < 1
+                  OR json_valid(NEW.label_field_set_snapshot) = 0
+                  OR json_type(
+                      NEW.label_field_set_snapshot, '$'
+                  ) <> 'object'
+                  OR NEW.resolved_schema_contract_version IS NULL
+                  OR length(
+                      trim(NEW.resolved_schema_contract_version)
+                  ) = 0
+                  OR NEW.dimension_route_policy_snapshot IS NOT NULL
+                  OR NEW.evaluation_profile_set_snapshot IS NOT NULL
+              )
+          )
+          OR (
+              NEW.strategy_schema_version = 'strategy-bundle-v3'
+              AND (
+                  NEW.prompt_b_version IS NOT NULL
+                  OR NEW.dimension_route_policy_id IS NULL
+                  OR length(trim(NEW.dimension_route_policy_id)) = 0
+                  OR json_valid(NEW.dimension_schema_set_snapshot) = 0
+                  OR json_type(
+                      NEW.dimension_schema_set_snapshot, '$'
+                  ) <> 'object'
+                  OR json_type(
+                      NEW.dimension_schema_set_snapshot, '$.schemas'
+                  ) <> 'array'
+                  OR json_array_length(
+                      NEW.dimension_schema_set_snapshot, '$.schemas'
+                  ) < 1
+                  OR json_valid(NEW.label_field_set_snapshot) = 0
+                  OR json_type(
+                      NEW.label_field_set_snapshot, '$'
+                  ) <> 'object'
+                  OR NEW.resolved_schema_contract_version IS NULL
+                  OR length(
+                      trim(NEW.resolved_schema_contract_version)
+                  ) = 0
+                  OR json_valid(
+                      NEW.dimension_route_policy_snapshot
+                  ) = 0
+                  OR json_type(
+                      NEW.dimension_route_policy_snapshot, '$'
+                  ) <> 'object'
+                  OR json_extract(
+                      NEW.dimension_route_policy_snapshot,
+                      '$.format_version'
+                  ) <> 'dimension-route-policy-snapshot-v1'
+                  OR json_type(
+                      NEW.dimension_route_policy_snapshot,
+                      '$.definition'
+                  ) <> 'object'
+                  OR length(json_extract(
+                      NEW.dimension_route_policy_snapshot,
+                      '$.canonical_hash'
+                  )) <> 64
+                  OR NEW.dimension_route_policy_id <> (
+                      json_extract(
+                          NEW.dimension_route_policy_snapshot,
+                          '$.policy_key'
+                      )
+                      || '@'
+                      || json_extract(
+                          NEW.dimension_route_policy_snapshot,
+                          '$.version'
+                      )
+                  )
+                  OR json_valid(
+                      NEW.evaluation_profile_set_snapshot
+                  ) = 0
+                  OR json_type(
+                      NEW.evaluation_profile_set_snapshot, '$'
+                  ) <> 'object'
+                  OR json_extract(
+                      NEW.evaluation_profile_set_snapshot,
+                      '$.format_version'
+                  ) <> 'evaluation-profile-set-v1'
+                  OR json_extract(
+                      NEW.evaluation_profile_set_snapshot,
+                      '$.execution_context'
+                  ) NOT IN ('calibration','production')
+                  OR json_type(
+                      NEW.evaluation_profile_set_snapshot,
+                      '$.profiles'
+                  ) <> 'object'
+                  OR NOT EXISTS (
+                      SELECT 1
+                      FROM json_each(
+                          NEW.evaluation_profile_set_snapshot,
+                          '$.profiles'
+                      )
+                  )
+                  OR length(json_extract(
+                      NEW.evaluation_profile_set_snapshot,
+                      '$.canonical_hash'
+                  )) <> 64
+              )
+          )
+        BEGIN
+            SELECT RAISE(
+                ABORT,
+                'StrategyBundle routed dimension contract is invalid'
+            );
+        END
+    """)
+
+
+def _migration_029_add_routed_strategy_bundles(
+    connection: Connection,
+) -> None:
+    tables = {
+        row[0]
+        for row in connection.exec_driver_sql(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )
+    }
+    if "strategy_bundles" not in tables:
+        violations = connection.exec_driver_sql(
+            "PRAGMA foreign_key_check"
+        ).all()
+        if violations:
+            raise RuntimeError(
+                "无 StrategyBundle 分叉库 foreign_key_check 失败："
+                f"{violations[:3]}"
+            )
+        return
+    columns = {
+        row[1]
+        for row in connection.exec_driver_sql(
+            "PRAGMA table_info(strategy_bundles)"
+        )
+    }
+    additions = (
+        ("dimension_route_policy_snapshot", "TEXT"),
+        ("evaluation_profile_set_snapshot", "TEXT"),
+    )
+    for column_name, definition in additions:
+        if column_name not in columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE strategy_bundles ADD COLUMN "
+                f"{column_name} {definition}"
+            )
+    invalid_existing = connection.exec_driver_sql("""
+        SELECT id
+        FROM strategy_bundles
+        WHERE strategy_schema_version NOT IN (
+                'strategy-bundle-v1','strategy-bundle-v2'
+              )
+           OR dimension_route_policy_snapshot IS NOT NULL
+           OR evaluation_profile_set_snapshot IS NOT NULL
+        LIMIT 1
+    """).first()
+    if invalid_existing is not None:
+        raise RuntimeError(
+            "迁移前 StrategyBundle 存在无法解释的 v3 冻结字段"
+        )
+    _install_v3_strategy_bundle_trigger(connection)
+    violations = connection.exec_driver_sql(
+        "PRAGMA foreign_key_check"
+    ).all()
+    if violations:
+        raise RuntimeError(
+            "v3 StrategyBundle 迁移 foreign_key_check 失败："
+            f"{violations[:3]}"
+        )
+
+
 MIGRATIONS = [
     Migration(1, "add_sample_expected_level", _migration_001_add_sample_expected_level),
     Migration(2, "add_review_corrections", _migration_002_add_review_corrections),
@@ -4561,6 +4764,11 @@ MIGRATIONS = [
         28,
         "add_dimension_route_policies",
         _migration_028_add_dimension_route_policies,
+    ),
+    Migration(
+        29,
+        "add_routed_strategy_bundles",
+        _migration_029_add_routed_strategy_bundles,
     ),
 ]
 

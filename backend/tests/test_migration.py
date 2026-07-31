@@ -42,6 +42,7 @@ MIGRATION_NAMES = [
     "add_dimension_schemas",
     "bind_dimension_contract_to_strategy",
     "add_dimension_route_policies",
+    "add_routed_strategy_bundles",
 ]
 
 
@@ -1996,7 +1997,7 @@ def test_v23_real_executor_migration_preserves_rows_and_adds_safe_defaults(
                 )
             assert connection.exec_driver_sql(
                 "SELECT max(version) FROM schema_migrations"
-            ).scalar_one() == 28
+            ).scalar_one() == len(MIGRATION_NAMES)
     finally:
         engine.dispose()
 

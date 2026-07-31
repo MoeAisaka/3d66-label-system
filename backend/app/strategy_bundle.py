@@ -20,6 +20,7 @@ from .dimension_schema_registry import (
     SPACE_SCHEMA_KEY,
 )
 from .models import (
+    DimensionRoutePolicy,
     DimensionSchema,
     ModelConfig,
     PromptVersion,
@@ -31,10 +32,14 @@ from .models import (
 REDACTED = "[REDACTED]"
 LEGACY_STRATEGY_SCHEMA_VERSION = "strategy-bundle-v1"
 STRATEGY_SCHEMA_VERSION = "strategy-bundle-v2"
+ROUTED_STRATEGY_SCHEMA_VERSION = "strategy-bundle-v3"
 DIMENSION_ROUTE_POLICY_ID = "space-static-by-scoring-profile-v1"
 RESOLVED_SCHEMA_CONTRACT_VERSION = "dimension-resolution-v1"
+ROUTED_SCHEMA_CONTRACT_VERSION = "dimension-route-resolution-v2"
 DIMENSION_SCHEMA_SET_FORMAT_VERSION = "dimension-schema-set-v1"
 LABEL_FIELD_SET_FORMAT_VERSION = "label-field-set-snapshot-v1"
+EVALUATION_PROFILE_SET_FORMAT_VERSION = "evaluation-profile-set-v1"
+ROUTE_POLICY_SNAPSHOT_FORMAT_VERSION = "dimension-route-policy-snapshot-v1"
 
 _ENDPOINT_KEYS = {
     "apibase",
@@ -679,6 +684,405 @@ def _load_dimension_contract(
     return dimension_set, label_set
 
 
+def build_dimension_route_policy_snapshot(
+    policy: DimensionRoutePolicy,
+) -> dict[str, Any]:
+    """Freeze one registered route policy with its complete definition."""
+    if policy.id is None:
+        raise ValueError(
+            "DimensionRoutePolicy 必须先持久化，才能创建 v3 Bundle"
+        )
+    try:
+        definition = json.loads(policy.definition_json)
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            "DimensionRoutePolicy definition_json 已损坏"
+        ) from exc
+    if (
+        not isinstance(definition, dict)
+        or _compute_canonical_hash(definition) != policy.canonical_hash
+    ):
+        raise ValueError("DimensionRoutePolicy 规范哈希无法复算")
+    if (
+        definition.get("policy_key") != policy.policy_key
+        or definition.get("policy_version") != policy.version
+    ):
+        raise ValueError("DimensionRoutePolicy 身份与定义不一致")
+    return {
+        "format_version": ROUTE_POLICY_SNAPSHOT_FORMAT_VERSION,
+        "id": policy.id,
+        "policy_key": policy.policy_key,
+        "version": policy.version,
+        "status": policy.status,
+        "canonical_hash": policy.canonical_hash,
+        "definition": definition,
+    }
+
+
+def build_frozen_evaluation_profile(
+    *,
+    profile_key: str,
+    schema: DimensionSchema,
+    prompt_b: PromptVersion | None,
+) -> dict[str, Any]:
+    """Freeze one schema, optional B prompt and label-field contract."""
+    if not profile_key.strip():
+        raise ValueError("EvaluationProfile 键不能为空")
+    if schema.id is None:
+        raise ValueError(
+            "DimensionSchema 必须先持久化，才能创建 v3 Bundle"
+        )
+    try:
+        definition = json.loads(schema.definition_json)
+    except json.JSONDecodeError as exc:
+        raise ValueError("DimensionSchema definition_json 已损坏") from exc
+    if (
+        not isinstance(definition, dict)
+        or _compute_canonical_hash(definition) != schema.canonical_hash
+    ):
+        raise ValueError("DimensionSchema 规范哈希无法复算")
+    output_contract = definition.get("output_contract")
+    if not isinstance(output_contract, dict):
+        raise ValueError("DimensionSchema 缺少 output_contract")
+    label_field_set_id = output_contract.get("label_field_set_id")
+    label_fields = output_contract.get("label_fields_snapshot")
+    if label_field_set_id is None and label_fields is None:
+        label_field_set_id = (
+            f"{schema.schema_key}-label-fields-empty-v1"
+        )
+        label_fields = []
+    if (
+        not isinstance(label_field_set_id, str)
+        or not label_field_set_id
+        or not isinstance(label_fields, list)
+    ):
+        raise ValueError("DimensionSchema 标签字段集合不完整")
+    label_field_set = {
+        "format_version": LABEL_FIELD_SET_FORMAT_VERSION,
+        "label_field_set_id": label_field_set_id,
+        "label_fields_snapshot": label_fields,
+    }
+    label_field_set["canonical_hash"] = _compute_canonical_hash(
+        label_field_set
+    )
+
+    prompt_definition = (
+        _build_prompt_definition(prompt_b)
+        if prompt_b is not None
+        else None
+    )
+    if prompt_b is not None and prompt_b.stage != "B":
+        raise ValueError("EvaluationProfile 只能冻结 B 阶段提示词")
+    frozen_prompt = (
+        {
+            **prompt_definition,
+            "canonical_hash": _compute_canonical_hash(prompt_definition),
+        }
+        if prompt_definition is not None
+        else None
+    )
+
+    source_gate = definition.get("release_gate")
+    if not isinstance(source_gate, dict):
+        source_gate = {}
+    blocked_reasons = [
+        str(item)
+        for item in source_gate.get("blocked_reasons", [])
+        if isinstance(item, str) and item
+    ]
+    if frozen_prompt is None and "prompt_contract_missing" not in (
+        blocked_reasons
+    ):
+        blocked_reasons.append("prompt_contract_missing")
+    publishing_blocked = bool(
+        source_gate.get("publishing_blocked", False)
+        or blocked_reasons
+    )
+    release_gate = {
+        "minimum_calibration_samples": int(
+            source_gate.get("minimum_calibration_samples", 0)
+        ),
+        "target_calibration_samples": int(
+            source_gate.get("target_calibration_samples", 0)
+        ),
+        "completed_calibration_samples": int(
+            source_gate.get("completed_calibration_samples", 0)
+        ),
+        "required_sample_roles": [
+            str(item)
+            for item in source_gate.get("required_sample_roles", [])
+            if isinstance(item, str) and item
+        ],
+        "status": str(source_gate.get("status", "not_applicable")),
+        "publishing_blocked": publishing_blocked,
+        "blocked_reasons": sorted(set(blocked_reasons)),
+    }
+    profile = {
+        "profile_key": profile_key.strip(),
+        "family_key": schema.family_key,
+        "status": schema.status,
+        "dimension_schema": {
+            "id": schema.id,
+            "schema_key": schema.schema_key,
+            "version": schema.version,
+            "schema_type": schema.schema_type,
+            "family_key": schema.family_key,
+            "status": schema.status,
+            "canonical_hash": schema.canonical_hash,
+            "definition": definition,
+        },
+        "prompt_b": frozen_prompt,
+        "label_field_set": label_field_set,
+        "release_gate": release_gate,
+    }
+    profile["canonical_hash"] = _compute_canonical_hash(profile)
+    return profile
+
+
+def build_evaluation_profile_set(
+    *,
+    profiles: list[dict[str, Any]],
+    execution_context: str,
+    default_profile_key: str,
+) -> dict[str, Any]:
+    """Build and validate the byte-stable candidate set frozen before A."""
+    if execution_context not in {"calibration", "production"}:
+        raise ValueError("execution_context 只允许 calibration 或 production")
+    profile_map: dict[str, dict[str, Any]] = {}
+    for profile in profiles:
+        if not isinstance(profile, dict):
+            raise ValueError("EvaluationProfile 必须是对象")
+        key = profile.get("profile_key")
+        if not isinstance(key, str) or not key or key in profile_map:
+            raise ValueError("EvaluationProfile 键为空或重复")
+        stored_hash = profile.get("canonical_hash")
+        definition_without_hash = {
+            item_key: item_value
+            for item_key, item_value in profile.items()
+            if item_key != "canonical_hash"
+        }
+        if (
+            not isinstance(stored_hash, str)
+            or stored_hash
+            != _compute_canonical_hash(definition_without_hash)
+        ):
+            raise ValueError(f"EvaluationProfile {key} 规范哈希无效")
+        profile_map[key] = deepcopy(profile)
+    if not profile_map:
+        raise ValueError("EvaluationProfile 集合不能为空")
+    if default_profile_key not in profile_map:
+        raise ValueError("默认 EvaluationProfile 未包含在冻结集合中")
+    profile_set = {
+        "format_version": EVALUATION_PROFILE_SET_FORMAT_VERSION,
+        "execution_context": execution_context,
+        "default_profile_key": default_profile_key,
+        "profiles": {
+            key: profile_map[key]
+            for key in sorted(profile_map)
+        },
+    }
+    profile_set["canonical_hash"] = _compute_canonical_hash(profile_set)
+    return profile_set
+
+
+def _validate_routed_bundle_contract(
+    *,
+    route_policy_snapshot: dict[str, Any],
+    profile_set: dict[str, Any],
+) -> None:
+    if (
+        route_policy_snapshot.get("format_version")
+        != ROUTE_POLICY_SNAPSHOT_FORMAT_VERSION
+    ):
+        raise ValueError("未知的冻结路由策略快照版本")
+    policy_definition = route_policy_snapshot.get("definition")
+    policy_hash = route_policy_snapshot.get("canonical_hash")
+    if (
+        not isinstance(policy_definition, dict)
+        or not isinstance(policy_hash, str)
+        or _compute_canonical_hash(policy_definition) != policy_hash
+    ):
+        raise ValueError("冻结路由策略规范哈希无效")
+    if (
+        profile_set.get("format_version")
+        != EVALUATION_PROFILE_SET_FORMAT_VERSION
+    ):
+        raise ValueError("未知的 EvaluationProfile 集合版本")
+    stored_set_hash = profile_set.get("canonical_hash")
+    set_without_hash = {
+        key: value
+        for key, value in profile_set.items()
+        if key != "canonical_hash"
+    }
+    if (
+        not isinstance(stored_set_hash, str)
+        or stored_set_hash != _compute_canonical_hash(set_without_hash)
+    ):
+        raise ValueError("EvaluationProfile 集合规范哈希无效")
+    profiles = profile_set.get("profiles")
+    if not isinstance(profiles, dict) or not profiles:
+        raise ValueError("EvaluationProfile 集合为空")
+
+    schema_index: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for profile_key, profile in profiles.items():
+        if (
+            not isinstance(profile_key, str)
+            or not isinstance(profile, dict)
+            or profile.get("profile_key") != profile_key
+        ):
+            raise ValueError("EvaluationProfile 集合身份不一致")
+        profile_hash = profile.get("canonical_hash")
+        profile_without_hash = {
+            key: value
+            for key, value in profile.items()
+            if key != "canonical_hash"
+        }
+        if (
+            not isinstance(profile_hash, str)
+            or profile_hash
+            != _compute_canonical_hash(profile_without_hash)
+        ):
+            raise ValueError(
+                f"EvaluationProfile {profile_key} 规范哈希无效"
+            )
+        schema = profile.get("dimension_schema")
+        if not isinstance(schema, dict):
+            raise ValueError(
+                f"EvaluationProfile {profile_key} 缺少维度规则"
+            )
+        schema_definition = schema.get("definition")
+        if (
+            not isinstance(schema_definition, dict)
+            or schema.get("canonical_hash")
+            != _compute_canonical_hash(schema_definition)
+        ):
+            raise ValueError(
+                f"EvaluationProfile {profile_key} 的 Schema 哈希无效"
+            )
+        identity = (
+            str(schema.get("schema_key")),
+            str(schema.get("version")),
+            str(schema.get("canonical_hash")),
+        )
+        if identity in schema_index:
+            raise ValueError("EvaluationProfile 集合重复冻结同一 Schema")
+        schema_index[identity] = profile
+
+        label_set = profile.get("label_field_set")
+        if not isinstance(label_set, dict):
+            raise ValueError(
+                f"EvaluationProfile {profile_key} 缺少标签字段集合"
+            )
+        label_hash = label_set.get("canonical_hash")
+        label_without_hash = {
+            key: value
+            for key, value in label_set.items()
+            if key != "canonical_hash"
+        }
+        if (
+            not isinstance(label_hash, str)
+            or label_hash != _compute_canonical_hash(label_without_hash)
+        ):
+            raise ValueError(
+                f"EvaluationProfile {profile_key} 的标签哈希无效"
+            )
+        prompt_b = profile.get("prompt_b")
+        if prompt_b is not None:
+            if not isinstance(prompt_b, dict) or prompt_b.get("stage") != "B":
+                raise ValueError(
+                    f"EvaluationProfile {profile_key} 的 B 提示词无效"
+                )
+            prompt_hash = prompt_b.get("canonical_hash")
+            prompt_without_hash = {
+                key: value
+                for key, value in prompt_b.items()
+                if key != "canonical_hash"
+            }
+            if (
+                not isinstance(prompt_hash, str)
+                or prompt_hash
+                != _compute_canonical_hash(prompt_without_hash)
+            ):
+                raise ValueError(
+                    f"EvaluationProfile {profile_key} 的 B 哈希无效"
+                )
+        gate = profile.get("release_gate")
+        if (
+            not isinstance(gate, dict)
+            or not isinstance(gate.get("publishing_blocked"), bool)
+            or not isinstance(gate.get("blocked_reasons"), list)
+        ):
+            raise ValueError(
+                f"EvaluationProfile {profile_key} 的发布门禁无效"
+            )
+
+    routes = policy_definition.get("family_routes")
+    if not isinstance(routes, dict) or not routes:
+        raise ValueError("冻结路由策略缺少 family_routes")
+    for family_key, route in routes.items():
+        schema_ref = route.get("schema_ref") if isinstance(route, dict) else None
+        if not isinstance(schema_ref, dict):
+            raise ValueError(f"素材族 {family_key} 缺少冻结 Schema 引用")
+        identity = (
+            str(schema_ref.get("schema_key")),
+            str(schema_ref.get("version")),
+            str(schema_ref.get("canonical_hash")),
+        )
+        if identity not in schema_index:
+            raise ValueError(f"素材族 {family_key} 命中未冻结 Profile")
+
+    execution_context = profile_set.get("execution_context")
+    if execution_context == "production":
+        if (
+            route_policy_snapshot.get("status") != "published"
+            or policy_definition.get("activation_scope")
+            == "calibration_only"
+        ):
+            raise ValueError("生产 Bundle 只能冻结已发布的生产路由策略")
+        for profile_key, profile in profiles.items():
+            gate = profile["release_gate"]
+            if (
+                profile.get("status") != "published"
+                or profile.get("prompt_b") is None
+                or gate.get("publishing_blocked") is not False
+                or gate.get("blocked_reasons")
+            ):
+                raise ValueError(
+                    f"生产 Bundle 的 Profile {profile_key} 未通过发布门禁"
+                )
+    elif execution_context != "calibration":
+        raise ValueError("EvaluationProfile 集合缺少合法执行上下文")
+
+
+def _profile_sets_for_legacy_columns(
+    profile_set: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    profiles = profile_set["profiles"]
+    schema_entries: dict[tuple[str, str], dict[str, Any]] = {}
+    label_entries: dict[str, dict[str, Any]] = {}
+    for profile in profiles.values():
+        schema = deepcopy(profile["dimension_schema"])
+        schema_entries[(schema["schema_key"], schema["version"])] = schema
+        label_set = deepcopy(profile["label_field_set"])
+        label_entries[label_set["label_field_set_id"]] = label_set
+    return (
+        {
+            "format_version": DIMENSION_SCHEMA_SET_FORMAT_VERSION,
+            "schemas": [
+                schema_entries[key]
+                for key in sorted(schema_entries)
+            ],
+        },
+        {
+            "format_version": LABEL_FIELD_SET_FORMAT_VERSION,
+            "sets": [
+                label_entries[key]
+                for key in sorted(label_entries)
+            ],
+        },
+    )
+
+
 def _dimension_contract_is_active(db: Session) -> bool:
     """Keep pre-migration/test databases on the readable v1 contract."""
     if db.get_bind().dialect.name != "sqlite":
@@ -701,6 +1105,28 @@ def _dimension_contract_is_active(db: Session) -> bool:
     )
 
 
+def _routed_contract_is_active(db: Session) -> bool:
+    """Require migration 29 before persisting strategy-bundle-v3."""
+    if db.get_bind().dialect.name != "sqlite":
+        return True
+    connection = db.connection()
+    migrations_table = connection.exec_driver_sql(
+        """
+        SELECT 1
+        FROM sqlite_master
+        WHERE type = 'table' AND name = 'schema_migrations'
+        """
+    ).first()
+    if migrations_table is None:
+        return False
+    return (
+        connection.exec_driver_sql(
+            "SELECT 1 FROM schema_migrations WHERE version = 29"
+        ).first()
+        is not None
+    )
+
+
 def _build_canonical_definition(
     *,
     schema_version: str,
@@ -717,6 +1143,8 @@ def _build_canonical_definition(
     dimension_schema_set: dict[str, Any] | None = None,
     label_field_set: dict[str, Any] | None = None,
     resolved_schema_contract_version: str | None = None,
+    dimension_route_policy_snapshot: dict[str, Any] | None = None,
+    evaluation_profile_set_snapshot: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     definition = {
         "schema_version": schema_version,
@@ -730,7 +1158,10 @@ def _build_canonical_definition(
         "risk_review_version": risk_review_version,
         "agent_plan_version": agent_plan_version,
     }
-    if schema_version == STRATEGY_SCHEMA_VERSION:
+    if schema_version in {
+        STRATEGY_SCHEMA_VERSION,
+        ROUTED_STRATEGY_SCHEMA_VERSION,
+    }:
         if (
             not dimension_route_policy_id
             or not isinstance(dimension_schema_set, dict)
@@ -748,6 +1179,32 @@ def _build_canonical_definition(
                 ),
             }
         )
+        if schema_version == ROUTED_STRATEGY_SCHEMA_VERSION:
+            if (
+                prompt_b is not None
+                or not isinstance(dimension_route_policy_snapshot, dict)
+                or not isinstance(evaluation_profile_set_snapshot, dict)
+            ):
+                raise ValueError(
+                    "strategy-bundle-v3 缺少冻结路由或评审配置集合"
+                )
+            definition.update(
+                {
+                    "dimension_route_policy_snapshot": (
+                        dimension_route_policy_snapshot
+                    ),
+                    "evaluation_profile_set_snapshot": (
+                        evaluation_profile_set_snapshot
+                    ),
+                }
+            )
+        elif (
+            dimension_route_policy_snapshot is not None
+            or evaluation_profile_set_snapshot is not None
+        ):
+            raise ValueError(
+                "strategy-bundle-v2 不允许携带 v3 冻结配置"
+            )
     elif schema_version != LEGACY_STRATEGY_SCHEMA_VERSION:
         raise ValueError("不支持的 StrategyBundle 快照版本")
     return _redact_secrets(definition)
@@ -811,6 +1268,8 @@ def _bundle_values(
     dimension_schema_set: dict[str, Any] | None,
     label_field_set: dict[str, Any] | None,
     resolved_schema_contract_version: str | None,
+    dimension_route_policy_snapshot: dict[str, Any] | None = None,
+    evaluation_profile_set_snapshot: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     return {
         "canonical_hash": canonical_hash,
@@ -839,6 +1298,16 @@ def _bundle_values(
         ),
         "resolved_schema_contract_version": (
             resolved_schema_contract_version
+        ),
+        "dimension_route_policy_snapshot": (
+            _canonical_json(dimension_route_policy_snapshot)
+            if dimension_route_policy_snapshot is not None
+            else None
+        ),
+        "evaluation_profile_set_snapshot": (
+            _canonical_json(evaluation_profile_set_snapshot)
+            if evaluation_profile_set_snapshot is not None
+            else None
         ),
     }
 
@@ -996,6 +1465,125 @@ def get_or_create_bundle(
     return bundle
 
 
+def get_or_create_routed_bundle(
+    *,
+    db: Session,
+    model_config: ModelConfig,
+    prompt_a: PromptVersion,
+    route_policy: DimensionRoutePolicy,
+    evaluation_profile_set: dict[str, Any],
+    engine_version: str,
+    risk_review_version: str | None,
+    sampling_policy: SamplingPolicy | None,
+    rubric_version: str = "routed-profile-set-v1",
+    agent_plan_version: str = "controlled-agent-plan-v1",
+) -> StrategyBundle:
+    """Persist a v3 bundle that freezes all A-after-route candidates."""
+    if not _routed_contract_is_active(db):
+        raise ValueError(
+            "strategy-bundle-v3 需要先应用迁移 29"
+        )
+    if prompt_a.stage != "A":
+        raise ValueError("strategy-bundle-v3 必须冻结 A 阶段提示词")
+    route_policy_snapshot = build_dimension_route_policy_snapshot(
+        route_policy
+    )
+    _validate_routed_bundle_contract(
+        route_policy_snapshot=route_policy_snapshot,
+        profile_set=evaluation_profile_set,
+    )
+    dimension_schema_set, label_field_set = (
+        _profile_sets_for_legacy_columns(evaluation_profile_set)
+    )
+    model_config_snapshot = _build_model_config_snapshot(model_config)
+    route_policy_id = (
+        f"{route_policy.policy_key}@{route_policy.version}"
+    )
+    definition = _build_canonical_definition(
+        schema_version=ROUTED_STRATEGY_SCHEMA_VERSION,
+        model_id=model_config.model_id,
+        model_config_snapshot=model_config_snapshot,
+        prompt_a=prompt_a,
+        prompt_b=None,
+        rubric_version=rubric_version,
+        engine_version=engine_version,
+        sampling_policy=sampling_policy,
+        risk_review_version=risk_review_version,
+        agent_plan_version=agent_plan_version,
+        dimension_route_policy_id=route_policy_id,
+        dimension_schema_set=dimension_schema_set,
+        label_field_set=label_field_set,
+        resolved_schema_contract_version=(
+            ROUTED_SCHEMA_CONTRACT_VERSION
+        ),
+        dimension_route_policy_snapshot=route_policy_snapshot,
+        evaluation_profile_set_snapshot=evaluation_profile_set,
+    )
+    _assert_strategy_identity_is_safe(
+        definition,
+        model_config=model_config,
+        prompt_a=prompt_a,
+        prompt_b=None,
+        rubric_version=rubric_version,
+        engine_version=engine_version,
+        risk_review_version=risk_review_version,
+        agent_plan_version=agent_plan_version,
+    )
+    _assert_no_sensitive_material(definition)
+    canonical_hash = _compute_canonical_hash(definition)
+    existing = db.scalar(
+        select(StrategyBundle).where(
+            StrategyBundle.canonical_hash == canonical_hash
+        )
+    )
+    if existing is not None:
+        return existing
+
+    values = _bundle_values(
+        canonical_hash=canonical_hash,
+        strategy_schema_version=ROUTED_STRATEGY_SCHEMA_VERSION,
+        model_config=model_config,
+        model_config_snapshot=model_config_snapshot,
+        prompt_a=prompt_a,
+        prompt_b=None,
+        rubric_version=rubric_version,
+        engine_version=engine_version,
+        risk_review_version=risk_review_version,
+        sampling_policy=sampling_policy,
+        agent_plan_version=agent_plan_version,
+        dimension_route_policy_id=route_policy_id,
+        dimension_schema_set=dimension_schema_set,
+        label_field_set=label_field_set,
+        resolved_schema_contract_version=(
+            ROUTED_SCHEMA_CONTRACT_VERSION
+        ),
+        dimension_route_policy_snapshot=route_policy_snapshot,
+        evaluation_profile_set_snapshot=evaluation_profile_set,
+    )
+    _assert_no_sensitive_material(values)
+    if db.get_bind().dialect.name == "sqlite":
+        _insert_bundle_if_absent(db, values)
+    else:
+        try:
+            with db.begin_nested():
+                bundle = StrategyBundle(**values)
+                db.add(bundle)
+                db.flush()
+        except IntegrityError as exc:
+            if not _is_canonical_hash_conflict(exc):
+                raise
+        else:
+            return bundle
+    bundle = db.scalar(
+        select(StrategyBundle).where(
+            StrategyBundle.canonical_hash == canonical_hash
+        )
+    )
+    if bundle is None:
+        raise RuntimeError("v3 StrategyBundle 原子创建后无法回查")
+    return bundle
+
+
 def build_strategy_snapshot(
     bundle: StrategyBundle,
     prompt_a: PromptVersion,
@@ -1018,6 +1606,16 @@ def build_strategy_snapshot(
         if bundle.label_field_set_snapshot is not None
         else None
     )
+    dimension_route_policy_snapshot = (
+        json.loads(bundle.dimension_route_policy_snapshot)
+        if bundle.dimension_route_policy_snapshot is not None
+        else None
+    )
+    evaluation_profile_set_snapshot = (
+        json.loads(bundle.evaluation_profile_set_snapshot)
+        if bundle.evaluation_profile_set_snapshot is not None
+        else None
+    )
     definition = _build_canonical_definition(
         schema_version=schema_version,
         model_id=bundle.model_id,
@@ -1034,6 +1632,12 @@ def build_strategy_snapshot(
         label_field_set=label_field_set,
         resolved_schema_contract_version=(
             bundle.resolved_schema_contract_version
+        ),
+        dimension_route_policy_snapshot=(
+            dimension_route_policy_snapshot
+        ),
+        evaluation_profile_set_snapshot=(
+            evaluation_profile_set_snapshot
         ),
     )
     if _compute_canonical_hash(definition) != bundle.canonical_hash:
