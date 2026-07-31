@@ -11,15 +11,20 @@
 - 方法：`POST /api/production-feedback-events`
 - 内容类型：`application/json`
 - 认证：`Authorization: Bearer <专用机器 token>`
-- 服务端配置：环境变量 `PRODUCTION_FEEDBACK_TOKEN`
+- 服务端配置优先级：
+  1. 环境变量 `PRODUCTION_FEEDBACK_TOKEN`；
+  2. `PRODUCTION_FEEDBACK_TOKEN_FILE` 指向的仓库外秘密文件；
+  3. 默认仓库外文件 `${DATA_DIR}/secrets/production-feedback.token`。
 - 浏览器 Cookie、管理员会话和管理员密码均不能代替机器 token。
 - 服务端未配置 token 时返回 `503`；请求缺少 token 或 token 错误时返回
   `401`。比较使用恒定时间比较。
 - 部署间通信应使用 HTTPS。当前合同不定义额外的 payload HMAC 签名；Bearer
   token 是当前唯一受支持的认证方式，不应发送后端不会验证的自定义签名。
 
-Token 只存在于发送端秘密配置和 LabelLab 服务端环境变量中。不得写入事件
-JSON、URL、日志、截图、文档、数据库业务字段或前端配置。
+Token 只存在于发送端秘密配置和 LabelLab 服务端环境变量/仓库外秘密文件中。
+秘密文件必须仅允许运行账户读取（macOS/Linux 建议权限 `0600`），不得提交
+Git。不得把 token 写入事件 JSON、URL、日志、截图、文档、数据库业务字段或
+前端配置。
 
 ## 幂等键
 
@@ -101,6 +106,9 @@ python scripts/integration/production_feedback_sender_example.py event.json --se
 
 ## 运维注意事项
 
+- 首次启用时应生成高熵随机 token，写入仓库外秘密文件，再重启服务。管理页
+  显示“机器接收鉴权：已配置”后，先验证无 token 返回 `401`、携带正确 token
+  但空业务载荷返回 `422`，再交接给生产发送端。验证过程不得打印 token。
 - 上线前先在隔离实例使用假事件验证 `401/409/422/503` 和相同载荷重放。
 - 发送端应保存 Outbox 事件原文与投递状态，重试必须重用相同字节语义。
 - 对 `401`、`409`、`422`、`503` 设置告警，禁止无上限快速重试。

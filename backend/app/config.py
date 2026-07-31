@@ -27,6 +27,22 @@ def _default_data_dir(
     return PROJECT_ROOT / "data"
 
 
+def _production_feedback_token(data_dir: Path) -> str | None:
+    environment_token = os.getenv("PRODUCTION_FEEDBACK_TOKEN", "").strip()
+    if environment_token:
+        return environment_token
+    token_file = Path(
+        os.getenv(
+            "PRODUCTION_FEEDBACK_TOKEN_FILE",
+            str(data_dir / "secrets" / "production-feedback.token"),
+        )
+    ).expanduser()
+    if not token_file.is_file():
+        return None
+    token = token_file.read_text(encoding="utf-8").strip()
+    return token or None
+
+
 @dataclass(frozen=True)
 class Settings:
     project_root: Path
@@ -59,9 +75,7 @@ def get_settings() -> Settings:
         host=os.getenv("APP_HOST", "0.0.0.0"),
         port=int(os.getenv("APP_PORT", "8080")),
         session_days=max(1, int(os.getenv("SESSION_DAYS", "7"))),
-        production_feedback_token=(
-            os.getenv("PRODUCTION_FEEDBACK_TOKEN", "").strip() or None
-        ),
+        production_feedback_token=_production_feedback_token(data_dir),
     )
     settings.database_path.parent.mkdir(parents=True, exist_ok=True)
     settings.upload_dir.mkdir(parents=True, exist_ok=True)
