@@ -56,6 +56,7 @@ export const workflowDomains = [
       { to: "/workflow/optimization/automation", label: "自动优化编排" },
       { to: "/workflow/optimization/feedback", label: "生产案例回流" },
       { to: "/workflow/optimization/candidates", label: "候选提示词" },
+      { to: "/workflow/optimization/dimensions", label: "维度管理器" },
       { to: "/workflow/optimization/paired-regression", label: "小样本配对回归" },
       { to: "/workflow/optimization/baseline-regression", label: "基准回归" },
     ],
