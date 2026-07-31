@@ -295,6 +295,81 @@ def test_config_request_repr_masks_secret_and_storage_error_is_sanitized(
     assert FAKE_SECRET_V1 not in str(error.value)
 
 
+def test_blank_config_key_means_keep_existing_secret(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app import main
+    from pydantic import SecretStr
+
+    def fail_if_called(_secret: str, *, account: str) -> str:
+        raise AssertionError(f"blank key must not touch secret storage: {account}")
+
+    monkeypatch.setattr(main, "protect_secret", fail_if_called)
+
+    assert (
+        main._protected_api_key(
+            None,
+            account=security.MODEL_CONFIG_KEYCHAIN_ACCOUNT,
+        )
+        is None
+    )
+    assert (
+        main._protected_api_key(
+            SecretStr("   "),
+            account=security.MODEL_CONFIG_KEYCHAIN_ACCOUNT,
+        )
+        is None
+    )
+
+
+def test_blank_model_config_key_updates_fields_without_rotating_secret() -> None:
+    from app import main
+    from app.models import ModelConfig
+
+    class FakeSession:
+        def __init__(self, config: ModelConfig) -> None:
+            self.config = config
+            self.committed = False
+
+        def scalar(self, _statement: object) -> ModelConfig:
+            return self.config
+
+        def add(self, _value: object) -> None:
+            raise AssertionError("existing config should be reused")
+
+        def commit(self) -> None:
+            self.committed = True
+
+    existing_reference = "dpapi:v1:ZXhpc3RpbmctY2lwaGVydGV4dA=="
+    model = ModelConfig(
+        name="before",
+        encrypted_api_key=existing_reference,
+    )
+    db = FakeSession(model)
+
+    response = main.update_model_config(
+        main.ModelConfigUpdate(
+            name="after",
+            base_url="https://example.invalid/v1",
+            api_path="/chat/completions",
+            model_id="fake-model",
+            api_key="",
+            temperature=0.1,
+            max_tokens=1024,
+            timeout_seconds=30,
+            max_retries=0,
+            max_concurrency=1,
+        ),
+        _user=object(),
+        db=db,  # type: ignore[arg-type]
+    )
+
+    assert response == {"ok": True}
+    assert model.name == "after"
+    assert model.encrypted_api_key == existing_reference
+    assert db.committed is True
+
+
 def test_model_and_optimizer_config_writes_use_different_stable_accounts(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

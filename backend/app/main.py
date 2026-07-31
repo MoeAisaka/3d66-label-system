@@ -208,7 +208,11 @@ def _protected_api_key(
         return None
     secret = value.get_secret_value().strip()
     if not secret:
-        raise HTTPException(status_code=422, detail="API Key 不能为空")
+        # The settings UI deliberately sends an empty string when the operator
+        # edits non-secret fields without rotating the stored credential.
+        # Treat blank input the same as an omitted value so the existing
+        # protected reference is preserved.
+        return None
     if len(secret) > 1000:
         raise HTTPException(status_code=422, detail="API Key 长度不能超过 1000 个字符")
     try:
