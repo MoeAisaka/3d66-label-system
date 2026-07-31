@@ -53,11 +53,16 @@ try {
         $env:APP_HOST = '127.0.0.1'
     }
 
-    $doctorArguments = @('-DpapiScope', $DpapiScope)
+    # PS 5.1：调用 PowerShell 脚本必须用哈希表 splat。数组 splat 会按位置传参、
+    # 不解析其中的参数名：'-DpapiScope' 会被绑给 doctor.ps1 的第一个位置参数
+    # $DataDir，剩下的 '-DataDir' 无位置可放而抛错；不带 -DataDir 时更隐蔽——
+    # $DataDir 会被静默绑成字符串 '-DpapiScope'，传给 Python 后 argparse 报
+    # 「argument --data-dir: expected one argument」并以退出码 2 失败。
+    $doctorParameters = @{ DpapiScope = $DpapiScope }
     if ($PSBoundParameters.ContainsKey('DataDir')) {
-        $doctorArguments += @('-DataDir', $DataDir)
+        $doctorParameters['DataDir'] = $DataDir
     }
-    & (Join-Path $PSScriptRoot 'doctor.ps1') @doctorArguments
+    & (Join-Path $PSScriptRoot 'doctor.ps1') @doctorParameters
     $doctorExitCode = $LASTEXITCODE
     if ($doctorExitCode -ne 0) {
         [Console]::Error.WriteLine("启动已阻止：doctor 门禁未通过（退出码 $doctorExitCode）。")

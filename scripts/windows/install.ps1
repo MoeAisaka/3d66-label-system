@@ -65,8 +65,23 @@ function Invoke-NativeCapture {
         [Parameter(Mandatory = $true)][object[]]$Arguments
     )
 
-    $output = & $FilePath @Arguments 2>&1
-    $exitCode = $LASTEXITCODE
+    # PS 5.1：$ErrorActionPreference='Stop' 叠加 2>&1 会把原生命令写入 stderr 的内容
+    # 转成 ErrorRecord 并升级为终止性错误，在读到 $LASTEXITCODE 之前就抛出（子进程
+    # 退出码为 0、仅写一行警告也会中止）。这里只捕获 stdout，并在调用期间临时放宽偏好，
+    # 一律以退出码判定成败。
+    # 只捕获 stdout；stderr 丢弃到 $null。不用 2>&1，也不让 stderr 流到控制台——
+    # 本函数四个调用点全是版本探测，候选失败（例如本机无 3.12 时 py launcher 写的
+    # 「No suitable Python runtime found」）属于逐候选尝试的正常过程，显示出来反而与
+    # 随后的 [OK] Python x.y.z 自相矛盾。全部候选都失败时仍会招明确报错。
+    $previousPreference = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $output = & $FilePath @Arguments 2>$null
+        $exitCode = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $previousPreference
+    }
     if ($exitCode -ne 0) {
         throw "子进程失败（退出码 $exitCode）：$FilePath"
     }
@@ -88,13 +103,22 @@ function Get-PythonCandidate {
         [PSCustomObject]@{ Command = 'python3.exe'; Prefix = @() }
     )
     foreach ($candidateSpec in $candidateSpecs) {
-        $command = Get-Command $candidateSpec.Command -CommandType Application -ErrorAction SilentlyContinue
-        if ($null -eq $command) {
+        # PS 5.1：同名命令可能有多个 PATH 命中（例如 C:\WINDOWS\py.exe 与 WindowsApps
+        # 应用执行别名），此时 Get-Command 返回数组，.Source 是 Object[]，绑定到
+        # [string]$FilePath 会抛「无法将空值转换为类型 System.String」并被 catch 吞掉，
+        # 最终误报「未检测到可运行的 Python」。取首个命中即可。
+        # 注意：StrictMode Latest 下不能直接写 @(...)[0]——命中为空时索引越界会抛
+        # IndexOutOfRangeException，反而掩盖友好提示。先取数组再判 Count。
+        $commandMatches = @(Get-Command $candidateSpec.Command -CommandType Application -ErrorAction SilentlyContinue)
+        if ($commandMatches.Count -eq 0) {
             continue
         }
+        $command = $commandMatches[0]
+        # 探测代码不得含字面双引号：PS 5.1 传参给原生命令时会剥掉双引号，
+        # '".".join(...)' 会变成 '..join(...)' 而触发 SyntaxError。
         $versionArguments = @($candidateSpec.Prefix) + @(
             '-X', 'utf8', '-c',
-            'import sys; print(".".join(map(str, sys.version_info[:3]))); raise SystemExit(0 if (3, 11) <= sys.version_info[:2] < (3, 13) else 1)'
+            'import sys; print(sys.version.split()[0]); raise SystemExit(0 if (3, 11) <= sys.version_info[:2] < (3, 13) else 1)'
         )
         try {
             [void](Invoke-NativeCapture -FilePath $command.Source -Arguments $versionArguments)
@@ -135,9 +159,10 @@ try {
     }
 
     $python = Get-PythonCandidate -RepositoryRoot $repoRoot
+    # 同上：避免字面双引号，改用 sys.version.split()[0]（输出等价，如 3.11.4）。
     $pythonVersionArguments = @($python.Prefix) + @(
         '-X', 'utf8', '-c',
-        'import sys; print(".".join(map(str, sys.version_info[:3]))); raise SystemExit(0 if (3, 11) <= sys.version_info[:2] < (3, 13) else 1)'
+        'import sys; print(sys.version.split()[0]); raise SystemExit(0 if (3, 11) <= sys.version_info[:2] < (3, 13) else 1)'
     )
     try {
         $pythonVersion = Invoke-NativeCapture -FilePath $python.FilePath -Arguments $pythonVersionArguments
@@ -146,8 +171,12 @@ try {
         throw 'Python 版本门禁未通过：仅允许 Python 3.11 或 3.12。'
     }
 
-    $nodeCommand = Get-Command 'node.exe' -CommandType Application -ErrorAction SilentlyContinue
-    $npmCommand = Get-Command 'npm.cmd' -CommandType Application -ErrorAction SilentlyContinue
+    # 同 Get-PythonCandidate：多命中时取首个，避免 .Source 变成 Object[]；
+    # 命中为空时保留 $null，让下方原有的友好报错继续生效。
+    $nodeMatches = @(Get-Command 'node.exe' -CommandType Application -ErrorAction SilentlyContinue)
+    $npmMatches = @(Get-Command 'npm.cmd' -CommandType Application -ErrorAction SilentlyContinue)
+    $nodeCommand = if ($nodeMatches.Count -gt 0) { $nodeMatches[0] } else { $null }
+    $npmCommand = if ($npmMatches.Count -gt 0) { $npmMatches[0] } else { $null }
     if ($null -eq $nodeCommand) {
         throw '未检测到 Node.js；请安装 20.x 至 26.x 后重试。'
     }
