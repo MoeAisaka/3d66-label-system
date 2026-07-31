@@ -31,6 +31,7 @@
 | [0016](0016-safe-automation-feedback-and-model-benchmark.md) | Accepted | 安全自动优化、不可变生产回流与三模型横评 |
 | [0018](0018-adr16-real-executors-and-rollout.md) | Accepted | ADR-0016 真实执行器、预算结算与分阶段启用 |
 | [0019](0019-session-derived-reviewer-identity.md) | Accepted | 审核身份由服务端登录会话派生 |
+| [0021](0021-material-package-lifecycle-and-baseline-package-selection.md) | Accepted | 素材包生命周期、素材入口合并与基准回归整包选择 |
 
 ## 新增 ADR 的规则
 
