@@ -148,8 +148,9 @@
 - Windows 分支全后端：`510 passed, 1 skipped, 1 warning`。
 - Windows 五个 PowerShell 脚本通过 PowerShell 7.6.4 官方解析器；
   前端 `npm run lint` 和正式 `npm run build` 通过。
-  注意：该口径**只是语法解析且是 7.x**，不覆盖 5.1 运行期行为，
-  实机已在 5.1 上发现四个运行期缺陷，见下节。
+  注意：该口径**只是语法解析且是 7.x**，不覆盖 5.1 运行期行为。
+  2026-07-31 实机在 5.1 上发现四个运行期缺陷（均逃过了 5.1 与 7.x 两个 parser），
+  已于 2026-08-01 全部修复并实机复验，见下节。
 - Python `compileall` 与 `git diff --check`：通过。
 
 ### 原生 Windows 实机验收（2026-07-31，13600K）
@@ -178,11 +179,10 @@ Python 3.11.4，Node v24.15.0，npm 11.12.1。被测提交
 
 未通过 / 边界（不得计入「已验证」）：
 
-- **`start.ps1` 在 PS 5.1 上无法启动服务**，`install.ps1` 同样必然失败；
-  本次验收**绕过了这两个脚本**（手工复制其安装与启动步骤），因此
-  「`install.ps1` / `start.ps1` 可用」仍为未验证/失败项。
-  四个缺陷详见 `DEFECTS-powershell-51.md`（另库归档），其中
-  `start.ps1` 用数组 splat 调 doctor 一条最致命，且可能不限于 5.1。
+- ~~**`start.ps1` 在 PS 5.1 上无法启动服务**，`install.ps1` 同样必然失败；
+  本次验收绕过了这两个脚本。~~
+  **已于 2026-08-01 修复并实机复验通过，见下方「四个 PS 5.1 缺陷修复与复验」。**
+- 两层 DPAPI 范围默认值相反：PS 脚本层 `-DpapiScope` 默认 `LocalMachine`，
 - 两层 DPAPI 范围默认值相反：PS 脚本层 `-DpapiScope` 默认 `LocalMachine`，
   Python 层 `API_KEY_DPAPI_SCOPE` 默认 `current-user`；靠脚本注入环境变量才
   对齐，建议统一。
@@ -196,9 +196,48 @@ Python 3.11.4，Node v24.15.0，npm 11.12.1。被测提交
 - 公司内网实例尚未部署本修复；线上故障是否解决仍须在该实例上以新 doctor 或
   保存接口的脱敏错误码确认。本次 13600K 验收证明的是**代码侧安全链成立**，
   不等于公司实例已修复。
-- 操作员双击 `.cmd` 的路径当前走不通（缺陷 4）；在修掉四条缺陷或统一要求
-  PS7（建议五个脚本加 `#Requires -Version 7`）之前，不能交付给前端工程师
-  自助部署。
+- ~~操作员双击 `.cmd` 的路径当前走不通（缺陷 4）。~~
+  **已于 2026-08-01 修复并实机复验通过，见下节。**
+
+### 四个 PS 5.1 缺陷修复与复验（2026-08-01，13600K）
+
+同一台 13600K，`PowerShell 5.1.26100.8115`，未安装 PS 7、未改动系统。
+基线 `windows-deploy@42dbda5`，验证时**不绕过任何 wrapper**。
+
+四条修法：
+
+| 缺陷 | 位置 | 修法 |
+| --- | --- | --- |
+| 1 | `install.ps1` 三处 `Get-Command`（含 `node.exe`/`npm.cmd`） | 包数组后先判 `.Count` 再取 `[0]`；命中为空保留 `$null` 以保留友好报错 |
+| 2 | `install.ps1` 两处版本探测 | 改 `sys.version.split()[0]`，去除字面双引号 |
+| 3 | `install.ps1:68` `Invoke-NativeCapture` | 去 `2>&1` 改 `2>$null`；调用期间临时 `Continue`，`finally` 还原；只以退出码判定 |
+| 4 | `start.ps1:56-64` | 数组 splat → **哈希表 splat** |
+
+实机结果：
+
+```text
+install.ps1 -Check   → Python 3.11.4 / Node v24.15.0 / npm 11.12.1 门禁全过
+install.ps1（完整）  → exit 0，65s；pip 31 包 + npm ci 113 包 + vite build ✓ 13.36s
+                       .venv 与 frontend/dist 均生成；复检 exit 0
+start.ps1（不带 -DataDir）  → 服务监听 18080，GET /openapi.json 200，GET / 200
+start.ps1 -DataDir ... -DpapiScope CurrentUser → 同样两个 200
+doctor 九项门禁：两个变体下均全部通过
+```
+
+参数绑定正确的决定性证据：不传 `-DpapiScope` 时 doctor 报 `local-machine`（默认），
+传 `CurrentUser` 时报 `current-user`——修复前该参数会被错绑。且已核实仓库根、
+`scripts\windows\`、`C:\` 三处都无名为 `-DpapiScope` 的残留目录。
+
+附带一条更正：`DEFECTS-powershell-51.md` 原先给缺陷 1 建议的 `@(...)[0].Source`
+**本身是错的**——`Set-StrictMode -Version Latest` 下对空数组取 `[0]` 会抛
+`IndexOutOfRangeException`，反而掉包友好报错；已实测确认并改为先判 `Count`。
+
+共享机未受影响：vLLM `pid 121044`（5001）与第三方 python `pid 14988`（8080）全程存活，
+18080 在每个变体后都回到空闲。
+
+仍建议补一条 5.1 冒烟测试（`-Check` + 一次 `start.ps1` 起停）；仅靠 parser 无法防同类回归。
+`doctor.ps1`/`backup.ps1`/`restore.ps1` 里的数组 splat **不是缺陷**（splat 给原生 exe，
+按位置传参本就正确），本轮未动。
 
 ## 最新完成：素材包主链与基准回归整包闭环（2026-07-31）
 
@@ -459,9 +498,9 @@ Python 3.11.4，Node v24.15.0，npm 11.12.1。被测提交
 
 明确未完成：
 
-- 本分支的 `install.ps1` 与 `start.ps1` **在 PowerShell 5.1 上实测不可用**
-  （四个运行期缺陷，`start.ps1` 无论怎么调都起不了服务）。2026-07-31 的
-  13600K 验收是绕过这两个脚本完成的，二者仍未验证。
+- ~~本分支的 `install.ps1` 与 `start.ps1` 在 PowerShell 5.1 上实测不可用。~~
+  已解除：四个运行期缺陷已于 2026-08-01 修复，并在 13600K 用**真实两个脚本**
+  完成安装与启动复验（install exit 0；start 两种调用均 HTTP 200）。
 - 13600K 实机已覆盖：doctor 九项门禁（两个 DPAPI 范围 + 默认 DATA_DIR）、
   DPAPI 真实回环、非空/空 Key 保存、解密正确性、跨范围解密兼容。
   仍未覆盖：管理员全新安装、Python/Node/npm 版本矩阵、中文/空格路径、
@@ -948,7 +987,7 @@ Python 3.11.4，Node v24.15.0，npm 11.12.1。被测提交
 | 初审人数弹性机制 | 当前工作树已完成 | 初期默认 1 人即时定案；支持切换 3/5/7/9 人，收齐全部冻结席位后计算多数共识；面板创建时冻结人数 |
 | P0-E 金丝雀前端编排 | 工作树已完成 | 已接 E3 认证 API；只登记门禁证据，不执行导入、下载、模型、Gold 或发布 |
 | macOS 部署生命周期 | 离线能力已完成 | 安装/诊断/前台启动/脱敏备份恢复已测试；目标 MacBook 尚未实际部署 |
-| Windows 部署生命周期 | 部分实机验收通过，wrapper 脚本待修 | doctor 门禁 9/9（两个 DPAPI 范围）与 ADR-0023 API Key 链已在 13600K 原生 Windows 实机验收；`install.ps1`/`start.ps1` 在 PowerShell 5.1 上实测不可用（四个缺陷），操作员 `.cmd` 路径待修复后重验 |
+| Windows 部署生命周期 | 实机验收通过（含 wrapper 脚本） | doctor 门禁 9/9（两个 DPAPI 范围）与 ADR-0023 API Key 链已在 13600K 原生 Windows 实机验收；`install.ps1`/`start.ps1` 的四个 PS 5.1 缺陷已于 2026-08-01 修复并用真实脚本复验（install exit 0；start 两种调用均 HTTP 200）；公司内网实例尚未部署 |
 
 ## 本地数据快照
 
@@ -1006,8 +1045,21 @@ API Key 落库形态：dpapi:v1: / dpapi-machine:v1:（前缀随范围切换）
 跨范围兼容：current-user 引用在 local-machine 运行时下正常解密
 空 Key 重提交：保留既有引用，不误删凭据
 manual install：venv 10s / pip 27s / npm ci 34s / vite build 17s
-install.ps1：PowerShell 5.1 下必然失败（已绕过，未验证）
-start.ps1：PowerShell 5.1 下无法启动服务（缺陷 4，FAIL）
+install.ps1：PowerShell 5.1 下必然失败（当时已绕过；后续已修复，见下方 08-01）
+start.ps1：PowerShell 5.1 下无法启动服务（缺陷 4；后续已修复，见下方 08-01）
+```
+
+2026-08-01（同一台 13600K，PowerShell 5.1.26100.8115，基线 `windows-deploy@42dbda5`
+叠四个缺陷修复，**不绕过任何 wrapper**）：
+
+```text
+install.ps1 -Check：Python 3.11.4 / Node v24.15.0 / npm 11.12.1 门禁全过
+install.ps1（完整安装）：exit 0，65s；pip 31 包 / npm ci 113 包 / vite build ✓ 13.36s
+                        .venv 与 frontend/dist 均生成；-Check 复检 exit 0
+start.ps1（不带 -DataDir）：监听 18080，GET /openapi.json 200，GET / 200
+start.ps1 -DataDir ... -DpapiScope CurrentUser：同样两个 200
+doctor 九项门禁：两个变体下均全过（scope 随入参正确切换）
+无 -DpapiScope 残留目录；共享服务 pid 121044 / 14988 全程存活
 ```
 
 2026-07-30（`windows-deploy` Windows 生命周期工作树，未在 Windows 实机运行）：
