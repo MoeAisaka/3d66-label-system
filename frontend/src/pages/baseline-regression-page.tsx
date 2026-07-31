@@ -21,6 +21,7 @@ import type {
   BaselineRegressionItem,
   BaselineRegressionRun,
   MaterialPackage,
+  PromptVersion,
 } from "@/lib/types"
 
 const levels: BaselineLevel[] = ["L1", "L2", "L3", "L4", "L5"]
@@ -37,6 +38,9 @@ export function BaselineRegressionPage() {
   const [useWholePackage, setUseWholePackage] = useState(false)
   const [selectedSetId, setSelectedSetId] = useState(0)
   const [selectedRunId, setSelectedRunId] = useState(0)
+  const [manualPromptSelection, setManualPromptSelection] = useState(false)
+  const [selectedPromptAId, setSelectedPromptAId] = useState(0)
+  const [selectedPromptBId, setSelectedPromptBId] = useState(0)
 
   const assets = useQuery({
     queryKey: ["baseline-assets", selectedPackageId],
@@ -45,6 +49,10 @@ export function BaselineRegressionPage() {
   const packages = useQuery({
     queryKey: ["baseline-packages"],
     queryFn: baselineRegressionApi.listPackages,
+  })
+  const prompts = useQuery({
+    queryKey: ["prompts"],
+    queryFn: baselineRegressionApi.listPrompts,
   })
   const baselineSets = useQuery({
     queryKey: ["baseline-sets"],
@@ -69,6 +77,25 @@ export function BaselineRegressionPage() {
       query.state.data?.summary.status === "running" ? 3000 : false,
   })
 
+  const promptAOptions = useMemo(
+    () => (prompts.data?.items ?? []).filter(
+      (prompt: PromptVersion) => prompt.stage === "A",
+    ),
+    [prompts.data?.items],
+  )
+  const promptBOptions = useMemo(
+    () => (prompts.data?.items ?? []).filter(
+      (prompt: PromptVersion) => prompt.stage === "B",
+    ),
+    [prompts.data?.items],
+  )
+  const publishedPromptA = promptAOptions.find(
+    (prompt) => prompt.status === "published",
+  )
+  const publishedPromptB = promptBOptions.find(
+    (prompt) => prompt.status === "published",
+  )
+
   useEffect(() => {
     if (!selectedSetId && baselineSets.data?.items.length) {
       setSelectedSetId(baselineSets.data.items[0].id)
@@ -91,6 +118,30 @@ export function BaselineRegressionPage() {
       }
     }
   }, [queryClient, runDetail.data?.summary.status, selectedSetId])
+
+  useEffect(() => {
+    if (!manualPromptSelection) return
+    if (
+      !promptAOptions.some((prompt) => prompt.id === selectedPromptAId)
+      && publishedPromptA
+    ) {
+      setSelectedPromptAId(publishedPromptA.id)
+    }
+    if (
+      !promptBOptions.some((prompt) => prompt.id === selectedPromptBId)
+      && publishedPromptB
+    ) {
+      setSelectedPromptBId(publishedPromptB.id)
+    }
+  }, [
+    manualPromptSelection,
+    promptAOptions,
+    promptBOptions,
+    publishedPromptA,
+    publishedPromptB,
+    selectedPromptAId,
+    selectedPromptBId,
+  ])
 
   const upload = useMutation({
     mutationFn: (files: File[]) => baselineRegressionApi.uploadAssets(files),
@@ -142,7 +193,15 @@ export function BaselineRegressionPage() {
   })
 
   const createRun = useMutation({
-    mutationFn: () => baselineRegressionApi.createRun(selectedSetId),
+    mutationFn: () => baselineRegressionApi.createRun(
+      selectedSetId,
+      manualPromptSelection
+        ? {
+            prompt_a_id: selectedPromptAId,
+            prompt_b_id: selectedPromptBId,
+          }
+        : {},
+    ),
     onSuccess: async (run) => {
       setSelectedRunId(run.id)
       await Promise.all([
@@ -184,7 +243,7 @@ export function BaselineRegressionPage() {
       <PageHeader
         index="03.6"
         title="基准回归"
-        description="冻结素材与 L1–L5 期望等级，按当前启用模型及已发布 A/B 提示词重复运行；准确率、混淆矩阵和逐张偏差均来自服务端权威结果。"
+        description="冻结素材与 L1–L5 期望等级，可使用当前发布版或手动指定 A/B 提示词版本重复运行；准确率、混淆矩阵和逐张偏差均来自服务端权威结果。"
         actions={
           <>
             <input
@@ -461,7 +520,7 @@ export function BaselineRegressionPage() {
 
           {selectedSet.data ? (
             <section className="mt-10">
-              <div className="flex flex-wrap items-end justify-between gap-4 border-b border-[var(--line-strong)] pb-5">
+              <div className="border-b border-[var(--line-strong)] pb-5">
                 <div>
                   <p className="font-data text-xs text-[var(--muted)]">
                     基准集 #{selectedSet.data.summary.id} · {selectedSet.data.summary.item_count} 张 · 指纹 {selectedSet.data.summary.fingerprint.slice(0, 12)}
@@ -471,12 +530,68 @@ export function BaselineRegressionPage() {
                     <p className="mt-2 text-sm text-[var(--muted)]">{selectedSet.data.summary.description}</p>
                   )}
                 </div>
-                <Button
-                  disabled={createRun.isPending || selectedSet.data.runs.some((run) => run.status === "running")}
-                  onClick={() => createRun.mutate()}
-                >
-                  <Play weight="fill" />{createRun.isPending ? "正在启动" : "运行全量回归"}
-                </Button>
+                <div className="mt-5 grid gap-3 border-y border-[var(--line)] bg-[#fafbf8] px-4 py-4 xl:grid-cols-[180px_minmax(220px,1fr)_minmax(220px,1fr)_minmax(250px,1fr)_auto] xl:items-end">
+                  <label>
+                    <span className="mb-2 block text-xs font-semibold">提示词取值方式</span>
+                    <select
+                      className="h-11 w-full rounded-[4px] border border-[var(--line-strong)] bg-white px-3 text-sm"
+                      value={manualPromptSelection ? "manual" : "published"}
+                      onChange={(event) => setManualPromptSelection(
+                        event.target.value === "manual",
+                      )}
+                    >
+                      <option value="published">当前发布版本</option>
+                      <option value="manual">手动选择版本</option>
+                    </select>
+                  </label>
+                  <PromptSelect
+                    label="调用 A"
+                    value={selectedPromptAId}
+                    options={promptAOptions}
+                    published={publishedPromptA}
+                    disabled={!manualPromptSelection}
+                    onChange={setSelectedPromptAId}
+                  />
+                  <PromptSelect
+                    label="调用 B"
+                    value={selectedPromptBId}
+                    options={promptBOptions}
+                    published={publishedPromptB}
+                    disabled={!manualPromptSelection}
+                    onChange={setSelectedPromptBId}
+                  />
+                  <label>
+                    <span className="mb-2 block text-xs font-semibold">维度版本</span>
+                    <select
+                      disabled
+                      className="h-11 w-full rounded-[4px] border border-[var(--line)] bg-[#f1f3ef] px-3 text-sm text-[var(--muted)]"
+                      value="strategy_snapshot"
+                    >
+                      <option value="strategy_snapshot">
+                        跟随策略快照（手动选择已预留）
+                      </option>
+                    </select>
+                  </label>
+                  <Button
+                    disabled={
+                      createRun.isPending
+                      || selectedSet.data.runs.some((run) => run.status === "running")
+                      || (
+                        manualPromptSelection
+                        && (!selectedPromptAId || !selectedPromptBId)
+                      )
+                    }
+                    onClick={() => createRun.mutate()}
+                  >
+                    <Play weight="fill" />
+                    {createRun.isPending ? "正在启动" : "运行全量回归"}
+                  </Button>
+                </div>
+                <p className="mt-2 text-xs leading-5 text-[var(--muted)]">
+                  {manualPromptSelection
+                    ? "本轮会冻结所选 A/B 的完整内容，不会改变线上发布指针。"
+                    : "本轮启动时自动冻结当时的已发布 A/B；以后发布新版本也不会改写历史 run。"}
+                </p>
               </div>
 
               <div className="mt-5 flex gap-2 overflow-x-auto pb-2">
@@ -498,6 +613,9 @@ export function BaselineRegressionPage() {
                     </div>
                     <p className="font-data mt-2 text-[0.68rem] text-[var(--muted)]">
                       {run.completed}/{run.total} · #{run.id}
+                    </p>
+                    <p className="font-data mt-1 truncate text-[0.68rem] text-[var(--muted)]">
+                      A {run.selection.prompt_a?.version ?? "—"} · B {run.selection.prompt_b?.version ?? "—"}
                     </p>
                   </button>
                 ))}
@@ -578,6 +696,30 @@ function RegressionResults({
   const metrics = run.metrics
   return (
     <>
+      <section className="mt-6 grid gap-px border-y border-[var(--line)] bg-[var(--line)] md:grid-cols-3">
+        <SelectionFact
+          label="本轮调用 A"
+          value={run.selection.prompt_a
+            ? `${run.selection.prompt_a.version} · ${run.selection.prompt_a.name}`
+            : "历史 run 未记录"}
+        />
+        <SelectionFact
+          label="本轮调用 B"
+          value={run.selection.prompt_b
+            ? `${run.selection.prompt_b.version} · ${run.selection.prompt_b.name}`
+            : "历史 run 未记录"}
+        />
+        <SelectionFact
+          label="本轮维度版本"
+          value={
+            run.selection.dimension.schemas.length
+              ? run.selection.dimension.schemas
+                .map((schema) => schema.version ?? schema.schema_key ?? "未知")
+                .join(" / ")
+              : "跟随旧版策略快照"
+          }
+        />
+      </section>
       <section className="mt-6 grid gap-px border-y border-[var(--line)] bg-[var(--line)] sm:grid-cols-2 xl:grid-cols-4">
         <Metric label="总体准确率" value={percent(metrics.exact_accuracy)} />
         <Metric label="相邻等级准确率" value={percent(metrics.adjacent_accuracy)} />
@@ -777,6 +919,57 @@ function LevelSelect({
   )
 }
 
+function PromptSelect({
+  label,
+  value,
+  options,
+  published,
+  disabled,
+  onChange,
+}: {
+  label: string
+  value: number
+  options: PromptVersion[]
+  published: PromptVersion | undefined
+  disabled: boolean
+  onChange: (value: number) => void
+}) {
+  return (
+    <label>
+      <span className="mb-2 block text-xs font-semibold">{label}</span>
+      <select
+        className="h-11 w-full rounded-[4px] border border-[var(--line-strong)] bg-white px-3 text-sm disabled:border-[var(--line)] disabled:bg-[#f1f3ef] disabled:text-[var(--muted)]"
+        value={disabled ? (published?.id ?? "") : (value || "")}
+        disabled={disabled}
+        onChange={(event) => onChange(Number(event.target.value))}
+      >
+        {!published && disabled && (
+          <option value="">当前发布版本未配置</option>
+        )}
+        {!options.length && !disabled && (
+          <option value="">暂无可选版本</option>
+        )}
+        {options.map((prompt) => (
+          <option key={prompt.id} value={prompt.id}>
+            {prompt.version} · {prompt.name} · {promptStatusName(prompt.status)}
+          </option>
+        ))}
+      </select>
+    </label>
+  )
+}
+
+function SelectionFact({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="min-w-0 bg-white px-5 py-4">
+      <p className="text-xs font-semibold text-[var(--muted)]">{label}</p>
+      <p className="font-data mt-2 truncate text-sm font-semibold" title={value}>
+        {value}
+      </p>
+    </div>
+  )
+}
+
 function Metric({ label, value }: { label: string; value: string }) {
   return (
     <div className="bg-white px-5 py-4">
@@ -784,6 +977,12 @@ function Metric({ label, value }: { label: string; value: string }) {
       <p className="font-data mt-2 text-2xl font-bold">{value}</p>
     </div>
   )
+}
+
+function promptStatusName(status: PromptVersion["status"]) {
+  if (status === "published") return "已发布"
+  if (status === "archived") return "已归档"
+  return "草稿"
 }
 
 function percent(value: number) {

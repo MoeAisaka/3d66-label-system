@@ -125,3 +125,178 @@ def test_baseline_api_freezes_truth_reports_and_enqueues_idempotently() -> None:
         app.dependency_overrides.clear()
         db.close()
         engine.dispose()
+
+
+def test_baseline_run_can_freeze_manual_prompt_pair_and_reserves_dimension_choice() -> None:
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    db = Session(engine, expire_on_commit=False)
+    user = User(
+        username="tester",
+        password_hash="unused",
+        display_name="测试员",
+    )
+    asset = Asset(
+        original_name="manual-version.jpg",
+        stored_name="manual-version.jpg",
+        mime_type="image/jpeg",
+        size_bytes=10,
+        sha256="c" * 64,
+        status="uploaded",
+    )
+    model = ModelConfig(
+        name="test",
+        provider="doubao",
+        base_url="https://example.test",
+        api_path="/chat",
+        model_id="model",
+        active=True,
+    )
+    published_a = PromptVersion(
+        stage="A",
+        name="发布 A",
+        version="A-published",
+        system_prompt="published system a",
+        user_prompt="published user a",
+        rubric_version="R1",
+        status="published",
+    )
+    published_b = PromptVersion(
+        stage="B",
+        name="发布 B",
+        version="B-published",
+        system_prompt="published system b",
+        user_prompt="published user b",
+        rubric_version="R1",
+        status="published",
+    )
+    draft_a = PromptVersion(
+        stage="A",
+        name="候选 A",
+        version="A-draft",
+        system_prompt="draft system a",
+        user_prompt="draft user a",
+        rubric_version="R2",
+        status="draft",
+    )
+    draft_b = PromptVersion(
+        stage="B",
+        name="候选 B",
+        version="B-draft",
+        system_prompt="draft system b",
+        user_prompt="draft user b",
+        rubric_version="R2",
+        status="draft",
+    )
+    db.add_all(
+        [
+            user,
+            asset,
+            model,
+            published_a,
+            published_b,
+            draft_a,
+            draft_b,
+        ]
+    )
+    db.commit()
+
+    app.dependency_overrides[get_db] = lambda: (yield db)
+    app.dependency_overrides[current_user] = lambda: user
+    client = TestClient(app)
+    try:
+        created = client.post(
+            "/api/baseline-sets",
+            json={
+                "name": "手选版本基准",
+                "description": "",
+                "default_expected_level": "L2",
+                "items": [{"asset_id": asset.id}],
+            },
+        )
+        assert created.status_code == 200
+        set_id = created.json()["id"]
+
+        partial = client.post(
+            f"/api/baseline-sets/{set_id}/runs",
+            json={"prompt_a_id": draft_a.id},
+        )
+        assert partial.status_code == 422
+        assert "必须同时指定 A 与 B" in partial.text
+
+        reserved_dimension = client.post(
+            f"/api/baseline-sets/{set_id}/runs",
+            json={"dimension_schema_id": 1},
+        )
+        assert reserved_dimension.status_code == 409
+        assert (
+            reserved_dimension.json()["detail"]["code"]
+            == "DIMENSION_VERSION_SELECTION_NOT_ENABLED"
+        )
+
+        missing = client.post(
+            f"/api/baseline-sets/{set_id}/runs",
+            json={"prompt_a_id": 99991, "prompt_b_id": 99992},
+        )
+        assert missing.status_code == 404
+        assert "提示词版本不存在" in missing.text
+
+        swapped = client.post(
+            f"/api/baseline-sets/{set_id}/runs",
+            json={
+                "prompt_a_id": draft_b.id,
+                "prompt_b_id": draft_a.id,
+            },
+        )
+        assert swapped.status_code == 422
+        assert "提示词阶段不匹配" in swapped.text
+        assert db.query(BaselineRegressionRun).count() == 0
+
+        response = client.post(
+            f"/api/baseline-sets/{set_id}/runs",
+            json={
+                "prompt_a_id": draft_a.id,
+                "prompt_b_id": draft_b.id,
+            },
+        )
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["selection"]["prompt_a"]["id"] == draft_a.id
+        assert payload["selection"]["prompt_a"]["version"] == "A-draft"
+        assert payload["selection"]["prompt_b"]["id"] == draft_b.id
+        assert payload["selection"]["prompt_b"]["version"] == "B-draft"
+        assert payload["selection"]["dimension"] == {
+            "mode": "strategy_snapshot",
+            "manual_selection_supported": False,
+            "route_policy_id": None,
+            "schemas": [],
+        }
+
+        run = db.get(BaselineRegressionRun, payload["id"])
+        assert run is not None
+        job = db.get(EvaluationJob, run.items[0].job_id)
+        assert job is not None
+        assert job.prompt_a_id == draft_a.id
+        assert job.prompt_b_id == draft_b.id
+
+        detail = client.get(
+            f"/api/baseline-regressions/{run.id}"
+        )
+        assert detail.status_code == 200
+        assert (
+            detail.json()["summary"]["selection"]["prompt_b"]["version"]
+            == "B-draft"
+        )
+        set_detail = client.get(f"/api/baseline-sets/{set_id}")
+        assert (
+            set_detail.json()["runs"][0]["selection"]["prompt_a"]["version"]
+            == "A-draft"
+        )
+    finally:
+        app.dependency_overrides.clear()
+        db.close()
+        engine.dispose()

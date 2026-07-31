@@ -604,6 +604,18 @@ class BaselineSetCreateRequest(BaseModel):
         return self
 
 
+class BaselineRunCreateRequest(BaseModel):
+    prompt_a_id: int | None = Field(default=None, ge=1)
+    prompt_b_id: int | None = Field(default=None, ge=1)
+    dimension_schema_id: int | None = Field(default=None, ge=1)
+
+    @model_validator(mode="after")
+    def validate_prompt_pair(self) -> "BaselineRunCreateRequest":
+        if (self.prompt_a_id is None) != (self.prompt_b_id is None):
+            raise ValueError("手动选择提示词时必须同时指定 A 与 B 版本")
+        return self
+
+
 class BaselineOptimizationQueueRequest(BaseModel):
     item_ids: list[int] = Field(min_length=1, max_length=1000)
 
@@ -5697,6 +5709,60 @@ def _create_regression_runs(
     return run_ids
 
 
+def _baseline_run_selection(
+    run: BaselineRegressionRun,
+) -> dict[str, Any]:
+    try:
+        strategy = safe_strategy_snapshot_payload(
+            run.strategy_snapshot_json
+        )
+    except ValueError:
+        strategy = {}
+
+    def prompt_identity(stage: str) -> dict[str, Any] | None:
+        raw = strategy.get(f"prompt_{stage.casefold()}")
+        if not isinstance(raw, dict):
+            return None
+        return {
+            "id": raw.get("id"),
+            "stage": raw.get("stage") or stage,
+            "name": raw.get("name"),
+            "version": raw.get("version"),
+            "rubric_version": raw.get("rubric_version"),
+        }
+
+    dimension_set = strategy.get("dimension_schema_set")
+    raw_schemas = (
+        dimension_set.get("schemas")
+        if isinstance(dimension_set, dict)
+        else []
+    )
+    schemas = [
+        {
+            "schema_key": item.get("schema_key"),
+            "version": item.get("version"),
+            "schema_type": item.get("schema_type"),
+            "family_key": item.get("family_key"),
+            "canonical_hash": item.get("canonical_hash"),
+        }
+        for item in raw_schemas
+        if isinstance(item, dict)
+    ]
+    return {
+        "schema_version": "baseline-run-selection-v1",
+        "prompt_a": prompt_identity("A"),
+        "prompt_b": prompt_identity("B"),
+        "dimension": {
+            "mode": "strategy_snapshot",
+            "manual_selection_supported": False,
+            "route_policy_id": strategy.get(
+                "dimension_route_policy_id"
+            ),
+            "schemas": schemas,
+        },
+    }
+
+
 def _baseline_run_summary(run: BaselineRegressionRun) -> dict[str, Any]:
     try:
         metrics = json.loads(run.metrics_json or "{}")
@@ -5715,6 +5781,7 @@ def _baseline_run_summary(run: BaselineRegressionRun) -> dict[str, Any]:
         "valid_predictions": run.valid_predictions,
         "failed": run.failed,
         "metrics": metrics,
+        "selection": _baseline_run_selection(run),
         "created_by": run.created_by,
         "created_at": run.created_at,
         "finished_at": run.finished_at,
@@ -5928,14 +5995,27 @@ def baseline_set_detail(
 @app.post("/api/baseline-sets/{baseline_set_id}/runs")
 def create_baseline_run(
     baseline_set_id: int,
+    payload: BaselineRunCreateRequest | None = None,
     user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
+    request = payload or BaselineRunCreateRequest()
     baseline_set = db.get(BaselineSet, baseline_set_id)
     if baseline_set is None:
         raise HTTPException(status_code=404, detail="基准集不存在")
     if not baseline_set.items:
         raise HTTPException(status_code=409, detail="空基准集不能创建 run")
+    if request.dimension_schema_id is not None:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "DIMENSION_VERSION_SELECTION_NOT_ENABLED",
+                "message": (
+                    "维度版本手动选择能力已预留，当前回归仍使用"
+                    " StrategyBundle 冻结的维度集合"
+                ),
+            },
+        )
     running = db.scalar(
         select(BaselineRegressionRun.id).where(
             BaselineRegressionRun.baseline_set_id == baseline_set.id,
@@ -5951,24 +6031,50 @@ def create_baseline_run(
         .order_by(ModelConfig.id.asc())
         .limit(1)
     )
-    prompt_a = db.scalar(
-        select(PromptVersion)
-        .where(
-            PromptVersion.stage == "A",
-            PromptVersion.status == "published",
+    if request.prompt_a_id is not None:
+        assert request.prompt_b_id is not None
+        prompt_a = db.get(PromptVersion, request.prompt_a_id)
+        prompt_b = db.get(PromptVersion, request.prompt_b_id)
+        missing = [
+            label
+            for label, prompt in (("A", prompt_a), ("B", prompt_b))
+            if prompt is None
+        ]
+        if missing:
+            raise HTTPException(
+                status_code=404,
+                detail=f"所选 {'/'.join(missing)} 提示词版本不存在",
+            )
+        if prompt_a.stage != "A" or prompt_b.stage != "B":
+            raise HTTPException(
+                status_code=422,
+                detail="所选提示词阶段不匹配：A 选择器只能选 A，B 选择器只能选 B",
+            )
+    else:
+        prompt_a = db.scalar(
+            select(PromptVersion)
+            .where(
+                PromptVersion.stage == "A",
+                PromptVersion.status == "published",
+            )
+            .order_by(
+                PromptVersion.created_at.desc(),
+                PromptVersion.id.desc(),
+            )
+            .limit(1)
         )
-        .order_by(PromptVersion.created_at.desc(), PromptVersion.id.desc())
-        .limit(1)
-    )
-    prompt_b = db.scalar(
-        select(PromptVersion)
-        .where(
-            PromptVersion.stage == "B",
-            PromptVersion.status == "published",
+        prompt_b = db.scalar(
+            select(PromptVersion)
+            .where(
+                PromptVersion.stage == "B",
+                PromptVersion.status == "published",
+            )
+            .order_by(
+                PromptVersion.created_at.desc(),
+                PromptVersion.id.desc(),
+            )
+            .limit(1)
         )
-        .order_by(PromptVersion.created_at.desc(), PromptVersion.id.desc())
-        .limit(1)
-    )
     if model_config is None or prompt_a is None or prompt_b is None:
         raise HTTPException(
             status_code=409,
@@ -6065,6 +6171,9 @@ def create_baseline_run(
             "sequence_no": sequence_no,
             "strategy_bundle_id": bundle.id,
             "strategy_canonical_id": bundle.canonical_hash,
+            "prompt_a_id": prompt_a.id,
+            "prompt_b_id": prompt_b.id,
+            "dimension_selection_mode": "strategy_snapshot",
             "total": run.total,
         },
         event_key=f"baseline-run:{run.id}:created",
@@ -6146,7 +6255,11 @@ def baseline_run_detail(
                 "finished_at": item.finished_at,
             }
         )
-    previous = db.get(BaselineRegressionRun, run.previous_run_id)
+    previous = (
+        db.get(BaselineRegressionRun, run.previous_run_id)
+        if run.previous_run_id is not None
+        else None
+    )
     return {
         "summary": _baseline_run_summary(run),
         "baseline_set": _baseline_set_summary(run.baseline_set),
