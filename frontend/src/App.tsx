@@ -80,8 +80,8 @@ export default function App() {
         {user ? (
           <Route element={<AppShell user={user} />}>
             <Route index element={<Navigate to="/workflow/materials/packages" replace />} />
-            <Route path="workflow/materials/packages" element={<AssetsPage view="packages" />} />
-            <Route path="workflow/materials/assets" element={<AssetsPage view="assets" />} />
+            <Route path="workflow/materials/packages" element={<AssetsPage />} />
+            <Route path="workflow/materials/assets" element={<Navigate to="/workflow/materials/packages" replace />} />
             <Route path="workflow/materials/jobs" element={<JobsPage />} />
             <Route path="workflow/review/:reviewView" element={<Suspense fallback={<RouteLoading />}><ReviewPage user={user} /></Suspense>} />
             <Route path="workflow/optimization/cases" element={<Suspense fallback={<RouteLoading />}><OptimizationCasesPage /></Suspense>} />
@@ -100,7 +100,7 @@ export default function App() {
             <Route path="workflow/governance/canary" element={<Suspense fallback={<RouteLoading />}><CanaryRunsPage /></Suspense>} />
             <Route path="workflow/governance/audit" element={<Suspense fallback={<RouteLoading />}><AuditEventsPage /></Suspense>} />
 
-            <Route path="assets" element={<Navigate to="/workflow/materials/assets" replace />} />
+            <Route path="assets" element={<Navigate to="/workflow/materials/packages" replace />} />
             <Route path="jobs" element={<Navigate to="/workflow/materials/jobs" replace />} />
             <Route path="review" element={<Navigate to="/workflow/review/low-confidence" replace />} />
             <Route path="review/:reviewStage" element={<LegacyReviewRedirect />} />

@@ -27,7 +27,6 @@ export const workflowDomains = [
     icon: Images,
     tabs: [
       { to: "/workflow/materials/packages", label: "素材包" },
-      { to: "/workflow/materials/assets", label: "素材选择" },
       { to: "/workflow/materials/jobs", label: "评测任务" },
     ],
   },

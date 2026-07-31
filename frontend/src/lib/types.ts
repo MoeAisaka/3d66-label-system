@@ -155,6 +155,7 @@ export type Asset = {
   created_at: string
   image_url: string
   duplicate?: boolean
+  restored?: boolean
   evaluation_status?:
     | "not_evaluated"
     | "evaluated_old"
@@ -288,6 +289,8 @@ export type MaterialPackage = {
   source: "manual_upload" | "production_import" | "legacy_backfill"
   item_count: number
   unique_asset_count: number
+  active_asset_count: number
+  removed_asset_count: number
   duplicate_count: number
   status_summary: Record<NonNullable<Asset["evaluation_status"]>, number>
   created_by: string

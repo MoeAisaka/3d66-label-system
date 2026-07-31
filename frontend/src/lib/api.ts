@@ -5,6 +5,7 @@ import type {
   BaselineRegressionRun,
   BaselineSetDetail,
   BaselineSetSummary,
+  MaterialPackage,
 } from "@/lib/types"
 
 export type ApiErrorDetail = {
@@ -81,11 +82,20 @@ export function jsonBody(value: unknown): RequestInit {
 }
 
 export const baselineRegressionApi = {
-  listAssets: () => api<{ items: Asset[]; total: number }>("/api/assets?limit=1000"),
-  uploadAssets: (files: FileList | File[]) => {
+  listAssets: (packageId?: number) => {
+    const params = new URLSearchParams({ limit: "1000" })
+    if (packageId) params.set("package_id", String(packageId))
+    return api<{ items: Asset[]; total: number }>(`/api/assets?${params.toString()}`)
+  },
+  listPackages: () => api<{ items: MaterialPackage[] }>("/api/material-packages?limit=500"),
+  uploadAssets: (files: readonly File[], packageName?: string) => {
     const form = new FormData()
-    Array.from(files).forEach((file) => form.append("files", file))
-    return api<{ items: Asset[] }>("/api/assets/upload", { method: "POST", body: form })
+    files.forEach((file) => form.append("files", file))
+    if (packageName?.trim()) form.append("package_name", packageName.trim())
+    return api<{
+      items: Asset[]
+      package: { id: number; name: string; item_count: number }
+    }>("/api/assets/upload", { method: "POST", body: form })
   },
   listSets: () => api<{ items: BaselineSetSummary[] }>("/api/baseline-sets"),
   getSet: (setId: number) => api<BaselineSetDetail>(`/api/baseline-sets/${setId}`),
@@ -93,6 +103,7 @@ export const baselineRegressionApi = {
     name: string
     description: string
     default_expected_level: BaselineLevel
+    source_package_id?: number
     items: Array<{
       asset_id: number
       expected_level?: BaselineLevel
@@ -109,4 +120,13 @@ export const baselineRegressionApi = {
   getRun: (runId: number) => api<BaselineRegressionDetail>(
     `/api/baseline-regressions/${runId}`,
   ),
+  enqueueDeviations: (runId: number, itemIds: number[]) => api<{
+    run_id: number
+    case_ids: number[]
+    created: number
+    idempotent: boolean
+  }>(`/api/baseline-regressions/${runId}/optimization-cases`, {
+    method: "POST",
+    ...jsonBody({ item_ids: itemIds }),
+  }),
 }
