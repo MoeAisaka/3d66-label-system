@@ -18,8 +18,8 @@
 - 健康检查：`http://192.168.1.35:8081/api/health`。
 - 发布目标固定为 Codeup `main`，发布前制作临时 Git bundle，通过 SSH 上传，
   服务器脚本构建并检查健康状态，失败自动回滚上一个提交。
-- Windows 双击 `部署测试环境.cmd`；macOS 执行
-  `./部署测试环境.command`；两者都调用同一个 `scripts/deploy-test.py`。
+- 仓库根目录不放置双击部署入口；Windows 和 macOS 入口单独分发，最终都调用
+  仓库内同一个 `scripts/deploy-test.py`。
 - 当前不需要 Jenkins。需要自动触发、审批或发布记录时，可在云效流水线中调用
   同一个脚本，继续复用服务器端的发布保护和回滚逻辑。
 - 脚本默认要求人工输入 `DEPLOY` 确认；仅在已确认目标提交时才使用 `--yes`。
