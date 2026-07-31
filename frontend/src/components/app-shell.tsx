@@ -51,8 +51,8 @@ export const workflowDomains = [
     label: "优化与回归",
     icon: Brain,
     tabs: [
-      { to: "/workflow/optimization/cases", label: "纠偏案例队列" },
-      { to: "/workflow/optimization/automation", label: "自动优化编排" },
+      { to: "/workflow/optimization/cases", label: "1 案例池" },
+      { to: "/workflow/optimization/automation", label: "2 组批与优化" },
       { to: "/workflow/optimization/feedback", label: "生产案例回流" },
       { to: "/workflow/optimization/candidates", label: "候选提示词" },
       { to: "/workflow/optimization/paired-regression", label: "小样本配对回归" },

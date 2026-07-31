@@ -156,6 +156,13 @@ export type Asset = {
   image_url: string
   duplicate?: boolean
   restored?: boolean
+  suggested_expected_level?: BaselineLevel | null
+  level_suggestion?: {
+    schema_version: "filename-level-suggestion-v1"
+    status: "matched" | "conflict" | "unmatched"
+    suggested_level: BaselineLevel | null
+    matches: Array<{ level: BaselineLevel; token: string }>
+  }
   evaluation_status?:
     | "not_evaluated"
     | "evaluated_old"
@@ -258,6 +265,8 @@ export type BaselineSetItem = {
     width: number | null
     height: number | null
     source_package_id: number | null
+    expected_level_source?: "filename" | "batch_default" | "manual_override"
+    filename_level_suggestion?: Asset["level_suggestion"]
     created_at: string
   }
   image_url: string
@@ -281,10 +290,33 @@ export type BaselineRegressionItem = {
   authoritative_score: number | null
   cap_reasons: Array<Record<string, unknown>>
   stage_a: Record<string, unknown>
+  level_explanation: {
+    schema_version: "baseline-level-explanation-v1"
+    status: "available" | "out_of_scope" | "incomplete" | "unavailable_historical"
+    predicted_level: BaselineLevel | null
+    authoritative_score: number | null
+    scope_status: string | null
+    strong_dimensions: Array<{
+      key: string
+      grade: number
+      evidence: string[]
+      defects: string[]
+    }>
+    weak_dimensions: Array<{
+      key: string
+      grade: number
+      evidence: string[]
+      defects: string[]
+    }>
+    caps: Array<Record<string, unknown>>
+    review_reasons: string[]
+    message?: string
+  }
   status: "queued" | "completed" | "failed"
   deviation: boolean
   error_message: string
   evaluation_id: number | null
+  evaluation: Evaluation | null
   job_id: number | null
   run_id: number
   optimization_case_id: number | null

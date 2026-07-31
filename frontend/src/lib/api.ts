@@ -105,6 +105,7 @@ export const baselineRegressionApi = {
     description: string
     default_expected_level: BaselineLevel
     source_package_id?: number
+    expected_level_overrides?: Record<number, BaselineLevel>
     items: Array<{
       asset_id: number
       expected_level?: BaselineLevel

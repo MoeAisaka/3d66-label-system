@@ -1,5 +1,13 @@
-import { ArrowRight, Clock, Play, Prohibit, ShieldWarning } from "@phosphor-icons/react"
-import { useEffect, useState, type ReactNode } from "react"
+import {
+  ArrowRight,
+  CheckCircle,
+  Clock,
+  GearSix,
+  Play,
+  Prohibit,
+  ShieldWarning,
+} from "@phosphor-icons/react"
+import { useEffect, useMemo, useState, type ReactNode } from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { Link } from "react-router-dom"
 import { toast } from "sonner"
@@ -43,18 +51,41 @@ export function OptimizationCasesPage() {
     queryKey: ["optimization-cases"],
     queryFn: () => api<{ items: OptimizationCase[] }>("/api/optimization-cases?limit=500"),
   })
+  const counts = caseCounts(cases.data?.items ?? [])
   return (
     <>
       <PageHeader
         index="03.1"
-        title="纠偏案例队列"
-        description="初审最终纠偏以幂等事件进入这里；队列只沉淀证据，不会自动调用优化模型或发布提示词。"
+        title="纠偏案例池"
+        description="人工纠偏和基准偏差先沉淀为可追溯案例，再按同一提示词版本组批。这里负责准备证据，不会自动调用模型或发布提示词。"
       />
       <div className="mx-auto max-w-[1540px] px-5 py-8 md:px-8 lg:px-10">
+        <OptimizationFlow activeStep={1} />
+        <section className="mt-6 grid gap-px border-y border-[var(--line-strong)] bg-[var(--line)] md:grid-cols-[1fr_1fr_1fr_minmax(260px,1.4fr)]">
+          <StatusCount label="待组批" value={counts.pending} />
+          <StatusCount label="已形成批次" value={counts.batched + counts.processing} />
+          <StatusCount label="已完成优化" value={counts.completed} />
+          <div className="bg-[#f7fadf] px-5 py-4">
+            <p className="text-xs font-semibold text-[var(--muted)]">当前下一步</p>
+            <p className="mt-2 text-sm font-semibold">
+              {counts.pending
+                ? `有 ${counts.pending} 条案例等待按提示词版本组批`
+                : "暂无待组批案例，继续完成纠偏或基准回归"}
+            </p>
+            {counts.pending > 0 && (
+              <Button asChild size="sm" className="mt-3">
+                <Link to="/workflow/optimization/automation">
+                  去生成安全试跑计划<ArrowRight />
+                </Link>
+              </Button>
+            )}
+          </div>
+        </section>
         <DataTable
+          className="mt-6"
           loading={cases.isLoading}
           empty="还没有完成的纠偏案例"
-          headers={["优先级", "来源", "证据", "提示词版本", "队列状态", "进入时间", "下一步"]}
+          headers={["优先级", "来源", "证据", "提示词版本", "当前状态", "进入时间", "下一步"]}
           rows={(cases.data?.items ?? []).map((item) => [
             <Badge key="severity" tone={item.severity === "P0" || item.severity === "P1" ? "danger" : "warning"}>{item.severity}</Badge>,
             <Badge key="source">{item.source_type === "production_feedback" ? "生产回流" : "实验台初审"}</Badge>,
@@ -62,7 +93,20 @@ export function OptimizationCasesPage() {
             <span key="prompt" className="font-data text-xs">{item.prompt_version}</span>,
             <Badge key="status">{caseStatus(item.status)}</Badge>,
             <span key="time" className="font-data text-xs text-[var(--muted)]">{new Date(item.created_at).toLocaleString("zh-CN")}</span>,
-            <Button key="next" asChild size="sm" variant="secondary"><Link to="/workflow/optimization/automation">查看自动编排<ArrowRight /></Link></Button>,
+            <Button key="next" asChild size="sm" variant="secondary">
+              <Link to={
+                item.status === "completed"
+                  ? "/workflow/optimization/candidates"
+                  : "/workflow/optimization/automation"
+              }>
+                {item.status === "pending"
+                  ? "配置本批"
+                  : item.status === "completed"
+                    ? "查看候选"
+                    : "查看运行"}
+                <ArrowRight />
+              </Link>
+            </Button>,
           ])}
         />
       </div>
@@ -80,28 +124,27 @@ export function AutomationControlPage() {
     queryKey: ["automation-runs"],
     queryFn: () => api<{ items: AutomationRun[] }>("/api/automation-runs?limit=100"),
   })
+  const cases = useQuery({
+    queryKey: ["optimization-cases"],
+    queryFn: () => api<{ items: OptimizationCase[] }>("/api/optimization-cases?limit=500"),
+  })
   const [draft, setDraft] = useState<AutomationPolicy | null>(null)
   const [riskConfirmed, setRiskConfirmed] = useState(false)
   const me = useQuery({ queryKey: ["me"], queryFn: () => api<User>("/api/auth/me") })
   useEffect(() => {
     if (policy.data) setDraft(policy.data)
   }, [policy.data])
+  const batchPreview = useMemo(
+    () => draft ? nextAutomationBatch(cases.data?.items ?? [], draft) : null,
+    [cases.data?.items, draft],
+  )
   const save = useMutation({
-    mutationFn: () => api<AutomationPolicy>("/api/automation-policy", {
+    mutationFn: () => draft
+      ? api<AutomationPolicy>("/api/automation-policy", {
       method: "PUT",
-      ...jsonBody({
-        enabled: draft?.enabled,
-        dry_run: draft?.dry_run,
-        case_threshold: draft?.case_threshold,
-        immediate_severities: draft?.immediate_severities,
-        daily_budget_micros: draft?.daily_budget_micros,
-        cooldown_seconds: draft?.cooldown_seconds,
-        max_candidates: draft?.max_candidates,
-        lease_seconds: draft?.lease_seconds,
-        max_attempts: draft?.max_attempts,
-        base_retry_seconds: draft?.base_retry_seconds,
-      }),
-    }),
+      ...jsonBody(automationPolicyBody(draft)),
+    })
+      : Promise.reject(new Error("自动优化策略尚未加载")),
     onSuccess: async (saved) => {
       setDraft(saved)
       await queryClient.invalidateQueries({ queryKey: ["automation-policy"] })
@@ -122,28 +165,153 @@ export function AutomationControlPage() {
     },
     onError: (error) => toast.error(error.message),
   })
+  const safeTrial = useMutation({
+    mutationFn: async () => {
+      if (!draft || !batchPreview?.caseCount) {
+        throw new Error("当前没有可组批案例")
+      }
+      const safeDraft: AutomationPolicy = {
+        ...draft,
+        enabled: true,
+        dry_run: true,
+        case_threshold: batchPreview.caseCount,
+      }
+      const saved = await api<AutomationPolicy>("/api/automation-policy", {
+        method: "PUT",
+        ...jsonBody(automationPolicyBody(safeDraft)),
+      })
+      const result = await api<{ status: string; run_id?: number }>(
+        "/api/automation-runs/consume",
+        { method: "POST" },
+      )
+      return { saved, result }
+    },
+    onSuccess: async ({ saved, result }) => {
+      setDraft(saved)
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["automation-runs"] }),
+        queryClient.invalidateQueries({ queryKey: ["optimization-cases"] }),
+        queryClient.invalidateQueries({ queryKey: ["automation-policy"] }),
+      ])
+      toast.success(
+        result.status === "planned"
+          ? "安全试跑计划已生成：未调用模型、未产生费用"
+          : `安全试跑检查完成：${automationStatus(result.status)}`,
+      )
+    },
+    onError: (error) => toast.error(error.message),
+  })
   return (
     <>
-      <PageHeader index="03.2" title="自动优化编排" description="消费者默认关闭并保持 dry-run；租约、阈值、P0/P1即时触发、预算、冷却、重试与审计均在本地执行。自动链路最多到发布二审，永不自动发布。" />
-      <div className="mx-auto grid max-w-[1540px] gap-6 px-5 py-8 md:px-8 lg:grid-cols-[380px_minmax(0,1fr)] lg:px-10">
+      <PageHeader
+        index="03.2"
+        title="案例组批与优化"
+        description="把同一提示词版本的纠偏案例组成一批，先用安全试跑确认范围，再决定是否调用优化模型生成候选。任何模式都不会自动发布。"
+      />
+      <div className="mx-auto max-w-[1540px] px-5 py-8 md:px-8 lg:px-10">
+        <OptimizationFlow activeStep={2} />
+        <section className="mt-6 grid gap-px border-y border-[var(--line-strong)] bg-[var(--line)] lg:grid-cols-[minmax(0,1.3fr)_minmax(320px,0.7fr)]">
+          <div className="bg-[#f7fadf] px-5 py-5">
+            <p className="text-xs font-semibold text-[var(--muted)]">当前下一步</p>
+            <h2 className="font-editorial mt-2 text-2xl font-bold">
+              {automationNextTitle(draft, batchPreview)}
+            </h2>
+            <p className="mt-2 max-w-3xl text-sm leading-6 text-[var(--muted)]">
+              {automationNextDescription(draft, batchPreview)}
+            </p>
+            {me.data?.is_admin && batchPreview?.caseCount ? (
+              <Button
+                className="mt-4"
+                onClick={() => safeTrial.mutate()}
+                disabled={safeTrial.isPending}
+              >
+                <Play weight="fill" />
+                {safeTrial.isPending
+                  ? "正在生成试跑计划"
+                  : `生成安全试跑计划（${batchPreview.caseCount} 条）`}
+              </Button>
+            ) : null}
+          </div>
+          <div className="bg-white px-5 py-5">
+            <p className="text-xs font-semibold text-[var(--muted)]">本次预计处理</p>
+            <p className="font-data mt-2 text-3xl font-bold">{batchPreview?.caseCount ?? 0}</p>
+            <p className="mt-2 truncate text-xs text-[var(--muted)]" title={batchPreview?.promptVersion ?? ""}>
+              提示词版本：{batchPreview?.promptVersion ?? "暂无"}
+            </p>
+            <p className="mt-3 text-xs leading-5 text-[var(--muted)]">
+              安全试跑会自动启用消费者、保持 dry-run，并把门槛设置为本批数量；只冻结计划，不调用模型。
+            </p>
+          </div>
+        </section>
+      </div>
+      <div className="mx-auto grid max-w-[1540px] gap-6 px-5 pb-8 md:px-8 lg:grid-cols-[420px_minmax(0,1fr)] lg:px-10">
         <section className="border-y border-[var(--line-strong)] bg-white p-5">
-          <div className="flex items-center justify-between"><h2 className="font-editorial text-xl font-bold">消费者策略</h2><Badge tone={draft?.enabled ? "active" : "neutral"}>{draft?.enabled ? "已启用" : "已关闭"}</Badge></div>
+          <div className="flex items-center justify-between"><h2 className="font-editorial text-xl font-bold">运行方式</h2><Badge tone={draft?.enabled ? "active" : "neutral"}>{draft?.enabled ? "已启用" : "已关闭"}</Badge></div>
           {!draft ? <div className="mt-5 h-64 animate-pulse bg-[#fafbf8]" /> : !me.data?.is_admin ? (
             <p className="mt-5 border-y border-[var(--line)] py-4 text-sm text-[var(--muted)]">当前账号可查看运行与预算，但无权修改执行策略。</p>
           ) : (
             <div className="mt-5 space-y-4">
-              <ToggleLine label="启用自动消费者" checked={draft.enabled} onChange={(enabled) => setDraft({ ...draft, enabled })} />
-              <ToggleLine label="安全 dry-run" checked={draft.dry_run} onChange={(dry_run) => setDraft({ ...draft, dry_run })} />
-              <NumberField label="组批阈值" value={draft.case_threshold} min={1} onChange={(case_threshold) => setDraft({ ...draft, case_threshold })} />
-              <NumberField label="日预算（微单位）" value={draft.daily_budget_micros} min={0} onChange={(daily_budget_micros) => setDraft({ ...draft, daily_budget_micros })} />
-              <NumberField label="冷却秒数" value={draft.cooldown_seconds} min={0} onChange={(cooldown_seconds) => setDraft({ ...draft, cooldown_seconds })} />
-              <NumberField label="候选上限" value={draft.max_candidates} min={1} max={5} onChange={(max_candidates) => setDraft({ ...draft, max_candidates })} />
-              <NumberField label="租约秒数" value={draft.lease_seconds} min={30} max={3600} onChange={(lease_seconds) => setDraft({ ...draft, lease_seconds })} />
-              <NumberField label="最大尝试次数" value={draft.max_attempts} min={1} max={10} onChange={(max_attempts) => setDraft({ ...draft, max_attempts })} />
-              <NumberField label="基础退避秒数" value={draft.base_retry_seconds} min={1} max={86400} onChange={(base_retry_seconds) => setDraft({ ...draft, base_retry_seconds })} />
+              <ToggleLine
+                label="允许队列自动组批"
+                description="开启后，系统才会检查案例数量并形成优化批次。"
+                checked={draft.enabled}
+                onChange={(enabled) => setDraft({ ...draft, enabled })}
+              />
+              <ToggleLine
+                label="只生成试运行计划"
+                description="开启时不调用模型、不计费，只验证会选中哪些案例。首次使用建议保持开启。"
+                checked={draft.dry_run}
+                onChange={(dry_run) => setDraft({ ...draft, dry_run })}
+              />
+              <NumberField
+                label="同版本组批数量"
+                description="同一提示词版本累计到多少条案例时形成一批。"
+                value={draft.case_threshold}
+                min={1}
+                onChange={(case_threshold) => setDraft({ ...draft, case_threshold })}
+              />
+              <SeverityField
+                values={draft.immediate_severities}
+                onChange={(immediate_severities) => setDraft({
+                  ...draft,
+                  immediate_severities,
+                })}
+              />
+              <NumberField
+                label="每批最多生成候选"
+                description="真实执行时最多创建几个候选提示词草稿，范围为 1–5。"
+                value={draft.max_candidates}
+                min={1}
+                max={5}
+                onChange={(max_candidates) => setDraft({ ...draft, max_candidates })}
+              />
+              <NumberField
+                label="每日费用上限"
+                description="系统最小计费单位；0 表示只能试运行，真实执行必须大于 0。"
+                value={draft.daily_budget_micros}
+                min={0}
+                onChange={(daily_budget_micros) => setDraft({ ...draft, daily_budget_micros })}
+              />
+              <details className="border-y border-[var(--line)] bg-[#fafbf8]">
+                <summary className="flex cursor-pointer items-center gap-2 px-3 py-3 text-sm font-semibold">
+                  <GearSix />高级恢复设置（通常无需修改）
+                </summary>
+                <div className="space-y-4 border-t border-[var(--line)] px-3 py-4">
+                  <NumberField label="两批冷却时间" description="避免短时间连续触发，单位为秒。" value={draft.cooldown_seconds} min={0} onChange={(cooldown_seconds) => setDraft({ ...draft, cooldown_seconds })} />
+                  <NumberField label="单次占用保护时间" description="执行异常退出后，超过该时间可由系统回收批次。" value={draft.lease_seconds} min={30} max={3600} onChange={(lease_seconds) => setDraft({ ...draft, lease_seconds })} />
+                  <NumberField label="失败最多尝试次数" description="只对可重试的网络或限流故障生效。" value={draft.max_attempts} min={1} max={10} onChange={(max_attempts) => setDraft({ ...draft, max_attempts })} />
+                  <NumberField label="首次重试等待" description="后续失败按 2 倍递增等待，单位为秒。" value={draft.base_retry_seconds} min={1} max={86400} onChange={(base_retry_seconds) => setDraft({ ...draft, base_retry_seconds })} />
+                </div>
+              </details>
               <div className="border-y border-[#e8c876] bg-[#fff9e9] px-3 py-3 text-xs leading-5 text-[#6f5513]">{draft.real_model_calls_enabled ? "优化执行器已连接；关闭 dry-run 后将发生真实计费，但只会创建候选草稿和配对回归。" : "优化执行器尚不可用；请先在模型配置中补齐密钥、输入上限和非零计价。"} 自动发布永久关闭。</div>
               {draft.enabled && !draft.dry_run && <label className="flex items-start gap-3 border-y border-[#c55b52] bg-[#fff0ee] px-3 py-3 text-xs leading-5 text-[#7d201a]"><input className="mt-1 size-4" type="checkbox" checked={riskConfirmed} onChange={(event) => setRiskConfirmed(event.target.checked)} /><span>确认已核对日预算、真实计价和锁定黄金样本；保存后消费者可产生真实模型费用。</span></label>}
-              <div className="flex gap-2"><Button onClick={() => save.mutate()} disabled={save.isPending || (draft.enabled && !draft.dry_run && !riskConfirmed)}>保存策略</Button><Button variant="secondary" onClick={() => consume.mutate()} disabled={consume.isPending}>立即检查一次</Button></div>
+              <div className="flex flex-wrap gap-2">
+                <Button variant="secondary" onClick={() => save.mutate()} disabled={save.isPending || (draft.enabled && !draft.dry_run && !riskConfirmed)}>保存配置</Button>
+                <Button variant="ghost" onClick={() => consume.mutate()} disabled={consume.isPending || !draft.enabled}>按当前配置检查队列</Button>
+                {!draft.real_model_calls_enabled && !draft.dry_run && (
+                  <Button asChild variant="ghost"><Link to="/workflow/governance/model-config">配置优化模型<ArrowRight /></Link></Button>
+                )}
+              </div>
             </div>
           )}
         </section>
@@ -152,7 +320,7 @@ export function AutomationControlPage() {
           <DataTable
             loading={runs.isLoading}
             empty="还没有自动优化运行"
-            headers={["运行", "提示词", "触发", "模式", "状态", "案例 / 候选", "成本 / Token", "失败与重试"]}
+            headers={["运行", "提示词", "触发", "模式", "状态", "案例 / 候选", "成本 / Token", "下一步"]}
             rows={(runs.data?.items ?? []).map((run) => [
               <span key="id" className="font-data">#{run.id}</span>,
               <span key="prompt" className="font-data text-xs">{run.base_prompt_version}</span>,
@@ -161,7 +329,7 @@ export function AutomationControlPage() {
               <Badge key="status" tone={run.status === "failed" ? "danger" : run.status === "succeeded" || run.status === "awaiting_release_review" ? "success" : run.status === "processing" ? "active" : "neutral"}>{automationStatus(run.status)}</Badge>,
               <span key="cases" className="font-data">{run.case_ids.length} / {run.candidate_count}</span>,
               <span key="cost" className="font-data text-xs">{run.actual_cost_micros} / {run.total_tokens ?? "—"}</span>,
-              <span key="retry" className="text-xs text-[var(--muted)]">{run.error_message ? `${executorError(run.error_message)}${run.retryable ? "，将按策略退避重试" : "，已终止重试"}` : "—"}</span>,
+              <RunNextStep key="next" run={run} />,
             ])}
           />
         </section>
@@ -683,9 +851,248 @@ export function CapabilityStatusPage({ kind }: { kind: "benchmark" | "candidates
   )
 }
 
-function DataTable({ loading, empty, headers, rows }: { loading: boolean; empty: string; headers: string[]; rows: ReactNode[][] }) {
+type AutomationSeverity = AutomationPolicy["immediate_severities"][number]
+
+function OptimizationFlow({ activeStep }: { activeStep: 1 | 2 | 3 }) {
+  const steps = [
+    { index: 1, title: "收集案例", description: "人工纠偏与基准偏差进入案例池" },
+    { index: 2, title: "组批与生成", description: "先安全试跑，再按需调用优化模型" },
+    { index: 3, title: "验证候选", description: "配对回归与人工发布决策" },
+  ] as const
   return (
-    <div className="overflow-x-auto border-y border-[var(--line-strong)] bg-white">
+    <ol className="grid gap-px border-y border-[var(--line-strong)] bg-[var(--line)] md:grid-cols-3">
+      {steps.map((step) => (
+        <li
+          key={step.index}
+          aria-current={step.index === activeStep ? "step" : undefined}
+          className={`grid grid-cols-[36px_minmax(0,1fr)] gap-3 px-4 py-4 ${
+            step.index === activeStep ? "bg-[#f7fadf]" : "bg-white"
+          }`}
+        >
+          <span className={`font-data flex size-8 items-center justify-center border text-sm font-bold ${
+            step.index < activeStep
+              ? "border-[#7ca08a] bg-[#edf7f0] text-[#245b3b]"
+              : step.index === activeStep
+                ? "border-[#8da91e] bg-primary"
+                : "border-[var(--line-strong)] text-[var(--muted)]"
+          }`}>
+            {step.index < activeStep ? <CheckCircle weight="fill" /> : step.index}
+          </span>
+          <div>
+            <p className="text-sm font-semibold">{step.title}</p>
+            <p className="mt-1 text-xs leading-5 text-[var(--muted)]">{step.description}</p>
+          </div>
+        </li>
+      ))}
+    </ol>
+  )
+}
+
+function StatusCount({ label, value }: { label: string; value: number }) {
+  return (
+    <div className="bg-white px-5 py-4">
+      <p className="text-xs font-semibold text-[var(--muted)]">{label}</p>
+      <p className="font-data mt-2 text-2xl font-bold">{value}</p>
+    </div>
+  )
+}
+
+function caseCounts(items: OptimizationCase[]) {
+  return {
+    pending: items.filter((item) => item.status === "pending" || item.status === "failed").length,
+    batched: items.filter((item) => item.status === "batched").length,
+    processing: items.filter((item) => item.status === "processing").length,
+    completed: items.filter((item) => item.status === "completed").length,
+  }
+}
+
+function automationPolicyBody(policy: AutomationPolicy) {
+  return {
+    enabled: policy.enabled,
+    dry_run: policy.dry_run,
+    case_threshold: policy.case_threshold,
+    immediate_severities: policy.immediate_severities,
+    daily_budget_micros: policy.daily_budget_micros,
+    cooldown_seconds: policy.cooldown_seconds,
+    max_candidates: policy.max_candidates,
+    lease_seconds: policy.lease_seconds,
+    max_attempts: policy.max_attempts,
+    base_retry_seconds: policy.base_retry_seconds,
+  }
+}
+
+function nextAutomationBatch(
+  items: OptimizationCase[],
+  policy: AutomationPolicy,
+) {
+  const current = Date.now()
+  const available = items
+    .filter((item) => (
+      item.attempt_count < policy.max_attempts
+      && (
+        item.status === "pending"
+        || (
+          item.status === "failed"
+          && item.next_attempt_at !== null
+          && new Date(item.next_attempt_at).getTime() <= current
+        )
+      )
+    ))
+    .sort((a, b) => (
+      new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
+      || a.id - b.id
+    ))
+  const immediate = available.find((item) =>
+    policy.immediate_severities.includes(item.severity),
+  )
+  const promptVersion = immediate?.prompt_version ?? available[0]?.prompt_version
+  const samePrompt = promptVersion
+    ? available.filter((item) => item.prompt_version === promptVersion)
+    : []
+  return {
+    caseCount: samePrompt.length,
+    promptVersion: promptVersion ?? null,
+    immediateSeverity: immediate?.severity ?? null,
+    required: policy.case_threshold,
+    ready: Boolean(immediate || samePrompt.length >= policy.case_threshold),
+  }
+}
+
+function automationNextTitle(
+  policy: AutomationPolicy | null,
+  batch: ReturnType<typeof nextAutomationBatch> | null,
+) {
+  if (!policy) return "正在读取运行条件"
+  if (!batch?.caseCount) return "等待新的纠偏案例"
+  if (!policy.enabled) return "先生成一次安全试跑计划"
+  if (!batch.ready) return `同版本案例还差 ${Math.max(0, batch.required - batch.caseCount)} 条`
+  if (policy.dry_run) return "当前批次可以安全试跑"
+  if (!policy.real_model_calls_enabled) return "先补齐优化模型配置"
+  if (policy.daily_budget_micros <= 0) return "先设置真实执行费用上限"
+  return "当前批次可以生成候选提示词"
+}
+
+function automationNextDescription(
+  policy: AutomationPolicy | null,
+  batch: ReturnType<typeof nextAutomationBatch> | null,
+) {
+  if (!policy) return "系统正在核对消费者、案例数量、模型配置和费用门槛。"
+  if (!batch?.caseCount) {
+    return "案例会在人工纠偏完成或基准偏差手动入队后出现在这里。生产回流也会进入同一只追加案例池。"
+  }
+  if (!policy.enabled) {
+    return "点击下方按钮会开启队列消费者、把本批数量设为门槛并保持试运行模式。它只冻结选中的案例范围，不调用模型、不产生费用。"
+  }
+  if (!batch.ready) {
+    return `当前提示词版本 ${batch.promptVersion} 有 ${batch.caseCount} 条可用案例，策略要求 ${batch.required} 条。可以继续积累，也可生成一次以当前数量为门槛的安全试跑。`
+  }
+  if (policy.dry_run) {
+    return "当前设置只会验证组批范围。试跑结果确认无误后，再配置模型、费用上限并关闭试运行，才会真正生成候选。"
+  }
+  if (!policy.real_model_calls_enabled) {
+    return "真实执行需要在“系统治理 → 模型配置”中保存优化模型密钥、输入上限和输入/输出计价。"
+  }
+  return "执行后只会创建候选提示词草稿和配对回归，不会自动发布或切换线上提示词。"
+}
+
+function RunNextStep({ run }: { run: AutomationRun }) {
+  if (run.error_message) {
+    return (
+      <p className="max-w-56 text-xs leading-5 text-[#8d2924]">
+        {executorError(run.error_message)}
+        {run.retryable ? "；系统会按策略重试" : "；需修复后重新检查"}
+      </p>
+    )
+  }
+  if (run.status === "planned") {
+    return (
+      <p className="max-w-56 text-xs leading-5 text-[var(--muted)]">
+        核对本批范围；确认后再配置模型、预算并关闭试运行。
+      </p>
+    )
+  }
+  if (run.status === "succeeded" || run.status === "awaiting_release_review") {
+    return (
+      <Button asChild size="sm" variant="secondary">
+        <Link to="/workflow/optimization/candidates">查看候选<ArrowRight /></Link>
+      </Button>
+    )
+  }
+  return (
+    <p className="max-w-56 text-xs leading-5 text-[var(--muted)]">
+      {run.status === "processing" || run.status === "running"
+        ? "等待执行完成"
+        : "无需操作"}
+    </p>
+  )
+}
+
+function SeverityField({
+  values,
+  onChange,
+}: {
+  values: AutomationSeverity[]
+  onChange: (values: AutomationSeverity[]) => void
+}) {
+  const options: Array<{
+    value: AutomationSeverity
+    label: string
+    description: string
+  }> = [
+    { value: "P0", label: "P0", description: "阻断性严重错误" },
+    { value: "P1", label: "P1", description: "高风险明显错误" },
+    { value: "P2", label: "P2", description: "常规质量偏差" },
+    { value: "P3", label: "P3", description: "低优先级建议" },
+  ]
+  return (
+    <fieldset>
+      <legend className="text-sm font-semibold">无需等满即可触发</legend>
+      <p className="mt-1 text-xs leading-5 text-[var(--muted)]">
+        命中所选优先级时，即使未达到组批数量也可形成一批。至少保留一项。
+      </p>
+      <div className="mt-3 grid grid-cols-2 gap-px bg-[var(--line)]">
+        {options.map((option) => {
+          const checked = values.includes(option.value)
+          return (
+            <label key={option.value} className="flex cursor-pointer gap-2 bg-white px-3 py-3">
+              <input
+                type="checkbox"
+                className="mt-0.5 size-4 accent-[var(--primary)]"
+                checked={checked}
+                onChange={(event) => {
+                  const next = event.target.checked
+                    ? [...values, option.value]
+                    : values.filter((value) => value !== option.value)
+                  if (next.length) onChange(next)
+                }}
+              />
+              <span>
+                <span className="block text-xs font-bold">{option.label}</span>
+                <span className="mt-1 block text-[0.68rem] leading-4 text-[var(--muted)]">{option.description}</span>
+              </span>
+            </label>
+          )
+        })}
+      </div>
+    </fieldset>
+  )
+}
+
+function DataTable({
+  loading,
+  empty,
+  headers,
+  rows,
+  className = "",
+}: {
+  loading: boolean
+  empty: string
+  headers: string[]
+  rows: ReactNode[][]
+  className?: string
+}) {
+  return (
+    <div className={`overflow-x-auto border-y border-[var(--line-strong)] bg-white ${className}`}>
       {loading ? <div className="h-64 animate-pulse bg-white" /> : rows.length ? (
         <table className="w-full min-w-[920px] border-collapse text-left text-sm">
           <thead><tr className="border-b border-[var(--line)] bg-[#fafbf8]">{headers.map((header) => <th key={header} className="px-4 py-3 text-xs font-semibold text-[var(--muted)]">{header}</th>)}</tr></thead>
@@ -700,12 +1107,12 @@ function EmptyLine({ text }: { text: string }) {
   return <div className="flex min-h-56 flex-col items-center justify-center px-6 text-center"><Clock size={28} weight="light" /><p className="mt-3 text-sm text-[var(--muted)]">{text}</p></div>
 }
 
-function ToggleLine({ label, checked, onChange }: { label: string; checked: boolean; onChange: (checked: boolean) => void }) {
-  return <label className="flex items-center justify-between gap-4 border-b border-[var(--line)] pb-3 text-sm font-semibold"><span>{label}</span><input type="checkbox" checked={checked} onChange={(event) => onChange(event.target.checked)} className="size-4 accent-[var(--primary)]" /></label>
+function ToggleLine({ label, description, checked, onChange }: { label: string; description?: string; checked: boolean; onChange: (checked: boolean) => void }) {
+  return <label className="flex items-start justify-between gap-4 border-b border-[var(--line)] pb-3"><span><span className="block text-sm font-semibold">{label}</span>{description && <span className="mt-1 block text-xs leading-5 text-[var(--muted)]">{description}</span>}</span><input type="checkbox" checked={checked} onChange={(event) => onChange(event.target.checked)} className="mt-1 size-4 shrink-0 accent-[var(--primary)]" /></label>
 }
 
-function NumberField({ label, value, min, max, onChange }: { label: string; value: number; min: number; max?: number; onChange: (value: number) => void }) {
-  return <label className="grid grid-cols-[1fr_132px] items-center gap-4 text-sm"><span>{label}</span><input type="number" value={value} min={min} max={max} onChange={(event) => onChange(Number(event.target.value))} className="h-9 rounded-[4px] border border-[var(--line-strong)] px-3 font-data" /></label>
+function NumberField({ label, description, value, min, max, onChange }: { label: string; description?: string; value: number; min: number; max?: number; onChange: (value: number) => void }) {
+  return <label className="grid grid-cols-[minmax(0,1fr)_132px] items-center gap-4"><span><span className="block text-sm font-semibold">{label}</span>{description && <span className="mt-1 block text-xs leading-5 text-[var(--muted)]">{description}</span>}</span><input type="number" value={value} min={min} max={max} onChange={(event) => onChange(Number(event.target.value))} className="h-9 w-full rounded-[4px] border border-[var(--line-strong)] px-3 font-data" /></label>
 }
 
 function Metric({ label, value }: { label: string; value: string }) {

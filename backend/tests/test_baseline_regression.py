@@ -5,7 +5,11 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
-from app.baseline_regression import complete_baseline_item, compute_level_metrics
+from app.baseline_regression import (
+    complete_baseline_item,
+    compute_level_metrics,
+    filename_level_suggestion,
+)
 from app.database import Base, get_db
 from app.main import app, current_user
 from app.models import (
@@ -14,11 +18,23 @@ from app.models import (
     BaselineRegressionRun,
     EvaluationJob,
     EvaluationResult,
+    MaterialPackage,
+    MaterialPackageItem,
     ModelConfig,
     OptimizationCaseQueue,
     PromptVersion,
     User,
 )
+
+
+def test_filename_level_suggestion_is_advisory_and_conflict_safe() -> None:
+    assert filename_level_suggestion("客厅效果图_L2.jpg")["suggested_level"] == "L2"
+    assert filename_level_suggestion("厨房-中差.png")["suggested_level"] == "L3"
+    assert filename_level_suggestion("卧室_过滤.webp")["suggested_level"] == "L5"
+    assert filename_level_suggestion("户型l2draft.jpg")["status"] == "unmatched"
+    conflict = filename_level_suggestion("客厅_L1_过滤.jpg")
+    assert conflict["status"] == "conflict"
+    assert conflict["suggested_level"] is None
 
 
 def test_level_metrics_cover_boundaries_failures_and_stable_matrix() -> None:
@@ -91,7 +107,24 @@ def test_baseline_api_freezes_truth_reports_and_enqueues_idempotently() -> None:
             asset_id=asset.id, job_id=job.id, strategy_bundle_id=run.strategy_bundle_id,
             strategy_snapshot_json=run.strategy_snapshot_json,
             precheck_json=json.dumps({"classification": {"scope_status": "in_scope"}}),
-            aesthetic_json="{}", scoring_json=json.dumps({"caps": [{"cap": "L2", "reason": "原样"}]}),
+            aesthetic_json=json.dumps({
+                "dimensions": {
+                    "layout": {
+                        "grade": 4,
+                        "evidence": ["动线完整"],
+                        "defects": [],
+                    },
+                    "lighting": {
+                        "grade": 2,
+                        "evidence": ["暗部细节不足"],
+                        "defects": ["主灯过曝"],
+                    },
+                },
+            }),
+            scoring_json=json.dumps({
+                "caps": [{"cap": "L2", "reason": "原样"}],
+                "review_reasons": ["等级受限需人工确认"],
+            }),
             raw_response_a="{}", raw_response_b="{}", score=65, level="L3",
             confidence=.9, needs_review=True, model_id=run.strategy_bundle.model_id,
             prompt_a_version="A1", prompt_b_version="B1", rubric_version="R1",
@@ -106,6 +139,15 @@ def test_baseline_api_freezes_truth_reports_and_enqueues_idempotently() -> None:
         assert detail["summary"]["metrics"]["exact_accuracy"] == 0
         assert detail["items"][0]["cap_reasons"][0]["reason"] == "原样"
         assert detail["items"][0]["stage_a"]["classification"]["scope_status"] == "in_scope"
+        explanation = detail["items"][0]["level_explanation"]
+        assert explanation["status"] == "available"
+        assert explanation["predicted_level"] == "L3"
+        assert explanation["authoritative_score"] == 65
+        assert explanation["strong_dimensions"][0]["key"] == "layout"
+        assert explanation["weak_dimensions"][0]["defects"] == ["主灯过曝"]
+        assert explanation["review_reasons"] == ["等级受限需人工确认"]
+        assert detail["items"][0]["evaluation"]["id"] == result.id
+        assert detail["items"][0]["evaluation"]["review_stage"] == "initial"
         first = client.post(
             f"/api/baseline-regressions/{run.id}/optimization-cases",
             json={"item_ids": [item.id]},
@@ -119,8 +161,103 @@ def test_baseline_api_freezes_truth_reports_and_enqueues_idempotently() -> None:
         case = db.query(OptimizationCaseQueue).one()
         assert case.source_type == "baseline_regression"
         assert json.loads(case.case_json)["expected_level"] == "L1"
+        historical_snapshot = json.loads(item.result_snapshot_json)
+        historical_snapshot.pop("level_explanation")
+        item.result_snapshot_json = json.dumps(historical_snapshot)
+        db.commit()
+        historical = client.get(
+            f"/api/baseline-regressions/{run.id}"
+        ).json()["items"][0]["level_explanation"]
+        assert historical["status"] == "unavailable_historical"
+        assert historical["message"] == "历史结果未冻结评测理由"
         db.refresh(asset)
         assert asset.status == "uploaded"
+    finally:
+        app.dependency_overrides.clear()
+        db.close()
+        engine.dispose()
+
+
+def test_package_baseline_prefills_filename_level_and_accepts_manual_override() -> None:
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    db = Session(engine, expire_on_commit=False)
+    user = User(username="tester", password_hash="unused", display_name="测试员")
+    l2_asset = Asset(
+        original_name="stored-a.jpg",
+        stored_name="stored-a.jpg",
+        mime_type="image/jpeg",
+        size_bytes=10,
+        sha256="d" * 64,
+        status="uploaded",
+    )
+    override_asset = Asset(
+        original_name="stored-b.jpg",
+        stored_name="stored-b.jpg",
+        mime_type="image/jpeg",
+        size_bytes=10,
+        sha256="e" * 64,
+        status="uploaded",
+    )
+    package = MaterialPackage(
+        package_key="filename-level-package",
+        name="文件名等级包",
+        source="manual_upload",
+        created_by=user.username,
+    )
+    package.items = [
+        MaterialPackageItem(
+            asset=l2_asset,
+            original_name="客厅_L2.jpg",
+            position=0,
+        ),
+        MaterialPackageItem(
+            asset=override_asset,
+            original_name="卧室_过滤.jpg",
+            position=1,
+        ),
+    ]
+    db.add_all([user, package])
+    db.commit()
+
+    app.dependency_overrides[get_db] = lambda: (yield db)
+    app.dependency_overrides[current_user] = lambda: user
+    client = TestClient(app)
+    try:
+        created = client.post(
+            "/api/baseline-sets",
+            json={
+                "name": "文件名预填基准",
+                "description": "",
+                "default_expected_level": "L1",
+                "source_package_id": package.id,
+                "expected_level_overrides": {
+                    str(override_asset.id): "L3",
+                },
+                "items": [],
+            },
+        )
+        assert created.status_code == 200
+        detail = client.get(f"/api/baseline-sets/{created.json()['id']}")
+        assert detail.status_code == 200
+        by_asset = {
+            item["asset_id"]: item
+            for item in detail.json()["items"]
+        }
+        assert by_asset[l2_asset.id]["expected_level"] == "L2"
+        assert (
+            by_asset[l2_asset.id]["asset"]["expected_level_source"]
+            == "filename"
+        )
+        assert by_asset[override_asset.id]["expected_level"] == "L3"
+        assert (
+            by_asset[override_asset.id]["asset"]["expected_level_source"]
+            == "manual_override"
+        )
     finally:
         app.dependency_overrides.clear()
         db.close()
