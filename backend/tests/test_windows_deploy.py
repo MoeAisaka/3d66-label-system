@@ -614,12 +614,61 @@ def test_windows_scripts_hold_strict_utf8_and_native_exit_contracts() -> None:
     assert "$npmCommand.Source run build" in install
     assert "Assert-NoReparseTree -Root $venvRoot" in install
     assert "Assert-NoReparseTree -Root (Join-Path $frontendRoot 'node_modules')" in install
+
+    # 下面三组钉的是 2026-08-01 修复的 PS 5.1 运行期缺陷。三条都逃过了 5.1 与 7.x
+    # 的纯语法解析，只能用字面契约 + 实机冒烟双重防守。
+
+    # 缺陷 1：Get-Command 在 PATH 多命中时返回数组，.Source 成为 Object[] 后绑
+    # [string] 失败。必须先包数组、判 .Count、再索引。特别不能写成
+    # @(Get-Command ...)[0]：StrictMode Latest 下空命中取 [0] 会抛
+    # IndexOutOfRangeException，反而掉包原有的友好报错。
+    assert "$commandMatches.Count -eq 0" in install
+    assert "$nodeMatches.Count -gt 0" in install
+    assert "$npmMatches.Count -gt 0" in install
+    assert "-ErrorAction SilentlyContinue)[0]" not in install
+
+    # 缺陷 2：5.1 传参给原生命令时会剥掉字面双引号，使用 join 拼接的探测代码
+    # 会被改形而触发 SyntaxError。只检查真实的探测代码行（不能拿全文做
+    # 子串判定，否则会误伤解释该缺陷的中文注释）。
+    probe_lines = [
+        line
+        for line in install.splitlines()
+        if "import sys;" in line and "raise SystemExit" in line
+    ]
+    assert len(probe_lines) == 2
+    for probe in probe_lines:
+        assert "sys.version.split()[0]" in probe
+        assert '"' not in probe
+        assert "join" not in probe
+
+    # 缺陷 3：$ErrorActionPreference='Stop' 下，`2>&1` 会把原生 stderr 升级为终止
+    # 性错误，读到 $LASTEXITCODE 之前就抛出。捕获时必须丢弃 stderr，并在调用
+    # 期间临时 Continue、finally 还原，一律以退出码判定成败。
+    # 同样只看代码行：下面两个注释行为解释本缺陷而引用了 2>&1 字面量。
+    capture_lines = [
+        line
+        for line in install.splitlines()
+        if "& $FilePath @Arguments" in line and not line.lstrip().startswith("#")
+    ]
+    assert len(capture_lines) == 1
+    assert "2>$null" in capture_lines[0]
+    assert "2>&1" not in capture_lines[0]
+    assert "$ErrorActionPreference = 'Continue'" in install
+    assert "$ErrorActionPreference = $previousPreference" in install
     start = (scripts / "start.ps1").read_text(encoding="utf-8")
     assert start.index("doctor.ps1") < start.index("app.launcher")
     assert "$env:APP_HOST = '127.0.0.1'" in start
     assert "[string]$DpapiScope = 'LocalMachine'" in start
     assert "$env:API_KEY_DPAPI_SCOPE = 'local-machine'" in start
-    assert "@('-DpapiScope', $DpapiScope)" in start
+    # PS 5.1 下调用 PowerShell 脚本必须用哈希表 splat。数组 splat 会按位置传参、
+    # 不解析其中的参数名，'-DpapiScope' 会被绑给 doctor.ps1 的第一个位置参数
+    # $DataDir，导致两个启动入口在 5.1 上完全无法启动服务（已于 2026-08-01 修复）。
+    # 本断言原先钉的是带 bug 的数组写法，现改为钉正确写法并反向禁止回归。
+    assert "$doctorParameters = @{ DpapiScope = $DpapiScope }" in start
+    assert "$doctorParameters['DataDir'] = $DataDir" in start
+    assert "@doctorParameters" in start
+    assert "@('-DpapiScope', $DpapiScope)" not in start
+    assert "@doctorArguments" not in start
     doctor = (scripts / "doctor.ps1").read_text(encoding="utf-8")
     assert "[string]$DpapiScope = 'LocalMachine'" in doctor
     assert "$env:API_KEY_DPAPI_SCOPE = 'local-machine'" in doctor
