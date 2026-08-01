@@ -53,6 +53,7 @@ MIGRATION_NAMES = [
     "add_asset_category_channel",
     "add_material_package_status",
     "add_accounts_and_model_registry",
+    "modular_category_pipelines",
 ]
 
 
@@ -64,6 +65,67 @@ def result(level: str, category: str, confidence: float = 0.9) -> dict:
         "needs_review": False,
         "precheck": {"classification": {"primary_category": category}},
     }
+
+
+def test_v40_removes_fixed_category_check_and_preserves_profiles(tmp_path) -> None:
+    engine = _engine(tmp_path, "v39-category-profile.db")
+    try:
+        with engine.begin() as connection:
+            connection.exec_driver_sql("CREATE TABLE prompt_versions (id INTEGER PRIMARY KEY)")
+            connection.exec_driver_sql("CREATE TABLE model_configs (id INTEGER PRIMARY KEY)")
+            connection.exec_driver_sql("CREATE TABLE optimizer_configs (id INTEGER PRIMARY KEY)")
+            connection.exec_driver_sql("""
+                CREATE TABLE evaluation_category_profiles (
+                    id INTEGER PRIMARY KEY,
+                    category_key VARCHAR(40) NOT NULL UNIQUE,
+                    display_name VARCHAR(120) NOT NULL,
+                    status VARCHAR(20) NOT NULL DEFAULT 'active',
+                    allowed_mime_types_json TEXT NOT NULL DEFAULT '[]',
+                    preprocess_config_json TEXT NOT NULL DEFAULT '{}',
+                    rubric_version VARCHAR(40) NOT NULL DEFAULT 'rubric-v2.1',
+                    created_by VARCHAR(80) NOT NULL DEFAULT 'system',
+                    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    CHECK (category_key IN ('space_image','pdf_text','material_image')),
+                    CHECK (status IN ('draft','active','retired'))
+                )
+            """)
+            connection.exec_driver_sql(
+                "INSERT INTO evaluation_category_profiles "
+                "(id, category_key, display_name, allowed_mime_types_json, preprocess_config_json) "
+                "VALUES (1, 'space_image', '空间图片', '[\"image/jpeg\"]', '{\"preprocess\":\"image\"}')"
+            )
+            connection.exec_driver_sql("""
+                CREATE TABLE schema_migrations (
+                    version INTEGER PRIMARY KEY,
+                    name VARCHAR(200) NOT NULL,
+                    applied_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            for version, name in enumerate(MIGRATION_NAMES[:39], start=1):
+                connection.exec_driver_sql(
+                    "INSERT INTO schema_migrations(version, name) VALUES (?, ?)",
+                    (version, name),
+                )
+            run_migrations(connection)
+            table_sql = connection.exec_driver_sql(
+                "SELECT sql FROM sqlite_master WHERE type='table' "
+                "AND name='evaluation_category_profiles'"
+            ).scalar_one()
+            assert "category_key IN ('space_image','pdf_text','material_image')" not in table_sql
+            pipeline = json.loads(connection.exec_driver_sql(
+                "SELECT pipeline_config_json FROM evaluation_category_profiles WHERE id=1"
+            ).scalar_one())
+            assert pipeline["schema_version"] == "category-pipeline-v1"
+            connection.exec_driver_sql(
+                "INSERT INTO evaluation_category_profiles "
+                "(category_key, display_name, status, allowed_mime_types_json, "
+                "preprocess_config_json, pipeline_config_json) "
+                "VALUES ('landscape_image', '景观效果图', 'draft', '[\"image/jpeg\"]', '{}', '{}')"
+            )
+            assert connection.exec_driver_sql("PRAGMA foreign_key_check").fetchall() == []
+    finally:
+        engine.dispose()
 
 
 def _paired_strategy_snapshot(bundle_id: int, canonical_hash: str) -> str:

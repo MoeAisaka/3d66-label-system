@@ -9,7 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .audit import append_audit_event, canonical_json
-from .models import OptimizationCaseQueue, ProductionFeedbackEvent
+from .models import EvaluationCategoryProfile, OptimizationCaseQueue, ProductionFeedbackEvent
 
 
 SUPPORTED_SCHEMA_VERSION = "production-feedback-v1"
@@ -55,7 +55,13 @@ def ingest_production_feedback(
     if not prompt_version or len(prompt_version) > 40:
         raise ValueError("生产反馈 prompt_version 非法")
     category_key = str(payload["category_key"]).strip()
-    if category_key not in {"space_image", "pdf_text", "material_image"}:
+    profile = db.scalar(
+        select(EvaluationCategoryProfile).where(
+            EvaluationCategoryProfile.category_key == category_key,
+            EvaluationCategoryProfile.status == "active",
+        )
+    )
+    if profile is None:
         raise ValueError("生产反馈 category_key 非法")
 
     payload_json = canonical_json(payload)

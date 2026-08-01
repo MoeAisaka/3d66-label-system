@@ -298,10 +298,6 @@ class EvaluationCategoryProfile(Base):
     __tablename__ = "evaluation_category_profiles"
     __table_args__ = (
         CheckConstraint(
-            "category_key IN ('space_image','pdf_text','material_image')",
-            name="ck_evaluation_category_profiles_key",
-        ),
-        CheckConstraint(
             "status IN ('draft','active','retired')",
             name="ck_evaluation_category_profiles_status",
         ),
@@ -311,9 +307,12 @@ class EvaluationCategoryProfile(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     category_key: Mapped[str] = mapped_column(String(40), index=True)
     display_name: Mapped[str] = mapped_column(String(120))
+    description: Mapped[str] = mapped_column(Text, default="", server_default="")
     status: Mapped[str] = mapped_column(String(20), default="active", index=True)
     allowed_mime_types_json: Mapped[str] = mapped_column(Text, default="[]")
     preprocess_config_json: Mapped[str] = mapped_column(Text, default="{}")
+    pipeline_config_json: Mapped[str] = mapped_column(Text, default="{}", server_default="{}")
+    pipeline_revision: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
     prompt_a_id: Mapped[int | None] = mapped_column(
         ForeignKey("prompt_versions.id", ondelete="SET NULL"), nullable=True
     )

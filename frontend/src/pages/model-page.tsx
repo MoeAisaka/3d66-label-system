@@ -8,7 +8,7 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { api, jsonBody } from "@/lib/api"
-import type { EvaluationCategoryProfile, ModelConfig, OptimizerConfig, PromptVersion, ReviewWorkflowPolicy, SamplingPolicy, User } from "@/lib/types"
+import type { CategoryPipelineCatalog, CategoryPipelineConfig, EvaluationCategoryProfile, ModelConfig, OptimizerConfig, PromptVersion, ReviewWorkflowPolicy, SamplingPolicy, User } from "@/lib/types"
 
 type FormState = Omit<ModelConfig, "id" | "api_key_mask" | "updated_at" | "has_api_key" | "active"> & { api_key: string }
 type OptimizerFormState = Omit<OptimizerConfig, "id" | "api_key_mask" | "updated_at" | "has_api_key"> & { api_key: string }
@@ -27,13 +27,23 @@ type CategoryDraft = EvaluationCategoryProfile & {
 function categoryDraft(profile: EvaluationCategoryProfile): CategoryDraft {
   return {
     ...profile,
-    prompt_mode: profile.prompt_a_id === null
-      ? "follow"
-      : profile.prompt_b_id === null
-        ? "single"
-        : "ab",
+    prompt_mode: profile.pipeline_config.prompt_mode,
   }
 }
+
+const imagePipeline = (): CategoryPipelineConfig => ({
+  schema_version: "category-pipeline-v1",
+  input_kind: "image",
+  allowed_suffixes: [".jpg", ".jpeg", ".png", ".webp", ".gif"],
+  processors: [
+    { module: "image.prepare", enabled: true, config: {} },
+    { module: "image.animated_contact_sheet", enabled: true, config: { max_frames: 8 } },
+  ],
+  prompt_mode: "single",
+  prompt_context: { instruction: "" },
+  dimensions: { enabled: true, mode: "all", enabled_keys: [] },
+  model_nodes: { evaluation_main: true, pdf_summary: false, optimization: true, benchmark: true, diagnostic: true },
+})
 
 const emptyBenchmarkConfig: BenchmarkConfigDraft = {
   provider: "openai",
@@ -67,6 +77,7 @@ export function ModelPage() {
   const samplingPolicy = useQuery({ queryKey: ["sampling-policy"], queryFn: () => api<SamplingPolicy>("/api/sampling-policy") })
   const reviewWorkflowPolicy = useQuery({ queryKey: ["review-workflow-policy"], queryFn: () => api<ReviewWorkflowPolicy>("/api/review-workflow-policy") })
   const categoryProfiles = useQuery({ queryKey: ["evaluation-categories"], queryFn: () => api<{ items: EvaluationCategoryProfile[] }>("/api/evaluation-categories") })
+  const categoryModules = useQuery({ queryKey: ["evaluation-category-modules"], queryFn: () => api<CategoryPipelineCatalog>("/api/evaluation-categories/modules") })
   const modelNodes = useQuery({ queryKey: ["model-nodes"], queryFn: () => api<{ items: Array<{ node_key: string; model_config_id: number; category_key: string | null; enabled: boolean; model: ModelConfig }> }>("/api/model-nodes") })
   const prompts = useQuery({ queryKey: ["prompts"], queryFn: () => api<{ items: PromptVersion[] }>("/api/prompts") })
   const [form, setForm] = useState<FormState | null>(null)
@@ -77,7 +88,9 @@ export function ModelPage() {
   const [mainBenchmarkConfirmed, setMainBenchmarkConfirmed] = useState(false)
   const [benchmarkCreateConfirmed, setBenchmarkCreateConfirmed] = useState(false)
   const [categoryDrafts, setCategoryDrafts] = useState<Record<string, CategoryDraft>>({})
+  const [newCategory, setNewCategory] = useState({ category_key: "", display_name: "", description: "", pipeline_config: imagePipeline() })
   const [nodeDrafts, setNodeDrafts] = useState<Record<string, { model_config_id: number; category_key: string | null; enabled: boolean }>>({})
+  const [categoryNodeModels, setCategoryNodeModels] = useState<Record<string, number>>({})
   useEffect(() => {
     if (!config.data) return
     const { id: _id, api_key_mask: _mask, updated_at: _updated, has_api_key: _hasApiKey, active: _active, ...rest } = config.data
@@ -99,9 +112,29 @@ export function ModelPage() {
     setCategoryDrafts(Object.fromEntries(categoryProfiles.data.items.map((item) => [item.category_key, categoryDraft(item)])))
   }, [categoryProfiles.data])
   useEffect(() => {
-    if (!modelNodes.data) return
-    setNodeDrafts(Object.fromEntries(modelNodes.data.items.map((item) => [item.node_key, { model_config_id: item.model_config_id, category_key: item.category_key, enabled: item.enabled }])))
-  }, [modelNodes.data])
+    if (!modelNodes.data || !categoryModules.data) return
+    const firstModelId = modelConfigs.data?.items.find((item) => item.active)?.id ?? 0
+    setNodeDrafts(Object.fromEntries(categoryModules.data.model_nodes.map((node) => {
+      const binding = modelNodes.data.items.find((item) => item.node_key === node.key && item.category_key === null)
+      return [node.key, {
+        model_config_id: binding?.model_config_id ?? firstModelId,
+        category_key: null,
+        enabled: binding?.enabled ?? true,
+      }]
+    })))
+  }, [modelNodes.data, categoryModules.data, modelConfigs.data])
+  useEffect(() => {
+    if (!modelNodes.data || !categoryProfiles.data) return
+    const next: Record<string, number> = {}
+    for (const profile of categoryProfiles.data.items) {
+      for (const nodeKey of Object.keys(profile.pipeline_config.model_nodes)) {
+        const binding = modelNodes.data.items.find((item) => item.node_key === nodeKey && item.category_key === profile.category_key)
+          ?? modelNodes.data.items.find((item) => item.node_key === nodeKey && item.category_key === null)
+        if (binding) next[`${profile.category_key}:${nodeKey}`] = binding.model_config_id
+      }
+    }
+    setCategoryNodeModels(next)
+  }, [modelNodes.data, categoryProfiles.data])
 
   const save = useMutation({
     mutationFn: () => api("/api/model-config", { method: "PUT", ...jsonBody(form) }),
@@ -177,9 +210,11 @@ export function ModelPage() {
       method: "PUT",
       ...jsonBody({
         display_name: draft.display_name,
+        description: draft.description,
         status: draft.status,
         allowed_mime_types: draft.allowed_mime_types,
         preprocess_config: draft.preprocess_config,
+        pipeline_config: { ...draft.pipeline_config, prompt_mode: draft.prompt_mode },
         prompt_a_id: draft.prompt_mode === "follow" ? null : draft.prompt_a_id,
         prompt_b_id: draft.prompt_mode === "ab" ? draft.prompt_b_id : null,
         model_config_id: draft.model_config_id,
@@ -192,6 +227,30 @@ export function ModelPage() {
       setCategoryDrafts((current) => ({ ...current, [data.category_key]: categoryDraft(data) }))
       await categoryProfiles.refetch()
       toast.success(`${data.display_name}类目配置已保存`)
+    },
+    onError: (error) => toast.error(error.message),
+  })
+  const createCategory = useMutation({
+    mutationFn: () => api<EvaluationCategoryProfile>("/api/evaluation-categories", {
+      method: "POST",
+      ...jsonBody({
+        category_key: newCategory.category_key,
+        display_name: newCategory.display_name,
+        description: newCategory.description,
+        status: "draft",
+        allowed_mime_types: newCategory.pipeline_config.input_kind === "pdf" ? ["application/pdf"] : ["image/jpeg", "image/png", "image/webp", "image/gif"],
+        preprocess_config: {},
+        pipeline_config: newCategory.pipeline_config,
+        prompt_a_id: null,
+        prompt_b_id: null,
+        model_config_id: null,
+        rubric_version: "rubric-v2.1",
+      }),
+    }),
+    onSuccess: async (data) => {
+      setNewCategory({ category_key: "", display_name: "", description: "", pipeline_config: imagePipeline() })
+      await categoryProfiles.refetch()
+      toast.success(`${data.display_name}草稿已创建`)
     },
     onError: (error) => toast.error(error.message),
   })
@@ -226,6 +285,12 @@ export function ModelPage() {
       ...current,
       [categoryKey]: { ...current[categoryKey], ...patch },
     }))
+  }
+
+  function updatePipeline(categoryKey: string, patch: Partial<CategoryPipelineConfig>) {
+    const current = categoryDrafts[categoryKey]
+    if (!current) return
+    updateCategory(categoryKey, { pipeline_config: { ...current.pipeline_config, ...patch } })
   }
 
   if (me.data && !(me.data.permissions?.includes("*") || me.data.permissions?.includes("models:write"))) {
@@ -276,7 +341,7 @@ export function ModelPage() {
           <div className="grid gap-7 border-b border-[var(--line)] px-5 py-6 lg:grid-cols-[230px_1fr] lg:px-7">
             <div><div className="flex size-10 items-center justify-center rounded-[4px] border border-[var(--line-strong)]"><UsersThree size={21} /></div><h2 className="font-editorial mt-5 text-2xl font-bold">节点模型分配</h2><p className="mt-2 text-sm leading-6 text-[var(--muted)]">统一模型注册表。每个评测、PDF 总结、优化和横评节点可独立选择已验证模型，保存后只影响新任务。</p></div>
             <div className="divide-y divide-[var(--line)] border-y border-[var(--line)]">
-              {Object.entries(nodeDrafts).map(([nodeKey, draft]) => <div key={nodeKey} className="grid gap-3 px-4 py-4 md:grid-cols-[1fr_1fr_auto_auto] md:items-end"><Field label={{ evaluation_main: "主评测", pdf_summary: "PDF 多模态总结", optimization: "提示词优化", benchmark: "模型横评", diagnostic: "诊断" }[nodeKey] ?? nodeKey}><select className="flex h-11 w-full rounded-[4px] border border-input bg-transparent px-3 text-sm" value={draft.model_config_id} onChange={(event) => setNodeDrafts((current) => ({ ...current, [nodeKey]: { ...draft, model_config_id: Number(event.target.value) } }))}>{(modelConfigs.data?.items ?? []).filter((item) => item.active).map((item) => <option key={item.id} value={item.id}>{item.name} · {item.provider} · {item.model_id}</option>)}</select></Field><Field label="类目"><select className="flex h-11 w-full rounded-[4px] border border-input bg-transparent px-3 text-sm" value={draft.category_key ?? ""} onChange={(event) => setNodeDrafts((current) => ({ ...current, [nodeKey]: { ...draft, category_key: event.target.value || null } }))}><option value="">所有类目</option><option value="space_image">空间图片</option><option value="pdf_text">PDF 方案文本</option><option value="material_image">材质图</option></select></Field><label className="flex h-11 items-center gap-2 text-sm font-semibold"><input type="checkbox" checked={draft.enabled} onChange={(event) => setNodeDrafts((current) => ({ ...current, [nodeKey]: { ...draft, enabled: event.target.checked } }))} />启用</label><Button size="sm" onClick={() => saveNode.mutate({ nodeKey, draft })} disabled={saveNode.isPending}><FloppyDisk />保存</Button></div>)}
+              {Object.entries(nodeDrafts).map(([nodeKey, draft]) => <div key={nodeKey} className="grid min-w-0 gap-3 px-4 py-4 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto_auto] md:items-end"><Field label={categoryModules.data?.model_nodes.find((item) => item.key === nodeKey)?.label ?? nodeKey}><select className="flex h-11 min-w-0 w-full rounded-[4px] border border-input bg-transparent px-3 text-sm" value={draft.model_config_id} onChange={(event) => setNodeDrafts((current) => ({ ...current, [nodeKey]: { ...draft, model_config_id: Number(event.target.value) } }))}>{(modelConfigs.data?.items ?? []).filter((item) => item.active).map((item) => <option key={item.id} value={item.id}>{item.name} · {item.provider} · {item.model_id}</option>)}</select></Field><Field label="适用范围"><select className="flex h-11 min-w-0 w-full rounded-[4px] border border-input bg-transparent px-3 text-sm" value="" disabled><option value="">所有类目默认值</option></select></Field><label className="flex h-11 items-center gap-2 text-sm font-semibold"><input type="checkbox" checked={draft.enabled} onChange={(event) => setNodeDrafts((current) => ({ ...current, [nodeKey]: { ...draft, enabled: event.target.checked } }))} />启用</label><Button size="sm" onClick={() => saveNode.mutate({ nodeKey, draft })} disabled={saveNode.isPending || !draft.model_config_id}><FloppyDisk />保存</Button></div>)}
             </div>
           </div>
         </section>
@@ -303,14 +368,22 @@ export function ModelPage() {
               <h2 className="font-editorial mt-5 text-2xl font-bold">评测类目配置</h2>
               <p className="mt-2 text-sm leading-6 text-[var(--muted)]">每个类目独立绑定提示词、模型和前处理规则。保存后只影响新建任务，历史任务继续使用自己的冻结快照。</p>
             </div>
-            <div className="space-y-5">
+            <div className="min-w-0 space-y-5">
+              <div className="border border-[var(--line-strong)] bg-[#f6f8f3] p-4">
+                <div className="mb-4 flex flex-wrap items-center justify-between gap-3"><div className="min-w-0"><h3 className="font-semibold">新建类目模板</h3><p className="mt-1 text-xs text-[var(--muted)]">先创建草稿，再配置处理链、提示词、指标与模型后启用。</p></div><Button size="sm" onClick={() => createCategory.mutate()} disabled={createCategory.isPending || !newCategory.category_key || !newCategory.display_name}><Plus />新建草稿</Button></div>
+                <div className="grid gap-4 md:grid-cols-2">
+                  <Field label="稳定标识"><Input value={newCategory.category_key} placeholder="例如 landscape_image" onChange={(event) => setNewCategory((current) => ({ ...current, category_key: event.target.value.toLowerCase().replace(/[^a-z0-9_]/g, "") }))} /></Field>
+                  <Field label="显示名称"><Input value={newCategory.display_name} placeholder="例如 景观效果图" onChange={(event) => setNewCategory((current) => ({ ...current, display_name: event.target.value }))} /></Field>
+                  <Field label="输入类型"><select className="flex h-11 w-full rounded-[4px] border border-input bg-white px-3 text-sm" value={newCategory.pipeline_config.input_kind} onChange={(event) => { const kind = event.target.value as "image" | "pdf"; const next = kind === "image" ? imagePipeline() : { ...imagePipeline(), input_kind: "pdf" as const, allowed_suffixes: [".pdf"], processors: [{ module: "document.pdf_extract", enabled: true, config: { max_pages: 4, max_text_chars: 24000 } }, { module: "document.ocr_if_needed", enabled: true, config: { min_text_chars: 80 } }, { module: "document.page_contact_sheet", enabled: true, config: {} }, { module: "document.multimodal_summary", enabled: true, config: {} }], model_nodes: { evaluation_main: true, pdf_summary: true, optimization: true, benchmark: true, diagnostic: true } }; setNewCategory((current) => ({ ...current, pipeline_config: next })) }}><option value="image">图片 / 动图</option><option value="pdf">PDF 文档</option></select></Field>
+                  <Field label="用途说明"><Input value={newCategory.description} placeholder="说明该类目处理什么素材" onChange={(event) => setNewCategory((current) => ({ ...current, description: event.target.value }))} /></Field>
+                </div>
+              </div>
               {(categoryProfiles.data?.items ?? []).map((profile) => {
                 const draft = categoryDrafts[profile.category_key]
                 if (!draft) return null
                 const categoryPrompts = (prompts.data?.items ?? []).filter((item) => item.status === "published" && item.rubric_version === draft.rubric_version)
-                const preprocess = draft.preprocess_config
                 const promptReady = draft.prompt_mode === "follow"
-                  ? draft.category_key === "space_image"
+                  ? true
                   : draft.prompt_a_id !== null && (draft.prompt_mode === "single" || draft.prompt_b_id !== null)
                 const canSave = draft.status !== "active" || promptReady
                 return (
@@ -322,13 +395,18 @@ export function ModelPage() {
                     <div className="grid gap-4 md:grid-cols-2">
                       <Field label="显示名称"><Input value={draft.display_name} onChange={(event) => updateCategory(draft.category_key, { display_name: event.target.value })} /></Field>
                       <Field label="运行状态"><select className="flex h-11 w-full rounded-[4px] border border-input bg-transparent px-3 text-sm" value={draft.status} onChange={(event) => updateCategory(draft.category_key, { status: event.target.value as CategoryDraft["status"] })}><option value="active">启用新任务</option><option value="draft">草稿，不接收任务</option><option value="retired">停用，不接收任务</option></select></Field>
-                      <Field label="绑定主模型"><select className="flex h-11 w-full rounded-[4px] border border-input bg-transparent px-3 text-sm" value={draft.model_config_id ?? ""} onChange={(event) => updateCategory(draft.category_key, { model_config_id: event.target.value ? Number(event.target.value) : null })}><option value="">跟随主模型</option>{(modelConfigs.data?.items ?? []).map((item) => <option key={item.id} value={item.id}>{item.name} · {item.model_id}</option>)}</select></Field>
-                      <div className="md:col-span-2"><span className="mb-2 block text-xs font-semibold">提示词调用模式</span><div className="inline-flex max-w-full overflow-auto rounded-[4px] border border-[var(--line-strong)] bg-white p-1">{([...(draft.category_key === "space_image" ? [{ value: "follow", label: "跟随任务" }] : []), { value: "single", label: "单提示词" }, { value: "ab", label: "A/B 两段" }] as Array<{ value: CategoryPromptMode; label: string }>).map((option) => <button type="button" key={option.value} onClick={() => updateCategory(draft.category_key, { prompt_mode: option.value, ...(option.value === "follow" ? { prompt_a_id: null, prompt_b_id: null } : option.value === "single" ? { prompt_b_id: null } : {}) })} className={`h-9 whitespace-nowrap rounded-[3px] px-3 text-xs font-semibold ${draft.prompt_mode === option.value ? "bg-[#11130f] text-white" : "text-[var(--muted)] hover:bg-[#f1f3ef]"}`}>{option.label}</button>)}</div></div>
+                      <Field label="用途说明"><Input value={draft.description} onChange={(event) => updateCategory(draft.category_key, { description: event.target.value })} /></Field>
+                      <Field label="输入类型"><select className="flex h-11 w-full rounded-[4px] border border-input bg-transparent px-3 text-sm" value={draft.pipeline_config.input_kind} disabled={draft.status === "active"} onChange={(event) => { const kind = event.target.value as "image" | "pdf"; const base = kind === "image" ? imagePipeline() : { ...imagePipeline(), input_kind: "pdf" as const, allowed_suffixes: [".pdf"], processors: [{ module: "document.pdf_extract", enabled: true, config: { max_pages: 4, max_text_chars: 24000 } }, { module: "document.ocr_if_needed", enabled: true, config: { min_text_chars: 80 } }, { module: "document.page_contact_sheet", enabled: true, config: {} }, { module: "document.multimodal_summary", enabled: true, config: {} }], model_nodes: { evaluation_main: true, pdf_summary: true, optimization: true, benchmark: true, diagnostic: true } }; updateCategory(draft.category_key, { pipeline_config: base, allowed_mime_types: kind === "pdf" ? ["application/pdf"] : ["image/jpeg", "image/png", "image/webp", "image/gif"] }) }}><option value="image">图片 / 动图</option><option value="pdf">PDF 文档</option></select></Field>
+                      <Field label="绑定主模型"><select className="flex h-11 min-w-0 w-full rounded-[4px] border border-input bg-transparent px-3 text-sm" value={draft.model_config_id ?? ""} onChange={(event) => updateCategory(draft.category_key, { model_config_id: event.target.value ? Number(event.target.value) : null })}><option value="">跟随主模型</option>{(modelConfigs.data?.items ?? []).filter((item) => item.active).map((item) => <option key={item.id} value={item.id}>{item.name} · {item.model_id}</option>)}</select></Field>
+                      <div className="md:col-span-2"><span className="mb-2 block text-xs font-semibold">提示词调用模式</span><div className="inline-flex max-w-full overflow-auto rounded-[4px] border border-[var(--line-strong)] bg-white p-1">{([{ value: "follow", label: "跟随任务" }, { value: "single", label: "单提示词" }, { value: "ab", label: "A/B 两段" }] as Array<{ value: CategoryPromptMode; label: string }>).map((option) => <button type="button" key={option.value} onClick={() => { updateCategory(draft.category_key, { prompt_mode: option.value, ...(option.value === "follow" ? { prompt_a_id: null, prompt_b_id: null } : option.value === "single" ? { prompt_b_id: null } : {}) }); updatePipeline(draft.category_key, { prompt_mode: option.value }) }} className={`h-9 whitespace-nowrap rounded-[3px] px-3 text-xs font-semibold ${draft.prompt_mode === option.value ? "bg-[#11130f] text-white" : "text-[var(--muted)] hover:bg-[#f1f3ef]"}`}>{option.label}</button>)}</div></div>
                       {draft.prompt_mode !== "follow" && <Field label={draft.prompt_mode === "single" ? "单提示词版本" : "A 阶段版本"}><select className="flex h-11 w-full rounded-[4px] border border-input bg-transparent px-3 text-sm" value={draft.prompt_a_id ?? ""} onChange={(event) => updateCategory(draft.category_key, { prompt_a_id: event.target.value ? Number(event.target.value) : null })}><option value="">请选择 {draft.rubric_version} 版本</option>{categoryPrompts.filter((item) => item.stage === "A").map((item) => <option key={item.id} value={item.id}>{item.version} · {item.name}</option>)}</select></Field>}
                       {draft.prompt_mode === "ab" && <Field label="B 阶段版本"><select className="flex h-11 w-full rounded-[4px] border border-input bg-transparent px-3 text-sm" value={draft.prompt_b_id ?? ""} onChange={(event) => updateCategory(draft.category_key, { prompt_b_id: event.target.value ? Number(event.target.value) : null })}><option value="">请选择 {draft.rubric_version} 版本</option>{categoryPrompts.filter((item) => item.stage === "B").map((item) => <option key={item.id} value={item.id}>{item.version} · {item.name}</option>)}</select></Field>}
-                      {draft.category_key === "pdf_text" && <><Field label="最多处理页数"><Input type="number" min="1" max="20" value={Number(preprocess.max_pages ?? 4)} onChange={(event) => updateCategory(draft.category_key, { preprocess_config: { ...preprocess, max_pages: Number(event.target.value) } })} /></Field><Field label="文本上限字符数"><Input type="number" min="1000" max="100000" value={Number(preprocess.max_text_chars ?? 24000)} onChange={(event) => updateCategory(draft.category_key, { preprocess_config: { ...preprocess, max_text_chars: Number(event.target.value) } })} /></Field></>}
-                      {draft.category_key === "pdf_text" && <div className="border-y border-[#b9cddd] bg-[#f5f8fb] px-4 py-3 text-xs leading-5 text-[#355369] md:col-span-2">固定流程：文本抽取 → 必要时 OCR → 页图接触表 → 多模态总结 → 类目评测。多模态总结属于必经前置步骤。</div>}
-                      {draft.category_key === "material_image" && <label className="flex min-h-20 items-center justify-between gap-4 border border-[var(--line)] bg-white px-4"><span><span className="block text-sm font-semibold">材质专项关注</span><span className="mt-1 block text-xs text-[var(--muted)]">提示模型优先判断纹理、反光、接缝和工艺真实性。</span></span><input type="checkbox" checked={Boolean(preprocess.material_focus)} onChange={(event) => updateCategory(draft.category_key, { preprocess_config: { ...preprocess, material_focus: event.target.checked } })} className="size-5 accent-[#11130f]" /></label>}
+                      <div className="min-w-0 md:col-span-2"><span className="mb-2 block text-xs font-semibold">处理模块</span><div className="divide-y divide-[var(--line)] border-y border-[var(--line)] bg-white">{(categoryModules.data?.processors ?? []).filter((module) => draft.pipeline_config.input_kind === "pdf" ? module.module.startsWith("document.") : !module.module.startsWith("document.")).map((module) => { const configured = draft.pipeline_config.processors.find((item) => item.module === module.module); return <div key={module.module} className="min-w-0 px-3 py-3"><label className="flex min-w-0 items-center justify-between gap-3"><span className="min-w-0"><strong className="block text-sm">{module.label}</strong><span className="font-data block truncate text-xs text-[var(--muted)]">{module.module}</span></span><input type="checkbox" checked={configured?.enabled ?? false} onChange={(event) => { const existing = draft.pipeline_config.processors.filter((item) => item.module !== module.module); const next = event.target.checked ? [...existing, { module: module.module, enabled: true, config: Object.fromEntries(Object.entries(module.config_schema).map(([key, rule]) => [key, rule.default])) }].sort((a, b) => (categoryModules.data?.processors.findIndex((item) => item.module === a.module) ?? 0) - (categoryModules.data?.processors.findIndex((item) => item.module === b.module) ?? 0)) : existing; updatePipeline(draft.category_key, { processors: next }) }} className="size-5 shrink-0 accent-[#11130f]" /></label>{configured?.enabled && Object.entries(module.config_schema).map(([key, rule]) => <label key={key} className="mt-3 grid min-w-0 grid-cols-[minmax(0,1fr)_minmax(96px,140px)] items-center gap-3 text-xs"><span>{rule.label}</span>{rule.type === "boolean" ? <input type="checkbox" checked={Boolean(configured.config[key])} onChange={(event) => updatePipeline(draft.category_key, { processors: draft.pipeline_config.processors.map((item) => item.module === module.module ? { ...item, config: { ...item.config, [key]: event.target.checked } } : item) })} /> : <Input type="number" min={rule.min} max={rule.max} value={Number(configured.config[key] ?? rule.default ?? 0)} onChange={(event) => updatePipeline(draft.category_key, { processors: draft.pipeline_config.processors.map((item) => item.module === module.module ? { ...item, config: { ...item.config, [key]: Number(event.target.value) } } : item) })} />}</label>)}</div> })}</div></div>
+                      <div className="md:col-span-2"><label><span className="mb-2 block text-xs font-semibold">类目附加指令</span><textarea className="min-h-24 w-full rounded-[4px] border border-[var(--line-strong)] bg-white p-3 text-sm" maxLength={2000} value={draft.pipeline_config.prompt_context.instruction} onChange={(event) => updatePipeline(draft.category_key, { prompt_context: { instruction: event.target.value } })} /></label></div>
+                      <Field label="多维指标范围"><select className="flex h-11 w-full rounded-[4px] border border-input bg-transparent px-3 text-sm" value={draft.pipeline_config.dimensions.mode} onChange={(event) => updatePipeline(draft.category_key, { dimensions: { ...draft.pipeline_config.dimensions, mode: event.target.value as "all" | "selected" } })}><option value="all">全部已发布指标</option><option value="selected">仅重点指标</option></select></Field>
+                      {draft.pipeline_config.dimensions.mode === "selected" && <div className="md:col-span-2"><span className="mb-2 block text-xs font-semibold">重点指标</span><div className="grid gap-px border border-[var(--line)] bg-[var(--line)] sm:grid-cols-2">{(categoryModules.data?.dimension_options ?? []).map((dimension) => { const checked = draft.pipeline_config.dimensions.enabled_keys.includes(dimension.key); return <label key={dimension.key} className="flex min-h-11 items-center justify-between gap-3 bg-white px-3 py-2 text-xs"><span>{dimension.label}</span><input type="checkbox" checked={checked} onChange={(event) => updatePipeline(draft.category_key, { dimensions: { ...draft.pipeline_config.dimensions, enabled_keys: event.target.checked ? [...draft.pipeline_config.dimensions.enabled_keys, dimension.key] : draft.pipeline_config.dimensions.enabled_keys.filter((item) => item !== dimension.key) } })} /></label> })}</div></div>}
+                      <div className="md:col-span-2"><span className="mb-2 block text-xs font-semibold">类目节点开关</span><div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">{Object.entries(draft.pipeline_config.model_nodes).map(([node, enabled]) => { const definition = categoryModules.data?.model_nodes.find((item) => item.key === node); return <label key={node} className="flex min-h-11 items-center justify-between gap-3 border border-[var(--line)] bg-white px-3 py-2 text-xs font-semibold"><span>{definition?.label ?? node}</span><input type="checkbox" checked={enabled} disabled={definition?.required} onChange={(event) => updatePipeline(draft.category_key, { model_nodes: { ...draft.pipeline_config.model_nodes, [node]: event.target.checked } })} /></label> })}</div></div>
+                      <div className="min-w-0 md:col-span-2"><span className="mb-2 block text-xs font-semibold">各节点模型</span><div className="divide-y divide-[var(--line)] border-y border-[var(--line)] bg-white">{Object.entries(draft.pipeline_config.model_nodes).filter(([, enabled]) => enabled).map(([node]) => { const key = `${draft.category_key}:${node}`; const modelId = categoryNodeModels[key] ?? modelConfigs.data?.items.find((item) => item.active)?.id ?? 0; return <div key={node} className="grid min-w-0 gap-2 px-3 py-3 sm:grid-cols-[minmax(120px,180px)_minmax(0,1fr)_auto] sm:items-center"><strong className="text-xs">{categoryModules.data?.model_nodes.find((item) => item.key === node)?.label ?? node}</strong><select className="h-10 min-w-0 rounded-[4px] border border-input bg-white px-3 text-sm" value={modelId} onChange={(event) => setCategoryNodeModels((current) => ({ ...current, [key]: Number(event.target.value) }))}>{(modelConfigs.data?.items ?? []).filter((item) => item.active).map((item) => <option key={item.id} value={item.id}>{item.name} · {item.model_id}</option>)}</select><Button size="sm" variant="secondary" disabled={!modelId || saveNode.isPending} onClick={() => saveNode.mutate({ nodeKey: node, draft: { model_config_id: modelId, category_key: draft.category_key, enabled: true } })}><FloppyDisk />保存</Button></div> })}</div></div>
                     </div>
                     {!canSave && <p className="mt-3 border-t border-[#e8c876] pt-3 text-xs font-semibold text-[#7d4308]">启用该类目前，必须选择完整的类目专属提示词。</p>}
                   </div>
@@ -381,7 +459,7 @@ export function ModelPage() {
           </div>
           <div className="flex flex-wrap items-center justify-between gap-3 px-5 py-4 lg:px-7">
             <div className="flex items-center gap-2">{optimizerConfig.data?.has_api_key ? <CheckCircle size={20} weight="fill" className="text-[#2f6f48]" /> : <WarningCircle size={20} className="text-[#a85a0a]" />}<span className="text-sm font-semibold">{optimizerConfig.data?.has_api_key ? "当前电脑已保存诊断模型密钥" : "尚未保存诊断模型密钥"}</span></div>
-            <div className="flex gap-2"><Button variant="secondary" onClick={() => testOptimizer.mutate()} disabled={!optimizerConfig.data?.has_api_key || testOptimizer.isPending}><PlugsConnected />测试诊断模型连接</Button><Button onClick={() => saveOptimizer.mutate()} disabled={!optimizerForm || saveOptimizer.isPending}><FloppyDisk />保存诊断模型配置</Button></div>
+            <div className="flex flex-wrap gap-2"><Button variant="secondary" onClick={() => testOptimizer.mutate()} disabled={!optimizerConfig.data?.has_api_key || testOptimizer.isPending}><PlugsConnected />测试诊断模型连接</Button><Button onClick={() => saveOptimizer.mutate()} disabled={!optimizerForm || saveOptimizer.isPending}><FloppyDisk />保存诊断模型配置</Button></div>
           </div>
         </section>
 
@@ -476,5 +554,5 @@ export function ModelPage() {
 }
 
 function Field({ label, children }: { label: string; children: ReactNode }) {
-  return <label className="block"><span className="mb-2 block text-xs font-semibold">{label}</span>{children}</label>
+  return <label className="block min-w-0"><span className="mb-2 block text-xs font-semibold">{label}</span>{children}</label>
 }

@@ -219,7 +219,7 @@ export function AppShell({ user }: { user: User }) {
         </div>
       </aside>
 
-      <main className="min-h-[100dvh] lg:pl-[252px]">
+      <main className="min-h-[100dvh] min-w-0 lg:pl-[252px]">
         {active && (
           <nav
             className="sticky top-16 z-20 flex min-h-12 overflow-x-auto border-b border-[var(--line)] bg-white lg:top-0"

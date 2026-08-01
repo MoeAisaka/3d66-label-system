@@ -915,7 +915,7 @@ def test_migration_35_and_triggers_are_installed(database) -> None:
     with engine.connect() as connection:
         assert connection.exec_driver_sql(
             "SELECT max(version) FROM schema_migrations"
-        ).scalar_one() == 39
+        ).scalar_one() == 40
         assert connection.exec_driver_sql(
             "SELECT name FROM schema_migrations WHERE version = 30"
         ).scalar_one() == "add_dimension_calibration_results"

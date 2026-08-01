@@ -89,7 +89,7 @@ def test_jobs_pin_prompts_and_support_pause_resume_cancel() -> None:
         job_id = created.json()["job_ids"][0]
         frozen_job = db.get(EvaluationJob, job_id)
         frozen_profile = json.loads(frozen_job.category_profile_snapshot_json)
-        assert frozen_profile["schema_version"] == "evaluation-category-profile-v1"
+        assert frozen_profile["schema_version"] == "evaluation-category-profile-v2"
         assert frozen_profile["category_key"] == "space_image"
         assert frozen_profile["prompt_a_id"] == prompt_a.id
         assert frozen_profile["prompt_b_id"] == prompt_b.id

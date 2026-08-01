@@ -184,7 +184,7 @@ export type Evaluation = {
   preprocess: {
     schema_version: "evaluation-preprocess-v1"
     status: "completed"
-    category_key: "space_image" | "pdf_text" | "material_image"
+    category_key: string
     source_mime_type: string
     model_mime_type: string
     config: Record<string, unknown>
@@ -251,7 +251,7 @@ export type Asset = {
   id: number
   name: string
   mime_type: string
-  category_key: "space_image" | "pdf_text" | "material_image"
+  category_key: string
   size_bytes: number
   width: number | null
   height: number | null
@@ -471,7 +471,7 @@ export type MaterialPackage = {
   package_key: string
   name: string
   source: "manual_upload" | "production_import" | "legacy_backfill"
-  category_key: "space_image" | "pdf_text" | "material_image"
+  category_key: string
   item_count: number
   unique_asset_count: number
   active_asset_count: number
@@ -484,11 +484,14 @@ export type MaterialPackage = {
 
 export type EvaluationCategoryProfile = {
   id: number
-  category_key: "space_image" | "pdf_text" | "material_image"
+  category_key: string
   display_name: string
+  description: string
   status: "draft" | "active" | "retired"
   allowed_mime_types: string[]
   preprocess_config: Record<string, unknown>
+  pipeline_config: CategoryPipelineConfig
+  pipeline_revision: number
   prompt_a_id: number | null
   prompt_b_id: number | null
   model_config_id: number | null
@@ -496,6 +499,39 @@ export type EvaluationCategoryProfile = {
   dimension_schema_key: string | null
   dimension_schema_version: string | null
   updated_at: string
+}
+
+export type CategoryPipelineProcessor = {
+  module: string
+  enabled: boolean
+  config: Record<string, unknown>
+}
+
+export type CategoryPipelineConfig = {
+  schema_version: "category-pipeline-v1"
+  input_kind: "image" | "pdf"
+  allowed_suffixes: string[]
+  processors: CategoryPipelineProcessor[]
+  prompt_mode: "follow" | "single" | "ab"
+  prompt_context: { instruction: string }
+  dimensions: { enabled: boolean; mode: "all" | "selected"; enabled_keys: string[] }
+  model_nodes: Record<string, boolean>
+}
+
+export type CategoryPipelineCatalog = {
+  schema_version: "category-pipeline-catalog-v1"
+  input_kinds: Array<{ key: "image" | "pdf"; label: string; mime_types: string[]; suffixes: string[] }>
+  processors: Array<{
+    module: string
+    label: string
+    input_kinds: string[]
+    output_kind: string
+    requires_model_node?: string
+    config_schema: Record<string, { label: string; type: "integer" | "boolean"; min?: number; max?: number; default?: number | boolean }>
+  }>
+  dimension_options: Array<{ key: string; label: string }>
+  model_nodes: Array<{ key: string; label: string; required: boolean }>
+  prompt_modes: Array<"follow" | "single" | "ab">
 }
 
 export type ReviewPanelSummary = {

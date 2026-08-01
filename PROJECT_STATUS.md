@@ -1263,4 +1263,8 @@ npm.cmd run build
 
 ## 账号权限与模型管理系统（2026-08-01）
 
-已完成多人账号 RBAC（admin/manager/reviewer/analyst/viewer）、核心写接口权限收口、会话即时失效和最后管理员保护。模型配置升级为统一注册表，支持 OpenAI Chat/Responses、Anthropic Messages 与受控 OpenAI-compatible JSON 协议，节点模型绑定在入队时冻结非密快照。Docker/ Linux 使用 `/data/secrets/master.key` 的 AES-GCM 主密钥文件，数据库使用命名卷持久化；主密钥必须纳入备份。后端 Python 3.11 全量 `599 passed, 1 skipped`，前端 lint/build 通过。本机未安装 Docker CLI，未执行真实容器引擎金丝雀。
+已完成多人账号 RBAC（admin/manager/reviewer/analyst/viewer）、核心写接口权限收口、会话即时失效和最后管理员保护。模型配置升级为统一注册表，支持 OpenAI Chat/Responses、Anthropic Messages 与受控 OpenAI-compatible JSON 协议，节点模型绑定在入队时冻结非密快照。Docker/ Linux 使用 `/data/secrets/master.key` 的 AES-GCM 主密钥文件，数据库使用命名卷持久化；主密钥必须纳入备份。Mac mini 已安装 Docker/Colima 并完成真实容器构建、密钥密文、命名卷重启与容器重建读回金丝雀。
+
+## 管理员模块化类目流水线（2026-08-01）
+
+已移除类目表固定三值约束。管理员可创建草稿类目，并配置输入 MIME/后缀、有序前处理模块、跟随/单提示词/A-B 模式、类目附加指令、现役八维指标重点范围、各节点模型和自动化策略；启用后素材上传、ZIP 过滤、任务排队与 Worker 执行均读取类目合同。新任务冻结 `evaluation-category-profile-v2`，旧 v1 快照继续兼容。处理器、指标和模型节点均为服务端受控注册表，未知模块、未知指标和错误顺序 fail-closed，不开放任意代码插件。Docker v39→v40 迁移、动态类目创建、非法合同拒绝、容器重启读回及 1440/390 响应式验收通过。架构决策见 ADR-0028。

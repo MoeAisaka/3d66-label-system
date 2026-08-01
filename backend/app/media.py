@@ -24,6 +24,7 @@ def prepare_model_image(
     mime_type: str,
     content_sha256: str,
     cache_dir: Path,
+    max_frames: int = 4,
 ) -> tuple[Path, str]:
     """Return a provider-safe image payload, preserving animated source files.
 
@@ -33,22 +34,21 @@ def prepare_model_image(
     """
     if mime_type != "image/gif":
         return source_path, mime_type
+    if not 1 <= max_frames <= 24:
+        raise RuntimeError("动图关键帧数量超出允许范围")
     cache_dir.mkdir(parents=True, exist_ok=True)
-    preview_path = cache_dir / f"{content_sha256}.png"
+    preview_path = cache_dir / f"{content_sha256}-{max_frames}.png"
     if preview_path.exists():
         return preview_path, "image/png"
 
     try:
         with Image.open(source_path) as animation:
             frame_count = max(1, int(getattr(animation, "n_frames", 1)))
-            indices = sorted(
-                {
-                    0,
-                    frame_count // 3,
-                    (frame_count * 2) // 3,
-                    frame_count - 1,
-                }
-            )
+            sample_count = min(max_frames, frame_count)
+            indices = sorted({
+                round(position * (frame_count - 1) / max(sample_count - 1, 1))
+                for position in range(sample_count)
+            })
             frames: list[Image.Image] = []
             for index in indices:
                 animation.seek(index)
@@ -97,6 +97,8 @@ def prepare_pdf_model_input(
     cache_dir: Path,
     max_pages: int = 4,
     max_text_chars: int = 24_000,
+    ocr_enabled: bool = True,
+    ocr_min_text_chars: int = 1,
 ) -> PdfPreprocessResult:
     """Extract PDF text/OCR and render a bounded page contact sheet.
 
@@ -107,12 +109,16 @@ def prepare_pdf_model_input(
     """
     if not 1 <= max_pages <= 20 or not 1_000 <= max_text_chars <= 100_000:
         raise RuntimeError("PDF 前处理参数超出允许范围")
+    if not 0 <= ocr_min_text_chars <= 10_000:
+        raise RuntimeError("PDF OCR 触发阈值超出允许范围")
     cache_dir.mkdir(parents=True, exist_ok=True)
     cache_contract = {
         "schema_version": "pdf-preprocess-v2",
         "content_sha256": content_sha256,
         "max_pages": max_pages,
         "max_text_chars": max_text_chars,
+        "ocr_enabled": ocr_enabled,
+        "ocr_min_text_chars": ocr_min_text_chars,
     }
     cache_key = hashlib.sha256(
         json.dumps(
@@ -162,7 +168,7 @@ def prepare_pdf_model_input(
                 pixmap = page.get_pixmap(matrix=fitz.Matrix(1.25, 1.25), alpha=False)
                 frame = Image.open(io.BytesIO(pixmap.tobytes("png"))).convert("RGB")
                 rendered.append(frame)
-                if not extracted_pages[index].strip():
+                if ocr_enabled and len(extracted_pages[index].strip()) < ocr_min_text_chars:
                     ocr_attempts += 1
                     try:
                         import pytesseract  # type: ignore[import-not-found]

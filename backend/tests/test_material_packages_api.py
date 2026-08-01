@@ -23,6 +23,7 @@ from app.models import (
     AuditEvent,
     EvaluationJob,
     MaterialPackage,
+    ModelConfig,
     PromptVersion,
     User,
 )
@@ -209,6 +210,104 @@ def test_category_contracts_keep_pdf_and_material_inputs_isolated(tmp_path: Path
             files={"files": ("blocked.png", _image_bytes((3, 2, 1), format_name="PNG"), "image/png")},
         )
         assert blocked.status_code == 409
+
+
+def test_admin_can_create_modular_category_and_freeze_v2_job_contract(tmp_path: Path) -> None:
+    with _api_context(tmp_path) as (client, sessions):
+        catalog = client.get("/api/evaluation-categories/modules")
+        assert catalog.status_code == 200
+        assert {item["module"] for item in catalog.json()["processors"]} >= {
+            "image.prepare", "document.pdf_extract", "context.material_focus"
+        }
+        pipeline = {
+            "schema_version": "category-pipeline-v1",
+            "input_kind": "image",
+            "allowed_suffixes": [".jpg", ".png"],
+            "processors": [
+                {"module": "image.prepare", "enabled": True, "config": {}},
+                {"module": "context.material_focus", "enabled": True, "config": {"enabled": True}},
+            ],
+            "prompt_mode": "single",
+            "prompt_context": {"instruction": "重点检查室外植物与铺装关系。"},
+            "dimensions": {"enabled": True, "mode": "selected", "enabled_keys": ["composition_viewpoint"]},
+            "model_nodes": {"evaluation_main": True, "pdf_summary": False},
+        }
+        created = client.post(
+            "/api/evaluation-categories",
+            json={
+                "category_key": "landscape_image",
+                "display_name": "景观效果图",
+                "description": "景观类图片队列",
+                "status": "draft",
+                "allowed_mime_types": ["image/jpeg", "image/png"],
+                "preprocess_config": {},
+                "pipeline_config": pipeline,
+                "prompt_a_id": None,
+                "prompt_b_id": None,
+                "model_config_id": None,
+                "rubric_version": "landscape-v1",
+            },
+        )
+        assert created.status_code == 201, created.text
+        assert created.json()["category_key"] == "landscape_image"
+        assert created.json()["pipeline_revision"] == 1
+
+        invalid = dict(pipeline)
+        invalid["processors"] = [{"module": "python.user_plugin", "enabled": True, "config": {}}]
+        rejected = client.put(
+            "/api/evaluation-categories/landscape_image",
+            json={**created.json(), "pipeline_config": invalid},
+        )
+        assert rejected.status_code == 422
+        assert "未知处理模块" in rejected.json()["detail"]
+
+        with sessions() as db:
+            prompt = PromptVersion(
+                stage="A", name="景观单提示词", version="landscape-a1",
+                system_prompt="return a complete structured evaluation result",
+                user_prompt="evaluate {{image_metadata}} with all required fields",
+                rubric_version="landscape-v1", status="published",
+            )
+            inactive_model = ModelConfig(name="已停用模型", active=False)
+            db.add_all([prompt, inactive_model])
+            db.commit()
+            prompt_id = prompt.id
+            inactive_model_id = inactive_model.id
+        inactive_model_rejected = client.put(
+            "/api/evaluation-categories/landscape_image",
+            json={**created.json(), "model_config_id": inactive_model_id},
+        )
+        assert inactive_model_rejected.status_code == 422
+        assert "未启用" in inactive_model_rejected.json()["detail"]
+        activated = client.put(
+            "/api/evaluation-categories/landscape_image",
+            json={
+                **created.json(),
+                "status": "active",
+                "pipeline_config": pipeline,
+                "prompt_a_id": prompt_id,
+                "prompt_b_id": None,
+            },
+        )
+        assert activated.status_code == 200, activated.text
+        uploaded = client.post(
+            "/api/assets/upload",
+            data={"category_key": "landscape_image"},
+            files={"files": ("garden.jpg", _image_bytes((20, 80, 30)), "image/jpeg")},
+        )
+        assert uploaded.status_code == 200, uploaded.text
+        asset_id = uploaded.json()["items"][0]["id"]
+        queued = client.post(
+            "/api/jobs/enqueue",
+            json={"asset_ids": [asset_id], "category_key": "landscape_image"},
+        )
+        assert queued.status_code == 200, queued.text
+        with sessions() as db:
+            job = db.get(EvaluationJob, queued.json()["job_ids"][0])
+            frozen = json.loads(job.category_profile_snapshot_json)
+            assert frozen["schema_version"] == "evaluation-category-profile-v2"
+            assert frozen["category_key"] == "landscape_image"
+            assert frozen["pipeline_config"]["prompt_context"]["instruction"].startswith("重点检查")
 
 
 def test_material_category_requires_and_freezes_its_own_prompt_contract(

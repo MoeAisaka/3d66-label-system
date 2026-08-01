@@ -69,6 +69,11 @@ export function AssetsPage() {
     queryKey: ["evaluation-categories"],
     queryFn: () => api<{ items: EvaluationCategoryProfile[] }>("/api/evaluation-categories"),
   })
+  const selectedCategory = categories.data?.items.find((item) => item.category_key === categoryKey)
+  const categoryAccept = selectedCategory
+    ? [...selectedCategory.allowed_mime_types, ...selectedCategory.pipeline_config.allowed_suffixes].join(",")
+    : "image/jpeg,image/png,image/webp,image/gif"
+  const isDocumentCategory = selectedCategory?.pipeline_config.input_kind === "pdf"
 
   const prompts = useQuery({
     queryKey: ["prompts"],
@@ -295,7 +300,7 @@ export function AssetsPage() {
           ref={fileInputRef}
           type="file"
           multiple
-          accept={categoryKey === "pdf_text" ? "application/pdf,.pdf" : "image/jpeg,image/png,image/webp,image/gif"}
+          accept={categoryAccept}
           className="sr-only"
           onChange={(event) => {
             const files = snapshotFiles(event.target.files)
@@ -311,7 +316,7 @@ export function AssetsPage() {
           }}
           type="file"
           multiple
-          accept={categoryKey === "pdf_text" ? "application/pdf,.pdf" : "image/jpeg,image/png,image/webp,image/gif"}
+          accept={categoryAccept}
           className="sr-only"
           onChange={(event) => {
             const files = snapshotFiles(event.target.files)
@@ -352,7 +357,7 @@ export function AssetsPage() {
             </label>
             <div className="flex flex-wrap gap-2">
               <Button variant="secondary" onClick={() => fileInputRef.current?.click()} disabled={uploadBusy}>
-                <CloudArrowUp />{categoryKey === "pdf_text" ? "批量 PDF" : "批量图片"}
+                <CloudArrowUp />{isDocumentCategory ? "批量 PDF" : "批量图片"}
               </Button>
               <Button variant="secondary" onClick={() => folderInputRef.current?.click()} disabled={uploadBusy}>
                 <FolderOpen />整个文件夹
@@ -379,10 +384,10 @@ export function AssetsPage() {
           >
             <CloudArrowUp size={28} weight="light" />
             <p className="mt-3 font-editorial text-xl font-bold">
-              {uploadBusy ? "正在生成素材包" : categoryKey === "pdf_text" ? "拖入 PDF 方案，自动汇总成文本评测包" : "拖入一批图片，自动汇总成一个素材包"}
+              {uploadBusy ? "正在生成素材包" : isDocumentCategory ? `拖入 ${selectedCategory?.display_name ?? "PDF"} 素材` : `拖入一批${selectedCategory?.display_name ?? "图片"}素材`}
             </p>
             <p className="mt-2 text-sm text-[var(--muted)]">
-              {categoryKey === "pdf_text" ? "PDF 单文件不超过 25MB；上传后先做文本提取、OCR 和页图预处理" : "图片/文件夹单次最多 1000 张；更多素材用 ZIP，最多 10000 张；单张不超过 25MB"}
+              {isDocumentCategory ? "PDF 单文件不超过 25MB；上传后按类目处理链执行" : "图片/文件夹单次最多 1000 张；更多素材用 ZIP，最多 10000 张；单张不超过 25MB"}
             </p>
           </button>
         </section>

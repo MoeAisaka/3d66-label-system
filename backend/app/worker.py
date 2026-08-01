@@ -16,6 +16,12 @@ from sqlalchemy import func, select, text, update
 from sqlalchemy.exc import IntegrityError
 
 from .config import get_settings
+from .category_pipeline import (
+    active_modules,
+    legacy_preprocess_to_pipeline,
+    processor_config,
+    validate_pipeline_config,
+)
 from .database import init_database, session_scope
 from .doubao import DoubaoClient
 from .loop_engine import (
@@ -176,11 +182,17 @@ def _category_prompt_context(
     preprocess_config: dict[str, object],
     document_context: dict[str, object] | None,
     pdf_summary: dict[str, object] | None,
+    pipeline_config: dict[str, object] | None = None,
 ) -> str:
-    if category_key == "pdf_text":
-        if document_context is None or pdf_summary is None:
-            raise RuntimeError("PDF 前处理或多模态总结未完成")
-        return (
+    pipeline = pipeline_config or legacy_preprocess_to_pipeline(category_key, preprocess_config)
+    modules = active_modules(pipeline)
+    parts: list[str] = []
+    if "document.pdf_extract" in modules:
+        if document_context is None:
+            raise RuntimeError("PDF 前处理未完成")
+        if "document.multimodal_summary" in modules and pdf_summary is None:
+            raise RuntimeError("PDF 多模态总结未完成")
+        parts.append(
             "\n\nPDF 类目冻结上下文：\n"
             + json.dumps(
                 {
@@ -191,16 +203,19 @@ def _category_prompt_context(
             )
             + "\n请基于文档正文、页图与总结执行当前类目规则，不要把页眉页脚当成评测主体。"
         )
-    if category_key == "material_image" and preprocess_config.get(
-        "material_focus",
-        True,
-    ):
-        return (
+    if "context.material_focus" in modules and processor_config(pipeline, "context.material_focus").get("enabled", True):
+        parts.append(
             "\n\n材质图类目专项规则：优先检查纹理尺度与连续性、反光和粗糙度是否真实、"
             "接缝/收口/拼接关系、工艺瑕疵、重复贴图与拉伸，以及图片是否足以支持材质判断。"
             "所有结论必须引用图中可见证据；看不清时明确降低置信度并要求人工复核。"
         )
-    return ""
+    instruction = str((pipeline.get("prompt_context") or {}).get("instruction") or "").strip()
+    if instruction:
+        parts.append("\n\n类目管理员冻结指令：" + instruction)
+    dimensions = pipeline.get("dimensions") or {}
+    if dimensions.get("mode") == "selected" and dimensions.get("enabled_keys"):
+        parts.append("\n\n本类目重点指标：" + "、".join(str(item) for item in dimensions["enabled_keys"]) + "。其他必填维度仍需返回，但不作为类目重点解释。")
+    return "".join(parts)
 
 
 def _frozen_category_contract(
@@ -215,7 +230,7 @@ def _frozen_category_contract(
         raise RuntimeError("任务冻结类目配置损坏") from exc
     if (
         not isinstance(snapshot, dict)
-        or snapshot.get("schema_version") != "evaluation-category-profile-v1"
+        or snapshot.get("schema_version") not in {"evaluation-category-profile-v1", "evaluation-category-profile-v2"}
         or snapshot.get("category_key") != job.category_key
         or snapshot.get("prompt_a_id") != job.prompt_a_id
         or snapshot.get("prompt_b_id") != job.prompt_b_id
@@ -247,6 +262,11 @@ def _frozen_category_contract(
         raise RuntimeError("任务冻结类目 MIME 合同损坏")
     if not isinstance(snapshot.get("preprocess_config"), dict):
         raise RuntimeError("任务冻结类目前处理配置损坏")
+    if snapshot.get("schema_version") == "evaluation-category-profile-v2":
+        try:
+            snapshot["pipeline_config"] = validate_pipeline_config(snapshot.get("pipeline_config"))
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError("任务冻结类目流水线配置损坏") from exc
     rubric_version = snapshot.get("rubric_version")
     if not isinstance(rubric_version, str) or not rubric_version:
         raise RuntimeError("任务冻结类目 rubric 配置损坏")
@@ -608,6 +628,10 @@ async def evaluate_job(job_id: int) -> None:
                 "model_config_id"
             ]
             frozen_category_model = category_profile_snapshot["model_config"]
+            category_pipeline_config = (
+                category_profile_snapshot.get("pipeline_config")
+                or legacy_preprocess_to_pipeline(job.category_key, category_preprocess_config)
+            )
         else:
             category_profile = db.scalar(
                 select(EvaluationCategoryProfile).where(
@@ -645,6 +669,14 @@ async def evaluate_job(job_id: int) -> None:
                 raise RuntimeError("评测类目前处理配置损坏") from exc
             category_model_config_id = category_profile.model_config_id
             frozen_category_model = None
+            try:
+                category_pipeline_config = validate_pipeline_config(
+                    json.loads(category_profile.pipeline_config_json or "{}")
+                )
+            except (json.JSONDecodeError, ValueError):
+                category_pipeline_config = legacy_preprocess_to_pipeline(
+                    job.category_key, category_preprocess_config
+                )
         prompt_a_id = job.prompt_a_id
         prompt_b_id = job.prompt_b_id
         strategy_bundle_id = job.strategy_bundle_id
@@ -806,25 +838,35 @@ async def evaluate_job(job_id: int) -> None:
     if not image_path.exists():
         raise RuntimeError("原始素材文件不存在")
     document_context: dict[str, object] | None = None
-    if job.category_key == "pdf_text":
+    category_modules = active_modules(category_pipeline_config)
+    if "document.pdf_extract" in category_modules:
+        pdf_config = processor_config(category_pipeline_config, "document.pdf_extract")
+        ocr_config = processor_config(category_pipeline_config, "document.ocr_if_needed")
         pdf_input = prepare_pdf_model_input(
             image_path,
             content_sha256=asset.sha256,
             cache_dir=settings.upload_dir / ".derived" / "pdf",
-            max_pages=int(category_preprocess_config.get("max_pages", 4)),
+            max_pages=int(pdf_config.get("max_pages", category_preprocess_config.get("max_pages", 4))),
             max_text_chars=int(
-                category_preprocess_config.get("max_text_chars", 24_000)
+                pdf_config.get("max_text_chars", category_preprocess_config.get("max_text_chars", 24_000))
             ),
+            ocr_enabled="document.ocr_if_needed" in category_modules,
+            ocr_min_text_chars=int(ocr_config.get("min_text_chars", 80)),
         )
         model_image_path = pdf_input.preview_path
         model_mime_type = pdf_input.preview_mime_type
         document_context = pdf_input.context
     else:
+        animated_config = processor_config(
+            category_pipeline_config,
+            "image.animated_contact_sheet",
+        )
         model_image_path, model_mime_type = prepare_model_image(
             image_path,
             mime_type=asset.mime_type,
             content_sha256=asset.sha256,
             cache_dir=settings.upload_dir / ".derived" / "evaluation",
+            max_frames=int(animated_config.get("max_frames", 1)),
         )
 
     preprocess_snapshot: dict[str, object] = {
@@ -834,6 +876,7 @@ async def evaluate_job(job_id: int) -> None:
         "source_mime_type": asset.mime_type,
         "model_mime_type": model_mime_type,
         "config": category_preprocess_config,
+        "pipeline_config": category_pipeline_config,
     }
     if document_context is not None:
         document_text = str(document_context.get("text") or "")
@@ -872,15 +915,7 @@ async def evaluate_job(job_id: int) -> None:
     # as recovery jobs so retry lineage, attempt count and Retry-After survive.
     client = DoubaoClient(client_config)  # type: ignore[arg-type]
     pdf_summary: dict[str, object] | None = None
-    if document_context is not None:
-        summary_enabled = category_preprocess_config.get(
-            "multimodal_summary",
-            True,
-        )
-        if not isinstance(summary_enabled, bool):
-            raise RuntimeError("PDF 多模态总结配置损坏")
-        if not summary_enabled:
-            raise RuntimeError("PDF 类目必须启用多模态总结前置处理")
+    if document_context is not None and "document.multimodal_summary" in category_modules:
         _set_job(job_id, stage="pdf_summary", progress=12)
         summary_response = await client.chat_json(
             PDF_SUMMARY_SYSTEM_PROMPT,
@@ -921,6 +956,7 @@ async def evaluate_job(job_id: int) -> None:
         preprocess_config=category_preprocess_config,
         document_context=document_context,
         pdf_summary=pdf_summary,
+        pipeline_config=category_pipeline_config,
     )
     user_a = prompt_a.user_prompt.replace(
         "{{image_metadata}}", json.dumps(metadata, ensure_ascii=False)

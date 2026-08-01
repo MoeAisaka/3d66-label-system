@@ -6,6 +6,8 @@ from typing import Callable
 
 from sqlalchemy import Connection
 
+from ..category_pipeline import legacy_preprocess_to_pipeline, pipeline_json
+
 
 class Migration:
     def __init__(self, version: int, name: str, up: Callable[[Connection], None]) -> None:
@@ -5715,6 +5717,141 @@ def _migration_039_add_accounts_and_model_registry(connection: Connection) -> No
     )
 
 
+def _migration_040_modular_category_pipelines(connection: Connection) -> None:
+    tables = {
+        row[0]
+        for row in connection.exec_driver_sql(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )
+    }
+    if "evaluation_category_profiles" not in tables:
+        return
+    table_sql = str(
+        connection.exec_driver_sql(
+            "SELECT sql FROM sqlite_master WHERE type='table' "
+            "AND name='evaluation_category_profiles'"
+        ).scalar_one_or_none()
+        or ""
+    )
+    columns = {
+        row[1]
+        for row in connection.exec_driver_sql(
+            "PRAGMA table_info(evaluation_category_profiles)"
+        )
+    }
+    complete_profile_dependencies = {
+        "prompt_versions", "model_configs", "optimizer_configs"
+    }.issubset(tables)
+    needs_rebuild = (
+        "category_key IN ('space_image','pdf_text','material_image')" in table_sql
+        and complete_profile_dependencies
+    )
+    if needs_rebuild:
+        prompt_fk = (
+            "INTEGER REFERENCES prompt_versions(id) ON DELETE SET NULL"
+            if "prompt_versions" in tables else "INTEGER"
+        )
+        model_fk = (
+            "INTEGER REFERENCES model_configs(id) ON DELETE SET NULL"
+            if "model_configs" in tables else "INTEGER"
+        )
+        optimizer_fk = (
+            "INTEGER REFERENCES optimizer_configs(id) ON DELETE SET NULL"
+            if "optimizer_configs" in tables else "INTEGER"
+        )
+        connection.exec_driver_sql("DROP TABLE IF EXISTS evaluation_category_profiles_v40")
+        connection.exec_driver_sql("""
+            CREATE TABLE evaluation_category_profiles_v40 (
+                id INTEGER PRIMARY KEY,
+                category_key VARCHAR(40) NOT NULL UNIQUE,
+                display_name VARCHAR(120) NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                status VARCHAR(20) NOT NULL DEFAULT 'draft'
+                    CHECK(status IN ('draft','active','retired')),
+                allowed_mime_types_json TEXT NOT NULL DEFAULT '[]',
+                preprocess_config_json TEXT NOT NULL DEFAULT '{}',
+                pipeline_config_json TEXT NOT NULL DEFAULT '{}',
+                pipeline_revision INTEGER NOT NULL DEFAULT 1,
+                prompt_a_id %s,
+                prompt_b_id %s,
+                model_config_id %s,
+                optimizer_config_id %s,
+                automation_config_json TEXT NOT NULL DEFAULT '{"enabled":true,"case_threshold":1,"cooldown_seconds":0,"max_candidates":1}',
+                automation_revision INTEGER NOT NULL DEFAULT 1,
+                automation_last_triggered_at DATETIME,
+                rubric_version VARCHAR(40) NOT NULL DEFAULT 'rubric-v2.1',
+                dimension_schema_key VARCHAR(80),
+                dimension_schema_version VARCHAR(64),
+                created_by VARCHAR(80) NOT NULL DEFAULT 'system',
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+        """ % (prompt_fk, prompt_fk, model_fk, optimizer_fk))
+        ordered = (
+            "id", "category_key", "display_name", "description", "status",
+            "allowed_mime_types_json", "preprocess_config_json", "pipeline_config_json",
+            "pipeline_revision", "prompt_a_id", "prompt_b_id", "model_config_id",
+            "optimizer_config_id", "automation_config_json", "automation_revision",
+            "automation_last_triggered_at", "rubric_version", "dimension_schema_key",
+            "dimension_schema_version", "created_by", "created_at", "updated_at",
+        )
+        shared = [name for name in ordered if name in columns]
+        connection.exec_driver_sql(
+            "INSERT INTO evaluation_category_profiles_v40 ("
+            + ",".join(shared)
+            + ") SELECT "
+            + ",".join(shared)
+            + " FROM evaluation_category_profiles"
+        )
+        connection.exec_driver_sql("DROP TABLE evaluation_category_profiles")
+        connection.exec_driver_sql(
+            "ALTER TABLE evaluation_category_profiles_v40 "
+            "RENAME TO evaluation_category_profiles"
+        )
+    else:
+        for name, definition in (
+            ("description", "TEXT NOT NULL DEFAULT ''"),
+            ("pipeline_config_json", "TEXT NOT NULL DEFAULT '{}'"),
+            ("pipeline_revision", "INTEGER NOT NULL DEFAULT 1"),
+        ):
+            if name not in columns:
+                connection.exec_driver_sql(
+                    f"ALTER TABLE evaluation_category_profiles ADD COLUMN {name} {definition}"
+                )
+    connection.exec_driver_sql(
+        "CREATE INDEX IF NOT EXISTS ix_evaluation_category_profiles_category_key "
+        "ON evaluation_category_profiles(category_key)"
+    )
+    connection.exec_driver_sql(
+        "CREATE INDEX IF NOT EXISTS ix_evaluation_category_profiles_status "
+        "ON evaluation_category_profiles(status)"
+    )
+    rows = connection.exec_driver_sql(
+        "SELECT id, category_key, preprocess_config_json, pipeline_config_json "
+        "FROM evaluation_category_profiles"
+    ).fetchall()
+    for row in rows:
+        try:
+            existing = json.loads(row[3] or "{}")
+        except json.JSONDecodeError:
+            existing = {}
+        if existing.get("schema_version") == "category-pipeline-v1":
+            continue
+        try:
+            preprocess = json.loads(row[2] or "{}")
+        except json.JSONDecodeError:
+            preprocess = {}
+        frozen = pipeline_json(legacy_preprocess_to_pipeline(str(row[1]), preprocess))
+        connection.exec_driver_sql(
+            "UPDATE evaluation_category_profiles SET pipeline_config_json = ?, "
+            "pipeline_revision = 1 WHERE id = ?",
+            (frozen, row[0]),
+        )
+    violations = connection.exec_driver_sql("PRAGMA foreign_key_check").fetchall()
+    if violations:
+        raise RuntimeError(f"v40 类目模板迁移后外键校验失败：{violations[:3]}")
+
+
 MIGRATIONS = [
     Migration(1, "add_sample_expected_level", _migration_001_add_sample_expected_level),
     Migration(2, "add_review_corrections", _migration_002_add_review_corrections),
@@ -5866,6 +6003,11 @@ MIGRATIONS = [
         39,
         "add_accounts_and_model_registry",
         _migration_039_add_accounts_and_model_registry,
+    ),
+    Migration(
+        40,
+        "modular_category_pipelines",
+        _migration_040_modular_category_pipelines,
     ),
 ]
 

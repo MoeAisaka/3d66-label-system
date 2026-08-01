@@ -13,7 +13,7 @@ from collections import Counter
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, Mapping
 
 from fastapi import (
     BackgroundTasks,
@@ -45,6 +45,16 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from .config import get_settings
+from .category_pipeline import (
+    CATEGORY_KEY_PATTERN,
+    MODEL_NODE_KEYS,
+    active_modules,
+    allowed_mimes_for_pipeline,
+    default_pipeline,
+    legacy_preprocess_to_pipeline,
+    pipeline_catalog_payload,
+    validate_pipeline_config,
+)
 from .database import SessionLocal, get_db, init_database
 from .doubao import DoubaoClient
 from .migration import compare_results
@@ -208,7 +218,6 @@ MAX_ARCHIVE_COMPRESSION_RATIO = 200
 ALLOWED_MIME = {"image/jpeg", "image/png", "image/webp", "image/gif"}
 ALLOWED_IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
 CATEGORY_KEYS = ("space_image", "pdf_text", "material_image")
-ALLOWED_CATEGORY_KEYS = set(CATEGORY_KEYS)
 ALLOWED_PDF_SUFFIXES = {".pdf"}
 
 
@@ -276,7 +285,7 @@ class UserUpdateRequest(BaseModel):
 
 class ModelNodeBindingRequest(BaseModel):
     model_config_id: int = Field(ge=1)
-    category_key: str | None = Field(default=None, min_length=1, max_length=40)
+    category_key: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9_]{2,39}$")
     enabled: bool = True
 
 
@@ -462,7 +471,7 @@ class BenchmarkRunRequest(BaseModel):
 class MaterialPackageCreateRequest(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     asset_ids: list[int] = Field(min_length=1, max_length=1000)
-    category_key: Literal["space_image", "pdf_text", "material_image"] = "space_image"
+    category_key: str = Field(default="space_image", pattern=r"^[a-z][a-z0-9_]{2,39}$")
 
     @model_validator(mode="after")
     def validate_unique_assets(self) -> "MaterialPackageCreateRequest":
@@ -472,7 +481,7 @@ class MaterialPackageCreateRequest(BaseModel):
 
 
 class AssetCategoryUpdateRequest(BaseModel):
-    category_key: Literal["space_image", "pdf_text", "material_image"]
+    category_key: str = Field(pattern=r"^[a-z][a-z0-9_]{2,39}$")
 
 
 class AssetBulkDeleteRequest(BaseModel):
@@ -497,7 +506,7 @@ class EnqueueRequest(BaseModel):
         "canary",
     ] | None = None
     manual_recheck: bool = False
-    category_key: Literal["space_image", "pdf_text", "material_image"] = "space_image"
+    category_key: str = Field(default="space_image", pattern=r"^[a-z][a-z0-9_]{2,39}$")
 
     @model_validator(mode="after")
     def validate_prompt_mode(self) -> "EnqueueRequest":
@@ -512,9 +521,11 @@ class EnqueueRequest(BaseModel):
 
 class EvaluationCategoryProfileUpdate(BaseModel):
     display_name: str = Field(min_length=1, max_length=120)
+    description: str = Field(default="", max_length=2000)
     status: Literal["draft", "active", "retired"] = "active"
     allowed_mime_types: list[str] = Field(min_length=1, max_length=8)
     preprocess_config: dict[str, Any] = Field(default_factory=dict)
+    pipeline_config: dict[str, Any] | None = None
     prompt_a_id: int | None = Field(default=None, ge=1)
     prompt_b_id: int | None = Field(default=None, ge=1)
     model_config_id: int | None = Field(default=None, ge=1)
@@ -530,6 +541,11 @@ class EvaluationCategoryProfileUpdate(BaseModel):
         ):
             raise ValueError("维度 Schema 业务键与版本必须同时填写")
         return self
+
+
+class EvaluationCategoryProfileCreate(EvaluationCategoryProfileUpdate):
+    category_key: str = Field(pattern=r"^[a-z][a-z0-9_]{2,39}$")
+    status: Literal["draft"] = "draft"
 
 
 class PromptCreateRequest(BaseModel):
@@ -665,7 +681,7 @@ class SampleSetCreateRequest(BaseModel):
     name: str = Field(min_length=1, max_length=160)
     description: str = Field(default="", max_length=2000)
     kind: str = Field(default="test", pattern="^(golden|test)$")
-    category_key: Literal["space_image", "pdf_text", "material_image"] = "space_image"
+    category_key: str = Field(default="space_image", pattern=r"^[a-z][a-z0-9_]{2,39}$")
 
 
 class SampleSetAddItemsRequest(BaseModel):
@@ -2236,11 +2252,13 @@ def update_model_node(
     actor: User = Depends(_permission_user("models:write")),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    if node_key not in {"evaluation_main", "pdf_summary", "optimization", "benchmark", "diagnostic"}:
+    if node_key not in MODEL_NODE_KEYS:
         raise HTTPException(status_code=422, detail="未知模型节点")
     config = db.get(ModelConfig, payload.model_config_id)
     if config is None or not config.active:
         raise HTTPException(status_code=422, detail="模型配置不存在或未启用")
+    if payload.category_key is not None:
+        _category_profile(db, payload.category_key)
     row = db.scalar(select(ModelNodeBinding).where(ModelNodeBinding.node_key == node_key, ModelNodeBinding.category_key == payload.category_key))
     if row is None:
         row = ModelNodeBinding(node_key=node_key)
@@ -2308,20 +2326,23 @@ def _category_profile(
     *,
     require_active: bool = False,
 ) -> EvaluationCategoryProfile:
-    if category_key not in ALLOWED_CATEGORY_KEYS:
-        raise HTTPException(status_code=422, detail="不支持的评测类目")
+    if CATEGORY_KEY_PATTERN.fullmatch(category_key) is None:
+        raise HTTPException(status_code=422, detail="评测类目标识格式无效")
     profile = db.scalar(
         select(EvaluationCategoryProfile).where(
             EvaluationCategoryProfile.category_key == category_key,
         )
     )
     if profile is None:
-        defaults = CATEGORY_PROFILE_DEFAULTS[category_key]
+        defaults = CATEGORY_PROFILE_DEFAULTS.get(category_key)
+        if defaults is None:
+            raise HTTPException(status_code=404, detail="评测类目不存在")
         profile = EvaluationCategoryProfile(
             category_key=category_key,
             display_name=defaults["display_name"],
             allowed_mime_types_json=defaults["allowed_mime_types_json"],
             preprocess_config_json=defaults["preprocess_config_json"],
+            pipeline_config_json=canonical_json(default_pipeline(category_key)),
             status="active",
             rubric_version="rubric-v2.1",
             created_by="compatibility-default",
@@ -2333,14 +2354,33 @@ def _category_profile(
     return profile
 
 
+def _profile_pipeline(profile: EvaluationCategoryProfile) -> dict[str, Any]:
+    try:
+        raw = json.loads(profile.pipeline_config_json or "{}")
+    except json.JSONDecodeError:
+        raw = {}
+    if raw.get("schema_version") != "category-pipeline-v1":
+        raw = legacy_preprocess_to_pipeline(
+            profile.category_key,
+            json.loads(profile.preprocess_config_json or "{}"),
+        )
+    try:
+        return validate_pipeline_config(raw)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=f"类目流水线配置损坏：{exc}") from None
+
+
 def _category_profile_payload(profile: EvaluationCategoryProfile) -> dict[str, Any]:
     return {
         "id": profile.id,
         "category_key": profile.category_key,
         "display_name": profile.display_name,
+        "description": profile.description,
         "status": profile.status,
         "allowed_mime_types": json.loads(profile.allowed_mime_types_json or "[]"),
         "preprocess_config": json.loads(profile.preprocess_config_json or "{}"),
+        "pipeline_config": _profile_pipeline(profile),
+        "pipeline_revision": profile.pipeline_revision,
         "prompt_a_id": profile.prompt_a_id,
         "prompt_b_id": profile.prompt_b_id,
         "model_config_id": profile.model_config_id,
@@ -2365,7 +2405,7 @@ def _category_execution_snapshot(
 ) -> str:
     return canonical_json(
         {
-            "schema_version": "evaluation-category-profile-v1",
+            "schema_version": "evaluation-category-profile-v2",
             "profile_id": profile.id,
             "category_key": profile.category_key,
             "display_name": profile.display_name,
@@ -2375,6 +2415,8 @@ def _category_execution_snapshot(
             "preprocess_config": json.loads(
                 profile.preprocess_config_json or "{}"
             ),
+            "pipeline_config": _profile_pipeline(profile),
+            "pipeline_revision": profile.pipeline_revision,
             "prompt_a_id": prompt_a_id,
             "prompt_b_id": prompt_b_id,
             "model_config_id": model_config.id,
@@ -2412,58 +2454,63 @@ def list_evaluation_categories(
     return {"items": [_category_profile_payload(profile) for profile in profiles]}
 
 
-@app.put("/api/evaluation-categories/{category_key}")
-def update_evaluation_category(
-    category_key: str,
-    payload: EvaluationCategoryProfileUpdate,
-    user: User = Depends(admin_user),
-    db: Session = Depends(get_db),
+@app.get("/api/evaluation-categories/modules")
+def evaluation_category_modules(
+    _user: User = Depends(current_user),
 ) -> dict[str, Any]:
-    profile = _category_profile(db, category_key)
-    expected_mimes = (
-        {"application/pdf"}
-        if category_key == "pdf_text"
-        else ALLOWED_MIME
-    )
+    return pipeline_catalog_payload()
+
+
+def _apply_category_update(
+    *,
+    db: Session,
+    profile: EvaluationCategoryProfile,
+    payload: EvaluationCategoryProfileUpdate,
+    user: User,
+) -> None:
+    candidate = payload.pipeline_config
+    if candidate is None:
+        candidate = legacy_preprocess_to_pipeline(
+            profile.category_key,
+            payload.preprocess_config,
+        )
+    try:
+        pipeline = validate_pipeline_config(candidate)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from None
+    expected_mimes = set(allowed_mimes_for_pipeline(pipeline))
     if not set(payload.allowed_mime_types).issubset(expected_mimes):
-        raise HTTPException(status_code=422, detail="类目 MIME 类型与流水线不匹配")
-    preprocess_config = dict(payload.preprocess_config)
-    if category_key == "pdf_text":
-        max_pages = preprocess_config.get("max_pages", 4)
-        max_text_chars = preprocess_config.get("max_text_chars", 24_000)
-        multimodal_summary = preprocess_config.get("multimodal_summary", True)
-        if (
-            not isinstance(max_pages, int)
-            or isinstance(max_pages, bool)
-            or not 1 <= max_pages <= 20
-            or not isinstance(max_text_chars, int)
-            or isinstance(max_text_chars, bool)
-            or not 1_000 <= max_text_chars <= 100_000
-            or multimodal_summary is not True
-        ):
-            raise HTTPException(status_code=422, detail="PDF 前处理参数超出允许范围")
-    if category_key == "material_image" and not isinstance(
-        preprocess_config.get("material_focus", True), bool
-    ):
-        raise HTTPException(status_code=422, detail="材质专项关注必须是布尔值")
-    if payload.prompt_a_id is not None:
-        prompt_a = db.get(PromptVersion, payload.prompt_a_id)
-        if prompt_a is None or prompt_a.stage != "A":
-            raise HTTPException(status_code=422, detail="类目 A 提示词必须是有效的 A 阶段版本")
-        if prompt_a.rubric_version != payload.rubric_version.strip():
-            raise HTTPException(status_code=422, detail="类目 A 提示词与 rubric 版本不一致")
-    if payload.prompt_b_id is not None:
-        prompt_b = db.get(PromptVersion, payload.prompt_b_id)
-        if prompt_b is None or prompt_b.stage != "B":
-            raise HTTPException(status_code=422, detail="类目 B 提示词必须是有效的 B 阶段版本")
-        if prompt_b.rubric_version != payload.rubric_version.strip():
-            raise HTTPException(status_code=422, detail="类目 B 提示词与 rubric 版本不一致")
-    if payload.model_config_id is not None and db.get(ModelConfig, payload.model_config_id) is None:
-        raise HTTPException(status_code=422, detail="类目模型配置不存在")
+        raise HTTPException(status_code=422, detail="类目 MIME 类型与流水线输入类型不匹配")
+    if payload.status == "active" and not payload.allowed_mime_types:
+        raise HTTPException(status_code=422, detail="启用类目前必须配置输入 MIME")
+    prompt_mode = pipeline["prompt_mode"]
+    if payload.status == "active" and prompt_mode == "single" and (payload.prompt_a_id is None or payload.prompt_b_id is not None):
+        raise HTTPException(status_code=422, detail="单提示词模式必须只绑定一个 A 阶段版本")
+    if payload.status == "active" and prompt_mode == "ab" and (payload.prompt_a_id is None or payload.prompt_b_id is None):
+        raise HTTPException(status_code=422, detail="A/B 模式必须同时绑定 A、B 阶段版本")
+    if prompt_mode == "follow" and (payload.prompt_a_id is not None or payload.prompt_b_id is not None):
+        raise HTTPException(status_code=422, detail="跟随任务模式不能冻结类目提示词")
+    for stage, prompt_id in (("A", payload.prompt_a_id), ("B", payload.prompt_b_id)):
+        if prompt_id is None:
+            continue
+        prompt = db.get(PromptVersion, prompt_id)
+        if prompt is None or prompt.stage != stage:
+            raise HTTPException(status_code=422, detail=f"类目 {stage} 提示词必须是有效的 {stage} 阶段版本")
+        if prompt.rubric_version != payload.rubric_version.strip():
+            raise HTTPException(status_code=422, detail=f"类目 {stage} 提示词与 rubric 版本不一致")
+    if payload.model_config_id is not None:
+        category_model = db.get(ModelConfig, payload.model_config_id)
+        if category_model is None or not category_model.active:
+            raise HTTPException(status_code=422, detail="类目模型配置不存在或未启用")
     profile.display_name = payload.display_name.strip()
+    profile.description = payload.description.strip()
     profile.status = payload.status
     profile.allowed_mime_types_json = canonical_json(payload.allowed_mime_types)
-    profile.preprocess_config_json = canonical_json(preprocess_config)
+    profile.preprocess_config_json = canonical_json(payload.preprocess_config)
+    next_pipeline = canonical_json(pipeline)
+    if next_pipeline != (profile.pipeline_config_json or ""):
+        profile.pipeline_config_json = next_pipeline
+        profile.pipeline_revision += 1
     profile.prompt_a_id = payload.prompt_a_id
     profile.prompt_b_id = payload.prompt_b_id
     profile.model_config_id = payload.model_config_id
@@ -2474,19 +2521,50 @@ def update_evaluation_category(
     if automation:
         if not isinstance(automation.get("enabled", True), bool):
             raise HTTPException(status_code=422, detail="类目自动化 enabled 必须是布尔值")
-        for key, low, high in (
-            ("case_threshold", 1, 1000),
-            ("cooldown_seconds", 0, 86400),
-            ("max_candidates", 1, 5),
-        ):
+        for key, low, high in (("case_threshold", 1, 1000), ("cooldown_seconds", 0, 86400), ("max_candidates", 1, 5)):
             value = automation.get(key)
-            if value is not None and (
-                not isinstance(value, int) or isinstance(value, bool) or not low <= value <= high
-            ):
+            if value is not None and (not isinstance(value, int) or isinstance(value, bool) or not low <= value <= high):
                 raise HTTPException(status_code=422, detail=f"类目自动化 {key} 超出允许范围")
         profile.automation_config_json = canonical_json(automation)
         profile.automation_revision += 1
     profile.created_by = profile.created_by or user.username
+
+
+@app.post("/api/evaluation-categories", status_code=201)
+def create_evaluation_category(
+    payload: EvaluationCategoryProfileCreate,
+    user: User = Depends(admin_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    if db.scalar(select(EvaluationCategoryProfile.id).where(EvaluationCategoryProfile.category_key == payload.category_key)) is not None:
+        raise HTTPException(status_code=409, detail="评测类目标识已存在")
+    profile = EvaluationCategoryProfile(
+        category_key=payload.category_key,
+        display_name=payload.display_name.strip(),
+        description=payload.description.strip(),
+        status="draft",
+        allowed_mime_types_json=canonical_json(payload.allowed_mime_types),
+        preprocess_config_json=canonical_json(payload.preprocess_config),
+        pipeline_config_json="{}",
+        pipeline_revision=0,
+        created_by=user.username,
+    )
+    db.add(profile)
+    _apply_category_update(db=db, profile=profile, payload=payload, user=user)
+    db.commit()
+    db.refresh(profile)
+    return _category_profile_payload(profile)
+
+
+@app.put("/api/evaluation-categories/{category_key}")
+def update_evaluation_category(
+    category_key: str,
+    payload: EvaluationCategoryProfileUpdate,
+    user: User = Depends(admin_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    profile = _category_profile(db, category_key)
+    _apply_category_update(db=db, profile=profile, payload=payload, user=user)
     db.commit()
     db.refresh(profile)
     return _category_profile_payload(profile)
@@ -2528,21 +2606,24 @@ def _validate_asset_bytes(
     *,
     filename: str,
     content_type: str | None,
-    category_key: str,
+    pipeline: Mapping[str, Any],
+    allowed_mime_types: set[str],
 ) -> tuple[str, int | None, int | None]:
-    if category_key == "pdf_text":
+    if pipeline.get("input_kind") == "pdf":
         if not data or len(data) > MAX_UPLOAD_BYTES:
             raise HTTPException(status_code=400, detail=f"{filename} 为空或超过 25MB")
         if not data.startswith(b"%PDF-"):
             raise HTTPException(status_code=400, detail=f"{filename} 不是有效 PDF")
+        if "application/pdf" not in allowed_mime_types:
+            raise HTTPException(status_code=400, detail="该类目未允许 PDF MIME")
         return "application/pdf", None, None
     if content_type == "application/pdf":
-        raise HTTPException(status_code=400, detail="PDF 必须选择 PDF 文本类目")
+        raise HTTPException(status_code=400, detail="PDF 必须选择 PDF 输入类目")
     mime_type, width, height = _validate_image_bytes(
         data, filename=filename, content_type=content_type
     )
-    if category_key == "material_image" and mime_type not in ALLOWED_MIME:
-        raise HTTPException(status_code=400, detail="材质图仅支持 JPG、PNG、WebP、GIF")
+    if mime_type not in allowed_mime_types:
+        raise HTTPException(status_code=400, detail="文件 MIME 不在该类目允许范围内")
     return mime_type, width, height
 
 
@@ -2559,11 +2640,13 @@ def _store_package_asset(
     created_paths: list[Path],
 ) -> dict[str, Any]:
     normalized_name = (filename.strip() or f"image-{position}")[:500]
+    profile = _category_profile(db, category_key, require_active=True)
     mime_type, width, height = _validate_asset_bytes(
         data,
         filename=normalized_name,
         content_type=content_type,
-        category_key=category_key,
+        pipeline=_profile_pipeline(profile),
+        allowed_mime_types=set(json.loads(profile.allowed_mime_types_json or "[]")),
     )
     digest = hashlib.sha256(data).hexdigest()
     existing = db.scalar(
@@ -2756,6 +2839,8 @@ async def import_material_package_archive(
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     profile = _category_profile(db, category_key, require_active=True)
+    pipeline = _profile_pipeline(profile)
+    allowed_suffixes = set(pipeline["allowed_suffixes"])
     filename = archive.filename or "archive.zip"
     if Path(filename).suffix.lower() != ".zip":
         raise HTTPException(status_code=400, detail="压缩包仅支持 ZIP 格式")
@@ -2799,9 +2884,7 @@ async def import_material_package_archive(
                 if (
                     "__MACOSX" in path.parts
                     or path.name in {".DS_Store", "Thumbs.db"}
-                    or path.suffix.lower() not in (
-                        ALLOWED_PDF_SUFFIXES if category_key == "pdf_text" else ALLOWED_IMAGE_SUFFIXES
-                    )
+                    or path.suffix.lower() not in allowed_suffixes
                 ):
                     ignored_count += 1
                     continue
@@ -2832,7 +2915,7 @@ async def import_material_package_archive(
                     )
                 image_infos.append(info)
             if not image_infos:
-                raise HTTPException(status_code=400, detail="ZIP 中没有可用图片")
+                raise HTTPException(status_code=400, detail="ZIP 中没有符合类目输入合同的文件")
             if len(image_infos) > MAX_ARCHIVE_IMAGES:
                 raise HTTPException(
                     status_code=400,
@@ -3400,6 +3483,7 @@ def enqueue_jobs(
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     profile = _category_profile(db, payload.category_key, require_active=True)
+    pipeline = _profile_pipeline(profile)
     if profile.dimension_schema_key is not None:
         raise HTTPException(
             status_code=409,
@@ -3455,11 +3539,7 @@ def enqueue_jobs(
         if explicit_pair
         else profile.prompt_b_id
     )
-    if (
-        payload.category_key != "space_image"
-        and selected_single_id is None
-        and selected_a_id is None
-    ):
+    if pipeline["prompt_mode"] != "follow" and selected_single_id is None and selected_a_id is None:
         raise HTTPException(
             status_code=409,
             detail="请先为该评测类目绑定专属提示词",
@@ -3503,10 +3583,11 @@ def enqueue_jobs(
     pdf_binding = db.scalar(select(ModelNodeBinding).where(ModelNodeBinding.node_key == "pdf_summary", ModelNodeBinding.enabled.is_(True), ModelNodeBinding.category_key == payload.category_key))
     if pdf_binding is None:
         pdf_binding = db.scalar(select(ModelNodeBinding).where(ModelNodeBinding.node_key == "pdf_summary", ModelNodeBinding.enabled.is_(True), ModelNodeBinding.category_key.is_(None)))
+    summary_required = "document.multimodal_summary" in active_modules(pipeline)
     pdf_summary_model = (
         pdf_binding.model
-        if payload.category_key == "pdf_text" and pdf_binding is not None and pdf_binding.model.active
-        else selected_model if payload.category_key == "pdf_text" else None
+        if summary_required and pdf_binding is not None and pdf_binding.model.active
+        else selected_model if summary_required else None
     )
     category_profile_snapshot = _category_execution_snapshot(
         profile,
