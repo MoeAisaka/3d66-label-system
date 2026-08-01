@@ -405,6 +405,117 @@ class MaterialPackageItem(Base):
     asset: Mapped[Asset] = relationship()
 
 
+class EvaluationProductionRun(Base):
+    """Mutable orchestration record; the final EvaluationPackage stays separate."""
+
+    __tablename__ = "evaluation_production_runs"
+    __table_args__ = (
+        UniqueConstraint(
+            "idempotency_key", name="uq_evaluation_production_runs_key"
+        ),
+        CheckConstraint(
+            "status IN ("
+            "'preparing','queued','evaluating','first_review','optimizing',"
+            "'regressing','awaiting_review','approved','rejected','published',"
+            "'blocked','failed','archived'"
+            ")",
+            name="ck_evaluation_production_runs_status",
+        ),
+        CheckConstraint(
+            "json_valid(category_profile_snapshot_json) AND "
+            "json_type(category_profile_snapshot_json, '$') = 'object'",
+            name="ck_evaluation_production_runs_profile_json",
+        ),
+        CheckConstraint(
+            "json_valid(job_ids_json) AND json_type(job_ids_json, '$') = 'array'",
+            name="ck_evaluation_production_runs_job_ids_json",
+        ),
+        CheckConstraint(
+            "json_valid(blockers_json) AND json_type(blockers_json, '$') = 'array'",
+            name="ck_evaluation_production_runs_blockers_json",
+        ),
+        CheckConstraint(
+            "length(request_hash) = 64 AND request_hash = lower(request_hash) "
+            "AND request_hash NOT GLOB '*[^0-9a-f]*'",
+            name="ck_evaluation_production_runs_request_hash",
+        ),
+        CheckConstraint(
+            "length(category_profile_hash) = 64 "
+            "AND category_profile_hash = lower(category_profile_hash) "
+            "AND category_profile_hash NOT GLOB '*[^0-9a-f]*'",
+            name="ck_evaluation_production_runs_profile_hash",
+        ),
+        CheckConstraint(
+            "audit_revision >= 1",
+            name="ck_evaluation_production_runs_audit_revision",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    idempotency_key: Mapped[str] = mapped_column(
+        String(160), unique=True, index=True
+    )
+    request_hash: Mapped[str] = mapped_column(String(64), index=True)
+    material_package_id: Mapped[int] = mapped_column(
+        ForeignKey("material_packages.id", ondelete="RESTRICT"), index=True
+    )
+    category_key: Mapped[str] = mapped_column(String(40), index=True)
+    category_profile_snapshot_json: Mapped[str] = mapped_column(Text)
+    category_profile_hash: Mapped[str] = mapped_column(String(64), index=True)
+    job_ids_json: Mapped[str] = mapped_column(Text, default="[]")
+    batch_key: Mapped[str] = mapped_column(String(120), unique=True, index=True)
+    automation_run_id: Mapped[int | None] = mapped_column(
+        ForeignKey("automation_optimization_runs.id", ondelete="RESTRICT"),
+        nullable=True,
+        index=True,
+    )
+    regression_run_id: Mapped[int | None] = mapped_column(
+        ForeignKey("prompt_regression_runs.id", ondelete="RESTRICT"),
+        nullable=True,
+        index=True,
+    )
+    evaluation_package_id: Mapped[int | None] = mapped_column(
+        ForeignKey("evaluation_packages.id", ondelete="RESTRICT"),
+        nullable=True,
+        unique=True,
+        index=True,
+    )
+    status: Mapped[str] = mapped_column(
+        String(30), default="preparing", index=True
+    )
+    current_stage: Mapped[str] = mapped_column(
+        String(40), default="preparing", index=True
+    )
+    blockers_json: Mapped[str] = mapped_column(Text, default="[]")
+    error_code: Mapped[str] = mapped_column(String(80), default="")
+    error_message: Mapped[str] = mapped_column(Text, default="")
+    audit_revision: Mapped[int] = mapped_column(Integer, default=1)
+    created_by: Mapped[str] = mapped_column(String(80))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, index=True
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow
+    )
+    last_reconciled_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    archived_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    material_package: Mapped[MaterialPackage] = relationship()
+    automation_run: Mapped["AutomationOptimizationRun | None"] = relationship()
+    regression_run: Mapped["PromptRegressionRun | None"] = relationship()
+    evaluation_package: Mapped["EvaluationPackage | None"] = relationship()
+
+
 class AgentPlanVersion(Base):
     __tablename__ = "agent_plan_versions"
     __table_args__ = (

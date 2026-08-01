@@ -6138,6 +6138,98 @@ def _migration_043_add_evaluation_packages(connection: Connection) -> None:
         )
 
 
+def _migration_044_add_evaluation_production_runs(connection: Connection) -> None:
+    """Add the mutable orchestration record kept separate from final packages."""
+    connection.exec_driver_sql("""
+        CREATE TABLE IF NOT EXISTS evaluation_production_runs (
+            id INTEGER PRIMARY KEY,
+            idempotency_key VARCHAR(160) NOT NULL UNIQUE,
+            request_hash VARCHAR(64) NOT NULL,
+            material_package_id INTEGER NOT NULL
+                REFERENCES material_packages(id) ON DELETE RESTRICT,
+            category_key VARCHAR(40) NOT NULL,
+            category_profile_snapshot_json TEXT NOT NULL
+                CHECK(json_valid(category_profile_snapshot_json)
+                      AND json_type(category_profile_snapshot_json, '$') = 'object'),
+            category_profile_hash VARCHAR(64) NOT NULL,
+            job_ids_json TEXT NOT NULL DEFAULT '[]'
+                CHECK(json_valid(job_ids_json)
+                      AND json_type(job_ids_json, '$') = 'array'),
+            batch_key VARCHAR(120) NOT NULL UNIQUE,
+            automation_run_id INTEGER
+                REFERENCES automation_optimization_runs(id) ON DELETE RESTRICT,
+            regression_run_id INTEGER
+                REFERENCES prompt_regression_runs(id) ON DELETE RESTRICT,
+            evaluation_package_id INTEGER UNIQUE
+                REFERENCES evaluation_packages(id) ON DELETE RESTRICT,
+            status VARCHAR(30) NOT NULL DEFAULT 'preparing'
+                CHECK(status IN (
+                    'preparing','queued','evaluating','first_review',
+                    'optimizing','regressing','awaiting_review','approved',
+                    'rejected','published','blocked','failed','archived'
+                )),
+            current_stage VARCHAR(40) NOT NULL DEFAULT 'preparing',
+            blockers_json TEXT NOT NULL DEFAULT '[]'
+                CHECK(json_valid(blockers_json)
+                      AND json_type(blockers_json, '$') = 'array'),
+            error_code VARCHAR(80) NOT NULL DEFAULT '',
+            error_message TEXT NOT NULL DEFAULT '',
+            audit_revision INTEGER NOT NULL DEFAULT 1
+                CHECK(audit_revision >= 1),
+            created_by VARCHAR(80) NOT NULL,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            started_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            last_reconciled_at DATETIME,
+            finished_at DATETIME,
+            archived_at DATETIME,
+            CHECK(length(request_hash) = 64
+                  AND request_hash = lower(request_hash)
+                  AND request_hash NOT GLOB '*[^0-9a-f]*'),
+            CHECK(length(category_profile_hash) = 64
+                  AND category_profile_hash = lower(category_profile_hash)
+                  AND category_profile_hash NOT GLOB '*[^0-9a-f]*')
+        )
+    """)
+    for statement in (
+        "CREATE INDEX IF NOT EXISTS ix_evaluation_production_runs_status "
+        "ON evaluation_production_runs(status, updated_at)",
+        "CREATE INDEX IF NOT EXISTS ix_evaluation_production_runs_material "
+        "ON evaluation_production_runs(material_package_id, created_at)",
+        "CREATE INDEX IF NOT EXISTS ix_evaluation_production_runs_category "
+        "ON evaluation_production_runs(category_key, created_at)",
+        "CREATE INDEX IF NOT EXISTS ix_evaluation_production_runs_automation "
+        "ON evaluation_production_runs(automation_run_id)",
+        "CREATE INDEX IF NOT EXISTS ix_evaluation_production_runs_regression "
+        "ON evaluation_production_runs(regression_run_id)",
+    ):
+        connection.exec_driver_sql(statement)
+    for statement in (
+        """CREATE TRIGGER IF NOT EXISTS trg_evaluation_production_runs_frozen
+        BEFORE UPDATE ON evaluation_production_runs
+        WHEN NEW.idempotency_key IS NOT OLD.idempotency_key
+          OR NEW.request_hash IS NOT OLD.request_hash
+          OR NEW.material_package_id IS NOT OLD.material_package_id
+          OR NEW.category_key IS NOT OLD.category_key
+          OR NEW.category_profile_snapshot_json IS NOT OLD.category_profile_snapshot_json
+          OR NEW.category_profile_hash IS NOT OLD.category_profile_hash
+          OR NEW.batch_key IS NOT OLD.batch_key
+          OR NEW.created_by IS NOT OLD.created_by
+          OR NEW.created_at IS NOT OLD.created_at
+          OR NEW.started_at IS NOT OLD.started_at
+        BEGIN SELECT RAISE(ABORT, 'EvaluationProductionRun frozen fields are immutable'); END""",
+        """CREATE TRIGGER IF NOT EXISTS trg_evaluation_production_runs_no_delete
+        BEFORE DELETE ON evaluation_production_runs
+        BEGIN SELECT RAISE(ABORT, 'EvaluationProductionRun cannot be deleted'); END""",
+    ):
+        connection.exec_driver_sql(statement)
+    violations = connection.exec_driver_sql("PRAGMA foreign_key_check").fetchall()
+    if violations:
+        raise RuntimeError(
+            f"v44 评测生产编排迁移外键校验失败：{violations[:3]}"
+        )
+
+
 MIGRATIONS = [
     Migration(1, "add_sample_expected_level", _migration_001_add_sample_expected_level),
     Migration(2, "add_review_corrections", _migration_002_add_review_corrections),
@@ -6309,6 +6401,11 @@ MIGRATIONS = [
         43,
         "add_evaluation_packages",
         _migration_043_add_evaluation_packages,
+    ),
+    Migration(
+        44,
+        "add_evaluation_production_runs",
+        _migration_044_add_evaluation_production_runs,
     ),
 ]
 

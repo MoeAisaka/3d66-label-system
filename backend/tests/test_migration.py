@@ -57,6 +57,7 @@ MIGRATION_NAMES = [
     "unified_label_platform_contract",
     "add_automation_worker_status",
     "add_evaluation_packages",
+    "add_evaluation_production_runs",
 ]
 
 

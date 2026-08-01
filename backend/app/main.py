@@ -174,6 +174,7 @@ from .evaluation_packages import (
     build_evaluation_package_router,
     publish_evaluation_package,
 )
+from .evaluation_production import build_evaluation_production_router
 from .seed import seed_defaults
 from .schema_adapter import repair_combined_aesthetic_results, rescore_stored_results
 from .regression import (
@@ -3619,11 +3620,12 @@ def evaluation_detail(
     return _evaluation_asset_payload(result, sampling.get(result.id))
 
 
-@app.post("/api/jobs/enqueue")
-def enqueue_jobs(
+def _enqueue_jobs(
     payload: EnqueueRequest,
-    _user: User = Depends(_permission_user("jobs:write")),
-    db: Session = Depends(get_db),
+    db: Session,
+    *,
+    require_configuration: bool = False,
+    commit: bool = True,
 ) -> dict[str, Any]:
     profile = _category_profile(db, payload.category_key, require_active=True)
     pipeline = _profile_pipeline(profile)
@@ -3719,6 +3721,11 @@ def enqueue_jobs(
             .order_by(ModelConfig.id.asc())
         )
     )
+    if selected_model is None and require_configuration:
+        raise HTTPException(
+            status_code=409,
+            detail="类目冻结方案缺少已启用的主评测模型",
+        )
     if selected_model is None:
         selected_model = ModelConfig(active=True)
         db.add(selected_model)
@@ -3761,13 +3768,55 @@ def enqueue_jobs(
         db.add(job)
         db.flush()
         jobs.append(job.id)
-    db.commit()
+    if commit:
+        db.commit()
     return {
         "job_ids": jobs,
         "batch_key": batch_key,
         "queue_class": queue_class,
         "category_key": payload.category_key,
+        "category_profile_snapshot": category_profile_snapshot,
     }
+
+
+@app.post("/api/jobs/enqueue")
+def enqueue_jobs(
+    payload: EnqueueRequest,
+    _user: User = Depends(_permission_user("jobs:write")),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    result = _enqueue_jobs(payload, db)
+    return {
+        key: value
+        for key, value in result.items()
+        if key != "category_profile_snapshot"
+    }
+
+
+def _enqueue_production_assets(
+    db: Session,
+    asset_ids: list[int],
+    category_key: str,
+) -> dict[str, Any]:
+    return _enqueue_jobs(
+        EnqueueRequest(
+            asset_ids=asset_ids,
+            category_key=category_key,
+            queue_class="production_batch",
+        ),
+        db,
+        require_configuration=True,
+        commit=False,
+    )
+
+
+app.include_router(
+    build_evaluation_production_router(
+        current_user,
+        _permission_user("jobs:write"),
+        _enqueue_production_assets,
+    )
+)
 
 
 @app.get("/api/jobs")

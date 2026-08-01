@@ -501,173 +501,236 @@ export type EvaluationCategoryProfile = {
   updated_at: string
 }
 
-export type EvaluationPackageStatus =
-  | "draft"
-  | "ready"
+export type EvaluationProductionRunStatus =
+  | "preparing"
   | "queued"
   | "evaluating"
   | "first_review"
   | "optimizing"
   | "regressing"
-  | "second_review"
+  | "awaiting_review"
   | "approved"
   | "rejected"
-  | "publishing"
   | "published"
   | "blocked"
   | "failed"
   | "archived"
 
-export type EvaluationPackageProgress = {
+export type EvaluationProductionProgress = {
   percent: number
   current_step: string
-  completed_assets: number
-  total_assets: number
+  completed_jobs: number
+  total_jobs: number
 }
 
-export type EvaluationPackageBlocker = {
+export type EvaluationProductionFix = {
+  label: string
+  href: string
+  api_path?: string | null
+  api_method?: string | null
+}
+
+export type EvaluationProductionBlocker = {
   code: string
-  title?: string
+  title: string
   message: string
-  action_label?: string | null
-  action_href?: string | null
+  fix: EvaluationProductionFix
 }
 
-export type EvaluationPackageTimelineStep = {
+export type EvaluationProductionTimelineStep = {
   key: string
   label: string
-  description?: string
   status: "completed" | "current" | "pending" | "blocked" | "failed"
-  completed_at?: string | null
+  completed_at: string | null
 }
 
-export type EvaluationPackagePermissions = {
-  can_approve: boolean
-  can_reject: boolean
-  can_publish: boolean
-  can_archive: boolean
-  reason?: string | null
+export type EvaluationProductionRun = {
+  id: number
+  idempotency_key: string
+  status: EvaluationProductionRunStatus
+  current_stage: string
+  current_stage_label: string
+  material_package_id: number
+  material_package: {
+    id: number
+    name: string
+    package_key: string
+    active_asset_count: number
+  }
+  category_key: string
+  category: { key: string; name: string; configuration_hash: string }
+  job_ids: number[]
+  job_counts: {
+    total: number
+    queued: number
+    processing: number
+    completed: number
+    failed: number
+  }
+  pending_first_review_count: number
+  progress: EvaluationProductionProgress
+  automation_run_id: number | null
+  automation: { id: number; status: string; dry_run: boolean; href: string } | null
+  regression_run_id: number | null
+  regression: {
+    id: number
+    status: string
+    recommendation: string
+    completed: number
+    total: number
+    href: string
+  } | null
+  evaluation_package_id: number | null
+  evaluation_package: { id: number; status: string; href: string } | null
+  blockers: EvaluationProductionBlocker[]
+  fix_actions: EvaluationProductionFix[]
+  ai_next_step: string
+  timeline: EvaluationProductionTimelineStep[]
+  error: { code: string; message: string } | null
+  audit: { revision: number; last_reconciled_at: string | null }
+  created_by: string
+  created_at: string
+  updated_at: string
+  started_at: string
+  finished_at: string | null
+  archived_at: string | null
 }
+
+export type EvaluationPackageStatus =
+  | "validating"
+  | "awaiting_review"
+  | "approved"
+  | "rejected"
+  | "published"
+  | "archived"
 
 export type EvaluationPackageSummary = {
   id: number
   package_key: string
-  name: string
-  material_package_id: number
-  material_package_name: string
   category_key: string
-  category_name: string
-  asset_count: number
   status: EvaluationPackageStatus
-  progress: EvaluationPackageProgress
-  current_blockers: EvaluationPackageBlocker[]
-  ai_next_step: string
-  timeline?: EvaluationPackageTimelineStep[]
-  permissions?: EvaluationPackagePermissions
+  prompt_mode: "single" | "dual"
+  prompt_a_id: number
+  prompt_b_id: number | null
+  dimension_schema_id: number | null
+  dimension_route_policy_id: number | null
+  sample_set_id: number
+  baseline_strategy_bundle_id: number | null
+  candidate_strategy_bundle_id: number
+  regression_run_id: number
+  automation_run_id: number | null
+  metric_snapshot_id: number | null
+  canonical_manifest_hash: string
+  manifest_hash_valid: boolean
+  ai_recommendation: string
+  change_summary: string
+  review: {
+    revision: number
+    decision: "approved" | "rejected" | null
+    note: string
+    reviewed_by: string | null
+    reviewed_at: string | null
+  }
+  publish: {
+    published_by: string | null
+    published_at: string | null
+    publishes_automatically: false
+  }
+  archive: {
+    archived_by: string | null
+    archived_at: string | null
+    reason: string
+  }
   created_by: string
   created_at: string
   updated_at: string
 }
 
-export type EvaluationPackagePromptChange = {
-  stage: "single" | "A" | "B"
-  label: string
-  version_before: string | null
-  version_after: string
-  system_prompt_before: string
-  system_prompt_after: string
-  user_prompt_before: string
-  user_prompt_after: string
-  unified_diff: string
-  change_summary?: string
-}
-
-export type EvaluationPackageDimensionChange = {
-  key: string
-  label: string
-  change_type: "added" | "changed" | "removed" | "unchanged"
-  before: string | null
-  after: string | null
-  rationale: string
-}
-
-export type EvaluationPackageRepresentativeSample = {
+export type EvaluationPackagePromptSnapshot = {
   id: number
+  stage: "A" | "B"
   name: string
+  version: string
+  rubric_version: string
+  system_prompt: string
+  user_prompt: string
+}
+
+export type EvaluationPackagePrompts = {
+  mode: "single" | "dual"
+  a: EvaluationPackagePromptSnapshot
+  b: EvaluationPackagePromptSnapshot | null
+}
+
+export type EvaluationPackageGoldenItem = {
+  sample_item_id: number
+  asset_id: number
+  asset_name: string
+  asset_sha256: string
+  mime_type: string
   image_url: string
   expected_level: string | null
-  result_before: string | null
-  result_after: string | null
-  reason: string
+  expected_category: string | null
+  role: string | null
+  truth_revision: number
+  truth: Record<string, unknown>
+  source_evaluation_id: number | null
 }
 
 export type EvaluationPackageDetail = EvaluationPackageSummary & {
-  recommendation?: {
-    verdict: "approve" | "reject" | "needs_attention" | "pending"
-    title: string
-    summary: string
-    reasons: string[]
-    risks: string[]
+  canonical_manifest: Record<string, unknown>
+  category: {
+    category_key: string
+    profile: Record<string, unknown> | null
   }
-  change_summary?: {
-    title: string
-    overview: string
-    items: string[]
-  }
-  prompt_changes?: EvaluationPackagePromptChange[]
-  dimension_changes?: {
-    schema_before: string | null
-    schema_after: string
-    summary: string
-    items: EvaluationPackageDimensionChange[]
-  }
-  golden_set?: {
+  prompts: EvaluationPackagePrompts
+  dimensions: Record<string, unknown>
+  golden_sample_set: {
     id: number
     name: string
-    sample_count: number
-    representative_count: number
-    coverage: string
-    metrics: {
-      accuracy_before: number | null
-      accuracy_after: number | null
-      regression_pass_rate: number | null
-      p0_p1_errors: number | null
-    }
-    representative_samples: EvaluationPackageRepresentativeSample[]
+    description: string
+    kind: string
+    status: string
+    category_key: string
+    item_count: number
+    judgable_item_count: number
+    items_manifest_hash: string
+    items: EvaluationPackageGoldenItem[]
   }
-  automation?: {
-    summary: string
-    rounds: Array<{
-      sequence: number
-      title: string
-      status: "completed" | "failed" | "running"
-      summary: string
-      finished_at: string | null
-    }>
-    regression: {
-      name: string
-      completed: number
-      total: number
-      pass_rate: number | null
-      recommendation: "pass" | "fail" | "pending"
-      summary: string
-    } | null
-    evidence: string[]
+  strategies: {
+    baseline: Record<string, unknown> | null
+    candidate: Record<string, unknown>
   }
-  technical?: {
-    model_name: string | null
-    model_version: string | null
-    engine_version: string | null
-    rubric_version: string | null
-    dimension_schema_version: string | null
-    strategy_hash: string | null
-    package_hash: string | null
+  regression: {
+    id: number
+    name: string
+    mode: string
+    status: string
+    terminal: boolean
+    recommendation: string
+    threshold: number
+    total: number
+    completed: number
+    passed: number
+    failed: number
+    sample_set_version: string | null
+    sample_manifest: Record<string, unknown>
+    metric_rules_version: string | null
+    metric_rules: Record<string, unknown>
+    metrics: Record<string, unknown>
+    summary: Record<string, unknown>
+    items: Array<Record<string, unknown>>
+    created_by: string
+    created_at: string
+    finished_at: string | null
   }
-  review?: {
-    status: "pending" | "approved" | "rejected" | "published" | "archived"
-    reviewer: string | null
-    note: string
-    decided_at: string | null
+  automation: Record<string, unknown> | null
+  metrics: Record<string, unknown>
+  identity: Record<string, unknown>
+  ai: {
+    recommendation: string
+    change_summary: string
+    publishes_automatically: false
   }
 }
 
