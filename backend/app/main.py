@@ -198,8 +198,8 @@ MAX_UPLOAD_FILES = 1000
 MAX_ARCHIVE_IMAGES = 10_000
 MAX_ARCHIVE_UNCOMPRESSED_BYTES = 30 * 1024 * 1024 * 1024
 MAX_ARCHIVE_COMPRESSION_RATIO = 200
-ALLOWED_MIME = {"image/jpeg", "image/png", "image/webp"}
-ALLOWED_IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp"}
+ALLOWED_MIME = {"image/jpeg", "image/png", "image/webp", "image/gif"}
+ALLOWED_IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
 
 
 def _protected_api_key(
@@ -2094,7 +2094,7 @@ def _validate_image_bytes(
     if mime_type not in ALLOWED_MIME:
         raise HTTPException(
             status_code=400,
-            detail=f"{filename} 仅支持 JPG、PNG、WebP",
+            detail=f"{filename} 仅支持 JPG、PNG、WebP、GIF",
         )
     return mime_type, width, height
 

@@ -308,7 +308,7 @@ export function BaselineRegressionPage() {
               ref={uploadRef}
               className="hidden"
               type="file"
-              accept="image/jpeg,image/png,image/webp"
+              accept="image/jpeg,image/png,image/webp,image/gif"
               multiple
               onChange={(event) => {
                 const files = event.target.files

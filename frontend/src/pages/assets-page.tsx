@@ -246,7 +246,7 @@ export function AssetsPage() {
           ref={fileInputRef}
           type="file"
           multiple
-          accept="image/jpeg,image/png,image/webp"
+          accept="image/jpeg,image/png,image/webp,image/gif"
           className="sr-only"
           onChange={(event) => {
             const files = snapshotFiles(event.target.files)
@@ -262,7 +262,7 @@ export function AssetsPage() {
           }}
           type="file"
           multiple
-          accept="image/jpeg,image/png,image/webp"
+          accept="image/jpeg,image/png,image/webp,image/gif"
           className="sr-only"
           onChange={(event) => {
             const files = snapshotFiles(event.target.files)

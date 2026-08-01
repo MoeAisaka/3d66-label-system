@@ -116,6 +116,30 @@ def test_batch_upload_creates_one_package_and_manual_selection_creates_another(
         ]
 
 
+def test_gif_upload_preserves_animated_asset_mime(tmp_path: Path) -> None:
+    frames = [
+        Image.new("RGBA", (8, 6), (255, 0, 0, 255)),
+        Image.new("RGBA", (8, 6), (0, 255, 0, 255)),
+    ]
+    output = io.BytesIO()
+    frames[0].save(
+        output,
+        format="GIF",
+        save_all=True,
+        append_images=[frames[1]],
+        duration=100,
+        loop=0,
+    )
+    with _api_context(tmp_path) as (client, _sessions):
+        uploaded = client.post(
+            "/api/assets/upload",
+            files={"files": ("motion.gif", output.getvalue(), "image/gif")},
+        )
+
+    assert uploaded.status_code == 200, uploaded.text
+    assert uploaded.json()["items"][0]["mime_type"] == "image/gif"
+
+
 def test_zip_upload_aggregates_nested_images_and_ignores_metadata(
     tmp_path: Path,
 ) -> None:

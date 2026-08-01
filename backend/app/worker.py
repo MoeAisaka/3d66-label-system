@@ -26,6 +26,7 @@ from .loop_engine import (
     request_fingerprint,
     validate_result_scope,
 )
+from .media import prepare_model_image
 from .models import (
     Asset,
     CircuitBreaker,
@@ -356,13 +357,14 @@ async def _evaluate_targeted_loop_job(
     image_path: Path,
     asset: Asset,
     metadata: dict[str, object],
+    model_mime_type: str | None = None,
 ) -> None:
     targets = json.loads(attempt.target_dimensions_json)
     response = await client.chat_json(
         prompt_a.system_prompt,
         _targeted_loop_user_prompt(attempt, metadata=metadata),
         image_path=image_path,
-        mime_type=asset.mime_type,
+        mime_type=model_mime_type or asset.mime_type,
     )
     _ensure_job_processing(job_id)
     assert_safe_normalized_payload(response.parsed)
@@ -538,6 +540,12 @@ async def evaluate_job(job_id: int) -> None:
     image_path = settings.upload_dir / asset.stored_name
     if not image_path.exists():
         raise RuntimeError("原始图片文件不存在")
+    model_image_path, model_mime_type = prepare_model_image(
+        image_path,
+        mime_type=asset.mime_type,
+        content_sha256=asset.sha256,
+        cache_dir=settings.upload_dir / ".derived" / "evaluation",
+    )
 
     metadata = {
         "width": asset.width,
@@ -573,13 +581,17 @@ async def evaluate_job(job_id: int) -> None:
             attempt=loop_attempt,
             client=client,
             prompt_a=prompt_a,
-            image_path=image_path,
+            image_path=model_image_path,
             asset=asset,
             metadata=metadata,
+            model_mime_type=model_mime_type,
         )
         return
     response_a = await client.chat_json(
-        prompt_a.system_prompt, user_a, image_path=image_path, mime_type=asset.mime_type
+        prompt_a.system_prompt,
+        user_a,
+        image_path=model_image_path,
+        mime_type=model_mime_type,
     )
     _ensure_job_processing(job_id)
     combined_response = is_combined_aesthetic_response(response_a.parsed)
@@ -603,7 +615,10 @@ async def evaluate_job(job_id: int) -> None:
             "{{precheck_json}}", json.dumps(precheck, ensure_ascii=False)
         ).replace("{{rubric_version}}", prompt_b.rubric_version)
         response_b = await client.chat_json(
-            prompt_b.system_prompt, user_b, image_path=image_path, mime_type=asset.mime_type
+            prompt_b.system_prompt,
+            user_b,
+            image_path=model_image_path,
+            mime_type=model_mime_type,
         )
         response_b_attempts.append(response_b.raw_payload)
         _ensure_job_processing(job_id)
@@ -623,8 +638,8 @@ async def evaluate_job(job_id: int) -> None:
             response_b = await client.chat_json(
                 prompt_b.system_prompt,
                 repair_user,
-                image_path=image_path,
-                mime_type=asset.mime_type,
+                image_path=model_image_path,
+                mime_type=model_mime_type,
             )
             response_b_attempts.append(response_b.raw_payload)
             _ensure_job_processing(job_id)
@@ -676,8 +691,8 @@ async def evaluate_job(job_id: int) -> None:
                     preliminary_scoring,
                     dimension_schema=dimension_definition,
                 ),
-                image_path=image_path,
-                mime_type=asset.mime_type,
+                image_path=model_image_path,
+                mime_type=model_mime_type,
             )
             risk_review_raw = risk_response.raw_payload
             risk_review_report = apply_risk_review(
