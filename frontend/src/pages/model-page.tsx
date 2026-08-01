@@ -17,8 +17,22 @@ type BenchmarkConfigDraft = Omit<FormState, "benchmark_enabled"> & {
   benchmark_enabled: boolean
 }
 
+type CategoryPromptMode = "follow" | "single" | "ab"
+
 type CategoryDraft = EvaluationCategoryProfile & {
   api_key?: string
+  prompt_mode: CategoryPromptMode
+}
+
+function categoryDraft(profile: EvaluationCategoryProfile): CategoryDraft {
+  return {
+    ...profile,
+    prompt_mode: profile.prompt_a_id === null
+      ? "follow"
+      : profile.prompt_b_id === null
+        ? "single"
+        : "ab",
+  }
 }
 
 const emptyBenchmarkConfig: BenchmarkConfigDraft = {
@@ -77,7 +91,7 @@ export function ModelPage() {
   }, [reviewWorkflowPolicy.data])
   useEffect(() => {
     if (!categoryProfiles.data) return
-    setCategoryDrafts(Object.fromEntries(categoryProfiles.data.items.map((item) => [item.category_key, { ...item }])))
+    setCategoryDrafts(Object.fromEntries(categoryProfiles.data.items.map((item) => [item.category_key, categoryDraft(item)])))
   }, [categoryProfiles.data])
 
   const save = useMutation({
@@ -103,13 +117,13 @@ export function ModelPage() {
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: ["optimizer-config"] })
       setOptimizerForm((current) => current ? { ...current, api_key: "" } : current)
-      toast.success("SOL 提示词诊断模型配置已保存")
+      toast.success("提示词诊断模型配置已保存")
     },
     onError: (error) => toast.error(error.message),
   })
   const testOptimizer = useMutation({
     mutationFn: () => api<{ ok: boolean; message: string }>("/api/optimizer-config/test", { method: "POST" }),
-    onSuccess: (data) => toast.success(data.message || "SOL 连接成功"),
+    onSuccess: (data) => toast.success(data.message || "诊断模型连接成功"),
     onError: (error) => toast.error(error.message),
   })
   const createBenchmarkConfig = useMutation({
@@ -157,8 +171,8 @@ export function ModelPage() {
         status: draft.status,
         allowed_mime_types: draft.allowed_mime_types,
         preprocess_config: draft.preprocess_config,
-        prompt_a_id: draft.prompt_a_id,
-        prompt_b_id: draft.prompt_b_id,
+        prompt_a_id: draft.prompt_mode === "follow" ? null : draft.prompt_a_id,
+        prompt_b_id: draft.prompt_mode === "ab" ? draft.prompt_b_id : null,
         model_config_id: draft.model_config_id,
         rubric_version: draft.rubric_version,
         dimension_schema_key: draft.dimension_schema_key,
@@ -166,7 +180,7 @@ export function ModelPage() {
       }),
     }),
     onSuccess: async (data) => {
-      setCategoryDrafts((current) => ({ ...current, [data.category_key]: { ...data } }))
+      setCategoryDrafts((current) => ({ ...current, [data.category_key]: categoryDraft(data) }))
       await categoryProfiles.refetch()
       toast.success(`${data.display_name}类目配置已保存`)
     },
@@ -254,7 +268,7 @@ export function ModelPage() {
               {config.data?.has_api_key ? <CheckCircle size={22} weight="fill" className="text-[#2f6f48]" /> : <WarningCircle size={22} className="text-[#a85a0a]" />}
               <Badge tone={config.data?.has_api_key ? "success" : "warning"}>{config.data?.has_api_key ? "当前电脑已保存密钥" : "尚未保存密钥"}</Badge>
             </div>
-            <Field label="输入新的 API Key"><Input type="password" value={form?.api_key ?? ""} onChange={(event) => update("api_key", event.target.value)} placeholder={config.data?.has_api_key ? "留空以保留当前密钥" : "请输入火山方舟 API Key"} autoComplete="new-password" /></Field>
+            <Field label="输入新的 API Key"><Input type="password" value={form?.api_key ?? ""} onChange={(event) => update("api_key", event.target.value)} placeholder={config.data?.has_api_key ? "留空以保留当前密钥" : "请输入当前渠道 API Key"} autoComplete="new-password" /></Field>
           </div>
         </section>
 
@@ -269,22 +283,30 @@ export function ModelPage() {
               {(categoryProfiles.data?.items ?? []).map((profile) => {
                 const draft = categoryDrafts[profile.category_key]
                 if (!draft) return null
-                const categoryPrompts = (prompts.data?.items ?? []).filter((item) => item.status === "published")
+                const categoryPrompts = (prompts.data?.items ?? []).filter((item) => item.status === "published" && item.rubric_version === draft.rubric_version)
                 const preprocess = draft.preprocess_config
+                const promptReady = draft.prompt_mode === "follow"
+                  ? draft.category_key === "space_image"
+                  : draft.prompt_a_id !== null && (draft.prompt_mode === "single" || draft.prompt_b_id !== null)
+                const canSave = draft.status !== "active" || promptReady
                 return (
                   <div key={profile.category_key} className="border border-[var(--line)] bg-[#fafbf8] p-4">
                     <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-                      <div><h3 className="font-semibold">{draft.display_name}</h3><p className="font-data mt-1 text-xs text-[var(--muted)]">{draft.category_key} · MIME {draft.allowed_mime_types.join(", ")}</p></div>
-                      <Button size="sm" onClick={() => saveCategory.mutate(draft)} disabled={saveCategory.isPending}><FloppyDisk />保存类目</Button>
+                      <div><div className="flex flex-wrap items-center gap-2"><h3 className="font-semibold">{draft.display_name}</h3><Badge tone={draft.status === "active" ? "success" : draft.status === "retired" ? "neutral" : "warning"}>{draft.status === "active" ? "已启用" : draft.status === "retired" ? "已停用" : "草稿"}</Badge></div><p className="font-data mt-1 text-xs text-[var(--muted)]">{draft.category_key} · MIME {draft.allowed_mime_types.join(", ")} · {draft.rubric_version}</p></div>
+                      <Button size="sm" onClick={() => saveCategory.mutate(draft)} disabled={saveCategory.isPending || !canSave}><FloppyDisk />保存类目</Button>
                     </div>
                     <div className="grid gap-4 md:grid-cols-2">
                       <Field label="显示名称"><Input value={draft.display_name} onChange={(event) => updateCategory(draft.category_key, { display_name: event.target.value })} /></Field>
+                      <Field label="运行状态"><select className="flex h-11 w-full rounded-[4px] border border-input bg-transparent px-3 text-sm" value={draft.status} onChange={(event) => updateCategory(draft.category_key, { status: event.target.value as CategoryDraft["status"] })}><option value="active">启用新任务</option><option value="draft">草稿，不接收任务</option><option value="retired">停用，不接收任务</option></select></Field>
                       <Field label="绑定主模型"><select className="flex h-11 w-full rounded-[4px] border border-input bg-transparent px-3 text-sm" value={draft.model_config_id ?? ""} onChange={(event) => updateCategory(draft.category_key, { model_config_id: event.target.value ? Number(event.target.value) : null })}><option value="">跟随主模型</option>{(modelConfigs.data?.items ?? []).map((item) => <option key={item.id} value={item.id}>{item.name} · {item.model_id}</option>)}</select></Field>
-                      <Field label="A / 单提示词版本"><select className="flex h-11 w-full rounded-[4px] border border-input bg-transparent px-3 text-sm" value={draft.prompt_a_id ?? ""} onChange={(event) => updateCategory(draft.category_key, { prompt_a_id: event.target.value ? Number(event.target.value) : null })}><option value="">跟随任务选择</option>{categoryPrompts.filter((item) => item.stage === "A").map((item) => <option key={item.id} value={item.id}>{item.version} · {item.name}</option>)}</select></Field>
-                      <Field label="B 版本（留空即单提示词）"><select className="flex h-11 w-full rounded-[4px] border border-input bg-transparent px-3 text-sm" value={draft.prompt_b_id ?? ""} onChange={(event) => updateCategory(draft.category_key, { prompt_b_id: event.target.value ? Number(event.target.value) : null })}><option value="">单提示词 / 跟随任务选择</option>{categoryPrompts.filter((item) => item.stage === "B").map((item) => <option key={item.id} value={item.id}>{item.version} · {item.name}</option>)}</select></Field>
+                      <div className="md:col-span-2"><span className="mb-2 block text-xs font-semibold">提示词调用模式</span><div className="inline-flex max-w-full overflow-auto rounded-[4px] border border-[var(--line-strong)] bg-white p-1">{([...(draft.category_key === "space_image" ? [{ value: "follow", label: "跟随任务" }] : []), { value: "single", label: "单提示词" }, { value: "ab", label: "A/B 两段" }] as Array<{ value: CategoryPromptMode; label: string }>).map((option) => <button type="button" key={option.value} onClick={() => updateCategory(draft.category_key, { prompt_mode: option.value, ...(option.value === "follow" ? { prompt_a_id: null, prompt_b_id: null } : option.value === "single" ? { prompt_b_id: null } : {}) })} className={`h-9 whitespace-nowrap rounded-[3px] px-3 text-xs font-semibold ${draft.prompt_mode === option.value ? "bg-[#11130f] text-white" : "text-[var(--muted)] hover:bg-[#f1f3ef]"}`}>{option.label}</button>)}</div></div>
+                      {draft.prompt_mode !== "follow" && <Field label={draft.prompt_mode === "single" ? "单提示词版本" : "A 阶段版本"}><select className="flex h-11 w-full rounded-[4px] border border-input bg-transparent px-3 text-sm" value={draft.prompt_a_id ?? ""} onChange={(event) => updateCategory(draft.category_key, { prompt_a_id: event.target.value ? Number(event.target.value) : null })}><option value="">请选择 {draft.rubric_version} 版本</option>{categoryPrompts.filter((item) => item.stage === "A").map((item) => <option key={item.id} value={item.id}>{item.version} · {item.name}</option>)}</select></Field>}
+                      {draft.prompt_mode === "ab" && <Field label="B 阶段版本"><select className="flex h-11 w-full rounded-[4px] border border-input bg-transparent px-3 text-sm" value={draft.prompt_b_id ?? ""} onChange={(event) => updateCategory(draft.category_key, { prompt_b_id: event.target.value ? Number(event.target.value) : null })}><option value="">请选择 {draft.rubric_version} 版本</option>{categoryPrompts.filter((item) => item.stage === "B").map((item) => <option key={item.id} value={item.id}>{item.version} · {item.name}</option>)}</select></Field>}
                       {draft.category_key === "pdf_text" && <><Field label="最多处理页数"><Input type="number" min="1" max="20" value={Number(preprocess.max_pages ?? 4)} onChange={(event) => updateCategory(draft.category_key, { preprocess_config: { ...preprocess, max_pages: Number(event.target.value) } })} /></Field><Field label="文本上限字符数"><Input type="number" min="1000" max="100000" value={Number(preprocess.max_text_chars ?? 24000)} onChange={(event) => updateCategory(draft.category_key, { preprocess_config: { ...preprocess, max_text_chars: Number(event.target.value) } })} /></Field></>}
+                      {draft.category_key === "pdf_text" && <div className="border-y border-[#b9cddd] bg-[#f5f8fb] px-4 py-3 text-xs leading-5 text-[#355369] md:col-span-2">固定流程：文本抽取 → 必要时 OCR → 页图接触表 → 多模态总结 → 类目评测。多模态总结属于必经前置步骤。</div>}
                       {draft.category_key === "material_image" && <label className="flex min-h-20 items-center justify-between gap-4 border border-[var(--line)] bg-white px-4"><span><span className="block text-sm font-semibold">材质专项关注</span><span className="mt-1 block text-xs text-[var(--muted)]">提示模型优先判断纹理、反光、接缝和工艺真实性。</span></span><input type="checkbox" checked={Boolean(preprocess.material_focus)} onChange={(event) => updateCategory(draft.category_key, { preprocess_config: { ...preprocess, material_focus: event.target.checked } })} className="size-5 accent-[#11130f]" /></label>}
                     </div>
+                    {!canSave && <p className="mt-3 border-t border-[#e8c876] pt-3 text-xs font-semibold text-[#7d4308]">启用该类目前，必须选择完整的类目专属提示词。</p>}
                   </div>
                 )
               })}
@@ -316,8 +338,8 @@ export function ModelPage() {
           <div className="grid gap-7 border-b border-[var(--line)] px-5 py-6 lg:grid-cols-[230px_1fr] lg:px-7">
             <div>
               <div className="flex size-10 items-center justify-center rounded-[4px] bg-primary"><Key size={21} weight="bold" /></div>
-              <h2 className="font-editorial mt-5 text-2xl font-bold">SOL 提示词诊断模型</h2>
-              <p className="mt-2 text-sm leading-6 text-[var(--muted)]">读取人工纠错样本，定位高频误判并生成候选提示词。不会直接覆盖豆包正式提示词。</p>
+              <h2 className="font-editorial mt-5 text-2xl font-bold">提示词诊断模型</h2>
+              <p className="mt-2 text-sm leading-6 text-[var(--muted)]">读取人工纠错样本，定位高频误判并生成候选提示词。可使用任意 OpenAI-compatible 高能力模型，不会直接覆盖正式提示词。</p>
             </div>
             {optimizerForm ? <div className="grid gap-5 md:grid-cols-2">
               <Field label="配置名称"><Input value={optimizerForm.name} onChange={(event) => updateOptimizer("name", event.target.value)} /></Field>
@@ -325,7 +347,7 @@ export function ModelPage() {
               <Field label="模型 ID"><Input value={optimizerForm.model_id} onChange={(event) => updateOptimizer("model_id", event.target.value)} /></Field>
               <Field label="Base URL"><Input value={optimizerForm.base_url} onChange={(event) => updateOptimizer("base_url", event.target.value)} /></Field>
               <Field label="API 路径"><Input value={optimizerForm.api_path} onChange={(event) => updateOptimizer("api_path", event.target.value)} /></Field>
-              <div className="md:col-span-2"><Field label="OpenAI API Key"><Input type="password" value={optimizerForm.api_key} onChange={(event) => updateOptimizer("api_key", event.target.value)} placeholder={optimizerConfig.data?.has_api_key ? "留空以保留当前密钥" : "请输入可调用 SOL 的 API Key"} autoComplete="new-password" /></Field></div>
+              <div className="md:col-span-2"><Field label="API Key"><Input type="password" value={optimizerForm.api_key} onChange={(event) => updateOptimizer("api_key", event.target.value)} placeholder={optimizerConfig.data?.has_api_key ? "留空以保留当前密钥" : "请输入当前渠道 API Key"} autoComplete="new-password" /></Field></div>
               <Field label="最大输出 Token"><Input type="number" min="512" value={optimizerForm.max_tokens} onChange={(event) => updateOptimizer("max_tokens", Number(event.target.value))} /></Field>
               <Field label="超时（秒）"><Input type="number" min="10" value={optimizerForm.timeout_seconds} onChange={(event) => updateOptimizer("timeout_seconds", Number(event.target.value))} /></Field>
               <Field label="单次输入上限 Token"><Input type="number" min="0" value={optimizerForm.max_input_tokens} onChange={(event) => updateOptimizer("max_input_tokens", Number(event.target.value))} /></Field>
@@ -334,8 +356,8 @@ export function ModelPage() {
             </div> : <div className="h-44 animate-pulse bg-[#f1f3ef]" />}
           </div>
           <div className="flex flex-wrap items-center justify-between gap-3 px-5 py-4 lg:px-7">
-            <div className="flex items-center gap-2">{optimizerConfig.data?.has_api_key ? <CheckCircle size={20} weight="fill" className="text-[#2f6f48]" /> : <WarningCircle size={20} className="text-[#a85a0a]" />}<span className="text-sm font-semibold">{optimizerConfig.data?.has_api_key ? "当前电脑已保存 SOL 密钥" : "尚未保存 SOL 密钥"}</span></div>
-            <div className="flex gap-2"><Button variant="secondary" onClick={() => testOptimizer.mutate()} disabled={!optimizerConfig.data?.has_api_key || testOptimizer.isPending}><PlugsConnected />测试 SOL 连接</Button><Button onClick={() => saveOptimizer.mutate()} disabled={!optimizerForm || saveOptimizer.isPending}><FloppyDisk />保存 SOL 配置</Button></div>
+            <div className="flex items-center gap-2">{optimizerConfig.data?.has_api_key ? <CheckCircle size={20} weight="fill" className="text-[#2f6f48]" /> : <WarningCircle size={20} className="text-[#a85a0a]" />}<span className="text-sm font-semibold">{optimizerConfig.data?.has_api_key ? "当前电脑已保存诊断模型密钥" : "尚未保存诊断模型密钥"}</span></div>
+            <div className="flex gap-2"><Button variant="secondary" onClick={() => testOptimizer.mutate()} disabled={!optimizerConfig.data?.has_api_key || testOptimizer.isPending}><PlugsConnected />测试诊断模型连接</Button><Button onClick={() => saveOptimizer.mutate()} disabled={!optimizerForm || saveOptimizer.isPending}><FloppyDisk />保存诊断模型配置</Button></div>
           </div>
         </section>
 
@@ -423,7 +445,7 @@ export function ModelPage() {
           ) : <div className="h-36 animate-pulse bg-[#f1f3ef]" />}
         </section>
 
-        <div className="mt-8 flex justify-end"><Button onClick={() => save.mutate()} disabled={!form || save.isPending || (form.benchmark_enabled && !mainBenchmarkConfirmed)}><FloppyDisk />保存豆包配置</Button></div>
+        <div className="mt-8 flex justify-end"><Button onClick={() => save.mutate()} disabled={!form || save.isPending || (form.benchmark_enabled && !mainBenchmarkConfirmed)}><FloppyDisk />保存主模型配置</Button></div>
       </div>
     </>
   )

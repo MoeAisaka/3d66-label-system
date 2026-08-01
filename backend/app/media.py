@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import io
 import json
+import hashlib
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -104,13 +105,32 @@ def prepare_pdf_model_input(
     OCR is opportunistic: an unavailable local tesseract binary is recorded in
     the context instead of silently pretending OCR happened.
     """
+    if not 1 <= max_pages <= 20 or not 1_000 <= max_text_chars <= 100_000:
+        raise RuntimeError("PDF 前处理参数超出允许范围")
     cache_dir.mkdir(parents=True, exist_ok=True)
-    preview_path = cache_dir / f"{content_sha256}.png"
-    context_path = cache_dir / f"{content_sha256}.json"
+    cache_contract = {
+        "schema_version": "pdf-preprocess-v2",
+        "content_sha256": content_sha256,
+        "max_pages": max_pages,
+        "max_text_chars": max_text_chars,
+    }
+    cache_key = hashlib.sha256(
+        json.dumps(
+            cache_contract,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    preview_path = cache_dir / f"{cache_key}.png"
+    context_path = cache_dir / f"{cache_key}.json"
     if preview_path.exists() and context_path.exists():
         try:
             context = json.loads(context_path.read_text(encoding="utf-8"))
-            if isinstance(context, dict):
+            if isinstance(context, dict) and all(
+                context.get(key) == value
+                for key, value in cache_contract.items()
+            ):
                 return PdfPreprocessResult(preview_path, "image/png", context)
         except (OSError, json.JSONDecodeError):
             pass
@@ -133,8 +153,9 @@ def prepare_pdf_model_input(
 
         document = fitz.open(str(source_path))
         rendered: list[Image.Image] = []
-        ocr_pages: list[str] = []
-        ocr_status = "not_needed"
+        ocr_pages: list[tuple[int, str]] = []
+        ocr_attempts = 0
+        ocr_failures = 0
         try:
             for index in range(min(max_pages, document.page_count)):
                 page = document.load_page(index)
@@ -142,23 +163,42 @@ def prepare_pdf_model_input(
                 frame = Image.open(io.BytesIO(pixmap.tobytes("png"))).convert("RGB")
                 rendered.append(frame)
                 if not extracted_pages[index].strip():
+                    ocr_attempts += 1
                     try:
                         import pytesseract  # type: ignore[import-not-found]
-                        ocr_pages.append(pytesseract.image_to_string(frame, lang="chi_sim+eng"))
-                        ocr_status = "completed"
+                        ocr_pages.append(
+                            (
+                                index + 1,
+                                pytesseract.image_to_string(
+                                    frame,
+                                    lang="chi_sim+eng",
+                                ),
+                            )
+                        )
                     except Exception:
-                        ocr_status = "unavailable"
+                        ocr_failures += 1
         finally:
             document.close()
     except Exception as exc:
         raise RuntimeError("PDF 前处理失败") from exc
 
     ocr_text = "\n\n".join(
-        f"[第 {index + 1} 页 OCR]\n{text.strip()}"
-        for index, text in enumerate(ocr_pages) if text.strip()
+        f"[第 {page_number} 页 OCR]\n{text.strip()}"
+        for page_number, text in ocr_pages
+        if text.strip()
     )[:max_text_chars]
     if ocr_text:
-        document_text = "\n\n".join(item for item in (document_text, ocr_text) if item)
+        document_text = "\n\n".join(
+            item for item in (document_text, ocr_text) if item
+        )[:max_text_chars]
+    if ocr_attempts == 0:
+        ocr_status = "not_needed"
+    elif ocr_failures == ocr_attempts:
+        ocr_status = "unavailable"
+    elif ocr_failures:
+        ocr_status = "partial"
+    else:
+        ocr_status = "completed"
     if not rendered:
         raise RuntimeError("PDF 没有可渲染页面")
 
@@ -170,6 +210,7 @@ def prepare_pdf_model_input(
     for position, frame in enumerate(rendered):
         sheet.paste(frame, ((position % columns) * width, (position // columns) * height))
     temporary_path: str | None = None
+    temporary_context_path: str | None = None
     try:
         with tempfile.NamedTemporaryFile(
             dir=cache_dir, prefix=f".{content_sha256}.", suffix=".tmp", delete=False
@@ -178,23 +219,40 @@ def prepare_pdf_model_input(
         sheet.save(temporary_path, format="PNG", optimize=True)
         os.replace(temporary_path, preview_path)
         context = {
-            "schema_version": "pdf-preprocess-v1",
+            **cache_contract,
             "page_count": page_count,
             "rendered_pages": len(rendered),
             "text_extraction": "pypdf",
             "ocr_status": ocr_status,
+            "ocr_attempted_pages": ocr_attempts,
+            "ocr_failed_pages": ocr_failures,
             "text_chars": len(document_text),
             "text": document_text,
             "multimodal_summary": {
-                "status": "ready",
+                "status": "pending_model",
                 "instruction": "结合 PDF 文本与页图接触表判断方案内容，不要把页眉页脚当成评测主体。",
             },
         }
-        context_path.write_text(json.dumps(context, ensure_ascii=False, sort_keys=True), encoding="utf-8")
+        with tempfile.NamedTemporaryFile(
+            dir=cache_dir,
+            prefix=f".{cache_key}.",
+            suffix=".json.tmp",
+            delete=False,
+            mode="w",
+            encoding="utf-8",
+        ) as temporary_context:
+            temporary_context_path = temporary_context.name
+            json.dump(context, temporary_context, ensure_ascii=False, sort_keys=True)
+        os.replace(temporary_context_path, context_path)
     except OSError as exc:
         if temporary_path:
             try:
                 Path(temporary_path).unlink()
+            except OSError:
+                pass
+        if temporary_context_path:
+            try:
+                Path(temporary_context_path).unlink()
             except OSError:
                 pass
         raise RuntimeError("PDF 前处理结果写入失败") from exc

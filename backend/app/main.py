@@ -470,6 +470,14 @@ class EvaluationCategoryProfileUpdate(BaseModel):
     dimension_schema_key: str | None = Field(default=None, max_length=80)
     dimension_schema_version: str | None = Field(default=None, max_length=64)
 
+    @model_validator(mode="after")
+    def validate_dimension_identity(self) -> "EvaluationCategoryProfileUpdate":
+        if (self.dimension_schema_key is None) != (
+            self.dimension_schema_version is None
+        ):
+            raise ValueError("维度 Schema 业务键与版本必须同时填写")
+        return self
+
 
 class PromptCreateRequest(BaseModel):
     stage: str = Field(pattern="^[AB]$")
@@ -2216,6 +2224,7 @@ def update_evaluation_category(
     if category_key == "pdf_text":
         max_pages = preprocess_config.get("max_pages", 4)
         max_text_chars = preprocess_config.get("max_text_chars", 24_000)
+        multimodal_summary = preprocess_config.get("multimodal_summary", True)
         if (
             not isinstance(max_pages, int)
             or isinstance(max_pages, bool)
@@ -2223,6 +2232,7 @@ def update_evaluation_category(
             or not isinstance(max_text_chars, int)
             or isinstance(max_text_chars, bool)
             or not 1_000 <= max_text_chars <= 100_000
+            or multimodal_summary is not True
         ):
             raise HTTPException(status_code=422, detail="PDF 前处理参数超出允许范围")
     if category_key == "material_image" and not isinstance(
@@ -2233,10 +2243,14 @@ def update_evaluation_category(
         prompt_a = db.get(PromptVersion, payload.prompt_a_id)
         if prompt_a is None or prompt_a.stage != "A":
             raise HTTPException(status_code=422, detail="类目 A 提示词必须是有效的 A 阶段版本")
+        if prompt_a.rubric_version != payload.rubric_version.strip():
+            raise HTTPException(status_code=422, detail="类目 A 提示词与 rubric 版本不一致")
     if payload.prompt_b_id is not None:
         prompt_b = db.get(PromptVersion, payload.prompt_b_id)
         if prompt_b is None or prompt_b.stage != "B":
             raise HTTPException(status_code=422, detail="类目 B 提示词必须是有效的 B 阶段版本")
+        if prompt_b.rubric_version != payload.rubric_version.strip():
+            raise HTTPException(status_code=422, detail="类目 B 提示词与 rubric 版本不一致")
     if payload.model_config_id is not None and db.get(ModelConfig, payload.model_config_id) is None:
         raise HTTPException(status_code=422, detail="类目模型配置不存在")
     profile.display_name = payload.display_name.strip()
@@ -3036,6 +3050,11 @@ def enqueue_jobs(
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     profile = _category_profile(db, payload.category_key, require_active=True)
+    if profile.dimension_schema_key is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="该类目绑定的维度候选尚未通过生产校准门",
+        )
     assets = db.scalars(
         select(Asset).where(
             Asset.id.in_(payload.asset_ids),
@@ -3084,11 +3103,32 @@ def enqueue_jobs(
         if explicit_pair
         else profile.prompt_b_id
     )
+    if (
+        payload.category_key != "space_image"
+        and selected_single_id is None
+        and selected_a_id is None
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="请先为该评测类目绑定专属提示词",
+        )
     single_prompt = db.get(PromptVersion, selected_single_id) if selected_single_id else None
-    if payload.prompt_id and not single_prompt:
+    if selected_single_id and (
+        single_prompt is None or single_prompt.stage != "A"
+    ):
         raise HTTPException(status_code=400, detail="单提示词版本无效")
     prompt_a = None if single_prompt else selected_prompt("A", selected_a_id)
     prompt_b = None if single_prompt else selected_prompt("B", selected_b_id)
+    selected_rubrics = {
+        prompt.rubric_version
+        for prompt in (single_prompt, prompt_a, prompt_b)
+        if prompt is not None
+    }
+    if selected_rubrics != {profile.rubric_version}:
+        raise HTTPException(
+            status_code=409,
+            detail="类目 rubric 与所选提示词版本不一致",
+        )
     frozen_prompt_a_id = single_prompt.id if single_prompt else prompt_a.id
     frozen_prompt_b_id = None if single_prompt else prompt_b.id
     selected_model = (
@@ -4333,7 +4373,7 @@ def create_prompt_optimization(
     if prompt.stage != "B":
         raise HTTPException(status_code=400, detail="样本驱动优化目前用于调用 B 的美感维度提示词")
     if not config or not config.encrypted_api_key:
-        raise HTTPException(status_code=400, detail="请先在模型配置中填写 SOL API Key")
+        raise HTTPException(status_code=400, detail="请先在模型配置中填写提示词诊断模型 API Key")
     if not sample_set.items:
         raise HTTPException(status_code=400, detail="样本集还没有图片")
     active_run = db.scalar(

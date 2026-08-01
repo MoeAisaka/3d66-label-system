@@ -109,6 +109,99 @@ class JobInterrupted(RuntimeError):
     """The operator paused or canceled a job while a model call was in flight."""
 
 
+PDF_SUMMARY_SYSTEM_PROMPT = """你是 3d66 方案 PDF 的多模态前处理器。
+结合提供的 PDF 页图接触表与抽取/OCR 文本，先形成独立于最终评分的事实摘要。
+只输出 JSON 对象，字段固定为：document_type、summary、key_points、visual_findings、risks、confidence。
+summary 是 1 至 1200 字的中文摘要；key_points、visual_findings、risks 均为字符串数组；
+confidence 是 0 至 1 的数字。不得评分、不得输出 L1-L5，也不得臆造页图和文本中不存在的信息。"""
+
+
+def _pdf_summary_user_prompt(document_context: dict[str, object]) -> str:
+    return (
+        "请总结这份 PDF 方案。页图以随请求附带的接触表为准。\n\n"
+        "抽取/OCR 文本：\n"
+        + str(document_context.get("text") or "")
+    )
+
+
+def _validated_pdf_summary(payload: object) -> dict[str, object]:
+    if not isinstance(payload, dict):
+        raise RuntimeError("PDF 多模态总结返回结构无效")
+
+    def text_field(key: str, *, required: bool, limit: int) -> str:
+        value = payload.get(key)
+        if value is None and not required:
+            return ""
+        if not isinstance(value, str) or not value.strip():
+            raise RuntimeError("PDF 多模态总结返回结构无效")
+        return value.strip()[:limit]
+
+    def text_list(key: str) -> list[str]:
+        value = payload.get(key)
+        if not isinstance(value, list):
+            raise RuntimeError("PDF 多模态总结返回结构无效")
+        return [
+            item.strip()[:500]
+            for item in value[:12]
+            if isinstance(item, str) and item.strip()
+        ]
+
+    confidence = payload.get("confidence")
+    if (
+        not isinstance(confidence, (int, float))
+        or isinstance(confidence, bool)
+        or not 0 <= float(confidence) <= 1
+    ):
+        raise RuntimeError("PDF 多模态总结返回结构无效")
+    return {
+        "schema_version": "pdf-multimodal-summary-v1",
+        "status": "completed",
+        "document_type": text_field(
+            "document_type",
+            required=False,
+            limit=120,
+        ),
+        "summary": text_field("summary", required=True, limit=1200),
+        "key_points": text_list("key_points"),
+        "visual_findings": text_list("visual_findings"),
+        "risks": text_list("risks"),
+        "confidence": float(confidence),
+    }
+
+
+def _category_prompt_context(
+    *,
+    category_key: str,
+    preprocess_config: dict[str, object],
+    document_context: dict[str, object] | None,
+    pdf_summary: dict[str, object] | None,
+) -> str:
+    if category_key == "pdf_text":
+        if document_context is None or pdf_summary is None:
+            raise RuntimeError("PDF 前处理或多模态总结未完成")
+        return (
+            "\n\nPDF 类目冻结上下文：\n"
+            + json.dumps(
+                {
+                    "document_text": document_context.get("text") or "",
+                    "multimodal_summary": pdf_summary,
+                },
+                ensure_ascii=False,
+            )
+            + "\n请基于文档正文、页图与总结执行当前类目规则，不要把页眉页脚当成评测主体。"
+        )
+    if category_key == "material_image" and preprocess_config.get(
+        "material_focus",
+        True,
+    ):
+        return (
+            "\n\n材质图类目专项规则：优先检查纹理尺度与连续性、反光和粗糙度是否真实、"
+            "接缝/收口/拼接关系、工艺瑕疵、重复贴图与拉伸，以及图片是否足以支持材质判断。"
+            "所有结论必须引用图中可见证据；看不清时明确降低置信度并要求人工复核。"
+        )
+    return ""
+
+
 def _frozen_category_contract(
     job: EvaluationJob,
     asset: Asset,
@@ -685,6 +778,17 @@ async def evaluate_job(job_id: int) -> None:
         )
     if not single_mode and prompt_b is None:
         prompt_b = _prompt_for_job("B", prompt_b_id)
+    if category_profile_snapshot is not None:
+        frozen_rubric = category_profile_snapshot["rubric_version"]
+        prompt_rubrics = {prompt_a.rubric_version}
+        if prompt_b is not None:
+            prompt_rubrics.add(prompt_b.rubric_version)
+        if prompt_rubrics != {frozen_rubric}:
+            raise RuntimeError("任务冻结类目 rubric 与 Prompt 不一致")
+        if category_profile_snapshot.get("dimension_schema_key") is not None:
+            raise RuntimeError(
+                "任务冻结类目维度候选尚未通过生产校准门"
+            )
     image_path = settings.upload_dir / asset.stored_name
     if not image_path.exists():
         raise RuntimeError("原始素材文件不存在")
@@ -727,22 +831,6 @@ async def evaluate_job(job_id: int) -> None:
         }
         preprocess_snapshot["text_excerpt"] = document_text[:2_000]
 
-    metadata = {
-        "width": asset.width,
-        "height": asset.height,
-        "mime_type": asset.mime_type,
-        "size_bytes": asset.size_bytes,
-        "category_key": job.category_key,
-    }
-    user_a = prompt_a.user_prompt.replace(
-        "{{image_metadata}}", json.dumps(metadata, ensure_ascii=False)
-    )
-    if document_context is not None:
-        user_a += "\n\nPDF 前处理上下文（先理解文档，再输出评测 JSON）：\n" + json.dumps(
-            document_context, ensure_ascii=False
-        )
-    if single_mode:
-        _set_job(job_id, stage="single", progress=20)
     client_config = SimpleNamespace(
         encrypted_api_key=model_config.encrypted_api_key,
         provider=model_config.provider,
@@ -758,6 +846,46 @@ async def evaluate_job(job_id: int) -> None:
     # Provider calls do not retry in-place: recoverable failures are persisted
     # as recovery jobs so retry lineage, attempt count and Retry-After survive.
     client = DoubaoClient(client_config)  # type: ignore[arg-type]
+    pdf_summary: dict[str, object] | None = None
+    if document_context is not None:
+        summary_enabled = category_preprocess_config.get(
+            "multimodal_summary",
+            True,
+        )
+        if not isinstance(summary_enabled, bool):
+            raise RuntimeError("PDF 多模态总结配置损坏")
+        if not summary_enabled:
+            raise RuntimeError("PDF 类目必须启用多模态总结前置处理")
+        _set_job(job_id, stage="pdf_summary", progress=12)
+        summary_response = await client.chat_json(
+            PDF_SUMMARY_SYSTEM_PROMPT,
+            _pdf_summary_user_prompt(document_context),
+            image_path=model_image_path,
+            mime_type=model_mime_type,
+        )
+        _ensure_job_processing(job_id)
+        pdf_summary = _validated_pdf_summary(summary_response.parsed)
+        pdf_summary["model_id"] = model_config.model_id
+        preprocess_snapshot["multimodal_summary"] = pdf_summary
+
+    metadata = {
+        "width": asset.width,
+        "height": asset.height,
+        "mime_type": asset.mime_type,
+        "size_bytes": asset.size_bytes,
+        "category_key": job.category_key,
+    }
+    category_prompt_context = _category_prompt_context(
+        category_key=job.category_key,
+        preprocess_config=category_preprocess_config,
+        document_context=document_context,
+        pdf_summary=pdf_summary,
+    )
+    user_a = prompt_a.user_prompt.replace(
+        "{{image_metadata}}", json.dumps(metadata, ensure_ascii=False)
+    ) + category_prompt_context
+    if single_mode:
+        _set_job(job_id, stage="single", progress=20)
     if loop_attempt is not None and loop_attempt.business_round in (2, 3):
         _set_job(job_id, stage=loop_attempt.kind, progress=24)
         await _evaluate_targeted_loop_job(
@@ -799,6 +927,7 @@ async def evaluate_job(job_id: int) -> None:
         user_b = prompt_b.user_prompt.replace(
             "{{precheck_json}}", json.dumps(precheck, ensure_ascii=False)
         ).replace("{{rubric_version}}", prompt_b.rubric_version)
+        user_b += category_prompt_context
         response_b = await client.chat_json(
             prompt_b.system_prompt,
             user_b,

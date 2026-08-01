@@ -48,6 +48,7 @@ MIGRATION_NAMES = [
     "repair_evaluation_category_profiles",
     "add_evaluation_preprocess_snapshot",
     "freeze_job_category_profile",
+    "generalize_model_names_and_pdf_summary",
 ]
 
 
@@ -289,6 +290,65 @@ def test_repeated_migration_is_idempotent(tmp_path) -> None:
         assert [row[0] for row in versions] == list(
             range(1, len(MIGRATION_NAMES) + 1)
         )
+    finally:
+        engine.dispose()
+
+
+def test_migration_35_only_rewrites_legacy_default_names_and_pdf_contract(
+    tmp_path,
+) -> None:
+    engine = _engine(tmp_path, "migration-35.db")
+    Base.metadata.create_all(bind=engine)
+    try:
+        with engine.begin() as connection:
+            connection.exec_driver_sql(
+                "INSERT INTO model_configs (id, name, provider, base_url, api_path, "
+                "model_id, temperature, max_tokens, timeout_seconds, max_retries, "
+                "max_concurrency, structured_output, high_risk_review_enabled, active, "
+                "updated_at) "
+                "VALUES (1, '豆包主模型', 'doubao', 'https://example.test/v1', "
+                "'/chat/completions', 'legacy', 0.1, 4096, 120, 1, 2, 1, 1, 1, "
+                "CURRENT_TIMESTAMP), "
+                "(2, '用户自定义豆包实验', 'custom', 'https://example.test/v1', "
+                "'/chat/completions', 'custom', 0.1, 4096, 120, 1, 2, 1, 1, 1, "
+                "CURRENT_TIMESTAMP)"
+            )
+            connection.exec_driver_sql(
+                "INSERT INTO optimizer_configs (id, name, provider, base_url, api_path, "
+                "model_id, temperature, max_tokens, timeout_seconds, max_retries, "
+                "structured_output, updated_at) VALUES "
+                "(1, 'SOL 提示词诊断模型', 'openai', 'https://example.test/v1', "
+                "'/chat/completions', 'legacy-sol', 0.1, 4096, 120, 1, 1, "
+                "CURRENT_TIMESTAMP)"
+            )
+            connection.exec_driver_sql(
+                "INSERT INTO evaluation_category_profiles "
+                "(id, category_key, display_name, status, allowed_mime_types_json, "
+                "preprocess_config_json, rubric_version, created_by, created_at, "
+                "updated_at) VALUES "
+                "(1, 'pdf_text', 'PDF 方案文本', 'active', '[\"application/pdf\"]', "
+                "'{\"preprocess\":\"pdf\",\"max_pages\":8}', "
+                "'rubric-v2.1', 'test', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+            )
+            run_migrations(connection)
+            names = connection.exec_driver_sql(
+                "SELECT id, name FROM model_configs ORDER BY id"
+            ).fetchall()
+            assert names == [(1, "主评测模型"), (2, "用户自定义豆包实验")]
+            assert connection.exec_driver_sql(
+                "SELECT name FROM optimizer_configs WHERE id = 1"
+            ).scalar_one() == "提示词诊断模型"
+            pdf_config = json.loads(
+                connection.exec_driver_sql(
+                    "SELECT preprocess_config_json "
+                    "FROM evaluation_category_profiles WHERE id = 1"
+                ).scalar_one()
+            )
+            assert pdf_config == {
+                "max_pages": 8,
+                "multimodal_summary": True,
+                "preprocess": "pdf",
+            }
     finally:
         engine.dispose()
 

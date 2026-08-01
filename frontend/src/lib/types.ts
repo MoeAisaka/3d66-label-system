@@ -189,6 +189,17 @@ export type Evaluation = {
       ocr_status?: string
       text_chars?: number
     }
+    multimodal_summary?: {
+      schema_version: "pdf-multimodal-summary-v1"
+      status: "completed"
+      document_type: string
+      summary: string
+      key_points: string[]
+      visual_findings: string[]
+      risks: string[]
+      confidence: number
+      model_id: string
+    }
     text_excerpt?: string
   } | null
   precheck: Record<string, any>

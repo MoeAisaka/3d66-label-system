@@ -233,7 +233,7 @@ class DoubaoClient:
                 raise error from exc
             if not isinstance(data, dict):
                 error = DoubaoParseError(
-                    "豆包 API 返回了无法识别的数据结构"
+                    "模型 API 返回了无法识别的数据结构"
                 )
                 error.upstream_status_code = response.status_code
                 error.request_correlation_id = _request_correlation_id(

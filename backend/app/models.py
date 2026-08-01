@@ -47,7 +47,7 @@ CATEGORY_PROFILE_DEFAULTS: dict[str, dict[str, str]] = {
     "pdf_text": {
         "display_name": "PDF 方案文本",
         "allowed_mime_types_json": '["application/pdf"]',
-        "preprocess_config_json": '{"preprocess":"pdf","max_pages":4,"max_text_chars":24000}',
+        "preprocess_config_json": '{"preprocess":"pdf","max_pages":4,"max_text_chars":24000,"multimodal_summary":true}',
     },
     "material_image": {
         "display_name": "材质图",
@@ -86,7 +86,7 @@ class ModelConfig(Base):
     __tablename__ = "model_configs"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    name: Mapped[str] = mapped_column(String(120), default="豆包主模型")
+    name: Mapped[str] = mapped_column(String(120), default="主评测模型")
     provider: Mapped[str] = mapped_column(String(40), default="doubao")
     base_url: Mapped[str] = mapped_column(
         String(300), default="https://ark.cn-beijing.volces.com/api/v3"
@@ -123,7 +123,7 @@ class OptimizerConfig(Base):
     __tablename__ = "optimizer_configs"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    name: Mapped[str] = mapped_column(String(120), default="SOL 提示词诊断模型")
+    name: Mapped[str] = mapped_column(String(120), default="提示词诊断模型")
     provider: Mapped[str] = mapped_column(String(40), default="openai")
     base_url: Mapped[str] = mapped_column(String(300), default="https://api.openai.com/v1")
     api_path: Mapped[str] = mapped_column(String(120), default="/chat/completions")

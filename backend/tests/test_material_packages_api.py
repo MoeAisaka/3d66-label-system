@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import json
 import zipfile
 from contextlib import contextmanager
 from dataclasses import replace
@@ -17,7 +18,14 @@ from app import main
 from app.database import Base, get_db
 from app.main import app, current_user
 from app.migrations import run_migrations
-from app.models import Asset, AuditEvent, MaterialPackage, User
+from app.models import (
+    Asset,
+    AuditEvent,
+    EvaluationJob,
+    MaterialPackage,
+    PromptVersion,
+    User,
+)
 
 
 def _image_bytes(color: tuple[int, int, int], *, format_name: str = "JPEG") -> bytes:
@@ -201,6 +209,99 @@ def test_category_contracts_keep_pdf_and_material_inputs_isolated(tmp_path: Path
             files={"files": ("blocked.png", _image_bytes((3, 2, 1), format_name="PNG"), "image/png")},
         )
         assert blocked.status_code == 409
+
+
+def test_material_category_requires_and_freezes_its_own_prompt_contract(
+    tmp_path: Path,
+) -> None:
+    with _api_context(tmp_path) as (client, sessions):
+        uploaded = client.post(
+            "/api/assets/upload",
+            data={"category_key": "material_image"},
+            files={
+                "files": (
+                    "fabric.png",
+                    _image_bytes((12, 34, 56), format_name="PNG"),
+                    "image/png",
+                )
+            },
+        )
+        asset_id = uploaded.json()["items"][0]["id"]
+        missing_prompt = client.post(
+            "/api/jobs/enqueue",
+            json={"asset_ids": [asset_id], "category_key": "material_image"},
+        )
+        assert missing_prompt.status_code == 409
+        assert "专属提示词" in missing_prompt.json()["detail"]
+
+        with sessions() as db:
+            material_prompt = PromptVersion(
+                stage="A",
+                name="材质图单提示词",
+                version="material-single-v1",
+                system_prompt="return the complete material evaluation json",
+                user_prompt="evaluate material {{image_metadata}}",
+                rubric_version="material-rubric-v1",
+                status="published",
+            )
+            wrong_prompt = PromptVersion(
+                stage="A",
+                name="其他规则",
+                version="other-single-v1",
+                system_prompt="return a different complete evaluation json",
+                user_prompt="evaluate other {{image_metadata}}",
+                rubric_version="other-rubric-v1",
+                status="published",
+            )
+            db.add_all([material_prompt, wrong_prompt])
+            db.commit()
+
+        profile = next(
+            item
+            for item in client.get("/api/evaluation-categories").json()["items"]
+            if item["category_key"] == "material_image"
+        )
+        update_payload = {
+            key: value
+            for key, value in profile.items()
+            if key not in {"id", "category_key", "created_by", "created_at", "updated_at"}
+        }
+        update_payload.update(
+            {
+                "prompt_a_id": material_prompt.id,
+                "prompt_b_id": None,
+                "rubric_version": "material-rubric-v1",
+            }
+        )
+        saved = client.put(
+            "/api/evaluation-categories/material_image",
+            json=update_payload,
+        )
+        assert saved.status_code == 200, saved.text
+
+        mismatch = client.post(
+            "/api/jobs/enqueue",
+            json={
+                "asset_ids": [asset_id],
+                "category_key": "material_image",
+                "prompt_id": wrong_prompt.id,
+            },
+        )
+        assert mismatch.status_code == 409
+        assert "rubric" in mismatch.json()["detail"]
+
+        queued = client.post(
+            "/api/jobs/enqueue",
+            json={"asset_ids": [asset_id], "category_key": "material_image"},
+        )
+        assert queued.status_code == 200, queued.text
+        with sessions() as db:
+            job = db.get(EvaluationJob, queued.json()["job_ids"][0])
+            frozen = json.loads(job.category_profile_snapshot_json)
+            assert frozen["category_key"] == "material_image"
+            assert frozen["prompt_a_id"] == material_prompt.id
+            assert frozen["prompt_b_id"] is None
+            assert frozen["rubric_version"] == "material-rubric-v1"
 
 
 def test_zip_upload_aggregates_nested_images_and_ignores_metadata(

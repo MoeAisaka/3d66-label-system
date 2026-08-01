@@ -74,10 +74,10 @@ def test_pdf_preprocess_extracts_text_renders_contact_sheet_and_caches(tmp_path)
     )
     assert result.preview_mime_type == "image/png"
     assert result.preview_path.exists()
-    assert result.context["schema_version"] == "pdf-preprocess-v1"
+    assert result.context["schema_version"] == "pdf-preprocess-v2"
     assert result.context["page_count"] == 1
     assert "Living room proposal" in str(result.context["text"])
-    assert result.context["multimodal_summary"]["status"] == "ready"
+    assert result.context["multimodal_summary"]["status"] == "pending_model"
 
     cached = prepare_pdf_model_input(
         source,
@@ -86,6 +86,16 @@ def test_pdf_preprocess_extracts_text_renders_contact_sheet_and_caches(tmp_path)
     )
     assert cached.preview_path == result.preview_path
     assert cached.context == result.context
+
+    different_contract = prepare_pdf_model_input(
+        source,
+        content_sha256="b" * 64,
+        cache_dir=tmp_path / "derived",
+        max_pages=1,
+        max_text_chars=1_000,
+    )
+    assert different_contract.preview_path != result.preview_path
+    assert different_contract.context["max_text_chars"] == 1_000
 
 
 def test_pdf_preprocess_reports_invalid_input_without_partial_cache(tmp_path) -> None:
@@ -96,4 +106,16 @@ def test_pdf_preprocess_reports_invalid_input_without_partial_cache(tmp_path) ->
             source,
             content_sha256="c" * 64,
             cache_dir=tmp_path / "derived",
+        )
+
+
+def test_pdf_preprocess_rejects_unbounded_contract_before_reading_file(
+    tmp_path,
+) -> None:
+    with pytest.raises(RuntimeError, match="参数超出"):
+        prepare_pdf_model_input(
+            tmp_path / "missing.pdf",
+            content_sha256="f" * 64,
+            cache_dir=tmp_path / "derived",
+            max_pages=21,
         )

@@ -910,12 +910,12 @@ def test_database_triggers_reject_frozen_mutation(
             connection.exec_driver_sql(statement)
 
 
-def test_migration_34_and_triggers_are_installed(database) -> None:
+def test_migration_35_and_triggers_are_installed(database) -> None:
     _db, engine = database
     with engine.connect() as connection:
         assert connection.exec_driver_sql(
             "SELECT max(version) FROM schema_migrations"
-        ).scalar_one() == 34
+        ).scalar_one() == 35
         assert connection.exec_driver_sql(
             "SELECT name FROM schema_migrations WHERE version = 30"
         ).scalar_one() == "add_dimension_calibration_results"

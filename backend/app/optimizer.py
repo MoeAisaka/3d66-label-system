@@ -678,7 +678,7 @@ async def run_prompt_optimization(run_id: int) -> None:
                         "blind_holdout",
                     ],
                     "dimension_schema": dimension_schema,
-                    "note": "盲测样本没有发送给提示词生成模型，后续用于豆包回测。",
+                    "note": "盲测样本没有发送给提示词生成模型，后续用于主模型回测。",
                 },
                 "batch_diagnoses": [diagnostic_result],
             },
@@ -755,7 +755,7 @@ async def run_prompt_optimization(run_id: int) -> None:
         )
         run.candidate_system_prompt = candidate_system
         run.candidate_user_prompt = candidate_user
-        run.change_note = str(result.get("change_note") or "SOL 根据人工校验样本生成的候选提示词")
+        run.change_note = str(result.get("change_note") or "诊断模型根据人工校验样本生成的候选提示词")
         status_code, request_id, attempt_count = _response_context(
             synthesis_response
         )

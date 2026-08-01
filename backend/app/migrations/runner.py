@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from typing import Callable
 
@@ -5274,7 +5275,7 @@ def _migration_031_add_evaluation_category_profiles(connection: Connection) -> N
         return
     profiles = (
         ("space_image", "空间图片", '["image/jpeg","image/png","image/webp","image/gif"]', '{"preprocess":"image"}'),
-        ("pdf_text", "PDF 方案文本", '["application/pdf"]', '{"preprocess":"pdf","max_pages":4,"max_text_chars":24000}'),
+        ("pdf_text", "PDF 方案文本", '["application/pdf"]', '{"preprocess":"pdf","max_pages":4,"max_text_chars":24000,"multimodal_summary":true}'),
         ("material_image", "材质图", '["image/jpeg","image/png","image/webp","image/gif"]', '{"preprocess":"image","material_focus":true}'),
     )
     for category_key, display_name, mime_types, preprocess in profiles:
@@ -5313,7 +5314,7 @@ def _migration_032_repair_evaluation_category_profiles(connection: Connection) -
         return
     for category_key, display_name, mime_types, preprocess in (
         ("space_image", "空间图片", '["image/jpeg","image/png","image/webp","image/gif"]', '{"preprocess":"image"}'),
-        ("pdf_text", "PDF 方案文本", '["application/pdf"]', '{"preprocess":"pdf","max_pages":4,"max_text_chars":24000}'),
+        ("pdf_text", "PDF 方案文本", '["application/pdf"]', '{"preprocess":"pdf","max_pages":4,"max_text_chars":24000,"multimodal_summary":true}'),
         ("material_image", "材质图", '["image/jpeg","image/png","image/webp","image/gif"]', '{"preprocess":"image","material_focus":true}'),
     ):
         connection.exec_driver_sql(
@@ -5376,6 +5377,84 @@ def _migration_034_freeze_job_category_profile(connection: Connection) -> None:
     if "category_profile_snapshot_json" not in columns:
         connection.exec_driver_sql(
             "ALTER TABLE evaluation_jobs ADD COLUMN category_profile_snapshot_json TEXT"
+        )
+
+
+def _migration_035_generalize_model_names_and_pdf_summary(
+    connection: Connection,
+) -> None:
+    tables = {
+        row[0]
+        for row in connection.exec_driver_sql(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )
+    }
+    model_columns = (
+        {
+            row[1]
+            for row in connection.exec_driver_sql(
+                "PRAGMA table_info(model_configs)"
+            )
+        }
+        if "model_configs" in tables
+        else set()
+    )
+    if "name" in model_columns:
+        connection.exec_driver_sql(
+            "UPDATE model_configs SET name = '主评测模型' "
+            "WHERE name = '豆包主模型'"
+        )
+    optimizer_columns = (
+        {
+            row[1]
+            for row in connection.exec_driver_sql(
+                "PRAGMA table_info(optimizer_configs)"
+            )
+        }
+        if "optimizer_configs" in tables
+        else set()
+    )
+    if "name" in optimizer_columns:
+        connection.exec_driver_sql(
+            "UPDATE optimizer_configs SET name = '提示词诊断模型' "
+            "WHERE name = 'SOL 提示词诊断模型'"
+        )
+    if "evaluation_category_profiles" not in tables:
+        return
+    profile_columns = {
+        row[1]
+        for row in connection.exec_driver_sql(
+            "PRAGMA table_info(evaluation_category_profiles)"
+        )
+    }
+    if not {"id", "category_key", "preprocess_config_json"}.issubset(
+        profile_columns
+    ):
+        return
+    rows = connection.exec_driver_sql(
+        "SELECT id, preprocess_config_json "
+        "FROM evaluation_category_profiles WHERE category_key = 'pdf_text'"
+    ).fetchall()
+    for profile_id, raw_config in rows:
+        try:
+            config = json.loads(raw_config or "{}")
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if not isinstance(config, dict):
+            continue
+        config["multimodal_summary"] = True
+        connection.exec_driver_sql(
+            "UPDATE evaluation_category_profiles "
+            "SET preprocess_config_json = ? WHERE id = ?",
+            (
+                json.dumps(
+                    config,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                profile_id,
+            ),
         )
 
 
@@ -5505,6 +5584,11 @@ MIGRATIONS = [
         34,
         "freeze_job_category_profile",
         _migration_034_freeze_job_category_profile,
+    ),
+    Migration(
+        35,
+        "generalize_model_names_and_pdf_summary",
+        _migration_035_generalize_model_names_and_pdf_summary,
     ),
 ]
 

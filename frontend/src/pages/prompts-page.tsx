@@ -257,12 +257,12 @@ export function PromptCandidatesPage() {
               <div className="grid gap-5 p-5 xl:grid-cols-[minmax(0,1fr)_240px_auto] xl:items-end">
                 <div>
                   <div className="flex items-center gap-2"><Sparkle size={20} weight="fill" /><h3 className="font-semibold">从人工校验样本生成候选提示词</h3></div>
-                  <p className="mt-2 max-w-[72ch] text-xs leading-5 text-[var(--muted)]">SOL 会读取样本中的维度纠错、原因和图片，保留一部分图片作为盲测，不会直接改动当前提示词。</p>
+                  <p className="mt-2 max-w-[72ch] text-xs leading-5 text-[var(--muted)]">提示词诊断模型会读取样本中的维度纠错、原因和图片，保留一部分图片作为盲测，不会直接改动当前提示词。</p>
                 </div>
                 <label><span className="mb-2 block text-xs font-semibold">选择校验样本集</span><select className="h-11 w-full rounded-[4px] border border-[var(--line-strong)] bg-white px-3 text-sm" value={sampleSetId ?? ""} onChange={(event) => setSampleSetId(event.target.value ? Number(event.target.value) : null)}><option value="">请选择样本集</option>{sampleSets.data?.items.map((set) => <option key={set.id} value={set.id}>{set.name} · {set.item_count}张</option>)}</select></label>
-                <Button onClick={() => startOptimization.mutate()} disabled={!sampleSetId || selected.stage !== "B" || !optimizerConfig.data?.has_api_key || Boolean(activeOptimization) || startOptimization.isPending}>{activeOptimization ? "SOL 正在分析" : "生成候选提示词"}<MagicWand /></Button>
+                <Button onClick={() => startOptimization.mutate()} disabled={!sampleSetId || selected.stage !== "B" || !optimizerConfig.data?.has_api_key || Boolean(activeOptimization) || startOptimization.isPending}>{activeOptimization ? "诊断模型正在分析" : "生成候选提示词"}<MagicWand /></Button>
               </div>
-              {!optimizerConfig.data?.has_api_key && <div className="flex items-start gap-2 border-t border-[var(--line)] bg-[#fff9ef] px-5 py-3 text-xs leading-5 text-[#7d4308]"><WarningCircle className="mt-0.5 shrink-0" />请先到“模型配置”填写 SOL API Key。Codex 登录权限不能直接供网站调用。</div>}
+              {!optimizerConfig.data?.has_api_key && <div className="flex items-start gap-2 border-t border-[var(--line)] bg-[#fff9ef] px-5 py-3 text-xs leading-5 text-[#7d4308]"><WarningCircle className="mt-0.5 shrink-0" />请先到“模型配置”填写提示词诊断模型 API Key。网页端登录权限不能直接供网站调用。</div>}
               {selected.stage !== "B" && <div className="border-t border-[var(--line)] px-5 py-3 text-xs text-[var(--muted)]">样本驱动优化目前用于调用 B 的维度评分。请选择调用 B 的提示词版本。</div>}
               {latestOptimization && <div className="border-t border-[var(--line)] px-5 py-4">
                 <div className="flex flex-wrap items-center justify-between gap-3">
