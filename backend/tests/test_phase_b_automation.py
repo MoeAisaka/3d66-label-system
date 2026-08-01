@@ -43,6 +43,8 @@ from app.models import (
     OptimizationCaseQueue,
     ProductionFeedbackEvent,
     PromptVersion,
+    PromptRegressionRun,
+    SampleSet,
     SamplingPolicy,
     User,
 )
@@ -52,6 +54,7 @@ from app.optimization_automation import (
     RealOptimizationAdapter,
     consume_optimization_queue_once,
 )
+from app.regression import _refresh_source_automation_review
 from app.production_feedback import (
     FeedbackConflict,
     ingest_production_feedback,
@@ -102,6 +105,7 @@ def _feedback(
         occurred_at=occurred_at or datetime(2026, 1, 1, tzinfo=timezone.utc),
         payload={
             "production_case_id": f"case-{event_id}",
+            "category_key": "space_image",
             "prompt_version": prompt_version,
             "severity": severity,
             "model_output": {"level": "L4"},
@@ -138,6 +142,7 @@ def test_production_feedback_is_idempotent_and_immutable() -> None:
                 occurred_at=datetime.now(timezone.utc),
                 payload={
                     "production_case_id": "different",
+                    "category_key": "space_image",
                     "prompt_version": "prompt-b-v1",
                     "severity": "P1",
                     "model_output": {},
@@ -187,6 +192,7 @@ def test_feedback_api_requires_machine_token_and_preserves_idempotency(
             "occurred_at": occurred_at,
             "payload": {
                 "production_case_id": "prod-1",
+                "category_key": "space_image",
                 "prompt_version": "v1",
                 "severity": "P1",
                 "model_output": {"level": "L4"},
@@ -285,7 +291,70 @@ def test_automation_defaults_disabled_then_dry_run_plans_without_model() -> None
         assert run.actual_cost_micros == 0
         assert run.result_json == "{}"
         statuses = set(db.scalars(select(OptimizationCaseQueue.status)))
-        assert statuses == {"batched"}
+        # The category profile owns its own automation threshold. The seeded
+        # profile defaults to one case, so one case is consumed and the next
+        # remains pending for the next worker tick.
+        assert statuses == {"batched", "pending"}
+    finally:
+        _close(engine, db)
+
+
+def test_automation_review_waits_for_all_candidate_regressions() -> None:
+    engine, db, _user = _database()
+    try:
+        source = AutomationOptimizationRun(
+            run_key="aggregate-all-candidates",
+            base_prompt_version="B-base",
+            category_key="space_image",
+            policy_revision=1,
+            status="succeeded",
+            trigger_reason="case_threshold",
+            case_ids_json="[]",
+            frozen_input_json='{"category_key":"space_image"}',
+            result_json="{}",
+        )
+        db.add(source)
+        db.flush()
+        candidate_a = PromptVersion(
+            stage="B", name="candidate-a", version="auto-a",
+            system_prompt="system prompt candidate a", user_prompt="user prompt",
+            source_automation_run_id=source.id,
+        )
+        candidate_b = PromptVersion(
+            stage="B", name="candidate-b", version="auto-b",
+            system_prompt="system prompt candidate b", user_prompt="user prompt",
+            source_automation_run_id=source.id,
+        )
+        db.add_all([candidate_a, candidate_b])
+        db.flush()
+        base_a = PromptVersion(
+            stage="A", name="base-a", version="auto-base-a",
+            system_prompt="system prompt base a", user_prompt="user prompt",
+        )
+        sample_set = SampleSet(
+            name="automation-review-golden", kind="golden", status="locked",
+            category_key="space_image",
+        )
+        db.add_all([base_a, sample_set])
+        db.flush()
+        first = PromptRegressionRun(
+            name="first", sample_set_id=sample_set.id, trigger_prompt_id=candidate_a.id,
+            prompt_a_id=base_a.id, prompt_b_id=candidate_a.id,
+        )
+        second = PromptRegressionRun(
+            name="second", sample_set_id=sample_set.id, trigger_prompt_id=candidate_b.id,
+            prompt_a_id=base_a.id, prompt_b_id=candidate_b.id,
+        )
+        db.add_all([first, second])
+        db.flush()
+        source.result_json = json.dumps({"regression_ids": [first.id, second.id]})
+        first.status = "passed"
+        _refresh_source_automation_review(db, first)
+        assert source.status == "running"
+        second.status = "regressed"
+        second.finished_at = datetime.now(timezone.utc)
+        _refresh_source_automation_review(db, second)
+        assert source.status == "awaiting_release_review"
     finally:
         _close(engine, db)
 
@@ -1139,6 +1208,7 @@ def test_feedback_sender_example_defaults_to_safe_dry_run(tmp_path) -> None:
         "occurred_at": "2026-01-01T00:00:00Z",
         "payload": {
             "production_case_id": "case-1",
+            "category_key": "space_image",
             "prompt_version": "B1",
             "severity": "P1",
             "model_output": {"private": sentinel},

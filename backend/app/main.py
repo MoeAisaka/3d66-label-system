@@ -361,6 +361,12 @@ class ProductionFeedbackRequest(BaseModel):
     occurred_at: datetime
     payload: dict[str, Any]
 
+    @model_validator(mode="after")
+    def validate_category(self) -> "ProductionFeedbackRequest":
+        if not self.payload.get("category_key"):
+            raise ValueError("生产反馈 payload 必须填写 category_key")
+        return self
+
 
 class BenchmarkVariantRequest(BaseModel):
     model_key: Literal["sol", "terra", "luna"]
@@ -433,6 +439,20 @@ class MaterialPackageCreateRequest(BaseModel):
         return self
 
 
+class AssetCategoryUpdateRequest(BaseModel):
+    category_key: Literal["space_image", "pdf_text", "material_image"]
+
+
+class AssetBulkDeleteRequest(BaseModel):
+    asset_ids: list[int] = Field(min_length=1, max_length=1000)
+
+    @model_validator(mode="after")
+    def validate_unique_assets(self) -> "AssetBulkDeleteRequest":
+        if len(self.asset_ids) != len(set(self.asset_ids)):
+            raise ValueError("素材列表不能包含重复素材")
+        return self
+
+
 class EnqueueRequest(BaseModel):
     asset_ids: list[int] = Field(min_length=1, max_length=1000)
     prompt_id: int | None = Field(default=None, ge=1)
@@ -469,6 +489,7 @@ class EvaluationCategoryProfileUpdate(BaseModel):
     rubric_version: str = Field(default="rubric-v2.1", min_length=1, max_length=40)
     dimension_schema_key: str | None = Field(default=None, max_length=80)
     dimension_schema_version: str | None = Field(default=None, max_length=64)
+    automation_config: dict[str, Any] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def validate_dimension_identity(self) -> "EvaluationCategoryProfileUpdate":
@@ -612,6 +633,7 @@ class SampleSetCreateRequest(BaseModel):
     name: str = Field(min_length=1, max_length=160)
     description: str = Field(default="", max_length=2000)
     kind: str = Field(default="test", pattern="^(golden|test)$")
+    category_key: Literal["space_image", "pdf_text", "material_image"] = "space_image"
 
 
 class SampleSetAddItemsRequest(BaseModel):
@@ -1058,6 +1080,7 @@ def _asset_payload(
         "id": asset.id,
         "name": name,
         "mime_type": asset.mime_type,
+        "category_key": asset.category_key,
         "size_bytes": asset.size_bytes,
         "width": asset.width,
         "height": asset.height,
@@ -2147,6 +2170,8 @@ def _category_profile_payload(profile: EvaluationCategoryProfile) -> dict[str, A
         "prompt_a_id": profile.prompt_a_id,
         "prompt_b_id": profile.prompt_b_id,
         "model_config_id": profile.model_config_id,
+        "automation_config": json.loads(profile.automation_config_json or "{}"),
+        "automation_revision": profile.automation_revision,
         "rubric_version": profile.rubric_version,
         "dimension_schema_key": profile.dimension_schema_key,
         "dimension_schema_version": profile.dimension_schema_version,
@@ -2263,6 +2288,22 @@ def update_evaluation_category(
     profile.rubric_version = payload.rubric_version.strip()
     profile.dimension_schema_key = payload.dimension_schema_key
     profile.dimension_schema_version = payload.dimension_schema_version
+    automation = dict(payload.automation_config)
+    if automation:
+        if not isinstance(automation.get("enabled", True), bool):
+            raise HTTPException(status_code=422, detail="类目自动化 enabled 必须是布尔值")
+        for key, low, high in (
+            ("case_threshold", 1, 1000),
+            ("cooldown_seconds", 0, 86400),
+            ("max_candidates", 1, 5),
+        ):
+            value = automation.get(key)
+            if value is not None and (
+                not isinstance(value, int) or isinstance(value, bool) or not low <= value <= high
+            ):
+                raise HTTPException(status_code=422, detail=f"类目自动化 {key} 超出允许范围")
+        profile.automation_config_json = canonical_json(automation)
+        profile.automation_revision += 1
     profile.created_by = profile.created_by or user.username
     db.commit()
     db.refresh(profile)
@@ -2348,8 +2389,14 @@ def _store_package_asset(
     )
     if existing is not None:
         restored = existing.status == "deleted"
+        if existing.category_key != category_key and not restored:
+            raise HTTPException(
+                status_code=409,
+                detail="同一文件已归属其他评测类目，请先在素材管理中调整归属后再上传",
+            )
         if restored:
             existing.status = "uploaded"
+            existing.category_key = category_key
             append_audit_event(
                 db,
                 category="materials",
@@ -2392,6 +2439,7 @@ def _store_package_asset(
         width=width,
         height=height,
         sha256=digest,
+        category_key=category_key,
     )
     db.add(asset)
     db.flush()
@@ -2715,6 +2763,8 @@ def create_material_package_from_assets(
             status_code=404,
             detail="部分素材不存在或已删除，请刷新后重试",
         )
+    if any(asset.category_key != payload.category_key for asset in assets_by_id.values()):
+        raise HTTPException(status_code=422, detail="素材所属通道与素材包类目不一致")
     allowed_mimes = set(
         json.loads(_category_profile(db, payload.category_key, require_active=True).allowed_mime_types_json or "[]")
     )
@@ -2796,6 +2846,7 @@ def list_material_packages(
     statement = select(MaterialPackage).order_by(
         MaterialPackage.created_at.desc(), MaterialPackage.id.desc()
     )
+    statement = statement.where(MaterialPackage.status != "deleted")
     if created_from is not None:
         statement = statement.where(MaterialPackage.created_at >= created_from)
     if created_to is not None:
@@ -2827,6 +2878,7 @@ def list_material_packages(
                 "name": package.name,
                 "source": package.source,
                 "category_key": package.category_key,
+                "status": package.status,
                 "item_count": len(package.items),
                 "unique_asset_count": len(
                     {item.asset_id for item in package.items}
@@ -2867,6 +2919,7 @@ def list_assets(
     limit: int = 100,
     offset: int = 0,
     package_id: int | None = None,
+    category_key: str | None = None,
     created_from: datetime | None = None,
     created_to: datetime | None = None,
     prompt_id: int | None = None,
@@ -2877,6 +2930,9 @@ def list_assets(
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     statement = select(Asset).where(Asset.status != "deleted")
+    if category_key is not None:
+        _category_profile(db, category_key)
+        statement = statement.where(Asset.category_key == category_key)
     if package_id is not None:
         statement = statement.join(
             MaterialPackageItem,
@@ -2955,6 +3011,37 @@ def asset_detail(
     return _asset_payload(asset)
 
 
+@app.patch("/api/assets/{asset_id}/category")
+def update_asset_category(
+    asset_id: int,
+    payload: AssetCategoryUpdateRequest,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    asset = db.get(Asset, asset_id)
+    if asset is None:
+        raise HTTPException(status_code=404, detail="素材不存在")
+    _category_profile(db, payload.category_key, require_active=True)
+    active_job = db.scalar(
+        select(EvaluationJob.id).where(
+            EvaluationJob.asset_id == asset.id,
+            EvaluationJob.status.in_(("queued", "processing", "paused")),
+        ).limit(1)
+    )
+    if active_job is not None:
+        raise HTTPException(status_code=409, detail="素材仍有排队或运行中的任务，暂不能修改所属通道")
+    previous = asset.category_key
+    asset.category_key = payload.category_key
+    append_audit_event(
+        db, category="materials", action="asset_category_updated", subject_type="asset",
+        subject_id=asset.id, actor=user.username,
+        payload={"from": previous, "to": payload.category_key},
+        event_key=f"asset:{asset.id}:category:{asset.category_key}",
+    )
+    db.commit()
+    return _asset_payload(asset)
+
+
 @app.delete("/api/assets/{asset_id}")
 def delete_asset(
     asset_id: int,
@@ -3005,6 +3092,75 @@ def delete_asset(
         "deleted": True,
         "history_retained": True,
     }
+
+
+def _soft_delete_assets(
+    db: Session,
+    *,
+    asset_ids: list[int],
+    actor: str,
+    source: str,
+) -> dict[str, Any]:
+    assets = db.scalars(select(Asset).where(Asset.id.in_(asset_ids))).all()
+    if len({asset.id for asset in assets}) != len(set(asset_ids)):
+        raise HTTPException(status_code=404, detail="部分素材不存在，请刷新后重试")
+    active_ids = [asset.id for asset in assets if asset.status != "deleted"]
+    blocked = db.scalars(
+        select(EvaluationJob.asset_id).where(
+            EvaluationJob.asset_id.in_(active_ids),
+            EvaluationJob.status.in_(("queued", "processing", "paused")),
+        ).distinct()
+    ).all()
+    if blocked:
+        raise HTTPException(status_code=409, detail={"message": "部分素材仍有排队或运行中的任务，请先取消任务", "asset_ids": blocked})
+    for asset in assets:
+        if asset.status == "deleted":
+            continue
+        previous = asset.status
+        asset.status = "deleted"
+        append_audit_event(
+            db, category="materials", action="asset_deleted", subject_type="asset",
+            subject_id=asset.id, actor=actor,
+            payload={"previous_status": previous, "history_retained": True, "binary_retained": True, "source": source},
+            event_key=f"asset:{asset.id}:deleted:{source}",
+        )
+    db.commit()
+    return {"deleted": len(active_ids), "already_deleted": len(assets) - len(active_ids), "asset_ids": active_ids, "history_retained": True}
+
+
+@app.post("/api/assets/bulk-delete")
+def bulk_delete_assets(
+    payload: AssetBulkDeleteRequest,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    return _soft_delete_assets(db, asset_ids=payload.asset_ids, actor=user.username, source="bulk")
+
+
+@app.delete("/api/material-packages/{package_id}")
+def delete_material_package(
+    package_id: int,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    package = db.get(MaterialPackage, package_id)
+    if package is None:
+        raise HTTPException(status_code=404, detail="素材包不存在")
+    if package.status == "deleted":
+        return {"package_id": package.id, "deleted": True, "deleted_assets": 0, "history_retained": True}
+    asset_ids = list(dict.fromkeys(item.asset_id for item in package.items))
+    if not asset_ids:
+        return {"package_id": package.id, "deleted": True, "deleted_assets": 0, "history_retained": True}
+    result = _soft_delete_assets(db, asset_ids=asset_ids, actor=user.username, source=f"package:{package_id}")
+    package.status = "deleted"
+    append_audit_event(
+        db, category="materials", action="material_package_deleted", subject_type="material_package",
+        subject_id=package.id, actor=user.username,
+        payload={"asset_ids": asset_ids, "history_retained": True},
+        event_key=f"material-package:{package.id}:deleted",
+    )
+    db.commit()
+    return {"package_id": package.id, "deleted": True, **result}
 
 
 @app.get("/api/evaluations")
@@ -3063,6 +3219,8 @@ def enqueue_jobs(
     ).all()
     if len(assets) != len(set(payload.asset_ids)):
         raise HTTPException(status_code=404, detail="部分图片不存在或已删除")
+    if any(asset.category_key != payload.category_key for asset in assets):
+        raise HTTPException(status_code=422, detail="所选素材包含其他评测类目，请先调整素材所属通道")
     allowed_mimes = set(json.loads(profile.allowed_mime_types_json or "[]"))
     if any(asset.mime_type not in allowed_mimes for asset in assets):
         raise HTTPException(status_code=422, detail="素材 MIME 类型与评测类目不匹配")
@@ -4661,8 +4819,15 @@ def _finalize_review_panel(
             )
             else "P2"
         )
+        _add_to_category_golden_set(
+            db,
+            evaluation=evaluation,
+            truth=truth,
+            actor=reviewer_name,
+        )
         db.add(
             OptimizationCaseQueue(
+                category_key=evaluation.job.category_key,
                 idempotency_key=f"review-panel:{panel.id}:final:{final_review.id}",
                 evaluation_id=evaluation.id,
                 final_review_id=final_review.id,
@@ -4687,6 +4852,70 @@ def _finalize_review_panel(
             )
         )
     return final_review
+
+
+def _add_to_category_golden_set(
+    db: Session,
+    *,
+    evaluation: EvaluationResult,
+    truth: dict[str, Any],
+    actor: str,
+) -> None:
+    """Persist every final correction into its isolated system golden set."""
+    category_key = evaluation.job.category_key
+    sample_set = db.scalar(
+        select(SampleSet).where(
+            SampleSet.category_key == category_key,
+            SampleSet.kind == "golden",
+            SampleSet.name == f"系统黄金集·{category_key}",
+        )
+    )
+    if sample_set is None:
+        sample_set = SampleSet(
+            name=f"系统黄金集·{category_key}",
+            description="由最终人工纠偏自动沉淀；按类目隔离维护。",
+            kind="golden",
+            status="locked",
+            category_key=category_key,
+            created_by="automation",
+        )
+        db.add(sample_set)
+        db.flush()
+    existing = db.scalar(
+        select(SampleSetItem).where(
+            SampleSetItem.sample_set_id == sample_set.id,
+            SampleSetItem.source_result_id == evaluation.id,
+        )
+    )
+    if existing is not None:
+        return
+    source_payload = _result_payload(evaluation) or {}
+    category = (
+        (source_payload.get("precheck") or {}).get("classification") or {}
+    ).get("primary_category") or "无法判断"
+    expected_level = truth.get("corrected_level") or evaluation.level
+    item = SampleSetItem(
+        sample_set_id=sample_set.id,
+        asset_id=evaluation.asset_id,
+        source_result_id=evaluation.id,
+        expected_level=expected_level,
+        expected_category=str(category),
+        truth_json=json.dumps(truth, ensure_ascii=False),
+        truth_updated_by=actor,
+        truth_updated_at=datetime.now(timezone.utc),
+        added_by=actor,
+    )
+    db.add(item)
+    db.flush()
+    db.add(
+        SampleTruthRevision(
+            sample_item_id=item.id,
+            revision=1,
+            truth_json=item.truth_json,
+            reason="最终人工纠偏自动沉淀为类目黄金样本",
+            reviewer_name=actor,
+        )
+    )
 
 
 @app.post("/api/evaluations/{evaluation_id}/review-panel/open")
@@ -4983,6 +5212,7 @@ def list_optimization_cases(
                 "final_review_id": case.final_review_id,
                 "source_type": case.source_type,
                 "source_event_id": case.source_event_id,
+                "category_key": case.category_key,
                 "prompt_version": case.prompt_version,
                 "severity": case.severity,
                 "case": json.loads(case.case_json),
@@ -5072,6 +5302,7 @@ def _automation_run_payload(
         "id": run.id,
         "run_key": run.run_key,
         "base_prompt_version": run.base_prompt_version,
+        "category_key": run.category_key,
         "policy_revision": run.policy_revision,
         "status": run.status,
         "dry_run": run.dry_run,
@@ -6007,6 +6238,7 @@ def _sample_set_summary(sample_set: SampleSet) -> dict[str, Any]:
         "name": sample_set.name,
         "description": sample_set.description,
         "kind": sample_set.kind,
+        "category_key": sample_set.category_key,
         "status": sample_set.status,
         "item_count": len(sample_set.items),
         "truth_complete_count": truth_complete,
@@ -6909,6 +7141,7 @@ def create_sample_set(
         name=name,
         description=payload.description.strip(),
         kind=payload.kind,
+        category_key=payload.category_key,
         created_by=user.username,
     )
     db.add(sample_set)
@@ -6948,6 +7181,8 @@ def add_sample_set_items(
     missing = [asset_id for asset_id in requested_ids if asset_id not in assets_by_id]
     if missing:
         raise HTTPException(status_code=400, detail=f"有 {len(missing)} 张素材不存在")
+    if any(asset.category_key != sample_set.category_key for asset in assets):
+        raise HTTPException(status_code=422, detail="样本集类目与素材所属通道不一致")
     existing_ids = {item.asset_id for item in sample_set.items}
     added = 0
     skipped: list[int] = []
@@ -7617,6 +7852,8 @@ def _create_paired_regression(
         raise HTTPException(
             status_code=400, detail="存在不属于该样本集的样本"
         )
+    if any(item.asset.category_key != sample_set.category_key for item in items_by_id.values()):
+        raise HTTPException(status_code=422, detail="黄金集条目包含其他评测类目素材")
 
     frozen: list[dict[str, Any]] = []
     for requested in payload.samples:

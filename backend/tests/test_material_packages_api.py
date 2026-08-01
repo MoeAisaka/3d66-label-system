@@ -411,6 +411,36 @@ def test_soft_delete_hides_asset_but_retains_history_and_reupload_restores_it(
         assert actions == ["asset_deleted", "asset_restored_by_upload"]
 
 
+def test_asset_category_can_be_changed_and_bulk_or_package_deleted(tmp_path: Path) -> None:
+    with _api_context(tmp_path) as (client, _sessions):
+        uploaded = client.post(
+            "/api/assets/upload",
+            data={"category_key": "material_image", "package_name": "材质包"},
+            files=[
+                ("files", ("one.png", _image_bytes((1, 2, 3), format_name="PNG"), "image/png")),
+                ("files", ("two.png", _image_bytes((3, 2, 1), format_name="PNG"), "image/png")),
+            ],
+        )
+        assert uploaded.status_code == 200, uploaded.text
+        body = uploaded.json()
+        ids = [item["id"] for item in body["items"]]
+        assert {item["category_key"] for item in body["items"]} == {"material_image"}
+        changed = client.patch(
+            f"/api/assets/{ids[0]}/category",
+            json={"category_key": "space_image"},
+        )
+        assert changed.status_code == 200, changed.text
+        assert changed.json()["category_key"] == "space_image"
+        bulk = client.post("/api/assets/bulk-delete", json={"asset_ids": [ids[0]]})
+        assert bulk.status_code == 200, bulk.text
+        assert bulk.json()["deleted"] == 1
+        package_delete = client.delete(f"/api/material-packages/{body['package']['id']}")
+        assert package_delete.status_code == 200, package_delete.text
+        assert package_delete.json()["deleted"] == 1
+        assert client.get("/api/material-packages").json()["items"] == []
+        assert client.get("/api/assets").json()["total"] == 0
+
+
 def test_baseline_set_accepts_whole_package_provenance(tmp_path: Path) -> None:
     with _api_context(tmp_path) as (client, _sessions):
         uploaded = client.post(

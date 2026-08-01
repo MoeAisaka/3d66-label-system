@@ -13,6 +13,8 @@ from .models import (
     HumanReview,
     PromptRegressionItem,
     PromptRegressionRun,
+    AutomationOptimizationRun,
+    PromptVersion,
     SampleSetItem,
 )
 from .scoring import (
@@ -1049,8 +1051,54 @@ def refresh_regression_run(db: Session, run: PromptRegressionRun) -> None:
     if run.total and run.completed == run.total:
         run.status = "passed" if pass_rate >= run.threshold else "regressed"
         run.finished_at = datetime.now(timezone.utc)
+        _refresh_source_automation_review(db, run)
     elif run.completed:
         run.status = "running"
+
+
+def _refresh_source_automation_review(
+    db: Session, completed_regression: PromptRegressionRun
+) -> None:
+    """Advance an optimizer run only after every generated regression settles.
+
+    A single optimizer run can emit several candidate prompts. The first
+    candidate finishing is not sufficient evidence for review; the parent run
+    remains ``running`` until every regression id recorded in its immutable
+    result payload reaches a terminal status.
+    """
+    if completed_regression.trigger_prompt_id is None:
+        return
+    source_run = db.scalar(
+        select(AutomationOptimizationRun).where(
+            AutomationOptimizationRun.id
+            == select(PromptVersion.source_automation_run_id)
+            .where(PromptVersion.id == completed_regression.trigger_prompt_id)
+            .scalar_subquery()
+        )
+    )
+    if source_run is None or source_run.status not in {"succeeded", "running"}:
+        return
+    try:
+        payload = json.loads(source_run.result_json or "{}")
+    except json.JSONDecodeError:
+        payload = {}
+    raw_ids = payload.get("regression_ids")
+    if not isinstance(raw_ids, list) or not raw_ids:
+        return
+    regression_ids = [int(value) for value in raw_ids if str(value).isdigit()]
+    if len(regression_ids) != len(raw_ids):
+        return
+    regressions = db.scalars(
+        select(PromptRegressionRun).where(PromptRegressionRun.id.in_(regression_ids))
+    ).all()
+    terminal = {"passed", "regressed", "failed", "error", "cancelled"}
+    if len(regressions) != len(regression_ids) or not all(
+        regression.status in terminal for regression in regressions
+    ):
+        source_run.status = "running"
+        return
+    source_run.status = "awaiting_release_review"
+    source_run.finished_at = completed_regression.finished_at or datetime.now(timezone.utc)
 
 
 def complete_regression_item(db: Session, item_id: int, result: EvaluationResult) -> None:

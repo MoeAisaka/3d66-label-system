@@ -5458,6 +5458,193 @@ def _migration_035_generalize_model_names_and_pdf_summary(
         )
 
 
+def _migration_036_add_category_automation_isolation(
+    connection: Connection,
+) -> None:
+    tables = {
+        row[0]
+        for row in connection.exec_driver_sql(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )
+    }
+
+    def add_column(table: str, name: str, ddl: str) -> None:
+        if table not in tables:
+            return
+        columns = {
+            row[1]
+            for row in connection.exec_driver_sql(f"PRAGMA table_info({table})")
+        }
+        if name not in columns:
+            connection.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
+
+    add_column("evaluation_category_profiles", "optimizer_config_id", "INTEGER REFERENCES optimizer_configs(id) ON DELETE SET NULL")
+    add_column(
+        "evaluation_category_profiles",
+        "automation_config_json",
+        "TEXT NOT NULL DEFAULT '{\"enabled\":true,\"case_threshold\":1,\"cooldown_seconds\":0,\"max_candidates\":1}'",
+    )
+    add_column("evaluation_category_profiles", "automation_revision", "INTEGER NOT NULL DEFAULT 1")
+    add_column("evaluation_category_profiles", "automation_last_triggered_at", "DATETIME")
+    for table in ("optimization_case_queue", "automation_optimization_runs", "sample_sets"):
+        add_column(table, "category_key", "VARCHAR(40) NOT NULL DEFAULT 'space_image'")
+        if table in tables:
+            connection.exec_driver_sql(
+                f"CREATE INDEX IF NOT EXISTS ix_{table}_category_key ON {table}(category_key)"
+            )
+
+    result_columns = (
+        {
+            row[1]
+            for row in connection.exec_driver_sql("PRAGMA table_info(evaluation_results)")
+        }
+        if "evaluation_results" in tables
+        else set()
+    )
+    job_columns = (
+        {
+            row[1]
+            for row in connection.exec_driver_sql("PRAGMA table_info(evaluation_jobs)")
+        }
+        if "evaluation_jobs" in tables
+        else set()
+    )
+    if (
+        {"optimization_case_queue", "evaluation_results", "evaluation_jobs"}.issubset(tables)
+        and "job_id" in result_columns
+        and "category_key" in job_columns
+    ):
+        connection.exec_driver_sql(
+            """
+            UPDATE optimization_case_queue
+            SET category_key = COALESCE(
+                (SELECT job.category_key
+                 FROM evaluation_results result
+                 JOIN evaluation_jobs job ON job.id = result.job_id
+                 WHERE result.id = optimization_case_queue.evaluation_id),
+                category_key, 'space_image'
+            )
+            """
+        )
+    if (
+        {"sample_sets", "sample_set_items", "evaluation_results", "evaluation_jobs"}.issubset(tables)
+        and "source_result_id" in {
+            row[1]
+            for row in connection.exec_driver_sql("PRAGMA table_info(sample_set_items)")
+        }
+        and "job_id" in result_columns
+        and "category_key" in job_columns
+    ):
+        connection.exec_driver_sql(
+            """
+            UPDATE sample_sets
+            SET category_key = COALESCE(
+                (SELECT job.category_key
+                 FROM sample_set_items item
+                 JOIN evaluation_results result ON result.id = item.source_result_id
+                 JOIN evaluation_jobs job ON job.id = result.job_id
+                 WHERE item.sample_set_id = sample_sets.id
+                 ORDER BY item.id LIMIT 1),
+                category_key, 'space_image'
+            )
+            """
+        )
+    if "automation_optimization_runs" in tables:
+        connection.exec_driver_sql(
+            """
+            UPDATE automation_optimization_runs
+            SET category_key = COALESCE(json_extract(frozen_input_json, '$.category_key'), category_key, 'space_image')
+            """
+        )
+    if "automation_policies" in tables:
+        connection.exec_driver_sql(
+            """
+            UPDATE automation_policies
+            SET updated_by = 'migration-v36'
+            WHERE updated_by IS NULL OR updated_by = ''
+            """
+        )
+
+
+def _migration_037_add_asset_category_channel(connection: Connection) -> None:
+    tables = {
+        row[0]
+        for row in connection.exec_driver_sql(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )
+    }
+    if "assets" not in tables:
+        return
+    columns = {
+        row[1]
+        for row in connection.exec_driver_sql("PRAGMA table_info(assets)")
+    }
+    if "category_key" not in columns:
+        connection.exec_driver_sql(
+            "ALTER TABLE assets ADD COLUMN category_key VARCHAR(40) NOT NULL DEFAULT 'space_image'"
+        )
+    connection.exec_driver_sql(
+        "CREATE INDEX IF NOT EXISTS ix_assets_category_key ON assets(category_key)"
+    )
+    if "material_package_items" in tables and "material_packages" in tables:
+        connection.exec_driver_sql(
+            """
+            UPDATE assets
+            SET category_key = COALESCE(
+                (SELECT packages.category_key
+                 FROM material_package_items items
+                 JOIN material_packages packages ON packages.id = items.package_id
+                 WHERE items.asset_id = assets.id
+                 ORDER BY items.id
+                 LIMIT 1),
+                category_key,
+                'space_image'
+            )
+            WHERE category_key = 'space_image'
+            """
+        )
+
+
+def _migration_038_add_material_package_status(connection: Connection) -> None:
+    tables = {
+        row[0]
+        for row in connection.exec_driver_sql(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )
+    }
+    if "material_packages" not in tables:
+        return
+    columns = {
+        row[1]
+        for row in connection.exec_driver_sql("PRAGMA table_info(material_packages)")
+    }
+    if "status" not in columns:
+        connection.exec_driver_sql(
+            "ALTER TABLE material_packages ADD COLUMN status VARCHAR(20) NOT NULL DEFAULT 'active'"
+        )
+    connection.exec_driver_sql(
+        "CREATE INDEX IF NOT EXISTS ix_material_packages_status ON material_packages(status)"
+    )
+    # Preserve immutable package metadata while allowing the explicit soft
+    # delete marker used by the package-management API.
+    connection.exec_driver_sql("DROP TRIGGER IF EXISTS trg_material_packages_no_update")
+    connection.exec_driver_sql(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_material_packages_no_metadata_update
+        BEFORE UPDATE ON material_packages
+        WHEN NEW.package_key <> OLD.package_key
+          OR NEW.name <> OLD.name
+          OR NEW.source <> OLD.source
+          OR NEW.category_key <> OLD.category_key
+          OR NEW.created_by <> OLD.created_by
+          OR NEW.created_at <> OLD.created_at
+        BEGIN
+            SELECT RAISE(ABORT, 'MaterialPackage is immutable');
+        END
+        """
+    )
+
+
 MIGRATIONS = [
     Migration(1, "add_sample_expected_level", _migration_001_add_sample_expected_level),
     Migration(2, "add_review_corrections", _migration_002_add_review_corrections),
@@ -5589,6 +5776,21 @@ MIGRATIONS = [
         35,
         "generalize_model_names_and_pdf_summary",
         _migration_035_generalize_model_names_and_pdf_summary,
+    ),
+    Migration(
+        36,
+        "add_category_automation_isolation",
+        _migration_036_add_category_automation_isolation,
+    ),
+    Migration(
+        37,
+        "add_asset_category_channel",
+        _migration_037_add_asset_category_channel,
+    ),
+    Migration(
+        38,
+        "add_material_package_status",
+        _migration_038_add_material_package_status,
     ),
 ]
 

@@ -245,6 +245,7 @@ export type Asset = {
   id: number
   name: string
   mime_type: string
+  category_key: "space_image" | "pdf_text" | "material_image"
   size_bytes: number
   width: number | null
   height: number | null

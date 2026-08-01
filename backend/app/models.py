@@ -234,6 +234,9 @@ class Asset(Base):
     width: Mapped[int | None] = mapped_column(Integer, nullable=True)
     height: Mapped[int | None] = mapped_column(Integer, nullable=True)
     sha256: Mapped[str] = mapped_column(String(64), index=True)
+    category_key: Mapped[str] = mapped_column(
+        String(40), default="space_image", server_default="space_image", index=True
+    )
     status: Mapped[str] = mapped_column(String(30), default="uploaded", index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
@@ -269,6 +272,21 @@ class EvaluationCategoryProfile(Base):
     model_config_id: Mapped[int | None] = mapped_column(
         ForeignKey("model_configs.id", ondelete="SET NULL"), nullable=True
     )
+    optimizer_config_id: Mapped[int | None] = mapped_column(
+        ForeignKey("optimizer_configs.id", ondelete="SET NULL"), nullable=True
+    )
+    automation_config_json: Mapped[str] = mapped_column(
+        Text,
+        default=(
+            '{"enabled":true,"case_threshold":1,"cooldown_seconds":0,'
+            '"max_candidates":1}'
+        ),
+        server_default='{"enabled":true,"case_threshold":1,"cooldown_seconds":0,"max_candidates":1}',
+    )
+    automation_revision: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
+    automation_last_triggered_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     rubric_version: Mapped[str] = mapped_column(String(40), default="rubric-v2.1")
     dimension_schema_key: Mapped[str | None] = mapped_column(String(80), nullable=True)
     dimension_schema_version: Mapped[str | None] = mapped_column(String(64), nullable=True)
@@ -289,6 +307,9 @@ class MaterialPackage(Base):
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    status: Mapped[str] = mapped_column(
+        String(20), default="active", server_default="active", index=True
+    )
     package_key: Mapped[str] = mapped_column(String(80), unique=True, index=True)
     name: Mapped[str] = mapped_column(String(200))
     source: Mapped[str] = mapped_column(
@@ -2203,6 +2224,9 @@ class OptimizationCaseQueue(Base):
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    category_key: Mapped[str] = mapped_column(
+        String(40), default="space_image", server_default="space_image", index=True
+    )
     idempotency_key: Mapped[str] = mapped_column(
         String(160), unique=True, index=True
     )
@@ -2339,6 +2363,9 @@ class AutomationOptimizationRun(Base):
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    category_key: Mapped[str] = mapped_column(
+        String(40), default="space_image", server_default="space_image", index=True
+    )
     run_key: Mapped[str] = mapped_column(String(160), unique=True, index=True)
     base_prompt_version: Mapped[str] = mapped_column(String(40), index=True)
     policy_revision: Mapped[int] = mapped_column(Integer)
@@ -2522,6 +2549,9 @@ class SampleSet(Base):
     __tablename__ = "sample_sets"
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    category_key: Mapped[str] = mapped_column(
+        String(40), default="space_image", server_default="space_image", index=True
+    )
     name: Mapped[str] = mapped_column(String(160), unique=True, index=True)
     description: Mapped[str] = mapped_column(Text, default="")
     kind: Mapped[str] = mapped_column(String(20), default="test", index=True)

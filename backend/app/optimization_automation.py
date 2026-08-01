@@ -19,6 +19,7 @@ from .models import (
     AutomationBudgetDay,
     AutomationPolicy,
     Asset,
+    EvaluationCategoryProfile,
     ModelConfig,
     OptimizerConfig,
     OptimizationCaseQueue,
@@ -125,14 +126,20 @@ class RealOptimizationAdapter:
         )
 
     def prepare_regression_binding(
-        self, db: Session, *, base_prompt: PromptVersion
+        self, db: Session, *, base_prompt: PromptVersion, category_key: str = "space_image"
     ) -> dict[str, Any]:
         sample_sets = db.scalars(
             select(SampleSet)
-            .where(SampleSet.kind == "golden", SampleSet.status == "locked")
+            .where(
+                SampleSet.kind == "golden",
+                SampleSet.status == "locked",
+                SampleSet.category_key == category_key,
+            )
             .order_by(SampleSet.id.desc())
         ).all()
         for sample_set in sample_sets:
+            if any(item.asset.category_key != category_key for item in sample_set.items):
+                continue
             target = stable = blind = None
             for item in sample_set.items:
                 review = latest_review_for_result(item.source_result)
@@ -551,22 +558,40 @@ def consume_optimization_queue_once(
     if not available:
         return {"status": "idle", "recovered_leases": recovered}
 
+    # Select one category cohort per tick. Cases from different pipelines must
+    # never share an optimizer run, even when they use the same prompt version.
+    category_key = available[0].category_key
+    category_cases = [case for case in available if case.category_key == category_key]
+    profile = db.scalar(
+        select(EvaluationCategoryProfile).where(
+            EvaluationCategoryProfile.category_key == category_key
+        )
+    )
+    category_config = {}
+    if profile is not None:
+        try:
+            category_config = json.loads(profile.automation_config_json or "{}")
+        except json.JSONDecodeError:
+            category_config = {}
+    if category_config.get("enabled") is False:
+        return {"status": "category_disabled", "category_key": category_key, "recovered_leases": recovered}
+    case_threshold = max(1, int(category_config.get("case_threshold", policy.case_threshold)))
+    max_candidates = max(1, int(category_config.get("max_candidates", policy.max_candidates)))
+
     immediate = set(json.loads(policy.immediate_severities_json or "[]"))
     trigger_case = next(
-        (case for case in available if case.severity in immediate),
+        (case for case in category_cases if case.severity in immediate),
         None,
     )
-    prompt_version = (
-        trigger_case.prompt_version if trigger_case else available[0].prompt_version
-    )
+    prompt_version = trigger_case.prompt_version if trigger_case else category_cases[0].prompt_version
     same_prompt = [
-        case for case in available if case.prompt_version == prompt_version
+        case for case in category_cases if case.prompt_version == prompt_version
     ]
-    if trigger_case is None and len(same_prompt) < policy.case_threshold:
+    if trigger_case is None and len(same_prompt) < case_threshold:
         return {
             "status": "threshold_wait",
             "available": len(same_prompt),
-            "required": policy.case_threshold,
+            "required": case_threshold,
             "recovered_leases": recovered,
         }
     if (
@@ -583,11 +608,7 @@ def consume_optimization_queue_once(
             "recovered_leases": recovered,
         }
 
-    selected = (
-        same_prompt[: policy.case_threshold]
-        if trigger_case is None
-        else same_prompt[: max(1, policy.case_threshold)]
-    )
+    selected = same_prompt[:case_threshold]
     frozen_cases = [
         {
             "id": case.id,
@@ -602,15 +623,23 @@ def consume_optimization_queue_once(
     frozen_input = {
         "schema_version": "automation-input-v1",
         "prompt_version": prompt_version,
+        "category_key": category_key,
         "policy": _policy_payload(policy),
         "cases": frozen_cases,
     }
-    if adapter is not None and hasattr(adapter, "bind_base_prompt"):
-        adapter.bind_base_prompt(db, version=prompt_version)  # type: ignore[attr-defined]
-    if adapter is not None and hasattr(adapter, "prepare_regression_binding"):
-        frozen_input["regression_binding"] = adapter.prepare_regression_binding(  # type: ignore[attr-defined]
-            db, base_prompt=adapter.base_prompt  # type: ignore[attr-defined]
-        )
+    try:
+        if adapter is not None and hasattr(adapter, "bind_base_prompt"):
+            adapter.bind_base_prompt(db, version=prompt_version)  # type: ignore[attr-defined]
+        if adapter is not None and hasattr(adapter, "prepare_regression_binding"):
+            frozen_input["regression_binding"] = adapter.prepare_regression_binding(  # type: ignore[attr-defined]
+                db, base_prompt=adapter.base_prompt, category_key=category_key  # type: ignore[attr-defined]
+            )
+    except ValueError:
+        return {
+            "status": "executor_config_blocked",
+            "reason": "pricing_or_regression_binding_missing",
+            "recovered_leases": recovered,
+        }
     try:
         estimated_cost = (
             0
@@ -709,6 +738,7 @@ def consume_optimization_queue_once(
                 "policy_revision": policy.revision,
                 "case_ids": selected_ids,
                 "prompt_version": prompt_version,
+                "category_key": category_key,
                 "attempts": {
                     str(case.id): case.attempt_count + 1 for case in selected
                 },
@@ -745,6 +775,7 @@ def consume_optimization_queue_once(
     run = AutomationOptimizationRun(
         run_key=run_key,
         base_prompt_version=prompt_version,
+        category_key=category_key,
         policy_revision=policy.revision,
         status=(
             "planned"
@@ -821,7 +852,7 @@ def consume_optimization_queue_once(
     try:
         result = adapter.optimize(
             frozen_input=frozen_input,
-            max_candidates=policy.max_candidates,
+            max_candidates=max_candidates,
         )
         if result.actual_cost_micros < 0:
             raise ValueError("实际成本不能为负数")
@@ -833,7 +864,7 @@ def consume_optimization_queue_once(
             raise RuntimeError("optimizer_usage_missing")
         if result.actual_cost_micros > estimated_cost:
             raise RuntimeError("optimizer_usage_exceeds_reserved_cost")
-        if not result.candidates or len(result.candidates) > policy.max_candidates:
+        if not result.candidates or len(result.candidates) > max_candidates:
             raise ValueError("优化执行器返回的候选数量无效")
         active_leases = int(
             db.scalar(

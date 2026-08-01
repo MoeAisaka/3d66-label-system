@@ -49,6 +49,9 @@ MIGRATION_NAMES = [
     "add_evaluation_preprocess_snapshot",
     "freeze_job_category_profile",
     "generalize_model_names_and_pdf_summary",
+    "add_category_automation_isolation",
+    "add_asset_category_channel",
+    "add_material_package_status",
 ]
 
 

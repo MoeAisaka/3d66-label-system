@@ -94,6 +94,7 @@ export function AssetsPage() {
   if (effectivePromptMode === "split" && effectivePromptAId) strategyParams.set("prompt_a_id", String(effectivePromptAId))
   if (effectivePromptMode === "split" && effectivePromptBId) strategyParams.set("prompt_b_id", String(effectivePromptBId))
   const packageParams = new URLSearchParams(strategyParams)
+  packageParams.set("category_key", categoryKey)
   packageParams.set("limit", "500")
   if (uploadedFrom) packageParams.set("created_from", `${uploadedFrom}T00:00:00Z`)
   if (uploadedTo) packageParams.set("created_to", `${uploadedTo}T23:59:59Z`)
@@ -104,6 +105,7 @@ export function AssetsPage() {
 
   const assetsParams = new URLSearchParams(strategyParams)
   assetsParams.set("limit", "1000")
+  assetsParams.set("category_key", categoryKey)
   if (packageId) assetsParams.set("package_id", String(packageId))
   if (excludeCurrent) assetsParams.set("exclude_evaluated_current", "true")
   const assets = useQuery({
@@ -195,6 +197,42 @@ export function AssetsPage() {
       })
       await refreshMaterials()
       toast.success("素材已从可选列表移除，历史评测与素材包记录仍保留")
+    },
+    onError: (error) => toast.error(error.message),
+  })
+
+  const bulkDelete = useMutation({
+    mutationFn: (assetIds: number[]) => api<{ deleted: number }>("/api/assets/bulk-delete", {
+      method: "POST",
+      ...jsonBody({ asset_ids: assetIds }),
+    }),
+    onSuccess: async (data) => {
+      setSelected(new Set())
+      await refreshMaterials()
+      toast.success(`已删除 ${data.deleted} 张素材，历史记录仍保留`)
+    },
+    onError: (error) => toast.error(error.message),
+  })
+
+  const deletePackage = useMutation({
+    mutationFn: (id: number) => api<{ deleted: number }>(`/api/material-packages/${id}`, { method: "DELETE" }),
+    onSuccess: async (data) => {
+      setPackageId(null)
+      setSelected(new Set())
+      await refreshMaterials()
+      toast.success(`素材包已删除，共移除 ${data.deleted} 张素材；历史记录仍保留`)
+    },
+    onError: (error) => toast.error(error.message),
+  })
+
+  const updateAssetCategory = useMutation({
+    mutationFn: ({ id, category }: { id: number; category: CategoryKey }) => api<Asset>(`/api/assets/${id}/category`, {
+      method: "PATCH",
+      ...jsonBody({ category_key: category }),
+    }),
+    onSuccess: async () => {
+      await refreshMaterials()
+      toast.success("素材所属通道已更新")
     },
     onError: (error) => toast.error(error.message),
   })
@@ -308,7 +346,7 @@ export function AssetsPage() {
             </label>
             <label>
               <span className="mb-2 block text-xs font-semibold">评测类目</span>
-              <select className="h-11 w-full rounded-[4px] border border-[var(--line-strong)] bg-white px-3 text-sm" value={categoryKey} onChange={(event) => setCategoryKey(event.target.value as CategoryKey)}>
+              <select className="h-11 w-full rounded-[4px] border border-[var(--line-strong)] bg-white px-3 text-sm" value={categoryKey} onChange={(event) => { setCategoryKey(event.target.value as CategoryKey); setPackageId(null); setSelected(new Set()) }}>
                 {(categories.data?.items ?? []).filter((item) => item.status !== "retired").map((item) => <option key={item.category_key} value={item.category_key}>{item.display_name}</option>)}
               </select>
             </label>
@@ -375,7 +413,8 @@ export function AssetsPage() {
                     <th className="px-3 py-3">素材</th>
                     <th className="px-3 py-3">当前策略状态</th>
                     <th className="px-3 py-3">创建人</th>
-                    <th className="px-4 py-3 text-right">创建时间</th>
+                    <th className="px-3 py-3">创建时间</th>
+                    <th className="px-4 py-3 text-right">操作</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -406,9 +445,10 @@ export function AssetsPage() {
                         </div>
                       </td>
                       <td className="px-3 py-4 text-xs text-[var(--muted)]">{item.created_by}</td>
-                      <td className="font-data px-4 py-4 text-right text-xs text-[var(--muted)]">
+                      <td className="font-data px-3 py-4 text-xs text-[var(--muted)]">
                         {new Date(item.created_at).toLocaleString("zh-CN")}
                       </td>
+                      <td className="px-4 py-4 text-right"><Button variant="ghost" size="sm" onClick={(event) => { event.stopPropagation(); if (window.confirm(`删除素材包“${item.name}”及包内全部素材？历史评测和原文件仍保留。`)) deletePackage.mutate(item.id) }}><Trash />删除包</Button></td>
                     </tr>
                   ))}
                 </tbody>
@@ -423,9 +463,7 @@ export function AssetsPage() {
               <h2 className="font-editorial text-2xl font-bold">{packageId ? "包内素材与任务" : "全部素材与任务"}</h2>
               <p className="mt-1 text-sm text-[var(--muted)]">{assets.data?.total ?? 0} 张可用素材，已选择 {selected.size} 张</p>
             </div>
-            <Button variant="ghost" size="sm" onClick={toggleAll} disabled={!assets.data?.items.length}>
-              {allSelected ? <CheckSquare weight="fill" /> : <Square />}{allSelected ? "取消全选" : "全选当前列表"}
-            </Button>
+            <div className="flex gap-2"><Button variant="ghost" size="sm" onClick={toggleAll} disabled={!assets.data?.items.length}>{allSelected ? <CheckSquare weight="fill" /> : <Square />}{allSelected ? "取消全选" : "全选当前列表"}</Button><Button variant="secondary" size="sm" disabled={!selected.size || bulkDelete.isPending} onClick={() => { if (window.confirm(`删除已选 ${selected.size} 张素材？历史评测和原文件仍保留。`)) bulkDelete.mutate(Array.from(selected)) }}><Trash />批量删除 ({selected.size})</Button></div>
           </div>
 
           <div className="mb-5 border border-[var(--line)] bg-[#fafbf8] p-4">
@@ -489,6 +527,7 @@ export function AssetsPage() {
                     <th className="px-3 py-3">尺寸</th>
                     <th className="px-3 py-3">格式</th>
                     <th className="px-3 py-3">大小</th>
+                    <th className="px-3 py-3">所属通道</th>
                     <th className="px-3 py-3">当前策略状态</th>
                     <th className="px-4 py-3 text-right">操作</th>
                   </tr>
@@ -524,6 +563,7 @@ export function AssetsPage() {
                         <td className="font-data px-3 py-3 text-xs text-[var(--muted)]">{asset.width && asset.height ? `${asset.width} × ${asset.height}` : "—"}</td>
                         <td className="font-data px-3 py-3 text-xs text-[var(--muted)]">{fileType(asset.mime_type)}</td>
                         <td className="font-data px-3 py-3 text-xs text-[var(--muted)]">{fileSize(asset.size_bytes)}</td>
+                        <td className="px-3 py-3"><select className="h-9 rounded-[4px] border border-[var(--line-strong)] bg-white px-2 text-xs" value={asset.category_key} onChange={(event) => updateAssetCategory.mutate({ id: asset.id, category: event.target.value as CategoryKey })}>{(categories.data?.items ?? []).filter((item) => item.status !== "retired").map((item) => <option key={item.category_key} value={item.category_key}>{item.display_name}</option>)}</select></td>
                         <td className="px-3 py-3"><Badge tone={statusTone(asset.evaluation_status)}>{evaluationStatus(asset.evaluation_status)}</Badge></td>
                         <td className="px-4 py-3 text-right">
                           <Button

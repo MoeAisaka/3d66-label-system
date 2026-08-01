@@ -206,7 +206,7 @@ export function AutomationControlPage() {
       <PageHeader
         index="03.2"
         title="案例组批与优化"
-        description="把同一提示词版本的纠偏案例组成一批，先用安全试跑确认范围，再决定是否调用优化模型生成候选。任何模式都不会自动发布。"
+        description="人工纠偏完成后，系统会按类目自动组批、分析、生成候选并执行回归；全部证据完成后才进入人工二审，任何模式都不会自动发布。"
       />
       <div className="mx-auto max-w-[1540px] px-5 py-8 md:px-8 lg:px-10">
         <OptimizationFlow activeStep={2} />
@@ -307,7 +307,8 @@ export function AutomationControlPage() {
               {draft.enabled && !draft.dry_run && <label className="flex items-start gap-3 border-y border-[#c55b52] bg-[#fff0ee] px-3 py-3 text-xs leading-5 text-[#7d201a]"><input className="mt-1 size-4" type="checkbox" checked={riskConfirmed} onChange={(event) => setRiskConfirmed(event.target.checked)} /><span>确认已核对日预算、真实计价和锁定黄金样本；保存后消费者可产生真实模型费用。</span></label>}
               <div className="flex flex-wrap gap-2">
                 <Button variant="secondary" onClick={() => save.mutate()} disabled={save.isPending || (draft.enabled && !draft.dry_run && !riskConfirmed)}>保存配置</Button>
-                <Button variant="ghost" onClick={() => consume.mutate()} disabled={consume.isPending || !draft.enabled}>按当前配置检查队列</Button>
+              <p className="text-xs leading-5 text-[var(--muted)]">纠偏案例由常驻 Worker 自动处理，无需逐批点击。此处仅保留管理员的手动重试入口。</p>
+              <Button variant="ghost" onClick={() => consume.mutate()} disabled={consume.isPending || !draft.enabled}>手动重试</Button>
                 {!draft.real_model_calls_enabled && !draft.dry_run && (
                   <Button asChild variant="ghost"><Link to="/workflow/governance/model-config">配置优化模型<ArrowRight /></Link></Button>
                 )}

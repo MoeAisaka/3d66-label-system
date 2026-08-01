@@ -37,6 +37,7 @@ def ingest_production_feedback(
         raise ValueError("不支持的生产反馈 event_type")
     required = {
         "production_case_id",
+        "category_key",
         "prompt_version",
         "severity",
         "model_output",
@@ -53,6 +54,9 @@ def ingest_production_feedback(
     prompt_version = str(payload["prompt_version"]).strip()
     if not prompt_version or len(prompt_version) > 40:
         raise ValueError("生产反馈 prompt_version 非法")
+    category_key = str(payload["category_key"]).strip()
+    if category_key not in {"space_image", "pdf_text", "material_image"}:
+        raise ValueError("生产反馈 category_key 非法")
 
     payload_json = canonical_json(payload)
     payload_hash = hashlib.sha256(payload_json.encode("utf-8")).hexdigest()
@@ -99,6 +103,7 @@ def ingest_production_feedback(
     db.add(event)
     db.flush()
     case = OptimizationCaseQueue(
+        category_key=category_key,
         idempotency_key=f"production:{event_id}",
         evaluation_id=None,
         final_review_id=None,
