@@ -85,9 +85,9 @@ export function JobsPage() {
   return (
     <>
       <PageHeader
-        index="03"
-        title="评测任务"
-        description="任务会固定使用创建时选择的提示词版本。暂停可继续，取消只结束未完成任务，已完成结果不受影响。"
+        index="01.2"
+        title="评测进度"
+        description="查看素材排队、评测和完成进度。每次任务都会固定使用开始时的类目方案；暂停可继续，取消只结束未完成任务。"
         actions={
           <>
             {isPaused ? (
@@ -116,15 +116,14 @@ export function JobsPage() {
         </div>
         <div className="overflow-x-auto border-y border-[var(--line-strong)] bg-white scrollbar-thin">
           {jobs.data?.items.length ? (
-            <table className="w-full min-w-[1300px] border-collapse text-left text-sm">
+            <table className="w-full min-w-[1120px] border-collapse text-left text-sm">
               <thead>
                 <tr className="border-b border-[var(--line)] bg-[#fafbf8] text-xs text-[var(--muted)]">
                   <th className="px-4 py-3">任务</th>
                   <th className="px-3 py-3">图片</th>
-                  <th className="px-3 py-3">提示词版本</th>
+                  <th className="px-3 py-3">运行依据</th>
                   <th className="px-3 py-3">阶段</th>
                   <th className="px-3 py-3">进度</th>
-                  <th className="px-3 py-3">尝试</th>
                   <th className="px-3 py-3">最新更新时间</th>
                   <th className="px-4 py-3">状态</th>
                 </tr>
@@ -135,7 +134,13 @@ export function JobsPage() {
                     <td className="font-data px-4 py-4 text-xs">#{job.id.toString().padStart(5, "0")}</td>
                     <td className="file-name max-w-[280px] truncate px-3 py-4">{job.asset_name}</td>
                     <td className="px-3 py-4">
-                      {job.prompt_version ? <p className="font-data text-xs">单提示词 · {job.prompt_version}</p> : <><p className="font-data text-xs">A · {job.prompt_a_version ?? "未记录（历史任务）"}</p><p className="font-data mt-1 text-xs text-[var(--muted)]">B · {job.prompt_b_version ?? "未记录（历史任务）"}</p></>}
+                      <details>
+                        <summary className="cursor-pointer text-xs font-semibold">类目方案已冻结</summary>
+                        <div className="mt-2 border-l border-[var(--line-strong)] pl-3">
+                          {job.prompt_version ? <p className="font-data text-xs">单次完整评测 · {job.prompt_version}</p> : <><p className="font-data text-xs">阶段 A · {job.prompt_a_version ?? "历史任务未记录"}</p><p className="font-data mt-1 text-xs text-[var(--muted)]">阶段 B · {job.prompt_b_version ?? "历史任务未记录"}</p></>}
+                          <p className="font-data mt-1 text-xs text-[var(--muted)]">运行次数 {job.attempts}</p>
+                        </div>
+                      </details>
                     </td>
                     <td className="px-3 py-4">{stageLabels[job.stage] ?? job.stage}</td>
                     <td className="px-3 py-4">
@@ -144,7 +149,6 @@ export function JobsPage() {
                         <span className="font-data text-xs text-[var(--muted)]">{job.progress}%</span>
                       </div>
                     </td>
-                    <td className="font-data px-3 py-4 text-xs text-[var(--muted)]">{job.attempts}</td>
                     <td className="font-data whitespace-nowrap px-3 py-4 text-xs text-[var(--muted)]">{new Date(job.updated_at).toLocaleString("zh-CN")}</td>
                     <td className="px-4 py-4">
                       <div className="flex items-center gap-2">
@@ -152,7 +156,7 @@ export function JobsPage() {
                         {job.status === "failed" && <WarningCircle className="text-[#b7362e]" />}
                         <Badge tone={statusTone(job.status)}>{statusLabels[job.status] ?? job.status}</Badge>
                       </div>
-                      {job.error_message && <p className="mt-2 max-w-md text-xs leading-5 text-[#8d2924]">{job.error_message}</p>}
+                      {job.error_message && <p className="mt-2 max-w-md text-xs leading-5 text-[#8d2924]">{jobFailureText(job.error_message)}</p>}
                     </td>
                   </tr>
                 ))}
@@ -162,11 +166,25 @@ export function JobsPage() {
             <div className="flex min-h-72 flex-col items-center justify-center text-center">
               <CircleNotch size={30} weight="light" />
               <h2 className="font-editorial mt-4 text-xl font-bold">暂无评测任务</h2>
-              <p className="mt-2 text-sm text-[var(--muted)]">在素材页选择图片和提示词版本后开始评测。</p>
+              <p className="mt-2 text-sm text-[var(--muted)]">前往评测包生产线，选择素材包和类目后开始评测。</p>
             </div>
           )}
         </div>
       </div>
     </>
   )
+}
+
+function jobFailureText(value: string) {
+  const known = ({
+    model_timeout: "模型响应超时，系统已停止本次处理",
+    model_network: "模型服务网络异常",
+    model_429: "模型服务当前繁忙",
+    model_provider5xx: "模型服务暂时不可用",
+    invalid_executor_output: "模型返回内容不完整，无法形成可信结果",
+  } as Record<string, string>)[value]
+  if (known) return known
+  return /[\u3400-\u9fff]/u.test(value)
+    ? value
+    : "评测没有完成，请联系管理员查看运行记录"
 }

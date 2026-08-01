@@ -501,6 +501,176 @@ export type EvaluationCategoryProfile = {
   updated_at: string
 }
 
+export type EvaluationPackageStatus =
+  | "draft"
+  | "ready"
+  | "queued"
+  | "evaluating"
+  | "first_review"
+  | "optimizing"
+  | "regressing"
+  | "second_review"
+  | "approved"
+  | "rejected"
+  | "publishing"
+  | "published"
+  | "blocked"
+  | "failed"
+  | "archived"
+
+export type EvaluationPackageProgress = {
+  percent: number
+  current_step: string
+  completed_assets: number
+  total_assets: number
+}
+
+export type EvaluationPackageBlocker = {
+  code: string
+  title?: string
+  message: string
+  action_label?: string | null
+  action_href?: string | null
+}
+
+export type EvaluationPackageTimelineStep = {
+  key: string
+  label: string
+  description?: string
+  status: "completed" | "current" | "pending" | "blocked" | "failed"
+  completed_at?: string | null
+}
+
+export type EvaluationPackagePermissions = {
+  can_approve: boolean
+  can_reject: boolean
+  can_publish: boolean
+  can_archive: boolean
+  reason?: string | null
+}
+
+export type EvaluationPackageSummary = {
+  id: number
+  package_key: string
+  name: string
+  material_package_id: number
+  material_package_name: string
+  category_key: string
+  category_name: string
+  asset_count: number
+  status: EvaluationPackageStatus
+  progress: EvaluationPackageProgress
+  current_blockers: EvaluationPackageBlocker[]
+  ai_next_step: string
+  timeline?: EvaluationPackageTimelineStep[]
+  permissions?: EvaluationPackagePermissions
+  created_by: string
+  created_at: string
+  updated_at: string
+}
+
+export type EvaluationPackagePromptChange = {
+  stage: "single" | "A" | "B"
+  label: string
+  version_before: string | null
+  version_after: string
+  system_prompt_before: string
+  system_prompt_after: string
+  user_prompt_before: string
+  user_prompt_after: string
+  unified_diff: string
+  change_summary?: string
+}
+
+export type EvaluationPackageDimensionChange = {
+  key: string
+  label: string
+  change_type: "added" | "changed" | "removed" | "unchanged"
+  before: string | null
+  after: string | null
+  rationale: string
+}
+
+export type EvaluationPackageRepresentativeSample = {
+  id: number
+  name: string
+  image_url: string
+  expected_level: string | null
+  result_before: string | null
+  result_after: string | null
+  reason: string
+}
+
+export type EvaluationPackageDetail = EvaluationPackageSummary & {
+  recommendation?: {
+    verdict: "approve" | "reject" | "needs_attention" | "pending"
+    title: string
+    summary: string
+    reasons: string[]
+    risks: string[]
+  }
+  change_summary?: {
+    title: string
+    overview: string
+    items: string[]
+  }
+  prompt_changes?: EvaluationPackagePromptChange[]
+  dimension_changes?: {
+    schema_before: string | null
+    schema_after: string
+    summary: string
+    items: EvaluationPackageDimensionChange[]
+  }
+  golden_set?: {
+    id: number
+    name: string
+    sample_count: number
+    representative_count: number
+    coverage: string
+    metrics: {
+      accuracy_before: number | null
+      accuracy_after: number | null
+      regression_pass_rate: number | null
+      p0_p1_errors: number | null
+    }
+    representative_samples: EvaluationPackageRepresentativeSample[]
+  }
+  automation?: {
+    summary: string
+    rounds: Array<{
+      sequence: number
+      title: string
+      status: "completed" | "failed" | "running"
+      summary: string
+      finished_at: string | null
+    }>
+    regression: {
+      name: string
+      completed: number
+      total: number
+      pass_rate: number | null
+      recommendation: "pass" | "fail" | "pending"
+      summary: string
+    } | null
+    evidence: string[]
+  }
+  technical?: {
+    model_name: string | null
+    model_version: string | null
+    engine_version: string | null
+    rubric_version: string | null
+    dimension_schema_version: string | null
+    strategy_hash: string | null
+    package_hash: string | null
+  }
+  review?: {
+    status: "pending" | "approved" | "rejected" | "published" | "archived"
+    reviewer: string | null
+    note: string
+    decided_at: string | null
+  }
+}
+
 export type CategoryPipelineProcessor = {
   module: string
   enabled: boolean

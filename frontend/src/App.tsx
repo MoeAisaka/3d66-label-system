@@ -1,9 +1,11 @@
 import { lazy, Suspense } from "react"
+import { ArrowClockwise, WarningCircle } from "@phosphor-icons/react"
 import { useQuery } from "@tanstack/react-query"
 import { Navigate, Route, Routes, useParams } from "react-router-dom"
 import { Toaster } from "sonner"
 
 import { AppShell } from "@/components/app-shell"
+import { Button } from "@/components/ui/button"
 import { api, ApiError } from "@/lib/api"
 import type { User } from "@/lib/types"
 import { AssetsPage } from "@/pages/assets-page"
@@ -58,6 +60,18 @@ const ReleaseWorkspacePage = lazy(() =>
 const CapabilityStatusPage = lazy(() =>
   import("@/pages/workflow-pages").then((module) => ({ default: module.CapabilityStatusPage })),
 )
+const EvaluationPackagePipelinePage = lazy(() =>
+  import("@/pages/evaluation-packages-page").then((module) => ({ default: module.EvaluationPackagePipelinePage })),
+)
+const EvaluationPackageReviewListPage = lazy(() =>
+  import("@/pages/evaluation-packages-page").then((module) => ({ default: module.EvaluationPackageReviewListPage })),
+)
+const EvaluationPackageDetailPage = lazy(() =>
+  import("@/pages/evaluation-packages-page").then((module) => ({ default: module.EvaluationPackageDetailPage })),
+)
+const SystemManagementPage = lazy(() =>
+  import("@/pages/system-management-page").then((module) => ({ default: module.SystemManagementPage })),
+)
 
 export default function App() {
   const me = useQuery({
@@ -75,6 +89,25 @@ export default function App() {
   }
 
   const unauthenticated = me.error instanceof ApiError && me.error.status === 401
+  if (me.isError && !unauthenticated) {
+    const permissionDenied = me.error instanceof ApiError && me.error.status === 403
+    return (
+      <div className="flex min-h-[100dvh] items-center justify-center bg-[#f3f5f0] px-5">
+        <div className="w-full max-w-lg border-y border-[var(--line-strong)] bg-white px-6 py-8 text-center">
+          <WarningCircle className="mx-auto text-[#a85a0a]" size={34} weight="fill" />
+          <h1 className="font-editorial mt-4 text-2xl font-bold">
+            {permissionDenied ? "当前账号无法进入标签系统" : "暂时无法连接标签系统"}
+          </h1>
+          <p className="mt-3 text-sm leading-6 text-[var(--muted)]">
+            {permissionDenied
+              ? "请联系管理员确认账号权限，或使用具备访问权限的账号重新登录。"
+              : "请检查网络和服务状态。连接恢复后可以直接重试，不会影响已经保存的记录。"}
+          </p>
+          <Button className="mt-6" onClick={() => me.refetch()}><ArrowClockwise />重新连接</Button>
+        </div>
+      </div>
+    )
+  }
   const user = me.data
 
   return (
@@ -83,7 +116,8 @@ export default function App() {
         <Route path="/login" element={<LoginPage user={user} />} />
         {user ? (
           <Route element={<AppShell user={user} />}>
-            <Route index element={<Navigate to="/workflow/materials/packages" replace />} />
+            <Route index element={<Navigate to="/workflow/production-line" replace />} />
+            <Route path="workflow/production-line" element={<Suspense fallback={<RouteLoading />}><EvaluationPackagePipelinePage user={user} /></Suspense>} />
             <Route path="workflow/materials/packages" element={<AssetsPage />} />
             <Route path="workflow/materials/assets" element={<Navigate to="/workflow/materials/packages" replace />} />
             <Route path="workflow/materials/jobs" element={<JobsPage />} />
@@ -95,12 +129,15 @@ export default function App() {
             <Route path="workflow/optimization/dimensions" element={<Suspense fallback={<RouteLoading />}><DimensionManagerPage /></Suspense>} />
             <Route path="workflow/optimization/paired-regression" element={<Suspense fallback={<RouteLoading />}><PairedRegressionPage user={user} /></Suspense>} />
             <Route path="workflow/optimization/baseline-regression" element={<Suspense fallback={<RouteLoading />}><BaselineRegressionPage /></Suspense>} />
+            <Route path="workflow/releases/packages" element={<Suspense fallback={<RouteLoading />}><EvaluationPackageReviewListPage /></Suspense>} />
+            <Route path="workflow/releases/packages/:packageId" element={<Suspense fallback={<RouteLoading />}><EvaluationPackageDetailPage /></Suspense>} />
             <Route path="workflow/releases/decisions" element={<Suspense fallback={<RouteLoading />}><ReleaseWorkspacePage view="decisions" /></Suspense>} />
             <Route path="workflow/releases/metrics" element={<Suspense fallback={<RouteLoading />}><ReleaseWorkspacePage view="metrics" /></Suspense>} />
             <Route path="workflow/releases/history" element={<Suspense fallback={<RouteLoading />}><ReleaseWorkspacePage view="history" /></Suspense>} />
             <Route path="workflow/models/benchmark" element={<Suspense fallback={<RouteLoading />}><BenchmarkPage /></Suspense>} />
             <Route path="workflow/models/migration" element={<MigrationsPage user={user} />} />
             <Route path="workflow/models/candidates" element={<Suspense fallback={<RouteLoading />}><CapabilityStatusPage kind="candidates" /></Suspense>} />
+            <Route path="workflow/governance" element={<Suspense fallback={<RouteLoading />}><SystemManagementPage user={user} /></Suspense>} />
             <Route path="workflow/governance/model-config" element={<ModelPage />} />
             <Route path="workflow/governance/users" element={<UsersPage />} />
             <Route path="workflow/governance/canary" element={<Suspense fallback={<RouteLoading />}><CanaryRunsPage /></Suspense>} />

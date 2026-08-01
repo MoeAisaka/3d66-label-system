@@ -5,6 +5,7 @@ import {
   CloudArrowUp,
   FileZip,
   FolderOpen,
+  GearSix,
   ImageSquare,
   Package,
   Square,
@@ -60,7 +61,7 @@ export function AssetsPage() {
   const [promptAId, setPromptAId] = useState<number | null>(null)
   const [promptBId, setPromptBId] = useState<number | null>(null)
   const [packageId, setPackageId] = useState<number | null>(null)
-  const [excludeCurrent, setExcludeCurrent] = useState(true)
+  const [excludeCurrent, setExcludeCurrent] = useState(false)
   const [uploadedFrom, setUploadedFrom] = useState("")
   const [uploadedTo, setUploadedTo] = useState("")
   const [categoryKey, setCategoryKey] = useState<CategoryKey>("space_image")
@@ -291,9 +292,9 @@ export function AssetsPage() {
   return (
     <>
       <PageHeader
-        index="01.1"
-        title="素材包"
-        description="上传、整理、筛选和选择素材都在这里完成。一次批量、一个文件夹或一个 ZIP 自动汇总为一个素材包。"
+        index="04.1"
+        title="资产库"
+        description="上传、整理和查找素材都在这里完成。一次批量、一个文件夹或一个 ZIP 自动汇总为一个可追溯素材包。"
       />
       <div className="mx-auto max-w-[1540px] px-5 py-7 md:px-8 lg:px-10 lg:py-10">
         <input
@@ -493,33 +494,41 @@ export function AssetsPage() {
               </Button>
             </div>
 
-            <div className="mt-4 flex flex-wrap items-center gap-2">
-              <span className="mr-2 text-xs font-semibold">评测方式</span>
-              <button type="button" onClick={() => setPromptMode("single")} className={`rounded-[4px] border px-3 py-2 text-xs font-semibold ${effectivePromptMode === "single" ? "border-[#7f991b] bg-[#eff8c7]" : "border-[var(--line-strong)] bg-white"}`}>单提示词</button>
-              <button type="button" onClick={() => setPromptMode("split")} className={`rounded-[4px] border px-3 py-2 text-xs font-semibold ${effectivePromptMode === "split" ? "border-[#7f991b] bg-[#eff8c7]" : "border-[var(--line-strong)] bg-white"}`}>A/B 两阶段</button>
-              <label className="ml-auto flex h-9 cursor-pointer items-center gap-2 border border-[var(--line-strong)] bg-white px-3 text-xs font-semibold">
-                <input type="checkbox" className="size-4 accent-[#9dbb1c]" checked={excludeCurrent} onChange={(event) => { setExcludeCurrent(event.target.checked); setSelected(new Set()) }} />
-                排除当前策略已完成
-              </label>
-            </div>
+            <details className="mt-4 border-y border-[var(--line)] bg-white">
+              <summary className="flex cursor-pointer items-center gap-2 px-4 py-3 text-sm font-bold">
+                <GearSix />管理员高级评测入口
+              </summary>
+              <div className="border-t border-[var(--line)] bg-[#fafbf8] px-4 pb-4 pt-1">
+                <p className="mt-3 text-xs leading-5 text-[var(--muted)]">一线审核请前往“评测包生产线”，系统会自动使用类目冻结方案。这里保留手动版本实验能力。</p>
+                <div className="mt-4 flex flex-wrap items-center gap-2">
+                  <span className="mr-2 text-xs font-semibold">评测方式</span>
+                  <button type="button" onClick={() => setPromptMode("single")} className={`rounded-[4px] border px-3 py-2 text-xs font-semibold ${effectivePromptMode === "single" ? "border-[#7f991b] bg-[#eff8c7]" : "border-[var(--line-strong)] bg-white"}`}>单提示词</button>
+                  <button type="button" onClick={() => setPromptMode("split")} className={`rounded-[4px] border px-3 py-2 text-xs font-semibold ${effectivePromptMode === "split" ? "border-[#7f991b] bg-[#eff8c7]" : "border-[var(--line-strong)] bg-white"}`}>A/B 两阶段</button>
+                  <label className="ml-auto flex h-9 cursor-pointer items-center gap-2 border border-[var(--line-strong)] bg-white px-3 text-xs font-semibold">
+                    <input type="checkbox" className="size-4 accent-[#9dbb1c]" checked={excludeCurrent} onChange={(event) => { setExcludeCurrent(event.target.checked); setSelected(new Set()) }} />
+                    排除当前策略已完成
+                  </label>
+                </div>
 
-            <div className={`mt-4 grid gap-4 lg:items-end ${effectivePromptMode === "single" ? "lg:grid-cols-[minmax(300px,1fr)_auto]" : "lg:grid-cols-[minmax(220px,1fr)_minmax(220px,1fr)_auto]"}`}>
-              {effectivePromptMode === "single" ? (
-                <PromptSelect label="完整评测提示词（一次调用）" value={effectivePromptId} options={allPromptOptions} onChange={setPromptId} />
-              ) : (
-                <>
-                  <PromptSelect label="分类与画质提示词（A）" value={effectivePromptAId} options={promptAOptions} onChange={setPromptAId} />
-                  <PromptSelect label="美感评测提示词（B）" value={effectivePromptBId} options={promptBOptions} onChange={setPromptBId} />
-                </>
-              )}
-              <Button
-                className="lg:min-w-40"
-                disabled={!selected.size || (effectivePromptMode === "single" ? !effectivePromptId : !effectivePromptAId || !effectivePromptBId) || enqueue.isPending}
-                onClick={() => enqueue.mutate()}
-              >
-                开始评测 {selected.size ? `(${selected.size})` : ""}<ArrowRight weight="bold" />
-              </Button>
-            </div>
+                <div className={`mt-4 grid gap-4 lg:items-end ${effectivePromptMode === "single" ? "lg:grid-cols-[minmax(300px,1fr)_auto]" : "lg:grid-cols-[minmax(220px,1fr)_minmax(220px,1fr)_auto]"}`}>
+                  {effectivePromptMode === "single" ? (
+                    <PromptSelect label="完整评测提示词（一次调用）" value={effectivePromptId} options={allPromptOptions} onChange={setPromptId} />
+                  ) : (
+                    <>
+                      <PromptSelect label="分类与画质提示词（A）" value={effectivePromptAId} options={promptAOptions} onChange={setPromptAId} />
+                      <PromptSelect label="美感评测提示词（B）" value={effectivePromptBId} options={promptBOptions} onChange={setPromptBId} />
+                    </>
+                  )}
+                  <Button
+                    className="lg:min-w-40"
+                    disabled={!selected.size || (effectivePromptMode === "single" ? !effectivePromptId : !effectivePromptAId || !effectivePromptBId) || enqueue.isPending}
+                    onClick={() => enqueue.mutate()}
+                  >
+                    开始评测 {selected.size ? `(${selected.size})` : ""}<ArrowRight weight="bold" />
+                  </Button>
+                </div>
+              </div>
+            </details>
           </div>
 
           <div className="overflow-x-auto border-y border-[var(--line-strong)] bg-white">
