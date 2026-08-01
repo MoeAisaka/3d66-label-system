@@ -6013,6 +6013,131 @@ def _migration_042_add_automation_worker_status(connection: Connection) -> None:
         raise RuntimeError(f"v42 自动优化 Worker 状态迁移外键校验失败：{violations[:3]}")
 
 
+def _migration_043_add_evaluation_packages(connection: Connection) -> None:
+    """Persist the immutable EvaluationPackage review/release aggregate."""
+    connection.exec_driver_sql("""
+        CREATE TABLE IF NOT EXISTS evaluation_packages (
+            id INTEGER PRIMARY KEY,
+            package_key VARCHAR(160) NOT NULL UNIQUE,
+            request_hash VARCHAR(64) NOT NULL,
+            category_key VARCHAR(40) NOT NULL,
+            prompt_mode VARCHAR(20) NOT NULL
+                CHECK(prompt_mode IN ('single','dual')),
+            prompt_a_id INTEGER NOT NULL
+                REFERENCES prompt_versions(id) ON DELETE RESTRICT,
+            prompt_b_id INTEGER
+                REFERENCES prompt_versions(id) ON DELETE RESTRICT,
+            dimension_schema_id INTEGER
+                REFERENCES dimension_schemas(id) ON DELETE RESTRICT,
+            dimension_route_policy_id INTEGER
+                REFERENCES dimension_route_policies(id) ON DELETE RESTRICT,
+            sample_set_id INTEGER NOT NULL
+                REFERENCES sample_sets(id) ON DELETE RESTRICT,
+            baseline_strategy_bundle_id INTEGER
+                REFERENCES strategy_bundles(id) ON DELETE RESTRICT,
+            candidate_strategy_bundle_id INTEGER NOT NULL
+                REFERENCES strategy_bundles(id) ON DELETE RESTRICT,
+            regression_run_id INTEGER NOT NULL
+                REFERENCES prompt_regression_runs(id) ON DELETE RESTRICT,
+            automation_run_id INTEGER
+                REFERENCES automation_optimization_runs(id) ON DELETE RESTRICT,
+            metric_snapshot_id INTEGER
+                REFERENCES prompt_metric_snapshots(id) ON DELETE RESTRICT,
+            canonical_manifest_json TEXT NOT NULL
+                CHECK(json_valid(canonical_manifest_json)
+                      AND json_type(canonical_manifest_json, '$') = 'object'),
+            canonical_manifest_hash VARCHAR(64) NOT NULL,
+            ai_recommendation VARCHAR(40) NOT NULL DEFAULT 'pending',
+            change_summary TEXT NOT NULL DEFAULT '',
+            status VARCHAR(30) NOT NULL DEFAULT 'validating'
+                CHECK(status IN (
+                    'validating','awaiting_review','approved','rejected',
+                    'published','archived'
+                )),
+            review_revision INTEGER NOT NULL DEFAULT 0
+                CHECK(review_revision >= 0),
+            review_decision VARCHAR(20),
+            review_note TEXT NOT NULL DEFAULT '',
+            reviewed_by VARCHAR(80),
+            reviewed_at DATETIME,
+            published_by VARCHAR(80),
+            published_at DATETIME,
+            archived_by VARCHAR(80),
+            archived_at DATETIME,
+            archive_reason TEXT NOT NULL DEFAULT '',
+            created_by VARCHAR(80) NOT NULL,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            CHECK(length(request_hash) = 64
+                  AND request_hash = lower(request_hash)
+                  AND request_hash NOT GLOB '*[^0-9a-f]*'),
+            CHECK(length(canonical_manifest_hash) = 64
+                  AND canonical_manifest_hash = lower(canonical_manifest_hash)
+                  AND canonical_manifest_hash NOT GLOB '*[^0-9a-f]*'),
+            CHECK((prompt_mode = 'single' AND prompt_b_id IS NULL)
+                  OR (prompt_mode = 'dual' AND prompt_b_id IS NOT NULL))
+        )
+    """)
+    for statement in (
+        "CREATE INDEX IF NOT EXISTS ix_evaluation_packages_status "
+        "ON evaluation_packages(status, created_at)",
+        "CREATE INDEX IF NOT EXISTS ix_evaluation_packages_category "
+        "ON evaluation_packages(category_key, created_at)",
+        "CREATE INDEX IF NOT EXISTS ix_evaluation_packages_automation "
+        "ON evaluation_packages(automation_run_id)",
+        "CREATE INDEX IF NOT EXISTS ix_evaluation_packages_regression "
+        "ON evaluation_packages(regression_run_id)",
+        "CREATE INDEX IF NOT EXISTS ix_evaluation_packages_candidate "
+        "ON evaluation_packages(candidate_strategy_bundle_id)",
+    ):
+        connection.exec_driver_sql(statement)
+    for statement in (
+        """CREATE TRIGGER IF NOT EXISTS trg_evaluation_packages_frozen_identity
+        BEFORE UPDATE ON evaluation_packages
+        WHEN NEW.package_key IS NOT OLD.package_key
+          OR NEW.request_hash IS NOT OLD.request_hash
+          OR NEW.category_key IS NOT OLD.category_key
+          OR NEW.prompt_mode IS NOT OLD.prompt_mode
+          OR NEW.prompt_a_id IS NOT OLD.prompt_a_id
+          OR NEW.prompt_b_id IS NOT OLD.prompt_b_id
+          OR NEW.dimension_schema_id IS NOT OLD.dimension_schema_id
+          OR NEW.dimension_route_policy_id IS NOT OLD.dimension_route_policy_id
+          OR NEW.sample_set_id IS NOT OLD.sample_set_id
+          OR NEW.baseline_strategy_bundle_id IS NOT OLD.baseline_strategy_bundle_id
+          OR NEW.candidate_strategy_bundle_id IS NOT OLD.candidate_strategy_bundle_id
+          OR NEW.regression_run_id IS NOT OLD.regression_run_id
+          OR NEW.automation_run_id IS NOT OLD.automation_run_id
+          OR NEW.metric_snapshot_id IS NOT OLD.metric_snapshot_id
+        BEGIN SELECT RAISE(ABORT, 'EvaluationPackage frozen identity is immutable'); END""",
+        """CREATE TRIGGER IF NOT EXISTS trg_evaluation_packages_reviewed_manifest
+        BEFORE UPDATE ON evaluation_packages
+        WHEN OLD.status <> 'validating'
+         AND (NEW.canonical_manifest_json IS NOT OLD.canonical_manifest_json
+          OR NEW.canonical_manifest_hash IS NOT OLD.canonical_manifest_hash
+          OR NEW.ai_recommendation IS NOT OLD.ai_recommendation
+          OR NEW.change_summary IS NOT OLD.change_summary)
+        BEGIN SELECT RAISE(ABORT, 'EvaluationPackage reviewed manifest is immutable'); END""",
+        """CREATE TRIGGER IF NOT EXISTS trg_evaluation_packages_state_transition
+        BEFORE UPDATE OF status ON evaluation_packages
+        WHEN NEW.status <> OLD.status AND NOT (
+             (OLD.status = 'validating' AND NEW.status = 'awaiting_review')
+          OR (OLD.status = 'awaiting_review' AND NEW.status IN ('approved','rejected'))
+          OR (OLD.status = 'approved' AND NEW.status IN ('published','archived'))
+          OR (OLD.status IN ('rejected','published') AND NEW.status = 'archived')
+        )
+        BEGIN SELECT RAISE(ABORT, 'EvaluationPackage illegal state transition'); END""",
+        """CREATE TRIGGER IF NOT EXISTS trg_evaluation_packages_no_delete
+        BEFORE DELETE ON evaluation_packages
+        BEGIN SELECT RAISE(ABORT, 'EvaluationPackage cannot be deleted'); END""",
+    ):
+        connection.exec_driver_sql(statement)
+    violations = connection.exec_driver_sql("PRAGMA foreign_key_check").fetchall()
+    if violations:
+        raise RuntimeError(
+            f"v43 评测包聚合迁移外键校验失败：{violations[:3]}"
+        )
+
+
 MIGRATIONS = [
     Migration(1, "add_sample_expected_level", _migration_001_add_sample_expected_level),
     Migration(2, "add_review_corrections", _migration_002_add_review_corrections),
@@ -6179,6 +6304,11 @@ MIGRATIONS = [
         42,
         "add_automation_worker_status",
         _migration_042_add_automation_worker_status,
+    ),
+    Migration(
+        43,
+        "add_evaluation_packages",
+        _migration_043_add_evaluation_packages,
     ),
 ]
 

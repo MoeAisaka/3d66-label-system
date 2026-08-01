@@ -715,9 +715,9 @@ def test_optimizer_candidate_materialization_is_idempotent_and_publish_is_gated(
         )
         assert approved.status_code == 200, approved.text
         published = seed.client.post(f"/api/prompts/{prompt.id}/publish")
-        assert published.status_code == 200, published.text
-        assert published.json()["regression_run_ids"] == []
-        assert seed.db.get(PromptVersion, prompt.id).status == "published"
+        assert published.status_code == 409
+        assert "评测包" in published.text
+        assert seed.db.get(PromptVersion, prompt.id).status == "draft"
 
         discover = seed.client.get(
             f"/api/strategy-bundles?prompt_b_id={seed.prompts['baseline_b'].id}"

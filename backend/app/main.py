@@ -76,6 +76,7 @@ from .models import (
     EvaluationCategoryProfile,
     CATEGORY_PROFILE_DEFAULTS,
     EvaluationControl,
+    EvaluationPackage,
     EvaluationJob,
     EvaluationResult,
     HumanReview,
@@ -169,6 +170,10 @@ from .optimization_automation import (
     consume_optimization_queue_once,
 )
 from .p0e_canary_api import build_canary_router
+from .evaluation_packages import (
+    build_evaluation_package_router,
+    publish_evaluation_package,
+)
 from .seed import seed_defaults
 from .schema_adapter import repair_combined_aesthetic_results, rescore_stored_results
 from .regression import (
@@ -1235,6 +1240,13 @@ def label_consumer_sender(
 
 
 app.include_router(build_canary_router(current_user))
+app.include_router(
+    build_evaluation_package_router(
+        require_permission("releases:read"),
+        require_permission("releases:write"),
+        admin_user,
+    )
+)
 
 
 def _asset_payload(
@@ -4638,25 +4650,49 @@ def publish_prompt(
     prompt = db.get(PromptVersion, prompt_id)
     if not prompt:
         raise HTTPException(status_code=404, detail="提示词版本不存在")
-    if prompt.source_optimization_run_id is not None:
-        approved_gate = db.scalar(
-            select(PromptRegressionRun)
+    legacy_regression_id = db.scalar(
+        select(PromptRegressionRun.id)
+        .where(PromptRegressionRun.trigger_prompt_id == prompt.id)
+        .order_by(PromptRegressionRun.id.desc())
+        .limit(1)
+    )
+    if (
+        prompt.source_optimization_run_id is not None
+        or prompt.source_automation_run_id is not None
+        or legacy_regression_id is not None
+    ):
+        evaluation_package = db.scalar(
+            select(EvaluationPackage)
             .where(
-                PromptRegressionRun.trigger_prompt_id == prompt.id,
-                PromptRegressionRun.regression_mode == "paired",
-                PromptRegressionRun.recommendation == "pass",
-                PromptRegressionRun.approval_status == "approved",
+                (EvaluationPackage.prompt_a_id == prompt.id)
+                | (EvaluationPackage.prompt_b_id == prompt.id),
+                EvaluationPackage.status.in_(("approved", "published")),
             )
-            .order_by(PromptRegressionRun.id.desc())
+            .order_by(EvaluationPackage.id.desc())
             .limit(1)
         )
-        if approved_gate is None:
+        if evaluation_package is None:
             raise HTTPException(
                 status_code=409,
                 detail=(
-                    "优化候选尚未通过配对回归并获得人工批准，不能发布"
+                    "优化候选必须先形成完整评测包并完成人工二审；"
+                    "旧配对回归批准不能绕过评测包发布门禁"
                 ),
             )
+        if not user.is_admin:
+            raise HTTPException(status_code=403, detail="仅管理员可发布评测包")
+        published_package, duplicate = publish_evaluation_package(
+            db,
+            package=evaluation_package,
+            actor=user.username,
+            note="通过兼容提示词发布接口触发",
+        )
+        return {
+            "ok": True,
+            "regression_run_ids": [],
+            "evaluation_package_id": published_package.id,
+            "duplicate": duplicate,
+        }
     previous_published = db.scalar(
         select(PromptVersion)
         .where(

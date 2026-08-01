@@ -3192,6 +3192,234 @@ class PromptRegressionItem(Base):
     )
 
 
+class EvaluationPackage(Base):
+    """Immutable review and release aggregate for one candidate strategy."""
+
+    __tablename__ = "evaluation_packages"
+    __table_args__ = (
+        UniqueConstraint(
+            "package_key", name="uq_evaluation_packages_package_key"
+        ),
+        CheckConstraint(
+            "status IN ("
+            "'validating','awaiting_review','approved','rejected',"
+            "'published','archived'"
+            ")",
+            name="ck_evaluation_packages_status",
+        ),
+        CheckConstraint(
+            "prompt_mode IN ('single','dual')",
+            name="ck_evaluation_packages_prompt_mode",
+        ),
+        CheckConstraint(
+            "(prompt_mode = 'single' AND prompt_b_id IS NULL) OR "
+            "(prompt_mode = 'dual' AND prompt_b_id IS NOT NULL)",
+            name="ck_evaluation_packages_prompt_mode_refs",
+        ),
+        CheckConstraint(
+            "json_valid(canonical_manifest_json) AND "
+            "json_type(canonical_manifest_json, '$') = 'object'",
+            name="ck_evaluation_packages_manifest_json",
+        ),
+        CheckConstraint(
+            "length(canonical_manifest_hash) = 64 AND "
+            "canonical_manifest_hash = lower(canonical_manifest_hash) AND "
+            "canonical_manifest_hash NOT GLOB '*[^0-9a-f]*'",
+            name="ck_evaluation_packages_manifest_hash",
+        ),
+        CheckConstraint(
+            "length(request_hash) = 64 AND "
+            "request_hash = lower(request_hash) AND "
+            "request_hash NOT GLOB '*[^0-9a-f]*'",
+            name="ck_evaluation_packages_request_hash",
+        ),
+        CheckConstraint(
+            "review_revision >= 0",
+            name="ck_evaluation_packages_review_revision",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    package_key: Mapped[str] = mapped_column(
+        String(160), unique=True, index=True
+    )
+    request_hash: Mapped[str] = mapped_column(String(64), index=True)
+    category_key: Mapped[str] = mapped_column(String(40), index=True)
+    prompt_mode: Mapped[str] = mapped_column(String(20), index=True)
+    prompt_a_id: Mapped[int] = mapped_column(
+        ForeignKey("prompt_versions.id", ondelete="RESTRICT"), index=True
+    )
+    prompt_b_id: Mapped[int | None] = mapped_column(
+        ForeignKey("prompt_versions.id", ondelete="RESTRICT"),
+        nullable=True,
+        index=True,
+    )
+    dimension_schema_id: Mapped[int | None] = mapped_column(
+        ForeignKey("dimension_schemas.id", ondelete="RESTRICT"),
+        nullable=True,
+        index=True,
+    )
+    dimension_route_policy_id: Mapped[int | None] = mapped_column(
+        ForeignKey("dimension_route_policies.id", ondelete="RESTRICT"),
+        nullable=True,
+        index=True,
+    )
+    sample_set_id: Mapped[int] = mapped_column(
+        ForeignKey("sample_sets.id", ondelete="RESTRICT"), index=True
+    )
+    baseline_strategy_bundle_id: Mapped[int | None] = mapped_column(
+        ForeignKey("strategy_bundles.id", ondelete="RESTRICT"),
+        nullable=True,
+        index=True,
+    )
+    candidate_strategy_bundle_id: Mapped[int] = mapped_column(
+        ForeignKey("strategy_bundles.id", ondelete="RESTRICT"), index=True
+    )
+    regression_run_id: Mapped[int] = mapped_column(
+        ForeignKey("prompt_regression_runs.id", ondelete="RESTRICT"),
+        index=True,
+    )
+    automation_run_id: Mapped[int | None] = mapped_column(
+        ForeignKey("automation_optimization_runs.id", ondelete="RESTRICT"),
+        nullable=True,
+        index=True,
+    )
+    metric_snapshot_id: Mapped[int | None] = mapped_column(
+        ForeignKey("prompt_metric_snapshots.id", ondelete="RESTRICT"),
+        nullable=True,
+        index=True,
+    )
+    canonical_manifest_json: Mapped[str] = mapped_column(Text)
+    canonical_manifest_hash: Mapped[str] = mapped_column(
+        String(64), index=True
+    )
+    ai_recommendation: Mapped[str] = mapped_column(
+        String(40), default="pending", index=True
+    )
+    change_summary: Mapped[str] = mapped_column(Text, default="")
+    status: Mapped[str] = mapped_column(
+        String(30), default="validating", index=True
+    )
+    review_revision: Mapped[int] = mapped_column(Integer, default=0)
+    review_decision: Mapped[str | None] = mapped_column(
+        String(20), nullable=True, index=True
+    )
+    review_note: Mapped[str] = mapped_column(Text, default="")
+    reviewed_by: Mapped[str | None] = mapped_column(
+        String(80), nullable=True
+    )
+    reviewed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    published_by: Mapped[str | None] = mapped_column(
+        String(80), nullable=True
+    )
+    published_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    archived_by: Mapped[str | None] = mapped_column(
+        String(80), nullable=True
+    )
+    archived_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    archive_reason: Mapped[str] = mapped_column(Text, default="")
+    created_by: Mapped[str] = mapped_column(String(80))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, index=True
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+    prompt_a: Mapped[PromptVersion] = relationship(
+        foreign_keys=[prompt_a_id]
+    )
+    prompt_b: Mapped[PromptVersion | None] = relationship(
+        foreign_keys=[prompt_b_id]
+    )
+    dimension_schema: Mapped[DimensionSchema | None] = relationship()
+    dimension_route_policy: Mapped[DimensionRoutePolicy | None] = relationship()
+    sample_set: Mapped[SampleSet] = relationship()
+    baseline_strategy_bundle: Mapped[StrategyBundle | None] = relationship(
+        foreign_keys=[baseline_strategy_bundle_id]
+    )
+    candidate_strategy_bundle: Mapped[StrategyBundle] = relationship(
+        foreign_keys=[candidate_strategy_bundle_id]
+    )
+    regression_run: Mapped[PromptRegressionRun] = relationship()
+    automation_run: Mapped[AutomationOptimizationRun | None] = relationship()
+    metric_snapshot: Mapped[PromptMetricSnapshot | None] = relationship()
+
+
+class EvaluationPackageFrozenError(ValueError):
+    """Raised when frozen package identity or reviewed evidence is changed."""
+
+
+_EVALUATION_PACKAGE_IDENTITY_FIELDS = (
+    "package_key",
+    "request_hash",
+    "category_key",
+    "prompt_mode",
+    "prompt_a_id",
+    "prompt_b_id",
+    "dimension_schema_id",
+    "dimension_route_policy_id",
+    "sample_set_id",
+    "baseline_strategy_bundle_id",
+    "candidate_strategy_bundle_id",
+    "regression_run_id",
+    "automation_run_id",
+    "metric_snapshot_id",
+)
+
+
+@event.listens_for(EvaluationPackage, "before_update")
+def _protect_evaluation_package_update(
+    _mapper: object,
+    _connection: Connection,
+    target: EvaluationPackage,
+) -> None:
+    changed_identity = _changed_fields(
+        target, _EVALUATION_PACKAGE_IDENTITY_FIELDS
+    )
+    if changed_identity:
+        raise EvaluationPackageFrozenError(
+            "EvaluationPackage 冻结引用禁止修改："
+            + "、".join(sorted(changed_identity))
+        )
+    manifest_changed = _changed_fields(
+        target,
+        (
+            "canonical_manifest_json",
+            "canonical_manifest_hash",
+            "ai_recommendation",
+            "change_summary",
+        ),
+    )
+    status_history = attributes.get_history(target, "status")
+    previous_status = (
+        str(status_history.deleted[0])
+        if status_history.deleted
+        else target.status
+    )
+    if manifest_changed and previous_status != "validating":
+        raise EvaluationPackageFrozenError(
+            "EvaluationPackage 进入二审后冻结清单禁止修改"
+        )
+
+
+@event.listens_for(EvaluationPackage, "before_delete")
+def _protect_evaluation_package_delete(
+    _mapper: object,
+    _connection: Connection,
+    _target: EvaluationPackage,
+) -> None:
+    raise EvaluationPackageFrozenError(
+        "EvaluationPackage 是永久审计记录，禁止删除"
+    )
+
+
 class PromptOptimizationRun(Base):
     __tablename__ = "prompt_optimization_runs"
 
