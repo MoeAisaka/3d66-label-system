@@ -14,7 +14,7 @@ from .config import get_settings
 from .database import SessionLocal
 from .dimension_schema_registry import canonical_hash
 from .doubao import DoubaoClient, DoubaoError, DoubaoResponse
-from .models import OptimizerConfig, PromptOptimizationRun
+from .models import ModelNodeBinding, OptimizerConfig, PromptOptimizationRun
 from .regression import (
     dimension_contract_for_result,
     latest_review_for_result,
@@ -465,7 +465,8 @@ async def run_prompt_optimization(run_id: int) -> None:
     active_stage = "diagnostic"
     try:
         run = db.get(PromptOptimizationRun, run_id)
-        config = db.scalar(select(OptimizerConfig).limit(1))
+        binding = db.scalar(select(ModelNodeBinding).where(ModelNodeBinding.node_key == "diagnostic", ModelNodeBinding.enabled.is_(True)))
+        config = binding.model if binding is not None and binding.model.active else db.scalar(select(OptimizerConfig).limit(1))
         if not run or not config:
             return
         run.status = "running"

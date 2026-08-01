@@ -68,6 +68,15 @@ class User(Base):
     is_admin: Mapped[bool] = mapped_column(
         Boolean, default=True, server_default=sql_text("1")
     )
+    role: Mapped[str] = mapped_column(
+        String(30), default="admin", server_default="admin", index=True
+    )
+    permissions_json: Mapped[str] = mapped_column(
+        Text, default="[]", server_default="[]"
+    )
+    last_login_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
@@ -88,6 +97,14 @@ class ModelConfig(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     name: Mapped[str] = mapped_column(String(120), default="主评测模型")
     provider: Mapped[str] = mapped_column(String(40), default="doubao")
+    protocol: Mapped[str] = mapped_column(
+        String(40), default="openai_chat", server_default="openai_chat"
+    )
+    capabilities_json: Mapped[str] = mapped_column(
+        Text, default='["text","vision","structured_output"]',
+        server_default='["text","vision","structured_output"]',
+    )
+    description: Mapped[str] = mapped_column(Text, default="", server_default="")
     base_url: Mapped[str] = mapped_column(
         String(300), default="https://ark.cn-beijing.volces.com/api/v3"
     )
@@ -117,6 +134,33 @@ class ModelConfig(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, onupdate=utcnow
     )
+    node_bindings: Mapped[list["ModelNodeBinding"]] = relationship(
+        back_populates="model", cascade="all, delete-orphan"
+    )
+
+
+class ModelNodeBinding(Base):
+    """Maps a pipeline node to a registered model without changing old snapshots."""
+
+    __tablename__ = "model_node_bindings"
+    __table_args__ = (
+        UniqueConstraint("node_key", "category_key", name="uq_model_node_bindings_node_category"),
+        CheckConstraint(
+            "node_key IN ('evaluation_main','pdf_summary','optimization','benchmark','diagnostic')",
+            name="ck_model_node_bindings_node_key",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    node_key: Mapped[str] = mapped_column(String(40), index=True)
+    model_config_id: Mapped[int] = mapped_column(
+        ForeignKey("model_configs.id", ondelete="RESTRICT"), index=True
+    )
+    category_key: Mapped[str | None] = mapped_column(String(40), nullable=True, index=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default=sql_text("1"))
+    updated_by: Mapped[str] = mapped_column(String(80), default="system")
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    model: Mapped[ModelConfig] = relationship(back_populates="node_bindings")
 
 
 class OptimizerConfig(Base):
@@ -125,6 +169,13 @@ class OptimizerConfig(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     name: Mapped[str] = mapped_column(String(120), default="提示词诊断模型")
     provider: Mapped[str] = mapped_column(String(40), default="openai")
+    protocol: Mapped[str] = mapped_column(
+        String(40), default="openai_chat", server_default="openai_chat"
+    )
+    capabilities_json: Mapped[str] = mapped_column(
+        Text, default='["text","structured_output"]',
+        server_default='["text","structured_output"]',
+    )
     base_url: Mapped[str] = mapped_column(String(300), default="https://api.openai.com/v1")
     api_path: Mapped[str] = mapped_column(String(120), default="/chat/completions")
     model_id: Mapped[str] = mapped_column(String(200), default="gpt-5.6-sol")

@@ -56,6 +56,7 @@ class Settings:
     port: int
     session_days: int
     production_feedback_token: str | None
+    database_url: str
 
 
 @lru_cache(maxsize=1)
@@ -76,6 +77,9 @@ def get_settings() -> Settings:
         port=int(os.getenv("APP_PORT", "8080")),
         session_days=max(1, int(os.getenv("SESSION_DAYS", "7"))),
         production_feedback_token=_production_feedback_token(data_dir),
+        database_url=os.getenv(
+            "DATABASE_URL", f"sqlite:///{(data_dir / 'database' / 'app.db').as_posix()}"
+        ),
     )
     settings.database_path.parent.mkdir(parents=True, exist_ok=True)
     settings.upload_dir.mkdir(parents=True, exist_ok=True)

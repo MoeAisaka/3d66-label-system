@@ -527,6 +527,7 @@ def _build_model_config_snapshot(config: ModelConfig) -> dict[str, Any]:
     snapshot = {
         "name": config.name,
         "provider": config.provider,
+        "protocol": getattr(config, "protocol", None) or "openai_chat",
         "base_url": config.base_url,
         "api_path": config.api_path,
         "model_id": config.model_id,

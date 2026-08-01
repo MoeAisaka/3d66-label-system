@@ -11,6 +11,7 @@ import { JobsPage } from "@/pages/jobs-page"
 import { LoginPage } from "@/pages/login-page"
 import { ModelPage } from "@/pages/model-page"
 import { MigrationsPage } from "@/pages/migrations-page"
+import { UsersPage } from "@/pages/users-page"
 
 const SampleSetsPage = lazy(() =>
   import("@/pages/sample-sets-page").then((module) => ({ default: module.SampleSetsPage })),
@@ -101,6 +102,7 @@ export default function App() {
             <Route path="workflow/models/migration" element={<MigrationsPage user={user} />} />
             <Route path="workflow/models/candidates" element={<Suspense fallback={<RouteLoading />}><CapabilityStatusPage kind="candidates" /></Suspense>} />
             <Route path="workflow/governance/model-config" element={<ModelPage />} />
+            <Route path="workflow/governance/users" element={<UsersPage />} />
             <Route path="workflow/governance/canary" element={<Suspense fallback={<RouteLoading />}><CanaryRunsPage /></Suspense>} />
             <Route path="workflow/governance/audit" element={<Suspense fallback={<RouteLoading />}><AuditEventsPage /></Suspense>} />
 

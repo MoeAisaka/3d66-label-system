@@ -16,8 +16,12 @@ class Base(DeclarativeBase):
 
 settings = get_settings()
 engine = create_engine(
-    f"sqlite:///{settings.database_path.as_posix()}",
-    connect_args={"check_same_thread": False, "timeout": 10},
+    settings.database_url,
+    connect_args=(
+        {"check_same_thread": False, "timeout": 10}
+        if settings.database_url.startswith("sqlite")
+        else {}
+    ),
     pool_pre_ping=True,
 )
 
@@ -29,6 +33,8 @@ def _sqlite_version_tuple() -> tuple[int, int, int]:
 
 @event.listens_for(engine, "connect")
 def _configure_sqlite(dbapi_connection: sqlite3.Connection, _connection_record: object) -> None:
+    if not isinstance(dbapi_connection, sqlite3.Connection):
+        return
     cursor = dbapi_connection.cursor()
     cursor.execute("PRAGMA foreign_keys=ON")
     cursor.execute("PRAGMA busy_timeout=10000")

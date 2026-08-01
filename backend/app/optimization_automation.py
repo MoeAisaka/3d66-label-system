@@ -21,6 +21,7 @@ from .models import (
     Asset,
     EvaluationCategoryProfile,
     ModelConfig,
+    ModelNodeBinding,
     OptimizerConfig,
     OptimizationCaseQueue,
     PromptVersion,
@@ -1046,7 +1047,10 @@ def _safe_executor_error(exc: Exception) -> tuple[str, bool]:
 
 
 def configured_optimization_adapter(db: Session) -> RealOptimizationAdapter | None:
-    config = db.scalar(select(OptimizerConfig).order_by(OptimizerConfig.id.asc()))
+    binding = db.scalar(select(ModelNodeBinding).where(ModelNodeBinding.node_key == "optimization", ModelNodeBinding.enabled.is_(True)))
+    config = binding.model if binding is not None and binding.model.active else None
+    if config is None:
+        config = db.scalar(select(OptimizerConfig).order_by(OptimizerConfig.id.asc()))
     if (
         config is None
         or not config.encrypted_api_key

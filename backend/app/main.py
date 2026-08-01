@@ -72,6 +72,7 @@ from .models import (
     MigrationItem,
     MigrationRun,
     ModelConfig,
+    ModelNodeBinding,
     ModelBenchmarkExperiment,
     ModelBenchmarkVariant,
     LoopAttempt,
@@ -141,7 +142,9 @@ from .security import (
     hash_session_token,
     protect_secret,
     verify_password,
+    hash_password,
 )
+from .authz import ROLE_LABELS, ROLE_PERMISSIONS, effective_role, has_permission
 from .optimizer import run_prompt_optimization, stage_audit_payload
 from .optimization_automation import (
     automation_budget_status,
@@ -257,9 +260,34 @@ class LoginRequest(BaseModel):
     password: str = Field(min_length=1, max_length=200)
 
 
+class UserCreateRequest(BaseModel):
+    username: str = Field(min_length=2, max_length=80, pattern=r"^[A-Za-z0-9_.-]+$")
+    display_name: str = Field(min_length=1, max_length=80)
+    password: str = Field(min_length=10, max_length=200)
+    role: Literal["admin", "manager", "reviewer", "analyst", "viewer"] = "reviewer"
+
+
+class UserUpdateRequest(BaseModel):
+    display_name: str = Field(min_length=1, max_length=80)
+    role: Literal["admin", "manager", "reviewer", "analyst", "viewer"]
+    is_active: bool = True
+    password: str | None = Field(default=None, min_length=10, max_length=200)
+
+
+class ModelNodeBindingRequest(BaseModel):
+    model_config_id: int = Field(ge=1)
+    category_key: str | None = Field(default=None, min_length=1, max_length=40)
+    enabled: bool = True
+
+
 class ModelConfigUpdate(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     provider: str = Field(default="doubao", min_length=1, max_length=40)
+    protocol: Literal["openai_chat", "openai_responses", "anthropic_messages", "custom_json"] = "openai_chat"
+    capabilities: list[Literal["text", "vision", "structured_output", "pdf", "gif"]] = Field(
+        default_factory=lambda: ["text", "vision", "structured_output"], max_length=10
+    )
+    description: str = Field(default="", max_length=1000)
     base_url: str = Field(min_length=8, max_length=300)
     api_path: str = Field(min_length=1, max_length=120)
     model_id: str = Field(min_length=1, max_length=200)
@@ -283,6 +311,10 @@ class ModelConfigUpdate(BaseModel):
 class OptimizerConfigUpdate(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     provider: str = Field(default="openai", min_length=1, max_length=40)
+    protocol: Literal["openai_chat", "openai_responses", "anthropic_messages", "custom_json"] = "openai_chat"
+    capabilities: list[Literal["text", "vision", "structured_output", "pdf", "gif"]] = Field(
+        default_factory=lambda: ["text", "structured_output"], max_length=10
+    )
     base_url: str = Field(min_length=8, max_length=300)
     api_path: str = Field(min_length=1, max_length=120)
     model_id: str = Field(min_length=1, max_length=200)
@@ -1043,6 +1075,31 @@ def admin_user(user: User = Depends(current_user)) -> User:
     if not user.is_admin:
         raise HTTPException(status_code=403, detail="仅管理员可执行此操作")
     return user
+
+
+def _user_payload(user: User) -> dict[str, Any]:
+    role = effective_role(user)
+    return {
+        "id": user.id,
+        "username": user.username,
+        "display_name": user.display_name,
+        "is_active": user.is_active,
+        "is_admin": user.is_admin,
+        "role": role,
+        "role_label": ROLE_LABELS[role],
+        "permissions": sorted(ROLE_PERMISSIONS[role]),
+        "created_at": user.created_at,
+        "last_login_at": user.last_login_at,
+    }
+
+
+def _permission_user(permission: str):
+    def dependency(user: User = Depends(current_user)) -> User:
+        if not has_permission(user, permission):
+            raise HTTPException(status_code=403, detail=f"缺少权限：{permission}")
+        return user
+
+    return dependency
 
 
 def production_feedback_sender(
@@ -2032,10 +2089,11 @@ def queue_status(
 @app.post("/api/auth/login")
 def login(payload: LoginRequest, response: Response, db: Session = Depends(get_db)) -> dict[str, Any]:
     user = db.scalar(select(User).where(User.username == payload.username))
-    if not user or not verify_password(payload.password, user.password_hash):
+    if not user or not user.is_active or not verify_password(payload.password, user.password_hash):
         raise HTTPException(status_code=401, detail="账号或密码错误")
     token, token_hash = create_session_token()
     expires = datetime.now(timezone.utc) + timedelta(days=settings.session_days)
+    user.last_login_at = datetime.now(timezone.utc)
     db.add(SessionToken(token_hash=token_hash, user_id=user.id, expires_at=expires))
     db.commit()
     response.set_cookie(
@@ -2047,12 +2105,7 @@ def login(payload: LoginRequest, response: Response, db: Session = Depends(get_d
         max_age=settings.session_days * 24 * 3600,
         path="/",
     )
-    return {
-        "id": user.id,
-        "username": user.username,
-        "display_name": user.display_name,
-        "is_admin": user.is_admin,
-    }
+    return _user_payload(user)
 
 
 @app.post("/api/auth/logout")
@@ -2072,12 +2125,133 @@ def logout(
 
 @app.get("/api/auth/me")
 def me(user: User = Depends(current_user)) -> dict[str, Any]:
+    return _user_payload(user)
+
+
+@app.get("/api/auth/roles")
+def list_roles(_user: User = Depends(admin_user)) -> dict[str, Any]:
     return {
-        "id": user.id,
-        "username": user.username,
-        "display_name": user.display_name,
-        "is_admin": user.is_admin,
+        "items": [
+            {"role": role, "label": ROLE_LABELS[role], "permissions": sorted(permissions)}
+            for role, permissions in ROLE_PERMISSIONS.items()
+        ]
     }
+
+
+@app.get("/api/users")
+def list_users(_user: User = Depends(admin_user), db: Session = Depends(get_db)) -> dict[str, Any]:
+    users = db.scalars(select(User).order_by(User.id.asc())).all()
+    return {"items": [_user_payload(user) for user in users]}
+
+
+@app.post("/api/users")
+def create_user(
+    payload: UserCreateRequest,
+    actor: User = Depends(admin_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    if db.scalar(select(User).where(User.username == payload.username)) is not None:
+        raise HTTPException(status_code=409, detail="用户名已存在")
+    user = User(
+        username=payload.username,
+        display_name=payload.display_name,
+        password_hash=hash_password(payload.password),
+        role=payload.role,
+        is_admin=payload.role == "admin",
+    )
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    append_audit_event(
+        db,
+        category="auth",
+        action="user_created",
+        subject_type="user",
+        subject_id=str(user.id),
+        actor=actor.username,
+        event_key=f"user:{user.id}:created",
+        payload={"username": user.username, "role": user.role},
+    )
+    db.commit()
+    return _user_payload(user)
+
+
+@app.patch("/api/users/{user_id}")
+def update_user(
+    user_id: int,
+    payload: UserUpdateRequest,
+    actor: User = Depends(admin_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    user = db.get(User, user_id)
+    if user is None:
+        raise HTTPException(status_code=404, detail="账号不存在")
+    if user.id == actor.id and (not payload.is_active or payload.role != "admin"):
+        raise HTTPException(status_code=422, detail="不能移除当前登录账号的管理员权限或停用当前账号")
+    if (not payload.is_active or payload.role != "admin") and user.role == "admin":
+        enabled_admins = db.scalar(
+            select(func.count()).select_from(User).where(User.is_active.is_(True), User.role == "admin")
+        ) or 0
+        if enabled_admins <= 1:
+            raise HTTPException(status_code=422, detail="至少保留一个启用中的系统管理员")
+    user.display_name = payload.display_name
+    user.role = payload.role
+    user.is_admin = payload.role == "admin"
+    user.is_active = payload.is_active
+    if payload.password:
+        user.password_hash = hash_password(payload.password)
+    if not user.is_active or payload.password:
+        db.query(SessionToken).filter(SessionToken.user_id == user.id).delete()
+    append_audit_event(
+        db, category="auth", action="user_updated", subject_type="user", subject_id=str(user.id),
+        actor=actor.username, event_key=f"user:{user.id}:updated:{uuid.uuid4().hex}",
+        payload={"role": user.role, "is_active": user.is_active, "password_reset": bool(payload.password)},
+    )
+    db.commit()
+    db.refresh(user)
+    return _user_payload(user)
+
+
+@app.get("/api/model-nodes")
+def list_model_nodes(_user: User = Depends(current_user), db: Session = Depends(get_db)) -> dict[str, Any]:
+    rows = db.scalars(select(ModelNodeBinding).order_by(ModelNodeBinding.node_key.asc())).all()
+    return {
+        "items": [
+            {
+                "node_key": row.node_key,
+                "model_config_id": row.model_config_id,
+                "category_key": row.category_key,
+                "enabled": row.enabled,
+                "model": _model_config_payload(row.model),
+            }
+            for row in rows
+        ]
+    }
+
+
+@app.put("/api/model-nodes/{node_key}")
+def update_model_node(
+    node_key: str,
+    payload: ModelNodeBindingRequest,
+    actor: User = Depends(_permission_user("models:write")),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    if node_key not in {"evaluation_main", "pdf_summary", "optimization", "benchmark", "diagnostic"}:
+        raise HTTPException(status_code=422, detail="未知模型节点")
+    config = db.get(ModelConfig, payload.model_config_id)
+    if config is None or not config.active:
+        raise HTTPException(status_code=422, detail="模型配置不存在或未启用")
+    row = db.scalar(select(ModelNodeBinding).where(ModelNodeBinding.node_key == node_key, ModelNodeBinding.category_key == payload.category_key))
+    if row is None:
+        row = ModelNodeBinding(node_key=node_key)
+        db.add(row)
+    row.model_config_id = config.id
+    row.category_key = payload.category_key
+    row.enabled = payload.enabled
+    row.updated_by = actor.username
+    db.commit()
+    db.refresh(row)
+    return {"node_key": row.node_key, "model_config_id": row.model_config_id, "category_key": row.category_key, "enabled": row.enabled, "model": _model_config_payload(config)}
 
 
 @app.get("/api/dashboard")
@@ -2187,6 +2361,7 @@ def _category_execution_snapshot(
     prompt_a_id: int,
     prompt_b_id: int | None,
     model_config: ModelConfig,
+    pdf_summary_model_config: ModelConfig | None = None,
 ) -> str:
     return canonical_json(
         {
@@ -2204,6 +2379,13 @@ def _category_execution_snapshot(
             "prompt_b_id": prompt_b_id,
             "model_config_id": model_config.id,
             "model_config": build_model_config_snapshot(model_config),
+            "pdf_summary_model_config_id": (
+                pdf_summary_model_config.id if pdf_summary_model_config is not None else None
+            ),
+            "pdf_summary_model_config": (
+                build_model_config_snapshot(pdf_summary_model_config)
+                if pdf_summary_model_config is not None else None
+            ),
             "rubric_version": profile.rubric_version,
             "dimension_schema_key": profile.dimension_schema_key,
             "dimension_schema_version": profile.dimension_schema_version,
@@ -2499,7 +2681,7 @@ async def upload_assets(
     files: list[UploadFile] = File(...),
     package_name: str | None = Form(default=None),
     category_key: str = Form(default="space_image"),
-    user: User = Depends(current_user),
+    user: User = Depends(_permission_user("assets:write")),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     profile = _category_profile(db, category_key, require_active=True)
@@ -2570,7 +2752,7 @@ async def import_material_package_archive(
     archive: UploadFile = File(...),
     package_name: str | None = Form(default=None),
     category_key: str = Form(default="space_image"),
-    user: User = Depends(current_user),
+    user: User = Depends(_permission_user("assets:write")),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     profile = _category_profile(db, category_key, require_active=True)
@@ -3015,7 +3197,7 @@ def asset_detail(
 def update_asset_category(
     asset_id: int,
     payload: AssetCategoryUpdateRequest,
-    user: User = Depends(current_user),
+    user: User = Depends(_permission_user("assets:write")),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     asset = db.get(Asset, asset_id)
@@ -3045,7 +3227,7 @@ def update_asset_category(
 @app.delete("/api/assets/{asset_id}")
 def delete_asset(
     asset_id: int,
-    user: User = Depends(current_user),
+    user: User = Depends(_permission_user("assets:write")),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     asset = db.get(Asset, asset_id)
@@ -3131,7 +3313,7 @@ def _soft_delete_assets(
 @app.post("/api/assets/bulk-delete")
 def bulk_delete_assets(
     payload: AssetBulkDeleteRequest,
-    user: User = Depends(current_user),
+    user: User = Depends(_permission_user("assets:write")),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     return _soft_delete_assets(db, asset_ids=payload.asset_ids, actor=user.username, source="bulk")
@@ -3140,7 +3322,7 @@ def bulk_delete_assets(
 @app.delete("/api/material-packages/{package_id}")
 def delete_material_package(
     package_id: int,
-    user: User = Depends(current_user),
+    user: User = Depends(_permission_user("assets:write")),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     package = db.get(MaterialPackage, package_id)
@@ -3214,7 +3396,7 @@ def evaluation_detail(
 @app.post("/api/jobs/enqueue")
 def enqueue_jobs(
     payload: EnqueueRequest,
-    _user: User = Depends(current_user),
+    _user: User = Depends(_permission_user("jobs:write")),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     profile = _category_profile(db, payload.category_key, require_active=True)
@@ -3301,9 +3483,13 @@ def enqueue_jobs(
         )
     frozen_prompt_a_id = single_prompt.id if single_prompt else prompt_a.id
     frozen_prompt_b_id = None if single_prompt else prompt_b.id
+    main_binding = db.scalar(select(ModelNodeBinding).where(ModelNodeBinding.node_key == "evaluation_main", ModelNodeBinding.enabled.is_(True), ModelNodeBinding.category_key == payload.category_key))
+    if main_binding is None:
+        main_binding = db.scalar(select(ModelNodeBinding).where(ModelNodeBinding.node_key == "evaluation_main", ModelNodeBinding.enabled.is_(True), ModelNodeBinding.category_key.is_(None)))
     selected_model = (
         db.get(ModelConfig, profile.model_config_id)
         if profile.model_config_id is not None
+        else main_binding.model if main_binding is not None and main_binding.model.active
         else db.scalar(
             select(ModelConfig)
             .where(ModelConfig.active.is_(True))
@@ -3314,11 +3500,20 @@ def enqueue_jobs(
         selected_model = ModelConfig(active=True)
         db.add(selected_model)
         db.flush()
+    pdf_binding = db.scalar(select(ModelNodeBinding).where(ModelNodeBinding.node_key == "pdf_summary", ModelNodeBinding.enabled.is_(True), ModelNodeBinding.category_key == payload.category_key))
+    if pdf_binding is None:
+        pdf_binding = db.scalar(select(ModelNodeBinding).where(ModelNodeBinding.node_key == "pdf_summary", ModelNodeBinding.enabled.is_(True), ModelNodeBinding.category_key.is_(None)))
+    pdf_summary_model = (
+        pdf_binding.model
+        if payload.category_key == "pdf_text" and pdf_binding is not None and pdf_binding.model.active
+        else selected_model if payload.category_key == "pdf_text" else None
+    )
     category_profile_snapshot = _category_execution_snapshot(
         profile,
         prompt_a_id=frozen_prompt_a_id,
         prompt_b_id=frozen_prompt_b_id,
         model_config=selected_model,
+        pdf_summary_model_config=pdf_summary_model,
     )
     jobs = []
     queue_class = (
@@ -3438,7 +3633,7 @@ def get_job_control(
 
 @app.post("/api/jobs/control/pause")
 def pause_all_jobs(
-    _user: User = Depends(current_user),
+    _user: User = Depends(_permission_user("jobs:write")),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     control = _evaluation_control(db)
@@ -3454,7 +3649,7 @@ def pause_all_jobs(
 
 @app.post("/api/jobs/control/resume")
 def resume_all_jobs(
-    _user: User = Depends(current_user),
+    _user: User = Depends(_permission_user("jobs:write")),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     control = _evaluation_control(db)
@@ -3473,7 +3668,7 @@ def resume_all_jobs(
 
 @app.post("/api/jobs/control/cancel")
 def cancel_all_jobs(
-    _user: User = Depends(current_user),
+    _user: User = Depends(_permission_user("jobs:write")),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     control = _evaluation_control(db)
@@ -3503,17 +3698,25 @@ def cancel_all_jobs(
 def get_model_config(
     _user: User = Depends(current_user), db: Session = Depends(get_db)
 ) -> dict[str, Any]:
-    config = db.scalar(select(ModelConfig).where(ModelConfig.active.is_(True)))
+    binding = db.scalar(select(ModelNodeBinding).where(ModelNodeBinding.node_key == "evaluation_main", ModelNodeBinding.enabled.is_(True)))
+    config = binding.model if binding is not None else db.scalar(select(ModelConfig).where(ModelConfig.active.is_(True)).order_by(ModelConfig.id.asc()))
     if not config:
         raise HTTPException(status_code=404, detail="模型配置不存在")
     return _model_config_payload(config)
 
 
 def _model_config_payload(config: ModelConfig) -> dict[str, Any]:
+    try:
+        capabilities = json.loads(config.capabilities_json or "[]")
+    except json.JSONDecodeError:
+        capabilities = []
     return {
         "id": config.id,
         "name": config.name,
         "provider": config.provider,
+        "protocol": config.protocol,
+        "capabilities": capabilities if isinstance(capabilities, list) else [],
+        "description": config.description,
         "base_url": config.base_url,
         "api_path": config.api_path,
         "model_id": config.model_id,
@@ -3546,14 +3749,14 @@ def list_model_configs(
 @app.post("/api/model-configs")
 def create_benchmark_model_config(
     payload: BenchmarkModelConfigCreate,
-    _user: User = Depends(admin_user),
+    _user: User = Depends(_permission_user("models:write")),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    config = ModelConfig(provider=payload.provider, active=False)
+    config = ModelConfig(provider=payload.provider, active=True)
     db.add(config)
     db.flush()
     for field in (
-        "name", "base_url", "api_path", "model_id", "temperature",
+        "name", "protocol", "base_url", "api_path", "model_id", "description",
         "max_tokens", "timeout_seconds", "max_retries", "max_concurrency",
         "structured_output", "high_risk_review_enabled",
         "input_micros_per_million_tokens",
@@ -3561,6 +3764,7 @@ def create_benchmark_model_config(
         "benchmark_enabled",
     ):
         setattr(config, field, getattr(payload, field))
+    config.capabilities_json = json.dumps(payload.capabilities, ensure_ascii=False)
     protected_api_key = _protected_api_key(
         payload.api_key,
         account=f"model-config-{config.id}",
@@ -3576,16 +3780,14 @@ def create_benchmark_model_config(
 def update_benchmark_model_config(
     config_id: int,
     payload: BenchmarkModelConfigCreate,
-    _user: User = Depends(admin_user),
+    _user: User = Depends(_permission_user("models:write")),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     config = db.get(ModelConfig, config_id)
     if config is None:
         raise HTTPException(status_code=404, detail="横评模型配置不存在")
-    if config.active:
-        raise HTTPException(status_code=409, detail="主评测模型请使用主配置入口修改")
     for field in (
-        "provider", "name", "base_url", "api_path", "model_id",
+        "provider", "name", "protocol", "base_url", "api_path", "model_id", "description",
         "temperature", "max_tokens", "timeout_seconds", "max_retries",
         "max_concurrency", "structured_output", "high_risk_review_enabled",
         "input_micros_per_million_tokens",
@@ -3593,6 +3795,7 @@ def update_benchmark_model_config(
         "benchmark_enabled",
     ):
         setattr(config, field, getattr(payload, field))
+    config.capabilities_json = json.dumps(payload.capabilities, ensure_ascii=False)
     protected_api_key = _protected_api_key(
         payload.api_key,
         account=f"model-config-{config.id}",
@@ -3662,7 +3865,7 @@ def get_review_workflow_policy(
 @app.put("/api/review-workflow-policy")
 def update_review_workflow_policy(
     payload: ReviewWorkflowPolicyUpdate,
-    user: User = Depends(current_user),
+    user: User = Depends(_permission_user("reviews:write")),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     policy = db.get(ReviewWorkflowPolicy, 1)
@@ -3680,7 +3883,7 @@ def update_review_workflow_policy(
 @app.put("/api/sampling-policy")
 def update_sampling_policy(
     payload: SamplingPolicyUpdate,
-    user: User = Depends(current_user),
+    user: User = Depends(_permission_user("reviews:write")),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     policy = db.get(SamplingPolicy, 1)
@@ -3705,7 +3908,7 @@ def update_sampling_policy(
 @app.put("/api/model-config")
 def update_model_config(
     payload: ModelConfigUpdate,
-    _user: User = Depends(admin_user),
+    _user: User = Depends(_permission_user("models:write")),
     db: Session = Depends(get_db),
 ) -> dict[str, bool]:
     config = db.scalar(select(ModelConfig).where(ModelConfig.active.is_(True)))
@@ -3713,7 +3916,7 @@ def update_model_config(
         config = ModelConfig()
         db.add(config)
     for field in (
-        "name",
+        "name", "protocol", "description",
         "provider",
         "base_url",
         "api_path",
@@ -3731,6 +3934,7 @@ def update_model_config(
         "benchmark_enabled",
     ):
         setattr(config, field, getattr(payload, field))
+    config.capabilities_json = json.dumps(payload.capabilities, ensure_ascii=False)
     protected_api_key = _protected_api_key(
         payload.api_key,
         account=MODEL_CONFIG_KEYCHAIN_ACCOUNT,
@@ -3743,7 +3947,7 @@ def update_model_config(
 
 @app.post("/api/model-config/test")
 async def test_model_config(
-    _user: User = Depends(admin_user), db: Session = Depends(get_db)
+    _user: User = Depends(_permission_user("models:write")), db: Session = Depends(get_db)
 ) -> dict[str, Any]:
     config = db.scalar(select(ModelConfig).where(ModelConfig.active.is_(True)))
     if not config:
@@ -3756,10 +3960,16 @@ async def test_model_config(
 
 
 def _optimizer_config_payload(config: OptimizerConfig) -> dict[str, Any]:
+    try:
+        capabilities = json.loads(config.capabilities_json or "[]")
+    except json.JSONDecodeError:
+        capabilities = []
     return {
         "id": config.id,
         "name": config.name,
         "provider": config.provider,
+        "protocol": config.protocol,
+        "capabilities": capabilities if isinstance(capabilities, list) else [],
         "base_url": config.base_url,
         "api_path": config.api_path,
         "model_id": config.model_id,
@@ -3793,7 +4003,7 @@ def get_optimizer_config(
 @app.put("/api/optimizer-config")
 def update_optimizer_config(
     payload: OptimizerConfigUpdate,
-    _user: User = Depends(admin_user),
+    _user: User = Depends(_permission_user("models:write")),
     db: Session = Depends(get_db),
 ) -> dict[str, bool]:
     config = db.scalar(select(OptimizerConfig).limit(1))
@@ -3802,7 +4012,7 @@ def update_optimizer_config(
         db.add(config)
     for field in (
         "name",
-        "provider",
+        "provider", "protocol",
         "base_url",
         "api_path",
         "model_id",
@@ -3816,6 +4026,7 @@ def update_optimizer_config(
         "max_input_tokens",
     ):
         setattr(config, field, getattr(payload, field))
+    config.capabilities_json = json.dumps(payload.capabilities, ensure_ascii=False)
     protected_api_key = _protected_api_key(
         payload.api_key,
         account=OPTIMIZER_CONFIG_KEYCHAIN_ACCOUNT,
@@ -3828,7 +4039,7 @@ def update_optimizer_config(
 
 @app.post("/api/optimizer-config/test")
 async def test_optimizer_config(
-    _user: User = Depends(admin_user), db: Session = Depends(get_db)
+    _user: User = Depends(_permission_user("models:write")), db: Session = Depends(get_db)
 ) -> dict[str, Any]:
     config = db.scalar(select(OptimizerConfig).limit(1))
     if not config:

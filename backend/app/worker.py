@@ -36,6 +36,7 @@ from .models import (
     EvaluationJob,
     EvaluationResult,
     ModelConfig,
+    ModelNodeBinding,
     LoopAttempt,
     LoopRun,
     PromptRegressionItem,
@@ -272,6 +273,16 @@ def _frozen_category_contract(
         raise RuntimeError("任务冻结类目模型快照损坏") from exc
     if rebuilt_model != frozen_model:
         raise RuntimeError("任务冻结类目模型快照损坏")
+    pdf_model = snapshot.get("pdf_summary_model_config")
+    pdf_model_id = snapshot.get("pdf_summary_model_config_id")
+    if pdf_model is not None:
+        if not isinstance(pdf_model, dict) or not isinstance(pdf_model_id, int):
+            raise RuntimeError("任务冻结 PDF 总结模型快照损坏")
+        try:
+            if build_model_config_snapshot(SimpleNamespace(**pdf_model)) != pdf_model:
+                raise RuntimeError("任务冻结 PDF 总结模型快照损坏")
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise RuntimeError("任务冻结 PDF 总结模型快照损坏") from exc
     return snapshot
 
 
@@ -336,14 +347,11 @@ def claim_next_job() -> int | None:
         control = db.get(EvaluationControl, 1)
         if control is not None and control.paused:
             return None
-        configured_model = db.scalar(
-            select(ModelConfig)
-            .where(
-                ModelConfig.encrypted_api_key.is_not(None),
-                ModelConfig.active.is_(True),
-            )
-            .order_by(ModelConfig.active.desc(), ModelConfig.id.asc())
-            .limit(1)
+        evaluation_binding = db.scalar(select(ModelNodeBinding).where(ModelNodeBinding.node_key == "evaluation_main", ModelNodeBinding.category_key.is_(None), ModelNodeBinding.enabled.is_(True)))
+        configured_model = (
+            evaluation_binding.model
+            if evaluation_binding is not None and evaluation_binding.model.active and evaluation_binding.model.encrypted_api_key
+            else db.scalar(select(ModelConfig).where(ModelConfig.encrypted_api_key.is_not(None), ModelConfig.active.is_(True)).order_by(ModelConfig.id.asc()).limit(1))
         )
         if configured_model is None:
             return None
@@ -752,9 +760,14 @@ async def evaluate_job(job_id: int) -> None:
             else:
                 model_statement = select(ModelConfig)
                 if category_model_config_id is None:
-                    model_statement = model_statement.where(
-                        ModelConfig.active.is_(True)
-                    )
+                    binding = db.scalar(select(ModelNodeBinding).where(ModelNodeBinding.node_key == "evaluation_main", ModelNodeBinding.category_key == job.category_key, ModelNodeBinding.enabled.is_(True)))
+                    if binding is None:
+                        binding = db.scalar(select(ModelNodeBinding).where(ModelNodeBinding.node_key == "evaluation_main", ModelNodeBinding.category_key.is_(None), ModelNodeBinding.enabled.is_(True)))
+                    if binding is not None:
+                        category_model_config_id = binding.model_config_id
+                        model_statement = model_statement.where(ModelConfig.id == category_model_config_id)
+                    else:
+                        model_statement = model_statement.where(ModelConfig.active.is_(True))
                 else:
                     model_statement = model_statement.where(
                         ModelConfig.id == category_model_config_id
@@ -831,17 +844,29 @@ async def evaluate_job(job_id: int) -> None:
         }
         preprocess_snapshot["text_excerpt"] = document_text[:2_000]
 
+    execution_model = model_config
+    if document_context is not None and category_profile_snapshot is not None and category_profile_snapshot.get("pdf_summary_model_config") is not None:
+        pdf_model_id = category_profile_snapshot["pdf_summary_model_config_id"]
+        with session_scope() as db:
+            credential = db.get(ModelConfig, pdf_model_id)
+            if credential is None or credential.encrypted_api_key is None:
+                raise RuntimeError("任务冻结 PDF 总结模型缺少可用凭据")
+        execution_model = SimpleNamespace(
+            **category_profile_snapshot["pdf_summary_model_config"],
+            encrypted_api_key=credential.encrypted_api_key,
+        )
     client_config = SimpleNamespace(
-        encrypted_api_key=model_config.encrypted_api_key,
-        provider=model_config.provider,
-        base_url=model_config.base_url,
-        api_path=model_config.api_path,
-        model_id=model_config.model_id,
-        temperature=model_config.temperature,
-        max_tokens=model_config.max_tokens,
-        timeout_seconds=model_config.timeout_seconds,
+        encrypted_api_key=execution_model.encrypted_api_key,
+        provider=execution_model.provider,
+        protocol=getattr(execution_model, "protocol", "openai_chat"),
+        base_url=execution_model.base_url,
+        api_path=execution_model.api_path,
+        model_id=execution_model.model_id,
+        temperature=execution_model.temperature,
+        max_tokens=execution_model.max_tokens,
+        timeout_seconds=execution_model.timeout_seconds,
         max_retries=0,
-        structured_output=model_config.structured_output,
+        structured_output=execution_model.structured_output,
     )
     # Provider calls do not retry in-place: recoverable failures are persisted
     # as recovery jobs so retry lineage, attempt count and Retry-After survive.
@@ -865,8 +890,24 @@ async def evaluate_job(job_id: int) -> None:
         )
         _ensure_job_processing(job_id)
         pdf_summary = _validated_pdf_summary(summary_response.parsed)
-        pdf_summary["model_id"] = model_config.model_id
+        pdf_summary["model_id"] = execution_model.model_id
         preprocess_snapshot["multimodal_summary"] = pdf_summary
+        # PDF summary has its own node; the actual evaluation returns to the
+        # frozen evaluation model instead of leaking the summary assignment.
+        if execution_model.model_id != model_config.model_id:
+            client = DoubaoClient(SimpleNamespace(
+                encrypted_api_key=model_config.encrypted_api_key,
+                provider=model_config.provider,
+                protocol=getattr(model_config, "protocol", "openai_chat"),
+                base_url=model_config.base_url,
+                api_path=model_config.api_path,
+                model_id=model_config.model_id,
+                temperature=model_config.temperature,
+                max_tokens=model_config.max_tokens,
+                timeout_seconds=model_config.timeout_seconds,
+                max_retries=0,
+                structured_output=model_config.structured_output,
+            ))
 
     metadata = {
         "width": asset.width,

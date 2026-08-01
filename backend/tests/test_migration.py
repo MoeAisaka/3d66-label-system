@@ -52,6 +52,7 @@ MIGRATION_NAMES = [
     "add_category_automation_isolation",
     "add_asset_category_channel",
     "add_material_package_status",
+    "add_accounts_and_model_registry",
 ]
 
 

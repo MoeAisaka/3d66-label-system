@@ -145,6 +145,13 @@ def _extract_message_text(payload: dict[str, Any]) -> str:
         for content in item.get("content") or []:
             if isinstance(content, dict) and content.get("type") == "output_text":
                 return str(content.get("text", ""))
+    content = payload.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        texts = [str(item.get("text", "")) for item in content if isinstance(item, dict) and item.get("type") == "text"]
+        if texts:
+            return "\n".join(texts)
     raise DoubaoParseError("模型响应中没有可读取的文本内容")
 
 
@@ -202,9 +209,37 @@ class DoubaoClient:
     def url(self) -> str:
         return f"{self.config.base_url.rstrip('/')}/{self.config.api_path.lstrip('/')}"
 
+    def _headers(self) -> dict[str, str]:
+        headers = {"Content-Type": "application/json"}
+        if (getattr(self.config, "protocol", None) or "openai_chat") == "anthropic_messages":
+            headers.update({"x-api-key": self.api_key, "anthropic-version": "2023-06-01"})
+        else:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        return headers
+
+    def _protocol_payload(self, system_prompt: str, user_content: str | list[dict[str, Any]]) -> dict[str, Any]:
+        protocol = getattr(self.config, "protocol", None) or "openai_chat"
+        if protocol == "anthropic_messages":
+            content = user_content
+            if isinstance(content, list):
+                converted: list[dict[str, Any]] = []
+                for item in content:
+                    if item.get("type") == "text":
+                        converted.append({"type": "text", "text": item.get("text", "")})
+                    elif item.get("type") == "image_url":
+                        url = str((item.get("image_url") or {}).get("url", ""))
+                        if url.startswith("data:") and ";base64," in url:
+                            media, encoded = url[5:].split(";base64,", 1)
+                            converted.append({"type": "image", "source": {"type": "base64", "media_type": media, "data": encoded}})
+                content = converted
+            return {"model": self.config.model_id, "system": system_prompt, "messages": [{"role": "user", "content": content}]}
+        if protocol == "openai_responses":
+            return {"model": self.config.model_id, "input": [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_content}]}
+        return {"model": self.config.model_id, "messages": [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_content}]}
+
     async def _post(self, payload: dict[str, Any]) -> _UpstreamResponse:
         timeout = httpx.Timeout(float(self.config.timeout_seconds))
-        headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
+        headers = self._headers()
         async with httpx.AsyncClient(timeout=timeout) as client:
             try:
                 response = await client.post(
@@ -260,7 +295,11 @@ class DoubaoClient:
         if actual_budget < 1:
             raise ValueError("模型输出预算必须大于 0")
         actual_reasoning_effort = reasoning_effort
-        if self.config.provider == "openai":
+        protocol = getattr(self.config, "protocol", None) or "openai_chat"
+        if protocol == "openai_responses":
+            payload["max_output_tokens"] = actual_budget
+            actual_reasoning_effort = actual_reasoning_effort or "high"
+        elif protocol == "openai_chat" and self.config.provider == "openai":
             payload["max_completion_tokens"] = actual_budget
             actual_reasoning_effort = actual_reasoning_effort or "high"
             payload["reasoning_effort"] = actual_reasoning_effort
@@ -274,7 +313,7 @@ class DoubaoClient:
             if structured_output is None
             else structured_output
         )
-        if use_structured_output:
+        if use_structured_output and self.config.protocol != "anthropic_messages":
             payload["response_format"] = {"type": "json_object"}
         return actual_budget, actual_reasoning_effort
 
@@ -322,13 +361,7 @@ class DoubaoClient:
             ]
         else:
             content = user_prompt
-        payload: dict[str, Any] = {
-            "model": self.config.model_id,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": content},
-            ],
-        }
+        payload = self._protocol_payload(system_prompt, content)
         actual_budget, actual_reasoning_effort = self._generation_options(
             payload,
             output_budget=output_budget,
@@ -422,13 +455,7 @@ class DoubaoClient:
                     "image_url": {"url": image_url, "detail": "high"},
                 }
             )
-        payload: dict[str, Any] = {
-            "model": self.config.model_id,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": content},
-            ],
-        }
+        payload = self._protocol_payload(system_prompt, content)
         actual_budget, actual_reasoning_effort = self._generation_options(
             payload,
             output_budget=output_budget,
@@ -473,16 +500,16 @@ class DoubaoClient:
         raise DoubaoError("模型调用失败")
 
     async def test_connection(self) -> str:
-        payload = {
-            "model": self.config.model_id,
-            "messages": [{"role": "user", "content": "只回复：连接成功"}],
-        }
-        if self.config.provider == "openai":
+        payload = self._protocol_payload("", "只回复：连接成功")
+        protocol = getattr(self.config, "protocol", None) or "openai_chat"
+        if protocol == "openai_responses":
+            payload["max_output_tokens"] = 64
+        elif protocol == "openai_chat" and self.config.provider == "openai":
             payload["max_completion_tokens"] = 64
             payload["reasoning_effort"] = "low"
         else:
             payload["temperature"] = 0
-            payload["max_tokens"] = 16
+            payload["max_tokens"] = 64
         upstream = await self._post(payload)
         raw, _status_code, _request_id = self._unpack_upstream(upstream)
         return _extract_message_text(raw).strip()

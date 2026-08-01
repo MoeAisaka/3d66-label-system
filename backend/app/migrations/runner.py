@@ -2742,6 +2742,13 @@ def _migration_024_add_real_executor_safety(connection: Connection) -> None:
         ),
     )
     add_columns(
+        "optimizer_configs",
+        (
+            ("protocol", "VARCHAR(40) NOT NULL DEFAULT 'openai_chat'"),
+            ("capabilities_json", "TEXT NOT NULL DEFAULT '[\"text\",\"structured_output\"]'"),
+        ),
+    )
+    add_columns(
         "model_benchmark_experiments",
         (
             ("max_round_cost_micros", "INTEGER NOT NULL DEFAULT 0"),
@@ -5645,6 +5652,69 @@ def _migration_038_add_material_package_status(connection: Connection) -> None:
     )
 
 
+def _migration_039_add_accounts_and_model_registry(connection: Connection) -> None:
+    tables = {
+        row[0]
+        for row in connection.exec_driver_sql(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )
+    }
+
+    def add_columns(table: str, columns: tuple[tuple[str, str], ...]) -> None:
+        if table not in tables:
+            return
+        existing = {row[1] for row in connection.exec_driver_sql(f"PRAGMA table_info({table})")}
+        for name, definition in columns:
+            if name not in existing:
+                connection.exec_driver_sql(
+                    f"ALTER TABLE {table} ADD COLUMN {name} {definition}"
+                )
+
+    add_columns(
+        "users",
+        (
+            ("role", "VARCHAR(30) NOT NULL DEFAULT 'admin'"),
+            ("permissions_json", "TEXT NOT NULL DEFAULT '[]'"),
+            ("last_login_at", "DATETIME"),
+        ),
+    )
+    if "users" in tables:
+        connection.exec_driver_sql(
+            "UPDATE users SET role = CASE WHEN is_admin = 1 THEN 'admin' ELSE 'reviewer' END "
+            "WHERE role IS NULL OR role = ''"
+        )
+        connection.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_users_role ON users(role)")
+    add_columns(
+        "model_configs",
+        (
+            ("protocol", "VARCHAR(40) NOT NULL DEFAULT 'openai_chat'"),
+            ("capabilities_json", "TEXT NOT NULL DEFAULT '[\"text\",\"vision\",\"structured_output\"]'"),
+            ("description", "TEXT NOT NULL DEFAULT ''"),
+        ),
+    )
+    connection.exec_driver_sql(
+        "CREATE TABLE IF NOT EXISTS model_node_bindings ("
+        "id INTEGER PRIMARY KEY,"
+        "node_key VARCHAR(40) NOT NULL,"
+        "model_config_id INTEGER NOT NULL REFERENCES model_configs(id) ON DELETE RESTRICT,"
+        "category_key VARCHAR(40),"
+        "enabled BOOLEAN NOT NULL DEFAULT 1,"
+        "updated_by VARCHAR(80) NOT NULL DEFAULT 'system',"
+        "updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP"
+        ")"
+    )
+    connection.exec_driver_sql(
+        "CREATE INDEX IF NOT EXISTS ix_model_node_bindings_model ON model_node_bindings(model_config_id)"
+    )
+    connection.exec_driver_sql(
+        "CREATE INDEX IF NOT EXISTS ix_model_node_bindings_category ON model_node_bindings(category_key)"
+    )
+    connection.exec_driver_sql(
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_model_node_bindings_node_category "
+        "ON model_node_bindings(node_key, COALESCE(category_key, ''))"
+    )
+
+
 MIGRATIONS = [
     Migration(1, "add_sample_expected_level", _migration_001_add_sample_expected_level),
     Migration(2, "add_review_corrections", _migration_002_add_review_corrections),
@@ -5791,6 +5861,11 @@ MIGRATIONS = [
         38,
         "add_material_package_status",
         _migration_038_add_material_package_status,
+    ),
+    Migration(
+        39,
+        "add_accounts_and_model_registry",
+        _migration_039_add_accounts_and_model_registry,
     ),
 ]
 

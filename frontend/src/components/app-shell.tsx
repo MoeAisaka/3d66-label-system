@@ -92,6 +92,7 @@ export const workflowDomains = [
     icon: SlidersHorizontal,
     tabs: [
       { to: "/workflow/governance/model-config", label: "模型配置" },
+      { to: "/workflow/governance/users", label: "账号与权限" },
       { to: "/workflow/governance/canary", label: "金丝雀" },
       { to: "/workflow/governance/audit", label: "审计" },
     ],

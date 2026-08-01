@@ -213,15 +213,16 @@ def test_wrong_platform_references_fail_closed(monkeypatch: pytest.MonkeyPatch) 
         security.unprotect_secret("vault:v9:model-config")
 
 
-def test_other_platforms_fail_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_linux_uses_file_aead_and_rejects_foreign_references(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
     monkeypatch.setattr(security.sys, "platform", "linux")
-
-    with pytest.raises(security.SecretStorageError, match="不支持"):
-        security.protect_secret(
-            FAKE_SECRET_V1,
-            account=security.MODEL_CONFIG_KEYCHAIN_ACCOUNT,
-        )
-    with pytest.raises(security.SecretStorageError, match="不支持"):
+    monkeypatch.setenv(security.FILE_AEAD_KEY_ENV, str(tmp_path / "master.key"))
+    reference = security.protect_secret(
+        FAKE_SECRET_V1, account=security.MODEL_CONFIG_KEYCHAIN_ACCOUNT
+    )
+    assert security.unprotect_secret(reference) == FAKE_SECRET_V1
+    with pytest.raises(security.SecretStorageError, match="未知"):
         security.unprotect_secret("keychain:v1:model-config")
 
 

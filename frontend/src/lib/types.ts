@@ -3,6 +3,12 @@ export type User = {
   username: string
   display_name: string
   is_admin: boolean
+  is_active?: boolean
+  role?: "admin" | "manager" | "reviewer" | "analyst" | "viewer"
+  role_label?: string
+  permissions?: string[]
+  created_at?: string
+  last_login_at?: string | null
 }
 
 export type CanaryRunState =
@@ -544,6 +550,9 @@ export type ModelConfig = {
   id: number
   name: string
   provider: string
+  protocol: "openai_chat" | "openai_responses" | "anthropic_messages" | "custom_json"
+  capabilities: string[]
+  description: string
   base_url: string
   api_path: string
   model_id: string

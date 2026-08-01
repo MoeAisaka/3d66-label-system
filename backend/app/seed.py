@@ -27,11 +27,21 @@ def seed_defaults(db: Session) -> None:
                 username="sol",
                 password_hash=DEFAULT_ADMIN_PASSWORD_HASH,
                 display_name="系统管理员",
+                role="admin",
             )
         )
 
     if db.scalar(select(ModelConfig).limit(1)) is None:
         db.add(ModelConfig())
+
+    db.flush()
+    from .models import ModelNodeBinding
+    primary = db.scalar(select(ModelConfig).where(ModelConfig.active.is_(True)).order_by(ModelConfig.id.asc()))
+    if primary is not None:
+        existing_nodes = {row[0] for row in db.query(ModelNodeBinding.node_key).all()}
+        for node_key in ("evaluation_main", "pdf_summary", "optimization", "benchmark", "diagnostic"):
+            if node_key not in existing_nodes:
+                db.add(ModelNodeBinding(node_key=node_key, model_config_id=primary.id))
 
     if db.scalar(select(OptimizerConfig).limit(1)) is None:
         db.add(OptimizerConfig())

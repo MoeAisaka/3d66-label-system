@@ -11,9 +11,11 @@ services:
       APP_HOST: 0.0.0.0
       APP_PORT: 8080
       DATA_DIR: /data
+      DATABASE_URL: sqlite:////data/database/app.db
+      API_KEY_MASTER_KEY_FILE: /data/secrets/master.key
       SESSION_DAYS: 7
     volumes:
-      - /opt/3d66-label-system-data:/data
+      - 3d66-label-system-data:/data
     restart: unless-stopped
     healthcheck:
       test:
@@ -25,3 +27,7 @@ services:
       timeout: 5s
       retries: 5
       start_period: 30s
+
+volumes:
+  3d66-label-system-data:
+    name: 3d66-label-system-data

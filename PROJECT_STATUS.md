@@ -1260,3 +1260,7 @@ npm.cmd run build
 4. 最近测试、构建和浏览器验收结果；
 5. 下一步 P0/P1；
 6. 新产生的长期架构决策链接。
+
+## 账号权限与模型管理系统（2026-08-01）
+
+已完成多人账号 RBAC（admin/manager/reviewer/analyst/viewer）、核心写接口权限收口、会话即时失效和最后管理员保护。模型配置升级为统一注册表，支持 OpenAI Chat/Responses、Anthropic Messages 与受控 OpenAI-compatible JSON 协议，节点模型绑定在入队时冻结非密快照。Docker/ Linux 使用 `/data/secrets/master.key` 的 AES-GCM 主密钥文件，数据库使用命名卷持久化；主密钥必须纳入备份。后端 Python 3.11 全量 `599 passed, 1 skipped`，前端 lint/build 通过。本机未安装 Docker CLI，未执行真实容器引擎金丝雀。

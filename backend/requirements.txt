@@ -4,6 +4,7 @@ sqlalchemy>=2.0,<3.0
 httpx>=0.28,<1.0
 python-multipart>=0.0.20,<1.0
 python-dotenv>=1.0,<2.0
+cryptography>=45.0,<47.0
 pillow>=11.0,<13.0
 pypdf>=5.0,<7.0
 pymupdf>=1.24,<2.0

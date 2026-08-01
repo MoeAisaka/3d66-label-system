@@ -10,9 +10,12 @@ import os
 import re
 import secrets
 import sys
+from pathlib import Path
 from collections.abc import Mapping
 from ctypes import wintypes
 from typing import Final, Protocol
+
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 
 DEFAULT_ADMIN_PASSWORD_HASH = (
@@ -29,6 +32,8 @@ DPAPI_MACHINE_REFERENCE_PREFIX: Final = "dpapi-machine:v1:"
 DPAPI_SCOPE_ENV: Final = "API_KEY_DPAPI_SCOPE"
 DPAPI_SCOPE_CURRENT_USER: Final = "current-user"
 DPAPI_SCOPE_LOCAL_MACHINE: Final = "local-machine"
+FILE_AEAD_REFERENCE_PREFIX: Final = "file-aead:v1:"
+FILE_AEAD_KEY_ENV: Final = "API_KEY_MASTER_KEY_FILE"
 
 _ALLOWED_KEYCHAIN_ACCOUNTS: Final = frozenset(
     {
@@ -647,6 +652,68 @@ def _decode_dpapi_reference(reference: str) -> bytes:
         raise SecretStorageError("DPAPI 密文格式无效") from exc
 
 
+def _file_aead_key_path() -> Path:
+    configured = os.getenv(FILE_AEAD_KEY_ENV, "").strip()
+    if configured:
+        return Path(configured).expanduser().resolve()
+    from .config import get_settings
+    return get_settings().data_dir / "secrets" / "master.key"
+
+
+def _file_aead_key() -> bytes:
+    path = _file_aead_key_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        if not path.exists():
+            key = AESGCM.generate_key(bit_length=256)
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(base64.urlsafe_b64encode(key))
+        if os.name != "nt":
+            path.chmod(0o600)
+        encoded = path.read_bytes().strip()
+        key = base64.urlsafe_b64decode(encoded)
+        if len(key) != 32:
+            raise ValueError("invalid key length")
+        return key
+    except (OSError, ValueError, binascii.Error) as exc:
+        raise SecretStorageError(
+            "容器主密钥不可用",
+            reason="FILE_AEAD_KEY_UNAVAILABLE",
+        ) from exc
+
+
+def _protect_file_aead(secret: str, account: str) -> str:
+    nonce = os.urandom(12)
+    ciphertext = AESGCM(_file_aead_key()).encrypt(
+        nonce, secret.encode("utf-8"), account.encode("utf-8")
+    )
+    payload = base64.urlsafe_b64encode(nonce + ciphertext).decode("ascii")
+    return f"{FILE_AEAD_REFERENCE_PREFIX}{account}:{payload}"
+
+
+def _unprotect_file_aead(reference: str) -> str:
+    remainder = reference.removeprefix(FILE_AEAD_REFERENCE_PREFIX)
+    try:
+        account, payload = remainder.split(":", 1)
+        account = _validate_account(account)
+        packed = base64.urlsafe_b64decode(payload.encode("ascii"))
+        cleartext = AESGCM(_file_aead_key()).decrypt(
+            packed[:12], packed[12:], account.encode("utf-8")
+        )
+        secret = cleartext.decode("utf-8")
+    except Exception as exc:
+        if isinstance(exc, SecretStorageError):
+            raise
+        raise SecretStorageError(
+            "容器密钥解密失败",
+            reason="FILE_AEAD_DECRYPT_FAILED",
+        ) from exc
+    if not secret:
+        raise SecretStorageError("容器密钥解密结果为空")
+    return secret
+
+
 def protect_secret(secret: str, *, account: str) -> str:
     if not isinstance(secret, str) or not secret or not secret.strip():
         raise SecretStorageError("API Key 不能为空")
@@ -667,15 +734,14 @@ def protect_secret(secret: str, *, account: str) -> str:
             else DPAPI_REFERENCE_PREFIX
         )
         return f"{prefix}{base64.b64encode(encrypted).decode('ascii')}"
-    raise SecretStorageError(
-        "当前操作系统不支持安全的 API Key 存储",
-        reason="SECURE_STORAGE_PLATFORM_UNSUPPORTED",
-    )
+    return _protect_file_aead(secret, account)
 
 
 def unprotect_secret(reference: str) -> str:
     if not isinstance(reference, str) or not reference:
         raise SecretStorageError("API Key 引用不能为空")
+    if reference.startswith(FILE_AEAD_REFERENCE_PREFIX):
+        return _unprotect_file_aead(reference)
 
     if sys.platform == "darwin":
         if (
@@ -705,10 +771,7 @@ def unprotect_secret(reference: str) -> str:
             raise SecretStorageError("DPAPI 解密结果为空")
         return secret
 
-    raise SecretStorageError(
-        "当前操作系统不支持安全的 API Key 读取",
-        reason="SECURE_STORAGE_PLATFORM_UNSUPPORTED",
-    )
+    raise SecretStorageError("未知的 API Key 引用格式")
 
 
 def probe_windows_dpapi() -> str:

@@ -1,5 +1,5 @@
 import { useEffect, useState, type ReactNode } from "react"
-import { CheckCircle, FloppyDisk, Key, PlugsConnected, Plus, SlidersHorizontal, WarningCircle } from "@phosphor-icons/react"
+import { CheckCircle, FloppyDisk, Key, PlugsConnected, Plus, SlidersHorizontal, WarningCircle, UsersThree } from "@phosphor-icons/react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { toast } from "sonner"
 
@@ -37,6 +37,9 @@ function categoryDraft(profile: EvaluationCategoryProfile): CategoryDraft {
 
 const emptyBenchmarkConfig: BenchmarkConfigDraft = {
   provider: "openai",
+  protocol: "openai_chat",
+  capabilities: ["text", "vision", "structured_output"],
+  description: "",
   name: "",
   base_url: "",
   api_path: "/chat/completions",
@@ -64,6 +67,7 @@ export function ModelPage() {
   const samplingPolicy = useQuery({ queryKey: ["sampling-policy"], queryFn: () => api<SamplingPolicy>("/api/sampling-policy") })
   const reviewWorkflowPolicy = useQuery({ queryKey: ["review-workflow-policy"], queryFn: () => api<ReviewWorkflowPolicy>("/api/review-workflow-policy") })
   const categoryProfiles = useQuery({ queryKey: ["evaluation-categories"], queryFn: () => api<{ items: EvaluationCategoryProfile[] }>("/api/evaluation-categories") })
+  const modelNodes = useQuery({ queryKey: ["model-nodes"], queryFn: () => api<{ items: Array<{ node_key: string; model_config_id: number; category_key: string | null; enabled: boolean; model: ModelConfig }> }>("/api/model-nodes") })
   const prompts = useQuery({ queryKey: ["prompts"], queryFn: () => api<{ items: PromptVersion[] }>("/api/prompts") })
   const [form, setForm] = useState<FormState | null>(null)
   const [optimizerForm, setOptimizerForm] = useState<OptimizerFormState | null>(null)
@@ -73,6 +77,7 @@ export function ModelPage() {
   const [mainBenchmarkConfirmed, setMainBenchmarkConfirmed] = useState(false)
   const [benchmarkCreateConfirmed, setBenchmarkCreateConfirmed] = useState(false)
   const [categoryDrafts, setCategoryDrafts] = useState<Record<string, CategoryDraft>>({})
+  const [nodeDrafts, setNodeDrafts] = useState<Record<string, { model_config_id: number; category_key: string | null; enabled: boolean }>>({})
   useEffect(() => {
     if (!config.data) return
     const { id: _id, api_key_mask: _mask, updated_at: _updated, has_api_key: _hasApiKey, active: _active, ...rest } = config.data
@@ -93,6 +98,10 @@ export function ModelPage() {
     if (!categoryProfiles.data) return
     setCategoryDrafts(Object.fromEntries(categoryProfiles.data.items.map((item) => [item.category_key, categoryDraft(item)])))
   }, [categoryProfiles.data])
+  useEffect(() => {
+    if (!modelNodes.data) return
+    setNodeDrafts(Object.fromEntries(modelNodes.data.items.map((item) => [item.node_key, { model_config_id: item.model_config_id, category_key: item.category_key, enabled: item.enabled }])))
+  }, [modelNodes.data])
 
   const save = useMutation({
     mutationFn: () => api("/api/model-config", { method: "PUT", ...jsonBody(form) }),
@@ -186,6 +195,11 @@ export function ModelPage() {
     },
     onError: (error) => toast.error(error.message),
   })
+  const saveNode = useMutation({
+    mutationFn: ({ nodeKey, draft }: { nodeKey: string; draft: { model_config_id: number; category_key: string | null; enabled: boolean } }) => api(`/api/model-nodes/${nodeKey}`, { method: "PUT", ...jsonBody(draft) }),
+    onSuccess: async () => { await queryClient.invalidateQueries({ queryKey: ["model-nodes"] }); toast.success("节点模型绑定已保存") },
+    onError: (error) => toast.error(error.message),
+  })
 
   function update<K extends keyof FormState>(key: K, value: FormState[K]) {
     setForm((current) => current ? { ...current, [key]: value } : current)
@@ -214,7 +228,7 @@ export function ModelPage() {
     }))
   }
 
-  if (me.data && !me.data.is_admin) {
+  if (me.data && !(me.data.permissions?.includes("*") || me.data.permissions?.includes("models:write"))) {
     return (
       <>
         <PageHeader index="06" title="模型配置" description="模型端点、计价与密钥只能由管理员修改；当前账号仅可查看安全状态。" />
@@ -230,8 +244,8 @@ export function ModelPage() {
     <>
       <PageHeader
         index="06"
-        title="模型配置"
-        description="主评测模型、提示词优化模型与横评模型分别配置。API Key 仅写入当前电脑的系统凭据库，页面和 API 不返回明文。"
+        title="模型管理系统"
+        description="统一维护渠道、协议、模型能力与密钥，并把已启用模型分配到各流水线节点。容器环境使用持久卷主密钥加密，页面和 API 不返回明文。"
         actions={
           <>
             <Button variant="secondary" onClick={() => test.mutate()} disabled={!config.data?.has_api_key || test.isPending}><PlugsConnected />测试主模型连接</Button>
@@ -251,10 +265,20 @@ export function ModelPage() {
               <Field label="配置名称"><Input value={form.name} onChange={(event) => update("name", event.target.value)} /></Field>
               <Field label="渠道标识"><Input value={form.provider} onChange={(event) => update("provider", event.target.value)} placeholder="doubao / openai / deepseek" /></Field>
               <Field label="模型 / 端点 ID"><Input value={form.model_id} onChange={(event) => update("model_id", event.target.value)} /></Field>
+              <Field label="协议"><select className="flex h-11 w-full rounded-[4px] border border-input bg-transparent px-3 text-sm" value={form.protocol} onChange={(event) => update("protocol", event.target.value as FormState["protocol"])}><option value="openai_chat">OpenAI Chat Completions</option><option value="openai_responses">OpenAI Responses</option><option value="anthropic_messages">Anthropic Messages</option><option value="custom_json">自定义 JSON 协议</option></select></Field>
               <Field label="Base URL"><Input value={form.base_url} onChange={(event) => update("base_url", event.target.value)} /></Field>
               <Field label="API 路径"><Input value={form.api_path} onChange={(event) => update("api_path", event.target.value)} /></Field>
             </div>
           ) : <div className="h-40 animate-pulse bg-[#f1f3ef]" />}
+        </section>
+
+        <section className="mt-8 border-y border-[var(--line-strong)] bg-white">
+          <div className="grid gap-7 border-b border-[var(--line)] px-5 py-6 lg:grid-cols-[230px_1fr] lg:px-7">
+            <div><div className="flex size-10 items-center justify-center rounded-[4px] border border-[var(--line-strong)]"><UsersThree size={21} /></div><h2 className="font-editorial mt-5 text-2xl font-bold">节点模型分配</h2><p className="mt-2 text-sm leading-6 text-[var(--muted)]">统一模型注册表。每个评测、PDF 总结、优化和横评节点可独立选择已验证模型，保存后只影响新任务。</p></div>
+            <div className="divide-y divide-[var(--line)] border-y border-[var(--line)]">
+              {Object.entries(nodeDrafts).map(([nodeKey, draft]) => <div key={nodeKey} className="grid gap-3 px-4 py-4 md:grid-cols-[1fr_1fr_auto_auto] md:items-end"><Field label={{ evaluation_main: "主评测", pdf_summary: "PDF 多模态总结", optimization: "提示词优化", benchmark: "模型横评", diagnostic: "诊断" }[nodeKey] ?? nodeKey}><select className="flex h-11 w-full rounded-[4px] border border-input bg-transparent px-3 text-sm" value={draft.model_config_id} onChange={(event) => setNodeDrafts((current) => ({ ...current, [nodeKey]: { ...draft, model_config_id: Number(event.target.value) } }))}>{(modelConfigs.data?.items ?? []).filter((item) => item.active).map((item) => <option key={item.id} value={item.id}>{item.name} · {item.provider} · {item.model_id}</option>)}</select></Field><Field label="类目"><select className="flex h-11 w-full rounded-[4px] border border-input bg-transparent px-3 text-sm" value={draft.category_key ?? ""} onChange={(event) => setNodeDrafts((current) => ({ ...current, [nodeKey]: { ...draft, category_key: event.target.value || null } }))}><option value="">所有类目</option><option value="space_image">空间图片</option><option value="pdf_text">PDF 方案文本</option><option value="material_image">材质图</option></select></Field><label className="flex h-11 items-center gap-2 text-sm font-semibold"><input type="checkbox" checked={draft.enabled} onChange={(event) => setNodeDrafts((current) => ({ ...current, [nodeKey]: { ...draft, enabled: event.target.checked } }))} />启用</label><Button size="sm" onClick={() => saveNode.mutate({ nodeKey, draft })} disabled={saveNode.isPending}><FloppyDisk />保存</Button></div>)}
+            </div>
+          </div>
         </section>
 
         <section className="mt-8 grid gap-7 border-y border-[var(--line-strong)] bg-white px-5 py-6 lg:grid-cols-[230px_1fr] lg:px-7">
