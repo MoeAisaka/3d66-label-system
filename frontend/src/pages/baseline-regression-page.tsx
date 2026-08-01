@@ -51,7 +51,7 @@ export function BaselineRegressionPage() {
   const [useWholePackage, setUseWholePackage] = useState(false)
   const [selectedSetId, setSelectedSetId] = useState(0)
   const [selectedRunId, setSelectedRunId] = useState(0)
-  const [manualPromptSelection, setManualPromptSelection] = useState(false)
+  const [promptSelectionMode, setPromptSelectionMode] = useState<"published" | "manual" | "single">("published")
   const [selectedPromptAId, setSelectedPromptAId] = useState(0)
   const [selectedPromptBId, setSelectedPromptBId] = useState(0)
 
@@ -133,7 +133,7 @@ export function BaselineRegressionPage() {
   }, [queryClient, runDetail.data?.summary.status, selectedSetId])
 
   useEffect(() => {
-    if (!manualPromptSelection) return
+    if (promptSelectionMode === "published") return
     if (
       !promptAOptions.some((prompt) => prompt.id === selectedPromptAId)
       && publishedPromptA
@@ -141,13 +141,15 @@ export function BaselineRegressionPage() {
       setSelectedPromptAId(publishedPromptA.id)
     }
     if (
+      promptSelectionMode === "manual"
+      &&
       !promptBOptions.some((prompt) => prompt.id === selectedPromptBId)
       && publishedPromptB
     ) {
       setSelectedPromptBId(publishedPromptB.id)
     }
   }, [
-    manualPromptSelection,
+    promptSelectionMode,
     promptAOptions,
     promptBOptions,
     publishedPromptA,
@@ -249,12 +251,14 @@ export function BaselineRegressionPage() {
   const createRun = useMutation({
     mutationFn: () => baselineRegressionApi.createRun(
       selectedSetId,
-      manualPromptSelection
-        ? {
+      promptSelectionMode === "single"
+        ? { prompt_id: selectedPromptAId }
+        : promptSelectionMode === "manual"
+          ? {
             prompt_a_id: selectedPromptAId,
             prompt_b_id: selectedPromptBId,
-          }
-        : {},
+            }
+          : {},
     ),
     onSuccess: async (run) => {
       setSelectedRunId(run.id)
@@ -297,7 +301,7 @@ export function BaselineRegressionPage() {
       <PageHeader
         index="03.6"
         title="基准回归"
-        description="冻结素材与 L1–L5 期望等级，可使用当前发布版或手动指定 A/B 提示词版本重复运行；准确率、混淆矩阵和逐张偏差均来自服务端权威结果。"
+        description="冻结素材与 L1–L5 期望等级，可使用当前发布版、手动指定 A/B，或单提示词一次调用重复运行；准确率、混淆矩阵和逐张偏差均来自服务端权威结果。"
         actions={
           <>
             <input
@@ -611,21 +615,22 @@ export function BaselineRegressionPage() {
                     <span className="mb-2 block text-xs font-semibold">提示词取值方式</span>
                     <select
                       className="h-11 w-full rounded-[4px] border border-[var(--line-strong)] bg-white px-3 text-sm"
-                      value={manualPromptSelection ? "manual" : "published"}
-                      onChange={(event) => setManualPromptSelection(
-                        event.target.value === "manual",
+                      value={promptSelectionMode}
+                      onChange={(event) => setPromptSelectionMode(
+                        event.target.value as "published" | "manual" | "single",
                       )}
                     >
                       <option value="published">当前发布版本</option>
                       <option value="manual">手动选择版本</option>
+                      <option value="single">单提示词（一次调用）</option>
                     </select>
                   </label>
                   <PromptSelect
-                    label="调用 A"
+                    label={promptSelectionMode === "single" ? "单提示词" : "调用 A"}
                     value={selectedPromptAId}
                     options={promptAOptions}
                     published={publishedPromptA}
-                    disabled={!manualPromptSelection}
+                    disabled={promptSelectionMode === "published"}
                     onChange={setSelectedPromptAId}
                   />
                   <PromptSelect
@@ -633,7 +638,7 @@ export function BaselineRegressionPage() {
                     value={selectedPromptBId}
                     options={promptBOptions}
                     published={publishedPromptB}
-                    disabled={!manualPromptSelection}
+                    disabled={promptSelectionMode !== "manual"}
                     onChange={setSelectedPromptBId}
                   />
                   <label>
@@ -653,8 +658,9 @@ export function BaselineRegressionPage() {
                       createRun.isPending
                       || selectedSet.data.runs.some((run) => run.status === "running")
                       || (
-                        manualPromptSelection
-                        && (!selectedPromptAId || !selectedPromptBId)
+                        promptSelectionMode !== "published"
+                        && (!selectedPromptAId
+                          || (promptSelectionMode === "manual" && !selectedPromptBId))
                       )
                     }
                     onClick={() => createRun.mutate()}
@@ -664,9 +670,11 @@ export function BaselineRegressionPage() {
                   </Button>
                 </div>
                 <p className="mt-2 text-xs leading-5 text-[var(--muted)]">
-                  {manualPromptSelection
-                    ? "本轮会冻结所选 A/B 的完整内容，不会改变线上发布指针。"
-                    : "本轮启动时自动冻结当时的已发布 A/B；以后发布新版本也不会改写历史 run。"}
+                  {promptSelectionMode === "single"
+                    ? "本轮只调用所选单提示词一次，B 位保持为空；不会改变线上发布指针。"
+                    : promptSelectionMode === "manual"
+                      ? "本轮会冻结所选 A/B 的完整内容，不会改变线上发布指针。"
+                      : "本轮启动时自动冻结当时的已发布 A/B；以后发布新版本也不会改写历史 run。"}
                 </p>
               </div>
 
@@ -832,7 +840,9 @@ function RegressionResults({
           label="本轮调用 B"
           value={run.selection.prompt_b
             ? `${run.selection.prompt_b.version} · ${run.selection.prompt_b.name}`
-            : "历史 run 未记录"}
+            : run.selection.prompt_a
+              ? "单提示词模式（B 位不调用）"
+              : "历史 run 未记录"}
         />
         <SelectionFact
           label="本轮维度版本"
@@ -1124,19 +1134,23 @@ function LevelExplanation({ item }: { item: BaselineRegressionItem }) {
       </p>
     )
   }
-  const dimensionRows = [
-    ...explanation.strong_dimensions.map((dimension) => ({
-      ...dimension,
-      kind: "主要优势",
-    })),
-    ...explanation.weak_dimensions.map((dimension) => ({
-      ...dimension,
-      kind: "主要短板",
-    })),
-  ].filter(
-    (dimension, index, all) =>
-      all.findIndex((candidate) => candidate.key === dimension.key) === index,
-  )
+  const dimensionRows = (explanation.all_dimensions.length
+    ? explanation.all_dimensions
+    : [
+        ...explanation.strong_dimensions,
+        ...explanation.weak_dimensions,
+      ].filter(
+        (dimension, index, all) =>
+          all.findIndex((candidate) => candidate.key === dimension.key) === index,
+      )
+  ).map((dimension) => ({
+    ...dimension,
+    kind: dimension.grade >= 4
+      ? "主要优势"
+      : dimension.grade <= 2
+        ? "主要短板"
+        : "中性维度",
+  }))
   return (
     <div className="border-t border-[var(--line)] px-4 py-4">
       <p className="text-sm font-semibold">
@@ -1163,6 +1177,39 @@ function LevelExplanation({ item }: { item: BaselineRegressionItem }) {
             </div>
           ))}
         </div>
+      )}
+      <div className="mt-4 grid gap-3 border-y border-[var(--line)] py-3 text-xs sm:grid-cols-2">
+        <p>
+          <span className="font-semibold text-[var(--muted)]">模型置信度：</span>
+          {item.confidence === null || item.confidence === undefined
+            ? "未返回"
+            : percent(item.confidence)}
+        </p>
+        <p>
+          <span className="font-semibold text-[var(--muted)]">复核标记：</span>
+          {item.needs_review === true
+            ? "建议人工复核"
+            : item.needs_review === false
+              ? "未触发复核"
+              : "未记录"}
+        </p>
+        <p>
+          <span className="font-semibold text-[var(--muted)]">画质：</span>
+          {explanation.image_quality.status === "available"
+            ? `${explanation.image_quality.severity_label || explanation.image_quality.severity || "已返回"}${explanation.image_quality.confidence === null || explanation.image_quality.confidence === undefined ? "" : ` · ${percent(explanation.image_quality.confidence)} 置信度`}`
+            : "未返回画质证据"}
+        </p>
+        <p>
+          <span className="font-semibold text-[var(--muted)]">版本：</span>
+          {[item.versions.model, item.versions.rubric, item.versions.engine]
+            .filter(Boolean)
+            .join(" · ") || "历史结果未记录"}
+        </p>
+      </div>
+      {explanation.image_quality.evidence.length > 0 && (
+        <p className="mt-2 text-xs leading-5 text-[var(--muted)]">
+          画质证据：{explanation.image_quality.evidence.join("；")}
+        </p>
       )}
       {explanation.caps.length > 0 && (
         <p className="mt-3 text-xs leading-5 text-[#7d4308]">

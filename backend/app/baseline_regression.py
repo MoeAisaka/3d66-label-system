@@ -27,6 +27,13 @@ LEVEL_LABELS = {
     "L5": "过滤",
 }
 _LEVEL_BY_LABEL = {label: level for level, label in LEVEL_LABELS.items()}
+_QUALITY_SEVERITY_LABELS = {
+    "none": "无明显问题",
+    "slight": "轻微",
+    "moderate": "中等",
+    "severe": "严重",
+    "unusable": "不可用",
+}
 _FILENAME_TOKEN_SPLIT = re.compile(
     r"[\s._\-—–/\\,，;；:：()（）\[\]【】{}]+"
 )
@@ -151,6 +158,43 @@ def _dimension_reason_items(aesthetic: Mapping[str, Any]) -> list[dict[str, Any]
     return items
 
 
+def _image_quality_summary(precheck: Mapping[str, Any]) -> dict[str, Any]:
+    quality = precheck.get("image_quality")
+    if not isinstance(quality, dict):
+        return {
+            "status": "missing",
+            "severity": None,
+            "severity_label": "",
+            "confidence": None,
+            "evidence": [],
+        }
+    severity = quality.get("quality_severity")
+    confidence = quality.get("confidence")
+    evidence = quality.get("evidence")
+    return {
+        "status": "available",
+        "severity": str(severity) if isinstance(severity, str) else None,
+        "severity_label": _QUALITY_SEVERITY_LABELS.get(
+            str(severity), str(severity) if severity is not None else ""
+        ),
+        "confidence": (
+            float(confidence)
+            if isinstance(confidence, (int, float))
+            and not isinstance(confidence, bool)
+            else None
+        ),
+        "evidence": (
+            [
+                str(item)
+                for item in evidence
+                if isinstance(item, str) and item.strip()
+            ][:5]
+            if isinstance(evidence, list)
+            else []
+        ),
+    }
+
+
 def level_explanation(
     *,
     precheck: Mapping[str, Any],
@@ -198,6 +242,10 @@ def level_explanation(
         "scope_status": scope_status,
         "strong_dimensions": strongest,
         "weak_dimensions": weakest,
+        "all_dimensions": sorted(
+            dimensions, key=lambda item: (item["grade"], item["key"])
+        ),
+        "image_quality": _image_quality_summary(precheck),
         "caps": caps if isinstance(caps, list) else [],
         "review_reasons": (
             [str(item) for item in review_reasons if isinstance(item, str)]

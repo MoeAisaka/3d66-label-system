@@ -8,7 +8,9 @@ from sqlalchemy.pool import StaticPool
 from app.baseline_regression import (
     complete_baseline_item,
     compute_level_metrics,
+    fail_baseline_item,
     filename_level_suggestion,
+    level_explanation,
 )
 from app.database import Base, get_db
 from app.main import app, current_user
@@ -58,6 +60,38 @@ def test_level_metrics_cover_boundaries_failures_and_stable_matrix() -> None:
         "L1": 0, "L2": 0, "L3": 0, "L4": 0, "L5": 0,
     }
     assert compute_level_metrics([])["exact_accuracy"] == 0
+
+
+def test_level_explanation_freezes_neutral_dimensions_and_quality_evidence() -> None:
+    explanation = level_explanation(
+        precheck={
+            "image_quality": {
+                "quality_severity": "moderate",
+                "confidence": 0.82,
+                "evidence": ["暗部细节损失", "过曝", "第三条", "第四条", "第五条", "截断"],
+            }
+        },
+        aesthetic={
+            "dimensions": {
+                "layout": {"grade": 4, "evidence": ["完整"], "defects": []},
+                "lighting": {"grade": 3, "evidence": ["基本均衡"], "defects": []},
+                "material": {"grade": 1, "evidence": [], "defects": ["纹理错误"]},
+            }
+        },
+        scoring={"caps": [{"cap": "L2", "reason": "画质受损最高 L2"}], "review_reasons": []},
+        predicted_level="L2",
+        authoritative_score=72,
+    )
+    assert [item["key"] for item in explanation["all_dimensions"]] == [
+        "material", "lighting", "layout"
+    ]
+    assert explanation["image_quality"] == {
+        "status": "available",
+        "severity": "moderate",
+        "severity_label": "中等",
+        "confidence": 0.82,
+        "evidence": ["暗部细节损失", "过曝", "第三条", "第四条", "第五条"],
+    }
 
 
 def test_baseline_api_freezes_truth_reports_and_enqueues_idempotently() -> None:
@@ -358,6 +392,36 @@ def test_baseline_run_can_freeze_manual_prompt_pair_and_reserves_dimension_choic
         assert created.status_code == 200
         set_id = created.json()["id"]
 
+        single_conflict = client.post(
+            f"/api/baseline-sets/{set_id}/runs",
+            json={"prompt_id": draft_a.id, "prompt_a_id": draft_a.id, "prompt_b_id": draft_b.id},
+        )
+        assert single_conflict.status_code == 422
+        assert "不能同时指定" in single_conflict.text
+
+        single = client.post(
+            f"/api/baseline-sets/{set_id}/runs",
+            json={"prompt_id": draft_a.id},
+        )
+        assert single.status_code == 200
+        single_payload = single.json()
+        assert single_payload["selection"]["prompt_a"]["id"] == draft_a.id
+        assert single_payload["selection"]["prompt_b"] is None
+        assert single_payload["selection"]["prompt_a"]["rubric_version"] == "R2"
+        single_run = db.get(BaselineRegressionRun, single_payload["id"])
+        assert single_run is not None
+        single_job = db.get(EvaluationJob, single_run.items[0].job_id)
+        assert single_job is not None
+        assert single_job.prompt_a_id == draft_a.id
+        assert single_job.prompt_b_id is None
+        assert json.loads(single_run.strategy_snapshot_json)["prompt_b"] is None
+        fail_baseline_item(
+            db,
+            item_id=single_run.items[0].id,
+            error_code="test_single_prompt_finished",
+        )
+        db.commit()
+
         partial = client.post(
             f"/api/baseline-sets/{set_id}/runs",
             json={"prompt_a_id": draft_a.id},
@@ -391,7 +455,7 @@ def test_baseline_run_can_freeze_manual_prompt_pair_and_reserves_dimension_choic
         )
         assert swapped.status_code == 422
         assert "提示词阶段不匹配" in swapped.text
-        assert db.query(BaselineRegressionRun).count() == 0
+        assert db.query(BaselineRegressionRun).count() == 1
 
         response = client.post(
             f"/api/baseline-sets/{set_id}/runs",

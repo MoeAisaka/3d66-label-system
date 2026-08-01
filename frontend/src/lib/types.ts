@@ -308,9 +308,31 @@ export type BaselineRegressionItem = {
       evidence: string[]
       defects: string[]
     }>
+    all_dimensions: Array<{
+      key: string
+      grade: number
+      evidence: string[]
+      defects: string[]
+    }>
+    image_quality: {
+      status: "available" | "missing"
+      severity: string | null
+      severity_label: string
+      confidence: number | null
+      evidence: string[]
+    }
     caps: Array<Record<string, unknown>>
     review_reasons: string[]
     message?: string
+  }
+  confidence: number | null
+  needs_review: boolean | null
+  versions: {
+    model?: string | null
+    prompt_a?: string | null
+    prompt_b?: string | null
+    rubric?: string | null
+    engine?: string | null
   }
   status: "queued" | "completed" | "failed"
   deviation: boolean

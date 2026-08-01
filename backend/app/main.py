@@ -638,12 +638,17 @@ class BaselineSetCreateRequest(BaseModel):
 
 
 class BaselineRunCreateRequest(BaseModel):
+    prompt_id: int | None = Field(default=None, ge=1)
     prompt_a_id: int | None = Field(default=None, ge=1)
     prompt_b_id: int | None = Field(default=None, ge=1)
     dimension_schema_id: int | None = Field(default=None, ge=1)
 
     @model_validator(mode="after")
     def validate_prompt_pair(self) -> "BaselineRunCreateRequest":
+        if self.prompt_id is not None and (
+            self.prompt_a_id is not None or self.prompt_b_id is not None
+        ):
+            raise ValueError("单提示词模式不能同时指定 A 与 B 提示词版本")
         if (self.prompt_a_id is None) != (self.prompt_b_id is None):
             raise ValueError("手动选择提示词时必须同时指定 A 与 B 版本")
         return self
@@ -6132,7 +6137,18 @@ def create_baseline_run(
         .order_by(ModelConfig.id.asc())
         .limit(1)
     )
-    if request.prompt_a_id is not None:
+    single_prompt_mode = request.prompt_id is not None
+    if single_prompt_mode:
+        prompt_a = db.get(PromptVersion, request.prompt_id)
+        if prompt_a is None:
+            raise HTTPException(status_code=404, detail="所选单提示词版本不存在")
+        if prompt_a.stage != "A":
+            raise HTTPException(
+                status_code=422,
+                detail="单提示词模式只能选择阶段为 A 的提示词版本",
+            )
+        prompt_b = None
+    elif request.prompt_a_id is not None:
         assert request.prompt_b_id is not None
         prompt_a = db.get(PromptVersion, request.prompt_a_id)
         prompt_b = db.get(PromptVersion, request.prompt_b_id)
@@ -6176,10 +6192,16 @@ def create_baseline_run(
             )
             .limit(1)
         )
-    if model_config is None or prompt_a is None or prompt_b is None:
+    if model_config is None or prompt_a is None or (
+        prompt_b is None and not single_prompt_mode
+    ):
         raise HTTPException(
             status_code=409,
-            detail="当前已发布 A/B 提示词或启用模型配置不完整",
+            detail=(
+                "当前已发布单提示词或启用模型配置不完整"
+                if single_prompt_mode
+                else "当前已发布 A/B 提示词或启用模型配置不完整"
+            ),
         )
     sampling_policy = db.get(SamplingPolicy, 1)
     bundle = get_or_create_bundle(
@@ -6187,7 +6209,11 @@ def create_baseline_run(
         model_config=model_config,
         prompt_a=prompt_a,
         prompt_b=prompt_b,
-        rubric_version=prompt_b.rubric_version,
+        rubric_version=(
+            prompt_a.rubric_version
+            if single_prompt_mode
+            else prompt_b.rubric_version
+        ),
         engine_version=ENGINE_VERSION,
         risk_review_version=(
             RISK_REVIEW_VERSION
@@ -6249,7 +6275,7 @@ def create_baseline_run(
         job = EvaluationJob(
             asset_id=frozen_item.asset_id,
             prompt_a_id=prompt_a.id,
-            prompt_b_id=prompt_b.id,
+            prompt_b_id=prompt_b.id if prompt_b is not None else None,
             baseline_regression_item_id=run_item.id,
             strategy_bundle_id=bundle.id,
             queue_class="validation",
@@ -6273,7 +6299,8 @@ def create_baseline_run(
             "strategy_bundle_id": bundle.id,
             "strategy_canonical_id": bundle.canonical_hash,
             "prompt_a_id": prompt_a.id,
-            "prompt_b_id": prompt_b.id,
+            "prompt_b_id": prompt_b.id if prompt_b is not None else None,
+            "prompt_mode": "single" if single_prompt_mode else "ab",
             "dimension_selection_mode": "strategy_snapshot",
             "total": run.total,
         },
@@ -6346,10 +6373,33 @@ def baseline_run_detail(
                 "scope_status": None,
                 "strong_dimensions": [],
                 "weak_dimensions": [],
+                "all_dimensions": [],
+                "image_quality": {
+                    "status": "missing",
+                    "severity": None,
+                    "severity_label": "",
+                    "confidence": None,
+                    "evidence": [],
+                },
                 "caps": [],
                 "review_reasons": [],
                 "message": "历史结果未冻结评测理由",
             }
+        else:
+            # 兼容已冻结的 v1 explanation：新字段只能补空默认值，不能重算或
+            # 改写历史结果，确保回归结果仍然是当时服务端结论的只读快照。
+            frozen_explanation = dict(frozen_explanation)
+            frozen_explanation.setdefault("all_dimensions", [])
+            frozen_explanation.setdefault(
+                "image_quality",
+                {
+                    "status": "missing",
+                    "severity": None,
+                    "severity_label": "",
+                    "confidence": None,
+                    "evidence": [],
+                },
+            )
         item_payloads.append(
             {
                 "id": item.id,
@@ -6363,6 +6413,9 @@ def baseline_run_detail(
                 "cap_reasons": snapshot.get("cap_reasons") or [],
                 "stage_a": snapshot.get("stage_a") or {},
                 "level_explanation": frozen_explanation,
+                "confidence": snapshot.get("confidence"),
+                "needs_review": snapshot.get("needs_review"),
+                "versions": snapshot.get("versions") or {},
                 "status": item.status,
                 "deviation": deviation,
                 "error_message": item.error_message,

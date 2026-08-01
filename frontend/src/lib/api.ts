@@ -117,6 +117,7 @@ export const baselineRegressionApi = {
   }),
   listPrompts: () => api<{ items: PromptVersion[] }>("/api/prompts"),
   createRun: (setId: number, payload: {
+    prompt_id?: number
     prompt_a_id?: number
     prompt_b_id?: number
     dimension_schema_id?: number
