@@ -5989,6 +5989,30 @@ def _migration_041_unified_label_platform_contract(connection: Connection) -> No
         raise RuntimeError(f"v41 统一标签平台迁移外键校验失败：{violations[:3]}")
 
 
+def _migration_042_add_automation_worker_status(connection: Connection) -> None:
+    connection.exec_driver_sql("""
+        CREATE TABLE IF NOT EXISTS automation_worker_statuses (
+            worker_id VARCHAR(120) PRIMARY KEY,
+            started_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            last_seen_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            last_tick_at DATETIME,
+            last_status VARCHAR(80) NOT NULL DEFAULT 'starting',
+            last_error TEXT NOT NULL DEFAULT '',
+            last_result_json TEXT NOT NULL DEFAULT '{}',
+            consecutive_errors INTEGER NOT NULL DEFAULT 0
+                CHECK(consecutive_errors >= 0),
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    connection.exec_driver_sql(
+        "CREATE INDEX IF NOT EXISTS ix_automation_worker_statuses_last_seen "
+        "ON automation_worker_statuses(last_seen_at)"
+    )
+    violations = connection.exec_driver_sql("PRAGMA foreign_key_check").fetchall()
+    if violations:
+        raise RuntimeError(f"v42 自动优化 Worker 状态迁移外键校验失败：{violations[:3]}")
+
+
 MIGRATIONS = [
     Migration(1, "add_sample_expected_level", _migration_001_add_sample_expected_level),
     Migration(2, "add_review_corrections", _migration_002_add_review_corrections),
@@ -6150,6 +6174,11 @@ MIGRATIONS = [
         41,
         "unified_label_platform_contract",
         _migration_041_unified_label_platform_contract,
+    ),
+    Migration(
+        42,
+        "add_automation_worker_status",
+        _migration_042_add_automation_worker_status,
     ),
 ]
 

@@ -137,6 +137,21 @@ def test_result_contract_uses_only_bound_dimension_keys() -> None:
     }
 
 
+def test_result_contract_maps_legacy_alias_to_bound_dimension_key() -> None:
+    definition = _definition()
+    result = _result(1, definition=definition)
+    aesthetic = json.loads(result.aesthetic_json)
+    aesthetic["dimensions"]["contemporary_relevance"] = (
+        aesthetic["dimensions"].pop("inspiration_reference")
+    )
+    result.aesthetic_json = json.dumps(aesthetic, ensure_ascii=False)
+
+    fields = result_fields(result)
+
+    assert fields["dimensions"]["inspiration_reference"] == 3
+    assert "contemporary_relevance" not in fields["dimensions"]
+
+
 def test_reviewed_truth_v2_freezes_full_dimension_identity() -> None:
     definition = _definition()
     result = _result(1, definition=definition)

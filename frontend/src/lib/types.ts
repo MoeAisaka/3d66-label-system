@@ -735,6 +735,49 @@ export type AutomationPolicy = {
     limit_micros: number
   }
   real_model_calls_enabled: boolean
+  runtime: {
+    status: "ready" | "waiting" | "blocked"
+    checked_at: string
+    worker: {
+      active_worker_count: number
+      stale_after_seconds: number
+      workers: Array<{
+        worker_id: string
+        active: boolean
+        started_at: string
+        last_seen_at: string
+        last_tick_at: string | null
+        last_status: string
+        last_error: string
+        last_result: Record<string, unknown>
+        consecutive_errors: number
+      }>
+    }
+    queue: {
+      eligible_case_count: number
+      next_category_key: string | null
+      next_prompt_version: string | null
+      available_for_prompt: number
+      required_for_prompt: number
+    }
+    optimizer: {
+      configured: boolean
+      source: string | null
+      model_id: string | null
+    }
+    budget: {
+      spent_micros: number
+      reserved_micros: number
+      used_micros: number
+      remaining_micros: number
+      limit_micros: number
+    }
+    blockers: Array<{
+      code: string
+      message: string
+      severity: "blocking" | "warning" | "waiting" | "info"
+    }>
+  }
   auto_publish_enabled: false
 }
 

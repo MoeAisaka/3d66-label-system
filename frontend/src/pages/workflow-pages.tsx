@@ -248,6 +248,44 @@ export function AutomationControlPage() {
             </p>
           </div>
         </section>
+        {draft?.runtime && <section className="mt-6 border-y border-[var(--line-strong)] bg-white">
+          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[var(--line)] px-5 py-4">
+            <div>
+              <p className="text-xs font-semibold text-[var(--muted)]">自动化运行状态</p>
+              <p className="mt-1 text-sm font-semibold">{automationRuntimeTitle(draft.runtime.status)}</p>
+            </div>
+            <Badge tone={automationRuntimeTone(draft.runtime.status)}>
+              {draft.runtime.worker.active_worker_count} 个 Worker 存活
+            </Badge>
+          </div>
+          <div className="grid gap-px bg-[var(--line)] md:grid-cols-3">
+            <RuntimeMetric
+              label="最近队列检查"
+              value={runtimeLastCheck(draft.runtime.worker.workers)}
+              detail={draft.runtime.worker.workers[0]?.last_status ?? "未记录"}
+            />
+            <RuntimeMetric
+              label="可组批案例"
+              value={`${draft.runtime.queue.available_for_prompt}/${draft.runtime.queue.required_for_prompt}`}
+              detail={draft.runtime.queue.next_prompt_version ?? "当前无待处理案例"}
+            />
+            <RuntimeMetric
+              label="优化模型"
+              value={draft.runtime.optimizer.configured ? "已就绪" : "未就绪"}
+              detail={draft.runtime.optimizer.model_id ?? "未解析到可执行配置"}
+            />
+          </div>
+          {draft.runtime.blockers.length > 0 && (
+            <div className="divide-y divide-[var(--line)] border-t border-[var(--line)]">
+              {draft.runtime.blockers.map((blocker) => (
+                <div key={blocker.code} className="flex items-start justify-between gap-4 px-5 py-3 text-xs leading-5">
+                  <span>{blocker.message}</span>
+                  <Badge tone={automationBlockerTone(blocker.severity)}>{automationBlockerLabel(blocker.severity)}</Badge>
+                </div>
+              ))}
+            </div>
+          )}
+        </section>}
       </div>
       <div className="mx-auto grid max-w-[1540px] gap-6 px-5 pb-8 md:px-8 lg:grid-cols-[420px_minmax(0,1fr)] lg:px-10">
         <section className="border-y border-[var(--line-strong)] bg-white p-5">
@@ -1348,6 +1386,53 @@ function automationStatus(value: string) {
     failed: "失败待恢复",
     cancelled: "已取消",
   } as Record<string, string>)[value] ?? value
+}
+
+function automationRuntimeTitle(status: AutomationPolicy["runtime"]["status"]) {
+  return {
+    ready: "条件已满足，Worker 会自动领取下一批",
+    waiting: "Worker 正常，等待组批条件满足",
+    blocked: "自动化被明确门禁阻止",
+  }[status]
+}
+
+function automationRuntimeTone(status: AutomationPolicy["runtime"]["status"]) {
+  return status === "ready" ? "success" : status === "waiting" ? "warning" : "danger"
+}
+
+function automationBlockerTone(
+  severity: AutomationPolicy["runtime"]["blockers"][number]["severity"],
+) {
+  return severity === "blocking" ? "danger" : severity === "info" ? "neutral" : "warning"
+}
+
+function automationBlockerLabel(
+  severity: AutomationPolicy["runtime"]["blockers"][number]["severity"],
+) {
+  return severity === "blocking" ? "需要处理" : severity === "waiting" ? "等待中" : severity === "warning" ? "注意" : "信息"
+}
+
+function runtimeLastCheck(workers: AutomationPolicy["runtime"]["worker"]["workers"]) {
+  const latest = workers[0]?.last_tick_at
+  return latest ? new Date(latest).toLocaleString("zh-CN") : "未检测到"
+}
+
+function RuntimeMetric({
+  label,
+  value,
+  detail,
+}: {
+  label: string
+  value: string
+  detail: string
+}) {
+  return (
+    <div className="min-w-0 bg-white px-5 py-4">
+      <p className="text-xs font-semibold text-[var(--muted)]">{label}</p>
+      <p className="mt-2 truncate text-sm font-semibold" title={value}>{value}</p>
+      <p className="mt-1 truncate font-data text-xs text-[var(--muted)]" title={detail}>{detail}</p>
+    </div>
+  )
 }
 
 function executorError(value: string) {

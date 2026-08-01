@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from app.scoring import calculate_corrected_score, calculate_score
 
 
@@ -48,6 +50,31 @@ def test_uniform_grade_four_is_l4() -> None:
     assert result["score"] == 82.0
     assert result["level"] == "L4"
     assert result["caps"] == []
+
+
+def test_legacy_dimension_aliases_are_mapped_to_published_keys() -> None:
+    result_aesthetic = aesthetic(4)
+    dimensions = result_aesthetic["dimensions"]
+    dimensions["spatial_design_coherence"] = dimensions.pop(
+        "spatial_design_furnishing"
+    )
+    dimensions["detail_finish"] = dimensions.pop("detail_completion")
+    dimensions["contemporary_relevance"] = dimensions.pop(
+        "inspiration_reference"
+    )
+
+    result = calculate_score(precheck(), result_aesthetic)
+
+    assert result["formal"] is True
+    assert result["level"] == "L4"
+
+
+def test_legacy_dimension_alias_conflict_is_rejected() -> None:
+    result_aesthetic = aesthetic(4)
+    result_aesthetic["dimensions"]["spatial_design_coherence"] = {"grade": 3}
+
+    with pytest.raises(ValueError, match="兼容维度别名"):
+        calculate_score(precheck(), result_aesthetic)
 
 
 def test_ai_image_is_capped_at_l4() -> None:

@@ -3,8 +3,12 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import socket
+import threading
 import time
+import traceback
+import uuid
 from collections import Counter
 from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
@@ -70,7 +74,10 @@ from .queue_scheduler import (
     record_breaker_failure,
     retry_delay_seconds,
 )
-from .optimization_automation import optimization_worker_tick
+from .optimization_automation import (
+    optimization_worker_tick,
+    touch_automation_worker_status,
+)
 from .scoring import ENGINE_VERSION, calculate_score
 from .schema_adapter import (
     adapt_combined_aesthetic_response,
@@ -115,7 +122,12 @@ logging.basicConfig(
     ],
 )
 logger = logging.getLogger("3d66.worker")
-WORKER_ID = f"{socket.gethostname()}-{id(object())}"
+
+def _new_worker_id() -> str:
+    return f"{socket.gethostname()}-{os.getpid()}-{uuid.uuid4().hex[:8]}"
+
+
+WORKER_ID = _new_worker_id()
 
 
 class JobInterrupted(RuntimeError):
@@ -366,6 +378,26 @@ def _is_job_breaker_open(
     )
 
 
+def _reset_expired_circuit_breakers(db, now: datetime) -> None:
+    expired_breakers = db.scalars(
+        select(CircuitBreaker).where(
+            CircuitBreaker.state == "open",
+            CircuitBreaker.cooldown_until.is_not(None),
+            CircuitBreaker.cooldown_until <= now,
+        )
+    ).all()
+    for breaker in expired_breakers:
+        breaker.state = "closed"
+        breaker.failure_count = 0
+        breaker.window_started_at = None
+        breaker.opened_at = None
+        breaker.cooldown_until = None
+        breaker.reason = None
+        breaker.reset_by = "system:cooldown"
+        breaker.reset_at = now
+        breaker.updated_at = now
+
+
 def claim_next_job() -> int | None:
     with session_scope() as db:
         if db.get_bind().dialect.name == "sqlite":
@@ -402,6 +434,7 @@ def claim_next_job() -> int | None:
             )
         if configured_model is None:
             return None
+        _reset_expired_circuit_breakers(db, now)
         open_breakers = set(
             db.execute(
                 select(
@@ -1591,10 +1624,18 @@ async def process_one() -> bool:
         logger.info("评测任务 %s 已中断：%s", job_id, exc)
     except Exception as exc:
         failure = _technical_failure_from_exception(exc)
+        trace = traceback.extract_tb(exc.__traceback__)
+        location = (
+            f"{Path(trace[-1].filename).name}:{trace[-1].lineno}:{trace[-1].name}"
+            if trace
+            else "unknown"
+        )
         logger.error(
-            "评测任务 %s 技术失败：%s",
+            "评测任务 %s 技术失败：%s exception=%s location=%s",
             job_id,
             failure.error_type,
+            type(exc).__name__,
+            location,
         )
         _handle_technical_failure(job_id, exc)
     return True
@@ -1604,24 +1645,51 @@ def run_forever(
     poll_seconds: float = 1.5,
     should_continue: Callable[[], bool] | None = None,
 ) -> None:
+    global WORKER_ID
+    WORKER_ID = _new_worker_id()
     init_database()
     with session_scope() as db:
         seed_defaults(db)
+        touch_automation_worker_status(db, worker_id=WORKER_ID)
+
+    heartbeat_stop = threading.Event()
+
+    def heartbeat_loop() -> None:
+        while not heartbeat_stop.wait(10):
+            try:
+                with session_scope() as db:
+                    touch_automation_worker_status(db, worker_id=WORKER_ID)
+            except Exception:
+                logger.exception("Worker 心跳写入失败：%s", WORKER_ID)
+
+    heartbeat_thread = threading.Thread(
+        target=heartbeat_loop,
+        name=f"automation-heartbeat-{WORKER_ID}",
+        daemon=True,
+    )
+    heartbeat_thread.start()
     logger.info("Worker 已启动：%s", WORKER_ID)
-    while should_continue is None or should_continue():
-        worked = asyncio.run(process_one())
-        automation = optimization_worker_tick(WORKER_ID)
-        if automation["status"] not in {
-            "disabled",
-            "idle",
-            "threshold_wait",
-            "cooldown",
-            "budget_blocked",
-        }:
-            logger.info("自动优化队列状态：%s", automation["status"])
-        if not worked:
-            time.sleep(poll_seconds)
-    logger.info("Worker 检测到主服务已退出，正在停止：%s", WORKER_ID)
+    try:
+        while should_continue is None or should_continue():
+            worked = asyncio.run(process_one())
+            try:
+                automation = optimization_worker_tick(WORKER_ID)
+                if automation["status"] not in {
+                    "disabled",
+                    "idle",
+                    "threshold_wait",
+                    "cooldown",
+                    "budget_blocked",
+                }:
+                    logger.info("自动优化队列状态：%s", automation["status"])
+            except Exception as exc:
+                logger.exception("自动优化队列 tick 失败，评测 Worker 继续运行：%s", exc)
+            if not worked:
+                time.sleep(poll_seconds)
+    finally:
+        heartbeat_stop.set()
+        heartbeat_thread.join(timeout=2)
+        logger.info("Worker 检测到主服务已退出，正在停止：%s", WORKER_ID)
 
 
 if __name__ == "__main__":

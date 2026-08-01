@@ -20,6 +20,7 @@ from .models import (
 from .scoring import (
     DimensionScoringContractError,
     dimension_schema_from_strategy_snapshot,
+    normalize_dimension_aliases,
 )
 
 
@@ -213,8 +214,15 @@ def result_fields(result: EvaluationResult) -> dict[str, Any]:
     quality = precheck.get("image_quality") or {}
     decision_rules = aesthetic.get("decision_rules") or {}
     dimensions: dict[str, int] = {}
+    raw_dimensions = aesthetic.get("dimensions") or {}
+    if not isinstance(raw_dimensions, dict):
+        raw_dimensions = {}
+    normalized_dimensions = normalize_dimension_aliases(
+        raw_dimensions,
+        dimension_keys,
+    )
     for key in dimension_keys:
-        grade = ((aesthetic.get("dimensions") or {}).get(key) or {}).get("grade")
+        grade = (normalized_dimensions.get(key) or {}).get("grade")
         if isinstance(grade, int) and 1 <= grade <= 5:
             dimensions[key] = grade
     return {
@@ -902,6 +910,7 @@ def refresh_paired_regression_run(
     run.finished_at = datetime.now(timezone.utc)
     run.summary_json = json.dumps(summary, ensure_ascii=False)
     run.metrics_json = run.summary_json
+    _refresh_source_automation_review(db, run)
 
 
 def complete_paired_regression_item(
@@ -1078,6 +1087,19 @@ def _refresh_source_automation_review(
     )
     if source_run is None or source_run.status not in {"succeeded", "running"}:
         return
+    _refresh_automation_review_from_source(
+        db,
+        source_run,
+        finished_at=completed_regression.finished_at,
+    )
+
+
+def _refresh_automation_review_from_source(
+    db: Session,
+    source_run: AutomationOptimizationRun,
+    *,
+    finished_at: datetime | None = None,
+) -> None:
     try:
         payload = json.loads(source_run.result_json or "{}")
     except json.JSONDecodeError:
@@ -1098,7 +1120,34 @@ def _refresh_source_automation_review(
         source_run.status = "running"
         return
     source_run.status = "awaiting_release_review"
-    source_run.finished_at = completed_regression.finished_at or datetime.now(timezone.utc)
+    terminal_times = [
+        regression.finished_at
+        for regression in regressions
+        if regression.finished_at is not None
+    ]
+    source_run.finished_at = (
+        finished_at
+        or max(terminal_times, default=None)
+        or datetime.now(timezone.utc)
+    )
+
+
+def reconcile_automation_review_states(db: Session) -> int:
+    sources = db.scalars(
+        select(AutomationOptimizationRun).where(
+            AutomationOptimizationRun.status.in_({"succeeded", "running"})
+        )
+    ).all()
+    advanced = 0
+    for source_run in sources:
+        previous = source_run.status
+        _refresh_automation_review_from_source(db, source_run)
+        if (
+            previous != "awaiting_release_review"
+            and source_run.status == "awaiting_release_review"
+        ):
+            advanced += 1
+    return advanced
 
 
 def complete_regression_item(db: Session, item_id: int, result: EvaluationResult) -> None:

@@ -53,3 +53,28 @@ def test_worker_stops_when_launcher_process_is_gone(monkeypatch) -> None:
     should_continue = captured["should_continue"]
     assert callable(should_continue)
     assert should_continue() is False
+
+
+def test_worker_waits_for_web_startup_before_consuming(monkeypatch) -> None:
+    class LiveParent:
+        def is_alive(self) -> bool:
+            return True
+
+    readiness = iter([False, False, True])
+    consumed: list[bool] = []
+    monkeypatch.setattr(launcher.mp, "parent_process", lambda: LiveParent())
+    monkeypatch.setattr(
+        launcher,
+        "_service_is_running",
+        lambda _port: next(readiness),
+    )
+    monkeypatch.setattr(launcher.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        launcher,
+        "run_forever",
+        lambda **_kwargs: consumed.append(True),
+    )
+
+    launcher._worker_entry(18080)
+
+    assert consumed == [True]

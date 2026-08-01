@@ -6,6 +6,7 @@ import os
 import subprocess
 import sys
 import threading
+from contextlib import contextmanager
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -27,7 +28,13 @@ from app.benchmarking import (
 )
 from app.doubao import DoubaoResponse
 from app.database import Base, get_db
-from app import benchmarking, main, optimizer
+from app import (
+    benchmarking,
+    main,
+    optimizer,
+    optimization_automation,
+    regression as regression_module,
+)
 from app.main import app, current_user
 from app.migrations import run_migrations
 from app.models import (
@@ -37,6 +44,8 @@ from app.models import (
     AutomationBudgetDay,
     AutomationOptimizationRun,
     AutomationPolicy,
+    AutomationWorkerStatus,
+    EvaluationCategoryProfile,
     ModelBenchmarkExperiment,
     ModelBenchmarkVariant,
     ModelConfig,
@@ -52,9 +61,17 @@ from app.optimization_automation import (
     AutomationAdapterResult,
     DeterministicOptimizationAdapter,
     RealOptimizationAdapter,
+    automation_runtime_status,
     consume_optimization_queue_once,
+    optimization_worker_tick,
+    record_automation_worker_status,
+    touch_automation_worker_status,
 )
-from app.regression import _refresh_source_automation_review
+from app.regression import (
+    _refresh_source_automation_review,
+    reconcile_automation_review_states,
+    refresh_paired_regression_run,
+)
 from app.production_feedback import (
     FeedbackConflict,
     ingest_production_feedback,
@@ -355,8 +372,84 @@ def test_automation_review_waits_for_all_candidate_regressions() -> None:
         second.finished_at = datetime.now(timezone.utc)
         _refresh_source_automation_review(db, second)
         assert source.status == "awaiting_release_review"
+
+        source.status = "succeeded"
+        source.finished_at = None
+        assert reconcile_automation_review_states(db) == 1
+        assert source.status == "awaiting_release_review"
+        assert source.finished_at == second.finished_at
     finally:
         _close(engine, db)
+
+
+def test_terminal_paired_regression_advances_source_automation(
+    monkeypatch,
+) -> None:
+    assessment = {
+        "aesthetic_correct": 8,
+        "aesthetic_checked": 8,
+        "whole_image_correct": True,
+        "level_consistent": True,
+    }
+    comparison = {
+        "baseline": {"assessment": assessment},
+        "candidate": {"assessment": assessment},
+        "target_error_improved": None,
+        "critical_regressions": [],
+        "new_severe_errors": [],
+    }
+    item = SimpleNamespace(
+        id=1,
+        sample_role="stable_control",
+        status="completed",
+        passed=True,
+        comparison_json=json.dumps(comparison),
+    )
+    run = SimpleNamespace(
+        id=1,
+        regression_mode="paired",
+        sample_set_version="a" * 64,
+        metric_rules_version="paired-v1",
+        metric_rules_json=json.dumps(
+            {
+                "thresholds": {
+                    "aesthetic_accuracy_max_drop": 0.0,
+                    "whole_image_accuracy_max_drop": 0.0,
+                    "level_consistency_max_drop": 0.0,
+                }
+            }
+        ),
+        total=0,
+        completed=0,
+        passed=0,
+        failed=0,
+        recommendation="pending",
+        status="waiting_results",
+        summary_json="{}",
+        metrics_json="{}",
+        finished_at=None,
+    )
+
+    class ScalarRows:
+        def all(self):
+            return [item]
+
+    class FakeDb:
+        def scalars(self, _query):
+            return ScalarRows()
+
+    advanced: list[object] = []
+    monkeypatch.setattr(
+        regression_module,
+        "_refresh_source_automation_review",
+        lambda _db, completed: advanced.append(completed),
+    )
+
+    refresh_paired_regression_run(FakeDb(), run)
+
+    assert run.status == "passed"
+    assert run.recommendation == "pass"
+    assert advanced == [run]
 
 
 def test_p0_triggers_immediately_and_live_budget_blocks_before_adapter() -> None:
@@ -414,6 +507,180 @@ def test_p0_triggers_immediately_and_live_budget_blocks_before_adapter() -> None
         _close(engine, db)
 
 
+def test_live_execution_without_optimizer_config_does_not_claim_case() -> None:
+    engine, db, _user = _database()
+    try:
+        db.add(AutomationPolicy(
+            id=1,
+            enabled=True,
+            dry_run=False,
+            case_threshold=1,
+            daily_budget_micros=100_000,
+        ))
+        _feedback(db, event_id="missing-optimizer")
+        db.commit()
+
+        result = consume_optimization_queue_once(db, worker_id="worker-missing")
+        db.commit()
+
+        assert result["status"] == "executor_config_blocked"
+        assert result["reason"] == "optimizer_config_incomplete"
+        case = db.scalar(select(OptimizationCaseQueue))
+        assert case.status == "pending"
+        assert case.attempt_count == 0
+        assert db.scalar(select(AutomationOptimizationRun.id)) is None
+    finally:
+        _close(engine, db)
+
+
+def test_runtime_status_explains_worker_queue_and_configuration_gates() -> None:
+    engine, db, _user = _database()
+    try:
+        policy = AutomationPolicy(
+            id=1,
+            enabled=True,
+            dry_run=False,
+            case_threshold=2,
+            daily_budget_micros=100_000,
+        )
+        db.add(policy)
+        _feedback(db, event_id="runtime-status")
+        profile = db.scalar(
+            select(EvaluationCategoryProfile).where(
+                EvaluationCategoryProfile.category_key == "space_image"
+            )
+        )
+        assert profile is not None
+        profile.automation_config_json = json.dumps({
+            "enabled": True,
+            "case_threshold": 2,
+            "max_candidates": 1,
+        })
+        db.commit()
+
+        before = automation_runtime_status(db, policy)
+        assert before["status"] == "blocked"
+        assert before["worker"]["active_worker_count"] == 0
+        assert before["queue"]["available_for_prompt"] == 1
+        assert before["queue"]["required_for_prompt"] == 2
+        assert {item["code"] for item in before["blockers"]} == {
+            "worker_not_seen",
+            "threshold_wait",
+            "optimizer_config_incomplete",
+        }
+
+        record_automation_worker_status(
+            db,
+            worker_id="worker-runtime",
+            status="threshold_wait",
+            result={"status": "threshold_wait"},
+        )
+        db.commit()
+        after = automation_runtime_status(db, policy)
+        assert after["worker"]["active_worker_count"] == 1
+        assert db.get(AutomationWorkerStatus, "worker-runtime").last_status == "threshold_wait"
+    finally:
+        _close(engine, db)
+
+
+def test_dry_run_runtime_reports_missing_optimizer_as_warning() -> None:
+    engine, db, _user = _database()
+    try:
+        policy = AutomationPolicy(
+            id=1,
+            enabled=True,
+            dry_run=True,
+            case_threshold=1,
+        )
+        db.add(policy)
+        _feedback(db, event_id="dry-run-runtime")
+        record_automation_worker_status(
+            db,
+            worker_id="worker-dry-run",
+            status="checking",
+            result={"status": "checking"},
+        )
+        db.commit()
+
+        runtime = automation_runtime_status(db, policy)
+
+        assert runtime["status"] == "waiting"
+        blockers = {item["code"]: item["severity"] for item in runtime["blockers"]}
+        assert blockers["dry_run_enabled"] == "warning"
+        assert blockers["optimizer_config_incomplete"] == "warning"
+        assert "worker_not_seen" not in blockers
+    finally:
+        _close(engine, db)
+
+
+def test_worker_heartbeat_does_not_overwrite_last_tick_result() -> None:
+    engine, db, _user = _database()
+    try:
+        tick_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        seen_at = tick_at + timedelta(seconds=10)
+        record_automation_worker_status(
+            db,
+            worker_id="worker-heartbeat",
+            status="threshold_wait",
+            result={"status": "threshold_wait", "available": 1},
+            now=tick_at,
+        )
+        touch_automation_worker_status(
+            db,
+            worker_id="worker-heartbeat",
+            now=seen_at,
+        )
+        db.commit()
+
+        row = db.get(AutomationWorkerStatus, "worker-heartbeat")
+        assert row.last_seen_at.replace(tzinfo=timezone.utc) == seen_at
+        assert row.last_tick_at.replace(tzinfo=timezone.utc) == tick_at
+        assert row.last_status == "threshold_wait"
+        assert json.loads(row.last_result_json)["available"] == 1
+    finally:
+        _close(engine, db)
+
+
+def test_worker_tick_records_failure_without_raising(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine, db, _user = _database()
+
+    @contextmanager
+    def fake_session_scope():
+        try:
+            yield db
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+
+    try:
+        monkeypatch.setattr(optimization_automation, "session_scope", fake_session_scope)
+
+        def fail_consume(*_args, **_kwargs):
+            raise RuntimeError("unexpected database detail")
+
+        monkeypatch.setattr(
+            optimization_automation,
+            "consume_optimization_queue_once",
+            fail_consume,
+        )
+        result = optimization_worker_tick("worker-safe-failure")
+
+        assert result == {
+            "status": "worker_error",
+            "error_message": "automation_executor_failed",
+        }
+        worker = db.get(AutomationWorkerStatus, "worker-safe-failure")
+        assert worker is not None
+        assert worker.last_status == "worker_error"
+        assert worker.last_error == "automation_executor_failed"
+        assert worker.consecutive_errors == 1
+    finally:
+        _close(engine, db)
+
+
 def test_automation_failure_sets_backoff_and_expired_lease_recovers() -> None:
     class RetryableModelError(RuntimeError):
         technical_error_type = "timeout"
@@ -450,6 +717,8 @@ def test_automation_failure_sets_backoff_and_expired_lease_recovers() -> None:
         )
         db.commit()
         assert failed["status"] == "failed"
+        assert isinstance(failed["retry_at"], str)
+        json.dumps(failed)
         case = db.scalar(select(OptimizationCaseQueue))
         assert case.status == "failed"
         assert case.next_attempt_at is not None

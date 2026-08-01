@@ -163,6 +163,7 @@ from .security import (
 from .authz import ROLE_LABELS, ROLE_PERMISSIONS, effective_role, has_permission, require_permission
 from .optimizer import run_prompt_optimization, stage_audit_payload
 from .optimization_automation import (
+    automation_runtime_status,
     automation_budget_status,
     configured_optimization_adapter,
     consume_optimization_queue_once,
@@ -5680,6 +5681,7 @@ def _automation_policy_payload(
     policy: AutomationPolicy, db: Session
 ) -> dict[str, Any]:
     adapter = configured_optimization_adapter(db)
+    runtime = automation_runtime_status(db, policy)
     return {
         "id": policy.id,
         "enabled": policy.enabled,
@@ -5700,6 +5702,7 @@ def _automation_policy_payload(
         "updated_at": policy.updated_at,
         "budget": automation_budget_status(db, policy),
         "real_model_calls_enabled": adapter is not None,
+        "runtime": runtime,
         "auto_publish_enabled": False,
     }
 
@@ -5797,7 +5800,6 @@ def consume_automation_runs(
     result = consume_optimization_queue_once(
         db,
         worker_id=f"manual:{user.username}",
-        adapter=configured_optimization_adapter(db),
     )
     db.commit()
     return result

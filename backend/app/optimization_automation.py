@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
+import traceback
 import uuid
 import asyncio
 from dataclasses import dataclass
@@ -18,6 +20,7 @@ from .models import (
     AutomationOptimizationRun,
     AutomationBudgetDay,
     AutomationPolicy,
+    AutomationWorkerStatus,
     Asset,
     EvaluationCategoryProfile,
     ModelConfig,
@@ -33,6 +36,9 @@ from .doubao import response_usage
 from .optimizer import generate_automation_candidates
 from .regression import latest_review_for_result, reviewed_truth_snapshot
 from .strategy_bundle import get_or_create_bundle
+
+
+logger = logging.getLogger("3d66.automation")
 
 
 @dataclass(frozen=True)
@@ -341,6 +347,25 @@ def _policy_payload(policy: AutomationPolicy) -> dict[str, Any]:
     }
 
 
+def _safe_json_object(value: str | None) -> dict[str, Any]:
+    try:
+        parsed = json.loads(value or "{}")
+    except json.JSONDecodeError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _config_is_ready(config: Any | None) -> bool:
+    return (
+        config is not None
+        and bool(getattr(config, "encrypted_api_key", None))
+        and int(getattr(config, "input_micros_per_million_tokens", 0) or 0) > 0
+        and int(getattr(config, "output_micros_per_million_tokens", 0) or 0) > 0
+        and int(getattr(config, "max_input_tokens", 0) or 0) > 0
+        and int(getattr(config, "max_tokens", 0) or 0) > 0
+    )
+
+
 def _legacy_budget_used_today(db: Session, now: datetime) -> int:
     day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     return int(
@@ -578,6 +603,8 @@ def consume_optimization_queue_once(
         return {"status": "category_disabled", "category_key": category_key, "recovered_leases": recovered}
     case_threshold = max(1, int(category_config.get("case_threshold", policy.case_threshold)))
     max_candidates = max(1, int(category_config.get("max_candidates", policy.max_candidates)))
+    if adapter is None:
+        adapter = configured_optimization_adapter(db, category_key=category_key)
 
     immediate = set(json.loads(policy.immediate_severities_json or "[]"))
     trigger_case = next(
@@ -604,12 +631,21 @@ def consume_optimization_queue_once(
     ):
         return {
             "status": "cooldown",
-            "cooldown_until": _aware(policy.last_triggered_at)
-            + timedelta(seconds=policy.cooldown_seconds),
+            "cooldown_until": (
+                _aware(policy.last_triggered_at)
+                + timedelta(seconds=policy.cooldown_seconds)
+            ).isoformat(),
             "recovered_leases": recovered,
         }
 
     selected = same_prompt[:case_threshold]
+    if not policy.dry_run and adapter is None:
+        return {
+            "status": "executor_config_blocked",
+            "reason": "optimizer_config_incomplete",
+            "category_key": category_key,
+            "recovered_leases": recovered,
+        }
     frozen_cases = [
         {
             "id": case.id,
@@ -1022,7 +1058,11 @@ def consume_optimization_queue_once(
             },
             event_key=f"automation-run-failed:{run.run_key}",
         )
-        return {"status": "failed", "run_id": run.id, "retry_at": retry_at}
+        return {
+            "status": "failed",
+            "run_id": run.id,
+            "retry_at": retry_at.isoformat() if retry_at else None,
+        }
 
 
 def _safe_executor_error(exc: Exception) -> tuple[str, bool]:
@@ -1046,21 +1086,109 @@ def _safe_executor_error(exc: Exception) -> tuple[str, bool]:
     return "automation_executor_failed", False
 
 
-def configured_optimization_adapter(db: Session) -> RealOptimizationAdapter | None:
-    binding = db.scalar(select(ModelNodeBinding).where(ModelNodeBinding.node_key == "optimization", ModelNodeBinding.enabled.is_(True)))
-    config = binding.model if binding is not None and binding.model.active else None
-    if config is None:
-        config = db.scalar(select(OptimizerConfig).order_by(OptimizerConfig.id.asc()))
-    if (
-        config is None
-        or not config.encrypted_api_key
-        or config.input_micros_per_million_tokens <= 0
-        or config.output_micros_per_million_tokens <= 0
-        or config.max_input_tokens <= 0
-        or config.max_tokens <= 0
-    ):
-        return None
-    return RealOptimizationAdapter(config=config)
+def _candidate_optimizer_configs(
+    db: Session, *, category_key: str | None = None
+) -> list[tuple[str, Any]]:
+    candidates: list[tuple[str, Any]] = []
+    if category_key:
+        profile = db.scalar(
+            select(EvaluationCategoryProfile).where(
+                EvaluationCategoryProfile.category_key == category_key
+            )
+        )
+        if profile is not None and profile.optimizer_config_id is not None:
+            config = db.get(OptimizerConfig, profile.optimizer_config_id)
+            candidates.append(("category_optimizer_config", config))
+        category_binding = db.scalar(
+            select(ModelNodeBinding).where(
+                ModelNodeBinding.node_key == "optimization",
+                ModelNodeBinding.category_key == category_key,
+                ModelNodeBinding.enabled.is_(True),
+            )
+        )
+        candidates.append((
+            "category_model_node",
+            category_binding.model
+            if category_binding is not None and category_binding.model.active
+            else None,
+        ))
+    global_binding = db.scalar(
+        select(ModelNodeBinding).where(
+            ModelNodeBinding.node_key == "optimization",
+            ModelNodeBinding.category_key.is_(None),
+            ModelNodeBinding.enabled.is_(True),
+        )
+    )
+    candidates.append((
+        "global_model_node",
+        global_binding.model
+        if global_binding is not None and global_binding.model.active
+        else None,
+    ))
+    candidates.append((
+        "optimizer_config",
+        db.scalar(select(OptimizerConfig).order_by(OptimizerConfig.id.asc())),
+    ))
+    return candidates
+
+
+def optimizer_configuration_status(
+    db: Session, *, category_key: str | None = None
+) -> dict[str, Any]:
+    checked: list[dict[str, Any]] = []
+    for source, config in _candidate_optimizer_configs(db, category_key=category_key):
+        ready = _config_is_ready(config)
+        checked.append(
+            {
+                "source": source,
+                "configured": ready,
+                "model_id": getattr(config, "model_id", None) if config is not None else None,
+                "has_api_key": bool(getattr(config, "encrypted_api_key", None))
+                if config is not None
+                else False,
+                "has_input_pricing": int(
+                    getattr(config, "input_micros_per_million_tokens", 0) or 0
+                )
+                > 0
+                if config is not None
+                else False,
+                "has_output_pricing": int(
+                    getattr(config, "output_micros_per_million_tokens", 0) or 0
+                )
+                > 0
+                if config is not None
+                else False,
+                "has_input_limit": int(getattr(config, "max_input_tokens", 0) or 0)
+                > 0
+                if config is not None
+                else False,
+                "has_output_limit": int(getattr(config, "max_tokens", 0) or 0) > 0
+                if config is not None
+                else False,
+            }
+        )
+        if ready:
+            return {
+                "configured": True,
+                "source": source,
+                "model_id": getattr(config, "model_id", None),
+                "checked": checked,
+            }
+    return {
+        "configured": False,
+        "source": None,
+        "model_id": None,
+        "checked": checked,
+    }
+
+
+def configured_optimization_adapter(
+    db: Session, *, category_key: str | None = None
+) -> RealOptimizationAdapter | None:
+    for _source, config in _candidate_optimizer_configs(db, category_key=category_key):
+        if _config_is_ready(config):
+            return RealOptimizationAdapter(config=config)
+    return None
 
 
 def automation_budget_status(
@@ -1077,11 +1205,281 @@ def automation_budget_status(
     }
 
 
+def record_automation_worker_status(
+    db: Session,
+    *,
+    worker_id: str,
+    status: str,
+    result: dict[str, Any] | None = None,
+    error_message: str = "",
+    now: datetime | None = None,
+) -> AutomationWorkerStatus:
+    current = now or _now()
+    row = db.get(AutomationWorkerStatus, worker_id)
+    if row is None:
+        row = AutomationWorkerStatus(worker_id=worker_id, started_at=current)
+        db.add(row)
+    row.last_seen_at = current
+    row.last_tick_at = current
+    row.last_status = status[:80]
+    row.last_error = error_message[:500]
+    row.last_result_json = canonical_json(result or {})
+    row.consecutive_errors = row.consecutive_errors + 1 if error_message else 0
+    row.updated_at = current
+    db.flush()
+    return row
+
+
+def touch_automation_worker_status(
+    db: Session,
+    *,
+    worker_id: str,
+    now: datetime | None = None,
+) -> AutomationWorkerStatus:
+    current = now or _now()
+    row = db.get(AutomationWorkerStatus, worker_id)
+    if row is None:
+        row = AutomationWorkerStatus(worker_id=worker_id, started_at=current)
+        db.add(row)
+    row.last_seen_at = current
+    row.updated_at = current
+    db.flush()
+    return row
+
+
+def automation_worker_snapshot(
+    db: Session, *, now: datetime | None = None, active_seconds: int = 30
+) -> dict[str, Any]:
+    current = now or _now()
+    active_cutoff = current - timedelta(seconds=active_seconds)
+    rows = db.scalars(
+        select(AutomationWorkerStatus)
+        .order_by(
+            AutomationWorkerStatus.last_seen_at.desc(),
+            AutomationWorkerStatus.worker_id.asc(),
+        )
+        .limit(20)
+    ).all()
+    workers = []
+    active_count = 0
+    for row in rows:
+        seen_at = _aware(row.last_seen_at)
+        active = seen_at is not None and seen_at >= active_cutoff
+        if active:
+            active_count += 1
+        workers.append(
+            {
+                "worker_id": row.worker_id,
+                "active": active,
+                "started_at": row.started_at,
+                "last_seen_at": row.last_seen_at,
+                "last_tick_at": row.last_tick_at,
+                "last_status": row.last_status,
+                "last_error": row.last_error,
+                "last_result": _safe_json_object(row.last_result_json),
+                "consecutive_errors": row.consecutive_errors,
+            }
+        )
+    return {
+        "active_worker_count": active_count,
+        "stale_after_seconds": active_seconds,
+        "workers": workers,
+    }
+
+
+def _eligible_cases(db: Session, policy: AutomationPolicy, now: datetime) -> list[OptimizationCaseQueue]:
+    return db.scalars(
+        select(OptimizationCaseQueue)
+        .where(
+            or_(
+                OptimizationCaseQueue.status == "pending",
+                and_(
+                    OptimizationCaseQueue.status == "failed",
+                    OptimizationCaseQueue.next_attempt_at.is_not(None),
+                ),
+            ),
+            OptimizationCaseQueue.attempt_count < policy.max_attempts,
+            or_(
+                OptimizationCaseQueue.next_attempt_at.is_(None),
+                OptimizationCaseQueue.next_attempt_at <= now,
+            ),
+            or_(
+                OptimizationCaseQueue.lease_expires_at.is_(None),
+                OptimizationCaseQueue.lease_expires_at <= now,
+            ),
+        )
+        .order_by(
+            OptimizationCaseQueue.created_at.asc(),
+            OptimizationCaseQueue.id.asc(),
+        )
+    ).all()
+
+
+def automation_runtime_status(
+    db: Session, policy: AutomationPolicy, *, now: datetime | None = None
+) -> dict[str, Any]:
+    current = now or _now()
+    worker = automation_worker_snapshot(db, now=current)
+    blockers: list[dict[str, Any]] = []
+
+    def block(code: str, message: str, *, severity: str = "blocking") -> None:
+        blockers.append({"code": code, "message": message, "severity": severity})
+
+    if worker["active_worker_count"] == 0:
+        block("worker_not_seen", "未检测到常驻 Worker 心跳；请用正式启动器启动服务。")
+    if not policy.enabled:
+        block("policy_disabled", "自动组批总开关关闭。")
+    if policy.dry_run:
+        block("dry_run_enabled", "当前为 dry-run，只生成试跑计划，不调用优化模型。", severity="warning")
+
+    budget = automation_budget_status(db, policy, now=current)
+    if not policy.dry_run and policy.daily_budget_micros <= 0:
+        block("budget_not_set", "真实执行需要设置大于 0 的每日预算。")
+    elif not policy.dry_run and budget["remaining_micros"] <= 0:
+        block("budget_exhausted", "今日自动优化预算已用尽。")
+
+    available = _eligible_cases(db, policy, current)
+    queue: dict[str, Any] = {
+        "eligible_case_count": len(available),
+        "next_category_key": None,
+        "next_prompt_version": None,
+        "available_for_prompt": 0,
+        "required_for_prompt": policy.case_threshold,
+    }
+    category_key: str | None = None
+    adapter: RealOptimizationAdapter | None = None
+    if not available:
+        block("queue_empty", "没有达到可组批条件的纠偏案例。", severity="info")
+    else:
+        category_key = available[0].category_key
+        category_cases = [case for case in available if case.category_key == category_key]
+        profile = db.scalar(
+            select(EvaluationCategoryProfile).where(
+                EvaluationCategoryProfile.category_key == category_key
+            )
+        )
+        category_config = _safe_json_object(profile.automation_config_json if profile else "{}")
+        if category_config.get("enabled") is False:
+            block("category_disabled", f"类目 {category_key} 的自动优化关闭。")
+        case_threshold = max(1, int(category_config.get("case_threshold", policy.case_threshold)))
+        immediate = set(json.loads(policy.immediate_severities_json or "[]"))
+        trigger_case = next(
+            (case for case in category_cases if case.severity in immediate),
+            None,
+        )
+        prompt_version = (
+            trigger_case.prompt_version if trigger_case else category_cases[0].prompt_version
+        )
+        same_prompt = [
+            case for case in category_cases if case.prompt_version == prompt_version
+        ]
+        queue.update(
+            {
+                "next_category_key": category_key,
+                "next_prompt_version": prompt_version,
+                "available_for_prompt": len(same_prompt),
+                "required_for_prompt": case_threshold,
+            }
+        )
+        if trigger_case is None and len(same_prompt) < case_threshold:
+            block(
+                "threshold_wait",
+                f"同一提示词版本案例 {len(same_prompt)}/{case_threshold}，尚未达到组批门槛。",
+                severity="waiting",
+            )
+        if (
+            trigger_case is None
+            and policy.last_triggered_at is not None
+            and _aware(policy.last_triggered_at)
+            + timedelta(seconds=policy.cooldown_seconds)
+            > current
+        ):
+            block("cooldown", "上一批刚触发完成，仍在冷却窗口。", severity="waiting")
+        adapter = configured_optimization_adapter(db, category_key=category_key)
+        if adapter is None:
+            block(
+                "optimizer_config_incomplete",
+                "优化模型缺少密钥、输入上限或非零计价。",
+                severity="warning" if policy.dry_run else "blocking",
+            )
+        elif not policy.dry_run:
+            try:
+                adapter.bind_base_prompt(db, version=prompt_version)
+                adapter.prepare_regression_binding(
+                    db, base_prompt=adapter.base_prompt, category_key=category_key
+                )
+            except ValueError:
+                block(
+                    "regression_binding_missing",
+                    "缺少同类目三角色锁定黄金集，无法创建发布前配对回归。",
+                )
+
+    blocking_codes = {
+        item["code"]
+        for item in blockers
+        if item["severity"] == "blocking"
+    }
+    status = (
+        "blocked"
+        if blocking_codes
+        else "waiting"
+        if blockers
+        else "ready"
+    )
+    return {
+        "status": status,
+        "checked_at": current,
+        "worker": worker,
+        "queue": queue,
+        "optimizer": optimizer_configuration_status(db, category_key=category_key),
+        "budget": budget,
+        "blockers": blockers,
+    }
+
+
 def optimization_worker_tick(worker_id: str) -> dict[str, Any]:
     """Run one queue iteration; persisted defaults remain fail-closed."""
     with session_scope() as db:
-        return consume_optimization_queue_once(
+        record_automation_worker_status(
             db,
             worker_id=worker_id,
-            adapter=configured_optimization_adapter(db),
+            status="checking",
+            result={"status": "checking"},
         )
+    try:
+        with session_scope() as db:
+            from .regression import reconcile_automation_review_states
+
+            reconcile_automation_review_states(db)
+            result = consume_optimization_queue_once(db, worker_id=worker_id)
+            record_automation_worker_status(
+                db,
+                worker_id=worker_id,
+                status=str(result.get("status", "unknown")),
+                result=result,
+            )
+            return result
+    except Exception as exc:
+        safe_error, _retryable = _safe_executor_error(exc)
+        trace = traceback.extract_tb(exc.__traceback__)
+        location = (
+            f"{trace[-1].filename.rsplit('/', 1)[-1]}:"
+            f"{trace[-1].lineno}:{trace[-1].name}"
+            if trace
+            else "unknown"
+        )
+        logger.error(
+            "自动优化 tick 异常：%s exception=%s location=%s",
+            safe_error,
+            type(exc).__name__,
+            location,
+        )
+        with session_scope() as db:
+            record_automation_worker_status(
+                db,
+                worker_id=worker_id,
+                status="worker_error",
+                result={"status": "worker_error", "error_message": safe_error},
+                error_message=safe_error,
+            )
+        return {"status": "worker_error", "error_message": safe_error}

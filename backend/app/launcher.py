@@ -5,6 +5,7 @@ import multiprocessing as mp
 import signal
 import socket
 import threading
+import time
 import webbrowser
 from urllib.error import URLError
 from urllib.request import urlopen
@@ -19,10 +20,31 @@ from .seed import seed_defaults
 from .worker import run_forever
 
 
-def _worker_entry() -> None:
+def _wait_for_service_ready(
+    port: int,
+    *,
+    parent_alive,
+    timeout_seconds: float = 30.0,
+    poll_seconds: float = 0.1,
+) -> bool:
+    deadline = time.monotonic() + timeout_seconds
+    while parent_alive() and time.monotonic() < deadline:
+        if _service_is_running(port):
+            return True
+        time.sleep(poll_seconds)
+    return False
+
+
+def _worker_entry(port: int | None = None) -> None:
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     parent = mp.parent_process()
-    run_forever(should_continue=lambda: parent is None or parent.is_alive())
+    parent_alive = lambda: parent is None or parent.is_alive()
+    if port is not None and not _wait_for_service_ready(
+        port,
+        parent_alive=parent_alive,
+    ):
+        return
+    run_forever(should_continue=parent_alive)
 
 
 def _local_ip() -> str | None:
@@ -72,7 +94,12 @@ def main() -> None:
         worker_count = max(1, min(10, model.max_concurrency if model else 1))
 
     workers = [
-        mp.Process(target=_worker_entry, name=f"3d66-worker-{index + 1}", daemon=True)
+        mp.Process(
+            target=_worker_entry,
+            args=(settings.port,),
+            name=f"3d66-worker-{index + 1}",
+            daemon=True,
+        )
         for index in range(worker_count)
     ]
     for process in workers:

@@ -338,6 +338,30 @@ def _cap_level(level: str, cap: int) -> str:
     return f"L{min(current, cap)}"
 
 
+def normalize_dimension_aliases(
+    dimensions: dict[str, Any],
+    dimension_keys: list[str] | tuple[str, ...],
+) -> dict[str, Any]:
+    normalized = deepcopy(dimensions)
+    allowed_keys = set(dimension_keys)
+    for alias, canonical_key in SPACE_INPUT_DIMENSION_ALIASES.items():
+        if (
+            alias not in normalized
+            or alias in allowed_keys
+            or canonical_key not in allowed_keys
+        ):
+            continue
+        if canonical_key not in normalized:
+            normalized[canonical_key] = normalized.pop(alias)
+            continue
+        if normalized[canonical_key] != normalized[alias]:
+            raise ValueError(
+                f"兼容维度别名 {alias} 与 {canonical_key} 不一致"
+            )
+        normalized.pop(alias)
+    return normalized
+
+
 def calculate_score(
     precheck: dict[str, Any],
     aesthetic: dict[str, Any] | None,
@@ -375,23 +399,8 @@ def calculate_score(
     dimensions = aesthetic.get("dimensions") or {}
     if not isinstance(dimensions, dict):
         raise ValueError("美感结果缺少维度对象")
-    dimensions = deepcopy(dimensions)
     dimension_keys = contract["dimension_keys"]
-    for alias, canonical_key in SPACE_INPUT_DIMENSION_ALIASES.items():
-        if (
-            alias not in dimensions
-            or alias in dimension_keys
-            or canonical_key not in dimension_keys
-        ):
-            continue
-        if (
-            canonical_key not in dimensions
-            or dimensions[canonical_key] != dimensions[alias]
-        ):
-            raise ValueError(
-                f"兼容维度别名 {alias} 与 {canonical_key} 不一致"
-            )
-        dimensions.pop(alias)
+    dimensions = normalize_dimension_aliases(dimensions, dimension_keys)
     unknown_keys = set(dimensions) - set(dimension_keys)
     if unknown_keys:
         raise ValueError(

@@ -1044,3 +1044,142 @@ def test_open_breaker_preserves_queued_job_and_claims_other_batch(
     finally:
         db.close()
         engine.dispose()
+
+
+@pytest.mark.parametrize(
+    ("scope_type", "scope_key"),
+    [
+        ("batch", "batch:cooldown"),
+        ("strategy", "1"),
+    ],
+)
+def test_expired_breaker_resets_and_job_becomes_claimable(
+    monkeypatch,
+    scope_type: str,
+    scope_key: str,
+) -> None:
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    db = Session(engine, expire_on_commit=False)
+    asset = Asset(
+        original_name="expired-breaker.jpg",
+        stored_name="expired-breaker.jpg",
+        mime_type="image/jpeg",
+        size_bytes=10,
+        sha256="5" * 64,
+    )
+    model = ModelConfig(encrypted_api_key="not-used-by-claim")
+    bundle = StrategyBundle(
+        canonical_hash="6" * 64,
+        model_id="expired-breaker-model",
+        model_config_snapshot="{}",
+        prompt_a_version="expired-breaker-A",
+        rubric_version="expired-breaker-rubric",
+        engine_version="expired-breaker-engine",
+    )
+    db.add_all([asset, model, bundle])
+    db.flush()
+    job = EvaluationJob(
+        asset=asset,
+        batch_key="batch:cooldown",
+        strategy_bundle_id=bundle.id,
+        queue_class="production_batch",
+    )
+    breaker = CircuitBreaker(
+        scope_type=scope_type,
+        scope_key=(
+            str(bundle.id) if scope_type == "strategy" else scope_key
+        ),
+        state="open",
+        failure_count=3,
+        window_started_at=datetime.now(timezone.utc) - timedelta(minutes=2),
+        last_failure_at=datetime.now(timezone.utc) - timedelta(minutes=1),
+        opened_at=datetime.now(timezone.utc) - timedelta(minutes=1),
+        cooldown_until=datetime.now(timezone.utc) - timedelta(seconds=1),
+        reason="SHORT_WINDOW_FAILURE_THRESHOLD",
+    )
+    db.add_all([job, breaker])
+    db.commit()
+
+    @contextmanager
+    def test_scope():
+        try:
+            yield db
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+
+    monkeypatch.setattr(worker, "session_scope", test_scope)
+    try:
+        assert worker.claim_next_job() == job.id
+        db.refresh(breaker)
+        assert breaker.state == "closed"
+        assert breaker.failure_count == 0
+        assert breaker.window_started_at is None
+        assert breaker.opened_at is None
+        assert breaker.cooldown_until is None
+        assert breaker.reason is None
+        assert breaker.reset_by == "system:cooldown"
+        assert breaker.reset_at is not None
+        assert breaker.last_failure_at is not None
+    finally:
+        db.close()
+        engine.dispose()
+
+
+def test_future_breaker_cooldown_keeps_job_blocked(monkeypatch) -> None:
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    db = Session(engine, expire_on_commit=False)
+    asset = Asset(
+        original_name="future-breaker.jpg",
+        stored_name="future-breaker.jpg",
+        mime_type="image/jpeg",
+        size_bytes=10,
+        sha256="7" * 64,
+    )
+    model = ModelConfig(encrypted_api_key="not-used-by-claim")
+    job = EvaluationJob(
+        asset=asset,
+        batch_key="batch:future-cooldown",
+        queue_class="production_batch",
+    )
+    breaker = CircuitBreaker(
+        scope_type="batch",
+        scope_key="batch:future-cooldown",
+        state="open",
+        failure_count=3,
+        cooldown_until=datetime.now(timezone.utc) + timedelta(minutes=5),
+        reason="SHORT_WINDOW_FAILURE_THRESHOLD",
+    )
+    db.add_all([model, job, breaker])
+    db.commit()
+
+    @contextmanager
+    def test_scope():
+        try:
+            yield db
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+
+    monkeypatch.setattr(worker, "session_scope", test_scope)
+    try:
+        assert worker.claim_next_job() is None
+        db.refresh(breaker)
+        assert breaker.state == "open"
+        assert breaker.reset_by is None
+        assert job.status == "queued"
+    finally:
+        db.close()
+        engine.dispose()

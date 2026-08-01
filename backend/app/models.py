@@ -2461,6 +2461,26 @@ class AutomationBudgetDay(Base):
     )
 
 
+class AutomationWorkerStatus(Base):
+    __tablename__ = "automation_worker_statuses"
+
+    worker_id: Mapped[str] = mapped_column(String(120), primary_key=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    last_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, index=True
+    )
+    last_tick_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_status: Mapped[str] = mapped_column(String(80), default="starting")
+    last_error: Mapped[str] = mapped_column(Text, default="")
+    last_result_json: Mapped[str] = mapped_column(Text, default="{}")
+    consecutive_errors: Mapped[int] = mapped_column(Integer, default=0)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+
 class ProductionFeedbackEvent(Base):
     __tablename__ = "production_feedback_events"
     __table_args__ = (
