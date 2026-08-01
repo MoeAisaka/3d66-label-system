@@ -105,7 +105,7 @@ export function PairedRegressionPage({ user }: { user: User }) {
   return (
     <>
       <PageHeader
-        index="03.5"
+        index="03.6"
         title="小样本配对回归"
         description="独立查看候选与基线的冻结配对证据；盲测完成前不展示答案，人工结论只冻结发布资格，不会自动发布。"
         actions={

@@ -79,6 +79,7 @@ from .risk_review import (
 )
 from .seed import seed_defaults
 from .strategy_bundle import (
+    ROUTED_STRATEGY_SCHEMA_VERSION,
     STRATEGY_SCHEMA_VERSION,
     build_evaluation_strategy_snapshot,
     build_strategy_snapshot,
@@ -436,6 +437,15 @@ async def evaluate_job(job_id: int) -> None:
         )
         if strategy_bundle_id is not None and frozen_bundle is None:
             raise RuntimeError("任务绑定的 StrategyBundle 不存在")
+        if (
+            frozen_bundle is not None
+            and frozen_bundle.strategy_schema_version
+            == ROUTED_STRATEGY_SCHEMA_VERSION
+        ):
+            raise RuntimeError(
+                "strategy-bundle-v3 尚未接入生产 Worker；"
+                "仅允许冻结合同与校准准备"
+            )
         if frozen_bundle is not None:
             credential = db.scalar(
                 select(ModelConfig)

@@ -32,6 +32,7 @@
 | [0017](0017-windows-deployment-lifecycle.md) | Accepted | Windows 公司服务器安装、诊断、前台启动与脱敏灾备生命周期 |
 | [0018](0018-adr16-real-executors-and-rollout.md) | Accepted | ADR-0016 真实执行器、预算结算与分阶段启用 |
 | [0019](0019-session-derived-reviewer-identity.md) | Accepted | 审核身份由服务端登录会话派生 |
+| [0020](0020-dimension-manager-and-variable-dimensions.md) | Accepted | 维度管理器、固定核心维与可变维度路由 |
 | [0021](0021-material-package-lifecycle-and-baseline-package-selection.md) | Accepted | 素材包生命周期、素材入口合并与基准回归整包选择 |
 | [0022](0022-baseline-prompt-version-selection.md) | Accepted | 基准回归手选提示词版本与维度版本预留 |
 | [0023](0023-windows-server-dpapi-scope-and-health-gate.md) | Accepted | Windows Server DPAPI 显式存储范围、真实回环门禁与脱敏诊断 |

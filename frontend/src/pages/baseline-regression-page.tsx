@@ -299,7 +299,7 @@ export function BaselineRegressionPage() {
   return (
     <>
       <PageHeader
-        index="03.6"
+        index="03.7"
         title="基准回归"
         description="冻结素材与 L1–L5 期望等级，可使用当前发布版、手动指定 A/B，或单提示词一次调用重复运行；准确率、混淆矩阵和逐张偏差均来自服务端权威结果。"
         actions={

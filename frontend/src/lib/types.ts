@@ -85,6 +85,75 @@ export type DimensionSchemaDefinition = {
     dimension_output_keys?: string[]
     unknown_key_policy?: string
   }
+  core_dimension_keys?: string[]
+  family_dimension_keys?: string[]
+  prompt_contract?: {
+    status?: string
+    required_stage?: string
+    publishing_blocked?: boolean
+  }
+  release_gate?: {
+    minimum_calibration_samples?: number
+    target_calibration_samples?: number
+    completed_calibration_samples?: number
+    status?: string
+    publishing_blocked?: boolean
+    blocked_reasons?: string[]
+  }
+}
+
+export type DimensionSchemaRegistryItem = {
+  id: number
+  schema_key: string
+  version: string
+  schema_type: "core" | "family_pack" | "extension"
+  family_key: "space" | "product" | "graphic" | "intent" | "common"
+  display_name: string
+  status: "draft" | "candidate" | "published" | "retired"
+  parent_schema_id: number | null
+  core_schema_id: number | null
+  canonical_hash: string
+  created_by: string
+  created_at: string
+  published_by: string | null
+  published_at: string | null
+  retired_at: string | null
+  definition?: DimensionSchemaDefinition
+}
+
+export type DimensionRoutePolicyDefinition = {
+  format_version: string
+  policy_key: string
+  policy_version: string
+  activation_scope: "calibration_only" | "production"
+  category_family_map: Record<string, string>
+  family_routes: Record<string, {
+    mode: "family_pack" | "core_fallback"
+    schema_ref: {
+      schema_key: string
+      version: string
+      family_key: string
+      status: string
+      canonical_hash: string
+    }
+  }>
+  unknown_family_policy: string
+  conflict_policy: string
+}
+
+export type DimensionRoutePolicyRegistryItem = {
+  id: number
+  policy_key: string
+  version: string
+  display_name: string
+  status: "draft" | "candidate" | "published" | "retired"
+  canonical_hash: string
+  created_by: string
+  created_at: string
+  published_by: string | null
+  published_at: string | null
+  retired_at: string | null
+  definition?: DimensionRoutePolicyDefinition
 }
 
 export type EvaluationDimensionSchema = {

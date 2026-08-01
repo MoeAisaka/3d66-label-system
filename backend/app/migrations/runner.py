@@ -4213,6 +4213,1012 @@ def _migration_027_bind_dimension_contract_to_strategy(
         )
 
 
+def _migration_028_add_dimension_route_policies(
+    connection: Connection,
+) -> None:
+    from ..dimension_route_registry import (
+        materialized_p2_dimension_schema_rows,
+        materialized_route_policy_rows,
+    )
+
+    schema_rows = materialized_p2_dimension_schema_rows()
+    core_row = next(
+        row for row in schema_rows if row["schema_type"] == "core"
+    )
+    product_row = next(
+        row for row in schema_rows if row["family_key"] == "product"
+    )
+
+    def insert_or_verify_schema(
+        row: dict[str, object],
+        *,
+        core_schema_id: int | None,
+    ) -> int:
+        existing = connection.exec_driver_sql(
+            """
+            SELECT id, schema_type, family_key, display_name, status,
+                   core_schema_id, definition_json, canonical_hash
+            FROM dimension_schemas
+            WHERE schema_key = ? AND version = ?
+            """,
+            (row["schema_key"], row["version"]),
+        ).mappings().first()
+        expected = {
+            "schema_type": row["schema_type"],
+            "family_key": row["family_key"],
+            "display_name": row["display_name"],
+            "status": row["status"],
+            "core_schema_id": core_schema_id,
+            "definition_json": row["definition_json"],
+            "canonical_hash": row["canonical_hash"],
+        }
+        if existing is not None:
+            actual = {key: existing[key] for key in expected}
+            if actual != expected:
+                raise RuntimeError(
+                    "已存在的 P2 DimensionSchema 与迁移定义不一致"
+                )
+            return int(existing["id"])
+        published = row["status"] in {"published", "retired"}
+        published_at = (
+            connection.exec_driver_sql("SELECT CURRENT_TIMESTAMP").scalar_one()
+            if published
+            else None
+        )
+        connection.exec_driver_sql(
+            """
+            INSERT INTO dimension_schemas (
+                schema_key, version, schema_type, family_key,
+                display_name, status, core_schema_id,
+                definition_json, canonical_hash, created_by,
+                published_by, published_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                row["schema_key"],
+                row["version"],
+                row["schema_type"],
+                row["family_key"],
+                row["display_name"],
+                row["status"],
+                core_schema_id,
+                row["definition_json"],
+                row["canonical_hash"],
+                "system:dimension-route-bootstrap",
+                "system:dimension-route-bootstrap" if published else None,
+                published_at,
+            ),
+        )
+        schema_id = connection.exec_driver_sql(
+            """
+            SELECT id FROM dimension_schemas
+            WHERE schema_key = ? AND version = ?
+            """,
+            (row["schema_key"], row["version"]),
+        ).scalar_one()
+        return int(schema_id)
+
+    core_schema_id = insert_or_verify_schema(
+        core_row,
+        core_schema_id=None,
+    )
+    expected_core_ref = product_row.get("core_schema_ref")
+    if (
+        not isinstance(expected_core_ref, dict)
+        or expected_core_ref.get("schema_key") != core_row["schema_key"]
+        or expected_core_ref.get("version") != core_row["version"]
+        or expected_core_ref.get("canonical_hash")
+        != core_row["canonical_hash"]
+    ):
+        raise RuntimeError("单品候选包的 L0 核心维引用不一致")
+    insert_or_verify_schema(
+        product_row,
+        core_schema_id=core_schema_id,
+    )
+
+    connection.exec_driver_sql("""
+        CREATE TABLE IF NOT EXISTS dimension_route_policies (
+            id INTEGER PRIMARY KEY,
+            policy_key VARCHAR(80) NOT NULL,
+            version VARCHAR(64) NOT NULL,
+            display_name VARCHAR(160) NOT NULL,
+            status VARCHAR(20) NOT NULL DEFAULT 'draft',
+            definition_json TEXT NOT NULL,
+            canonical_hash VARCHAR(64) NOT NULL,
+            created_by VARCHAR(80) NOT NULL DEFAULT 'system',
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            published_by VARCHAR(80),
+            published_at DATETIME,
+            retired_at DATETIME,
+            CONSTRAINT ck_dimension_route_policies_policy_key
+                CHECK(length(trim(policy_key)) > 0),
+            CONSTRAINT ck_dimension_route_policies_version
+                CHECK(length(trim(version)) > 0),
+            CONSTRAINT ck_dimension_route_policies_status
+                CHECK(status IN (
+                    'draft','candidate','published','retired'
+                )),
+            CONSTRAINT ck_dimension_route_policies_definition_json
+                CHECK(
+                    json_valid(definition_json)
+                    AND json_type(definition_json, '$') = 'object'
+                ),
+            CONSTRAINT ck_dimension_route_policies_canonical_hash
+                CHECK(
+                    length(canonical_hash) = 64
+                    AND canonical_hash = lower(canonical_hash)
+                    AND canonical_hash NOT GLOB '*[^0-9a-f]*'
+                ),
+            CONSTRAINT ck_dimension_route_policies_publish_audit
+                CHECK(
+                    (
+                        status IN ('published','retired')
+                        AND published_by IS NOT NULL
+                        AND published_at IS NOT NULL
+                    )
+                    OR
+                    (
+                        status IN ('draft','candidate')
+                        AND published_by IS NULL
+                        AND published_at IS NULL
+                    )
+                ),
+            CONSTRAINT ck_dimension_route_policies_retired_at
+                CHECK(
+                    (status = 'retired' AND retired_at IS NOT NULL)
+                    OR (status <> 'retired' AND retired_at IS NULL)
+                ),
+            CONSTRAINT uq_dimension_route_policies_key_version
+                UNIQUE(policy_key, version),
+            CONSTRAINT uq_dimension_route_policies_canonical_hash
+                UNIQUE(canonical_hash)
+        )
+    """)
+    for statement in (
+        "CREATE INDEX IF NOT EXISTS ix_dimension_route_policies_policy_key "
+        "ON dimension_route_policies(policy_key)",
+        "CREATE INDEX IF NOT EXISTS ix_dimension_route_policies_version "
+        "ON dimension_route_policies(version)",
+        "CREATE INDEX IF NOT EXISTS ix_dimension_route_policies_status "
+        "ON dimension_route_policies(status)",
+        "CREATE INDEX IF NOT EXISTS "
+        "ix_dimension_route_policies_canonical_hash "
+        "ON dimension_route_policies(canonical_hash)",
+        "CREATE INDEX IF NOT EXISTS ix_dimension_route_policies_registry "
+        "ON dimension_route_policies(policy_key, status)",
+    ):
+        connection.exec_driver_sql(statement)
+
+    for row in materialized_route_policy_rows():
+        existing = connection.exec_driver_sql(
+            """
+            SELECT display_name, status, definition_json, canonical_hash
+            FROM dimension_route_policies
+            WHERE policy_key = ? AND version = ?
+            """,
+            (row["policy_key"], row["version"]),
+        ).mappings().first()
+        expected = {
+            key: row[key]
+            for key in (
+                "display_name",
+                "status",
+                "definition_json",
+                "canonical_hash",
+            )
+        }
+        if existing is not None:
+            if dict(existing) != expected:
+                raise RuntimeError(
+                    "已存在的 DimensionRoutePolicy 与迁移定义不一致"
+                )
+            continue
+        connection.exec_driver_sql(
+            """
+            INSERT INTO dimension_route_policies (
+                policy_key, version, display_name, status,
+                definition_json, canonical_hash, created_by
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                row["policy_key"],
+                row["version"],
+                row["display_name"],
+                row["status"],
+                row["definition_json"],
+                row["canonical_hash"],
+                "system:dimension-route-bootstrap",
+            ),
+        )
+
+    connection.exec_driver_sql("""
+        CREATE TRIGGER IF NOT EXISTS
+            trg_dimension_route_policies_published_no_update
+        BEFORE UPDATE ON dimension_route_policies
+        WHEN OLD.status IN ('published','retired')
+        BEGIN
+            SELECT RAISE(
+                ABORT,
+                'Published DimensionRoutePolicy is immutable; create a new version'
+            );
+        END
+    """)
+    connection.exec_driver_sql("""
+        CREATE TRIGGER IF NOT EXISTS
+            trg_dimension_route_policies_published_no_delete
+        BEFORE DELETE ON dimension_route_policies
+        WHEN OLD.status IN ('published','retired')
+        BEGIN
+            SELECT RAISE(
+                ABORT,
+                'Published DimensionRoutePolicy cannot be deleted'
+            );
+        END
+    """)
+    violations = connection.exec_driver_sql(
+        "PRAGMA foreign_key_check"
+    ).all()
+    if violations:
+        raise RuntimeError(
+            "DimensionRoutePolicy 迁移 foreign_key_check 失败："
+            f"{violations[:3]}"
+        )
+
+
+def _install_v3_strategy_bundle_trigger(connection: Connection) -> None:
+    connection.exec_driver_sql(
+        "DROP TRIGGER IF EXISTS trg_strategy_bundles_contract_insert"
+    )
+    connection.exec_driver_sql("""
+        CREATE TRIGGER trg_strategy_bundles_contract_insert
+        BEFORE INSERT ON strategy_bundles
+        WHEN NEW.strategy_schema_version NOT IN (
+                'strategy-bundle-v1',
+                'strategy-bundle-v2',
+                'strategy-bundle-v3'
+             )
+          OR (
+              NEW.strategy_schema_version = 'strategy-bundle-v1'
+              AND (
+                  NEW.dimension_route_policy_id IS NOT NULL
+                  OR NEW.dimension_schema_set_snapshot IS NOT NULL
+                  OR NEW.label_field_set_snapshot IS NOT NULL
+                  OR NEW.resolved_schema_contract_version IS NOT NULL
+                  OR NEW.dimension_route_policy_snapshot IS NOT NULL
+                  OR NEW.evaluation_profile_set_snapshot IS NOT NULL
+              )
+          )
+          OR (
+              NEW.strategy_schema_version = 'strategy-bundle-v2'
+              AND (
+                  NEW.dimension_route_policy_id IS NULL
+                  OR length(trim(NEW.dimension_route_policy_id)) = 0
+                  OR json_valid(NEW.dimension_schema_set_snapshot) = 0
+                  OR json_type(
+                      NEW.dimension_schema_set_snapshot, '$'
+                  ) <> 'object'
+                  OR json_type(
+                      NEW.dimension_schema_set_snapshot, '$.schemas'
+                  ) <> 'array'
+                  OR json_array_length(
+                      NEW.dimension_schema_set_snapshot, '$.schemas'
+                  ) < 1
+                  OR json_valid(NEW.label_field_set_snapshot) = 0
+                  OR json_type(
+                      NEW.label_field_set_snapshot, '$'
+                  ) <> 'object'
+                  OR NEW.resolved_schema_contract_version IS NULL
+                  OR length(
+                      trim(NEW.resolved_schema_contract_version)
+                  ) = 0
+                  OR NEW.dimension_route_policy_snapshot IS NOT NULL
+                  OR NEW.evaluation_profile_set_snapshot IS NOT NULL
+              )
+          )
+          OR (
+              NEW.strategy_schema_version = 'strategy-bundle-v3'
+              AND (
+                  NEW.prompt_b_version IS NOT NULL
+                  OR NEW.dimension_route_policy_id IS NULL
+                  OR length(trim(NEW.dimension_route_policy_id)) = 0
+                  OR json_valid(NEW.dimension_schema_set_snapshot) = 0
+                  OR json_type(
+                      NEW.dimension_schema_set_snapshot, '$'
+                  ) <> 'object'
+                  OR json_type(
+                      NEW.dimension_schema_set_snapshot, '$.schemas'
+                  ) <> 'array'
+                  OR json_array_length(
+                      NEW.dimension_schema_set_snapshot, '$.schemas'
+                  ) < 1
+                  OR json_valid(NEW.label_field_set_snapshot) = 0
+                  OR json_type(
+                      NEW.label_field_set_snapshot, '$'
+                  ) <> 'object'
+                  OR NEW.resolved_schema_contract_version IS NULL
+                  OR length(
+                      trim(NEW.resolved_schema_contract_version)
+                  ) = 0
+                  OR json_valid(
+                      NEW.dimension_route_policy_snapshot
+                  ) = 0
+                  OR json_type(
+                      NEW.dimension_route_policy_snapshot, '$'
+                  ) <> 'object'
+                  OR json_extract(
+                      NEW.dimension_route_policy_snapshot,
+                      '$.format_version'
+                  ) <> 'dimension-route-policy-snapshot-v1'
+                  OR json_type(
+                      NEW.dimension_route_policy_snapshot,
+                      '$.definition'
+                  ) <> 'object'
+                  OR length(json_extract(
+                      NEW.dimension_route_policy_snapshot,
+                      '$.canonical_hash'
+                  )) <> 64
+                  OR NEW.dimension_route_policy_id <> (
+                      json_extract(
+                          NEW.dimension_route_policy_snapshot,
+                          '$.policy_key'
+                      )
+                      || '@'
+                      || json_extract(
+                          NEW.dimension_route_policy_snapshot,
+                          '$.version'
+                      )
+                  )
+                  OR json_valid(
+                      NEW.evaluation_profile_set_snapshot
+                  ) = 0
+                  OR json_type(
+                      NEW.evaluation_profile_set_snapshot, '$'
+                  ) <> 'object'
+                  OR json_extract(
+                      NEW.evaluation_profile_set_snapshot,
+                      '$.format_version'
+                  ) <> 'evaluation-profile-set-v1'
+                  OR json_extract(
+                      NEW.evaluation_profile_set_snapshot,
+                      '$.execution_context'
+                  ) NOT IN ('calibration','production')
+                  OR json_type(
+                      NEW.evaluation_profile_set_snapshot,
+                      '$.profiles'
+                  ) <> 'object'
+                  OR NOT EXISTS (
+                      SELECT 1
+                      FROM json_each(
+                          NEW.evaluation_profile_set_snapshot,
+                          '$.profiles'
+                      )
+                  )
+                  OR length(json_extract(
+                      NEW.evaluation_profile_set_snapshot,
+                      '$.canonical_hash'
+                  )) <> 64
+              )
+          )
+        BEGIN
+            SELECT RAISE(
+                ABORT,
+                'StrategyBundle routed dimension contract is invalid'
+            );
+        END
+    """)
+
+
+def _migration_029_add_routed_strategy_bundles(
+    connection: Connection,
+) -> None:
+    tables = {
+        row[0]
+        for row in connection.exec_driver_sql(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )
+    }
+    if "strategy_bundles" not in tables:
+        violations = connection.exec_driver_sql(
+            "PRAGMA foreign_key_check"
+        ).all()
+        if violations:
+            raise RuntimeError(
+                "无 StrategyBundle 分叉库 foreign_key_check 失败："
+                f"{violations[:3]}"
+            )
+        return
+    columns = {
+        row[1]
+        for row in connection.exec_driver_sql(
+            "PRAGMA table_info(strategy_bundles)"
+        )
+    }
+    additions = (
+        ("dimension_route_policy_snapshot", "TEXT"),
+        ("evaluation_profile_set_snapshot", "TEXT"),
+    )
+    for column_name, definition in additions:
+        if column_name not in columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE strategy_bundles ADD COLUMN "
+                f"{column_name} {definition}"
+            )
+    invalid_existing = connection.exec_driver_sql("""
+        SELECT id
+        FROM strategy_bundles
+        WHERE strategy_schema_version NOT IN (
+                'strategy-bundle-v1','strategy-bundle-v2'
+              )
+           OR dimension_route_policy_snapshot IS NOT NULL
+           OR evaluation_profile_set_snapshot IS NOT NULL
+        LIMIT 1
+    """).first()
+    if invalid_existing is not None:
+        raise RuntimeError(
+            "迁移前 StrategyBundle 存在无法解释的 v3 冻结字段"
+        )
+    _install_v3_strategy_bundle_trigger(connection)
+    violations = connection.exec_driver_sql(
+        "PRAGMA foreign_key_check"
+    ).all()
+    if violations:
+        raise RuntimeError(
+            "v3 StrategyBundle 迁移 foreign_key_check 失败："
+            f"{violations[:3]}"
+        )
+
+
+def _install_dimension_calibration_triggers(
+    connection: Connection,
+) -> None:
+    trigger_names = (
+        "trg_dimension_calibration_runs_insert_guard",
+        "trg_dimension_calibration_runs_transition_guard",
+        "trg_dimension_calibration_runs_frozen_guard",
+        "trg_dimension_calibration_runs_terminal_guard",
+        "trg_dimension_calibration_runs_delete_guard",
+        "trg_dimension_calibration_items_insert_guard",
+        "trg_dimension_calibration_items_transition_guard",
+        "trg_dimension_calibration_items_frozen_guard",
+        "trg_dimension_calibration_items_terminal_guard",
+        "trg_dimension_calibration_items_delete_guard",
+    )
+    for trigger_name in trigger_names:
+        connection.exec_driver_sql(
+            f"DROP TRIGGER IF EXISTS {trigger_name}"
+        )
+    connection.exec_driver_sql("""
+        CREATE TRIGGER trg_dimension_calibration_runs_insert_guard
+        BEFORE INSERT ON dimension_calibration_runs
+        WHEN NEW.status <> 'queued'
+          OR NEW.processing <> 0
+          OR NEW.completed <> 0
+          OR NEW.core_fallback <> 0
+          OR NEW.blocked <> 0
+          OR NEW.unassessable <> 0
+          OR NEW.failed <> 0
+          OR NEW.finished_at IS NOT NULL
+        BEGIN
+            SELECT RAISE(
+                ABORT,
+                'DimensionCalibrationRun must start queued'
+            );
+        END
+    """)
+    connection.exec_driver_sql("""
+        CREATE TRIGGER trg_dimension_calibration_runs_transition_guard
+        BEFORE UPDATE OF status ON dimension_calibration_runs
+        WHEN NEW.status <> OLD.status
+         AND NOT (
+             (OLD.status = 'queued' AND NEW.status = 'running')
+             OR (
+                 OLD.status = 'running'
+                 AND NEW.status IN (
+                     'completed','partial_failed','failed'
+                 )
+             )
+         )
+        BEGIN
+            SELECT RAISE(
+                ABORT,
+                'DimensionCalibrationRun state transition is invalid'
+            );
+        END
+    """)
+    connection.exec_driver_sql("""
+        CREATE TRIGGER trg_dimension_calibration_runs_frozen_guard
+        BEFORE UPDATE ON dimension_calibration_runs
+        WHEN OLD.run_key IS NOT NEW.run_key
+          OR OLD.strategy_bundle_id IS NOT NEW.strategy_bundle_id
+          OR OLD.strategy_bundle_hash IS NOT NEW.strategy_bundle_hash
+          OR OLD.strategy_snapshot_json IS NOT NEW.strategy_snapshot_json
+          OR OLD.asset_manifest_json IS NOT NEW.asset_manifest_json
+          OR OLD.definition_hash IS NOT NEW.definition_hash
+          OR OLD.total IS NOT NEW.total
+          OR OLD.created_by IS NOT NEW.created_by
+          OR OLD.created_at IS NOT NEW.created_at
+        BEGIN
+            SELECT RAISE(
+                ABORT,
+                'DimensionCalibrationRun frozen fields are immutable'
+            );
+        END
+    """)
+    connection.exec_driver_sql("""
+        CREATE TRIGGER trg_dimension_calibration_runs_terminal_guard
+        BEFORE UPDATE ON dimension_calibration_runs
+        WHEN OLD.status IN ('completed','partial_failed','failed')
+        BEGIN
+            SELECT RAISE(
+                ABORT,
+                'DimensionCalibrationRun terminal record is immutable'
+            );
+        END
+    """)
+    connection.exec_driver_sql("""
+        CREATE TRIGGER trg_dimension_calibration_runs_delete_guard
+        BEFORE DELETE ON dimension_calibration_runs
+        BEGIN
+            SELECT RAISE(
+                ABORT,
+                'DimensionCalibrationRun cannot be deleted'
+            );
+        END
+    """)
+    connection.exec_driver_sql("""
+        CREATE TRIGGER trg_dimension_calibration_items_insert_guard
+        BEFORE INSERT ON dimension_calibration_items
+        WHEN NEW.status <> 'queued'
+          OR NEW.worker_id IS NOT NULL
+          OR NEW.resolution_snapshot_json IS NOT NULL
+          OR NEW.precheck_json IS NOT NULL
+          OR NEW.aesthetic_json IS NOT NULL
+          OR NEW.scoring_json IS NOT NULL
+          OR NEW.raw_response_a IS NOT NULL
+          OR NEW.raw_response_b IS NOT NULL
+          OR NEW.score IS NOT NULL
+          OR NEW.level IS NOT NULL
+          OR NEW.confidence IS NOT NULL
+          OR NEW.error_type IS NOT NULL
+          OR NEW.error_message <> ''
+          OR NEW.started_at IS NOT NULL
+          OR NEW.finished_at IS NOT NULL
+        BEGIN
+            SELECT RAISE(
+                ABORT,
+                'DimensionCalibrationItem must start queued'
+            );
+        END
+    """)
+    connection.exec_driver_sql("""
+        CREATE TRIGGER trg_dimension_calibration_items_transition_guard
+        BEFORE UPDATE OF status ON dimension_calibration_items
+        WHEN NEW.status <> OLD.status
+         AND NOT (
+             (OLD.status = 'queued' AND NEW.status = 'processing')
+             OR (
+                 OLD.status = 'processing'
+                 AND NEW.status IN (
+                     'completed','core_fallback','blocked',
+                     'unassessable','failed'
+                 )
+             )
+         )
+        BEGIN
+            SELECT RAISE(
+                ABORT,
+                'DimensionCalibrationItem state transition is invalid'
+            );
+        END
+    """)
+    connection.exec_driver_sql("""
+        CREATE TRIGGER trg_dimension_calibration_items_frozen_guard
+        BEFORE UPDATE ON dimension_calibration_items
+        WHEN OLD.run_id IS NOT NEW.run_id
+          OR OLD.asset_id IS NOT NEW.asset_id
+          OR OLD.asset_snapshot_json IS NOT NEW.asset_snapshot_json
+          OR OLD.created_at IS NOT NEW.created_at
+        BEGIN
+            SELECT RAISE(
+                ABORT,
+                'DimensionCalibrationItem frozen fields are immutable'
+            );
+        END
+    """)
+    connection.exec_driver_sql("""
+        CREATE TRIGGER trg_dimension_calibration_items_terminal_guard
+        BEFORE UPDATE ON dimension_calibration_items
+        WHEN OLD.status IN (
+            'completed','core_fallback','blocked','unassessable','failed'
+        )
+        BEGIN
+            SELECT RAISE(
+                ABORT,
+                'DimensionCalibrationItem terminal record is immutable'
+            );
+        END
+    """)
+    connection.exec_driver_sql("""
+        CREATE TRIGGER trg_dimension_calibration_items_delete_guard
+        BEFORE DELETE ON dimension_calibration_items
+        BEGIN
+            SELECT RAISE(
+                ABORT,
+                'DimensionCalibrationItem cannot be deleted'
+            );
+        END
+    """)
+
+
+def _ensure_dimension_calibration_registry_dependencies(
+    connection: Connection,
+) -> None:
+    """Add the current calibration candidates without mutating older versions."""
+    from ..dimension_route_registry import (
+        materialized_p2_dimension_schema_rows,
+        materialized_route_policy_rows,
+    )
+
+    schema_rows = materialized_p2_dimension_schema_rows()
+    core_row = next(
+        row for row in schema_rows if row["schema_type"] == "core"
+    )
+    product_row = next(
+        row for row in schema_rows if row["family_key"] == "product"
+    )
+    core = connection.exec_driver_sql(
+        """
+        SELECT id, canonical_hash
+        FROM dimension_schemas
+        WHERE schema_key = ? AND version = ?
+        """,
+        (core_row["schema_key"], core_row["version"]),
+    ).mappings().first()
+    if (
+        core is None
+        or core["canonical_hash"] != core_row["canonical_hash"]
+    ):
+        raise RuntimeError("维度校准依赖的 L0 核心维不存在或已损坏")
+    core_schema_id = int(core["id"])
+
+    existing_product = connection.exec_driver_sql(
+        """
+        SELECT schema_type, family_key, display_name, status,
+               core_schema_id, definition_json, canonical_hash
+        FROM dimension_schemas
+        WHERE schema_key = ? AND version = ?
+        """,
+        (product_row["schema_key"], product_row["version"]),
+    ).mappings().first()
+    expected_product = {
+        "schema_type": product_row["schema_type"],
+        "family_key": product_row["family_key"],
+        "display_name": product_row["display_name"],
+        "status": product_row["status"],
+        "core_schema_id": core_schema_id,
+        "definition_json": product_row["definition_json"],
+        "canonical_hash": product_row["canonical_hash"],
+    }
+    if existing_product is None:
+        connection.exec_driver_sql(
+            """
+            INSERT INTO dimension_schemas (
+                schema_key, version, schema_type, family_key,
+                display_name, status, core_schema_id,
+                definition_json, canonical_hash, created_by
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                product_row["schema_key"],
+                product_row["version"],
+                product_row["schema_type"],
+                product_row["family_key"],
+                product_row["display_name"],
+                product_row["status"],
+                core_schema_id,
+                product_row["definition_json"],
+                product_row["canonical_hash"],
+                "system:dimension-calibration-bootstrap",
+            ),
+        )
+    elif dict(existing_product) != expected_product:
+        raise RuntimeError(
+            "已存在的维度校准单品候选包与迁移定义不一致"
+        )
+
+    for policy_row in materialized_route_policy_rows():
+        existing_policy = connection.exec_driver_sql(
+            """
+            SELECT display_name, status, definition_json, canonical_hash
+            FROM dimension_route_policies
+            WHERE policy_key = ? AND version = ?
+            """,
+            (policy_row["policy_key"], policy_row["version"]),
+        ).mappings().first()
+        expected_policy = {
+            key: policy_row[key]
+            for key in (
+                "display_name",
+                "status",
+                "definition_json",
+                "canonical_hash",
+            )
+        }
+        if existing_policy is None:
+            connection.exec_driver_sql(
+                """
+                INSERT INTO dimension_route_policies (
+                    policy_key, version, display_name, status,
+                    definition_json, canonical_hash, created_by
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    policy_row["policy_key"],
+                    policy_row["version"],
+                    policy_row["display_name"],
+                    policy_row["status"],
+                    policy_row["definition_json"],
+                    policy_row["canonical_hash"],
+                    "system:dimension-calibration-bootstrap",
+                ),
+            )
+        elif dict(existing_policy) != expected_policy:
+            raise RuntimeError(
+                "已存在的维度校准路由策略与迁移定义不一致"
+            )
+
+
+def _migration_030_add_dimension_calibration_results(
+    connection: Connection,
+) -> None:
+    _ensure_dimension_calibration_registry_dependencies(connection)
+    connection.exec_driver_sql("""
+        CREATE TABLE IF NOT EXISTS dimension_calibration_runs (
+            id INTEGER PRIMARY KEY,
+            run_key VARCHAR(120) NOT NULL,
+            strategy_bundle_id INTEGER NOT NULL,
+            strategy_bundle_hash VARCHAR(64) NOT NULL,
+            strategy_snapshot_json TEXT NOT NULL,
+            asset_manifest_json TEXT NOT NULL,
+            definition_hash VARCHAR(64) NOT NULL,
+            status VARCHAR(30) NOT NULL DEFAULT 'queued',
+            total INTEGER NOT NULL,
+            processing INTEGER NOT NULL DEFAULT 0,
+            completed INTEGER NOT NULL DEFAULT 0,
+            core_fallback INTEGER NOT NULL DEFAULT 0,
+            blocked INTEGER NOT NULL DEFAULT 0,
+            unassessable INTEGER NOT NULL DEFAULT 0,
+            failed INTEGER NOT NULL DEFAULT 0,
+            created_by VARCHAR(80) NOT NULL DEFAULT 'system',
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            finished_at DATETIME,
+            CONSTRAINT uq_dimension_calibration_runs_key UNIQUE (run_key),
+            CONSTRAINT ck_dimension_calibration_runs_key
+                CHECK (length(trim(run_key)) > 0),
+            CONSTRAINT ck_dimension_calibration_runs_status
+                CHECK (status IN (
+                    'queued','running','completed',
+                    'partial_failed','failed'
+                )),
+            CONSTRAINT ck_dimension_calibration_runs_total
+                CHECK (total BETWEEN 1 AND 100),
+            CONSTRAINT ck_dimension_calibration_runs_counts
+                CHECK (
+                    processing >= 0 AND completed >= 0
+                    AND core_fallback >= 0 AND blocked >= 0
+                    AND unassessable >= 0 AND failed >= 0
+                    AND processing + completed + core_fallback
+                        + blocked + unassessable + failed <= total
+                ),
+            CONSTRAINT ck_dimension_calibration_runs_bundle_hash
+                CHECK (
+                    length(strategy_bundle_hash) = 64
+                    AND strategy_bundle_hash = lower(strategy_bundle_hash)
+                    AND strategy_bundle_hash
+                        NOT GLOB '*[^0-9a-f]*'
+                ),
+            CONSTRAINT ck_dimension_calibration_runs_definition_hash
+                CHECK (
+                    length(definition_hash) = 64
+                    AND definition_hash = lower(definition_hash)
+                    AND definition_hash NOT GLOB '*[^0-9a-f]*'
+                ),
+            CONSTRAINT ck_dimension_calibration_runs_strategy_snapshot
+                CHECK (
+                    json_valid(strategy_snapshot_json)
+                    AND json_type(strategy_snapshot_json, '$') = 'object'
+                ),
+            CONSTRAINT ck_dimension_calibration_runs_asset_manifest
+                CHECK (
+                    json_valid(asset_manifest_json)
+                    AND json_type(asset_manifest_json, '$') = 'object'
+                ),
+            FOREIGN KEY(strategy_bundle_id)
+                REFERENCES strategy_bundles(id) ON DELETE RESTRICT
+        )
+    """)
+    connection.exec_driver_sql("""
+        CREATE TABLE IF NOT EXISTS dimension_calibration_items (
+            id INTEGER PRIMARY KEY,
+            run_id INTEGER NOT NULL,
+            asset_id INTEGER NOT NULL,
+            asset_snapshot_json TEXT NOT NULL,
+            status VARCHAR(30) NOT NULL DEFAULT 'queued',
+            worker_id VARCHAR(120),
+            resolution_snapshot_json TEXT,
+            precheck_json TEXT,
+            aesthetic_json TEXT,
+            scoring_json TEXT,
+            raw_response_a TEXT,
+            raw_response_b TEXT,
+            score FLOAT,
+            level VARCHAR(10),
+            confidence FLOAT,
+            needs_review BOOLEAN NOT NULL DEFAULT 0,
+            error_type VARCHAR(40),
+            error_message TEXT NOT NULL DEFAULT '',
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            started_at DATETIME,
+            finished_at DATETIME,
+            CONSTRAINT uq_dimension_calibration_run_asset
+                UNIQUE (run_id, asset_id),
+            CONSTRAINT ck_dimension_calibration_items_status
+                CHECK (status IN (
+                    'queued','processing','completed','core_fallback',
+                    'blocked','unassessable','failed'
+                )),
+            CONSTRAINT ck_dimension_calibration_items_asset_snapshot
+                CHECK (
+                    json_valid(asset_snapshot_json)
+                    AND json_type(asset_snapshot_json, '$') = 'object'
+                ),
+            CONSTRAINT ck_dimension_calibration_items_resolution
+                CHECK (
+                    resolution_snapshot_json IS NULL
+                    OR (
+                        json_valid(resolution_snapshot_json)
+                        AND json_type(
+                            resolution_snapshot_json, '$'
+                        ) = 'object'
+                    )
+                ),
+            CONSTRAINT ck_dimension_calibration_items_precheck
+                CHECK (
+                    precheck_json IS NULL
+                    OR (
+                        json_valid(precheck_json)
+                        AND json_type(precheck_json, '$') = 'object'
+                    )
+                ),
+            CONSTRAINT ck_dimension_calibration_items_aesthetic
+                CHECK (
+                    aesthetic_json IS NULL
+                    OR (
+                        json_valid(aesthetic_json)
+                        AND json_type(aesthetic_json, '$') = 'object'
+                    )
+                ),
+            CONSTRAINT ck_dimension_calibration_items_scoring
+                CHECK (
+                    scoring_json IS NULL
+                    OR (
+                        json_valid(scoring_json)
+                        AND json_type(scoring_json, '$') = 'object'
+                    )
+                ),
+            CONSTRAINT ck_dimension_calibration_items_level
+                CHECK (
+                    level IS NULL
+                    OR level IN ('L1','L2','L3','L4','L5')
+                ),
+            CONSTRAINT ck_dimension_calibration_items_lifecycle
+                CHECK (
+                    (
+                        status = 'queued'
+                        AND worker_id IS NULL
+                        AND started_at IS NULL
+                        AND finished_at IS NULL
+                    )
+                    OR (
+                        status = 'processing'
+                        AND length(trim(worker_id)) > 0
+                        AND started_at IS NOT NULL
+                        AND finished_at IS NULL
+                    )
+                    OR (
+                        status IN (
+                            'completed','core_fallback','blocked',
+                            'unassessable','failed'
+                        )
+                        AND length(trim(worker_id)) > 0
+                        AND started_at IS NOT NULL
+                        AND finished_at IS NOT NULL
+                    )
+                ),
+            CONSTRAINT ck_dimension_calibration_items_terminal_payload
+                CHECK (
+                    (
+                        status = 'completed'
+                        AND resolution_snapshot_json IS NOT NULL
+                        AND precheck_json IS NOT NULL
+                        AND aesthetic_json IS NOT NULL
+                        AND scoring_json IS NOT NULL
+                        AND score IS NOT NULL
+                        AND level IS NOT NULL
+                        AND confidence IS NOT NULL
+                        AND error_type IS NULL
+                        AND error_message = ''
+                    )
+                    OR (
+                        status IN (
+                            'core_fallback','blocked','unassessable'
+                        )
+                        AND resolution_snapshot_json IS NOT NULL
+                        AND precheck_json IS NOT NULL
+                        AND aesthetic_json IS NULL
+                        AND scoring_json IS NULL
+                        AND score IS NULL
+                        AND level IS NULL
+                        AND confidence IS NULL
+                        AND error_type IS NULL
+                        AND error_message = ''
+                    )
+                    OR (
+                        status = 'failed'
+                        AND length(trim(error_type)) > 0
+                        AND length(trim(error_message)) > 0
+                        AND aesthetic_json IS NULL
+                        AND scoring_json IS NULL
+                        AND score IS NULL
+                        AND level IS NULL
+                        AND confidence IS NULL
+                    )
+                    OR status IN ('queued','processing')
+                ),
+            FOREIGN KEY(run_id)
+                REFERENCES dimension_calibration_runs(id)
+                ON DELETE RESTRICT,
+            FOREIGN KEY(asset_id)
+                REFERENCES assets(id)
+                ON DELETE RESTRICT
+        )
+    """)
+    connection.exec_driver_sql(
+        "CREATE INDEX IF NOT EXISTS "
+        "ix_dimension_calibration_runs_bundle "
+        "ON dimension_calibration_runs(strategy_bundle_id)"
+    )
+    connection.exec_driver_sql(
+        "CREATE INDEX IF NOT EXISTS "
+        "ix_dimension_calibration_runs_status "
+        "ON dimension_calibration_runs(status)"
+    )
+    connection.exec_driver_sql(
+        "CREATE INDEX IF NOT EXISTS "
+        "ix_dimension_calibration_items_run "
+        "ON dimension_calibration_items(run_id)"
+    )
+    connection.exec_driver_sql(
+        "CREATE INDEX IF NOT EXISTS "
+        "ix_dimension_calibration_items_asset "
+        "ON dimension_calibration_items(asset_id)"
+    )
+    connection.exec_driver_sql(
+        "CREATE INDEX IF NOT EXISTS "
+        "ix_dimension_calibration_items_status "
+        "ON dimension_calibration_items(status)"
+    )
+    _install_dimension_calibration_triggers(connection)
+    violations = connection.exec_driver_sql(
+        "PRAGMA foreign_key_check"
+    ).all()
+    if violations:
+        raise RuntimeError(
+            "维度校准持久化迁移 foreign_key_check 失败："
+            f"{violations[:3]}"
+        )
+
+
 MIGRATIONS = [
     Migration(1, "add_sample_expected_level", _migration_001_add_sample_expected_level),
     Migration(2, "add_review_corrections", _migration_002_add_review_corrections),
@@ -4304,6 +5310,21 @@ MIGRATIONS = [
         27,
         "bind_dimension_contract_to_strategy",
         _migration_027_bind_dimension_contract_to_strategy,
+    ),
+    Migration(
+        28,
+        "add_dimension_route_policies",
+        _migration_028_add_dimension_route_policies,
+    ),
+    Migration(
+        29,
+        "add_routed_strategy_bundles",
+        _migration_029_add_routed_strategy_bundles,
+    ),
+    Migration(
+        30,
+        "add_dimension_calibration_results",
+        _migration_030_add_dimension_calibration_results,
     ),
 ]
 
