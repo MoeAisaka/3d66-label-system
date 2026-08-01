@@ -2,6 +2,7 @@ import {
   ArrowRight,
   CheckCircle,
   Clock,
+  DownloadSimple,
   GearSix,
   Play,
   Prohibit,
@@ -16,11 +17,12 @@ import { PageHeader } from "@/components/app-shell"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
-import { api, jsonBody } from "@/lib/api"
+import { api, downloadApi, jsonBody } from "@/lib/api"
 import type {
   AuditEvent,
   AutomationPolicy,
   AutomationRun,
+  EvaluationCategoryProfile,
   IntegrationStatus,
   LabelRelease,
   ModelBenchmark,
@@ -568,12 +570,21 @@ export function ReleaseWorkspacePage({ view }: { view: "decisions" | "metrics" |
     queryKey: ["integration-status"],
     queryFn: () => api<IntegrationStatus>("/api/integration-status"),
   })
+  const categoryProfiles = useQuery({
+    queryKey: ["evaluation-categories"],
+    queryFn: () => api<{ items: EvaluationCategoryProfile[] }>("/api/evaluation-categories"),
+  })
   const queryClient = useQueryClient()
   const [metricPromptId, setMetricPromptId] = useState("")
   const [taskSetKey, setTaskSetKey] = useState("")
   const [metricSource, setMetricSource] = useState<"batch" | "evaluations">("batch")
   const [batchKey, setBatchKey] = useState("")
   const [evaluationIds, setEvaluationIds] = useState("")
+  const [exportFormat, setExportFormat] = useState<"xlsx" | "csv" | "json">("xlsx")
+  const [exportScope, setExportScope] = useState<"current" | "history">("current")
+  const [exportCategory, setExportCategory] = useState("")
+  const [exportPublishedFrom, setExportPublishedFrom] = useState("")
+  const [exportPublishedTo, setExportPublishedTo] = useState("")
   const selectedMetricPromptId = Number(metricPromptId || items[0]?.id || 0)
   useEffect(() => {
     if (!metricPromptId && items[0]) setMetricPromptId(String(items[0].id))
@@ -631,6 +642,32 @@ export function ReleaseWorkspacePage({ view }: { view: "decisions" | "metrics" |
     },
     onError: (error) => toast.error(error.message),
   })
+  const exportLabels = useMutation({
+    mutationFn: () => {
+      return downloadApi(
+        "/api/published-labels/export",
+        `published-labels.${exportFormat}`,
+        {
+          method: "POST",
+          ...jsonBody({
+            format: exportFormat,
+            scope: exportScope,
+            category_key: exportCategory || null,
+            published_from: exportPublishedFrom
+              ? new Date(`${exportPublishedFrom}T00:00:00`).toISOString()
+              : null,
+            published_to: exportPublishedTo
+              ? new Date(`${exportPublishedTo}T23:59:59.999`).toISOString()
+              : null,
+          }),
+        },
+      )
+    },
+    onSuccess: ({ rowCount }) => {
+      toast.success(rowCount == null ? "正式标签已导出" : `已导出 ${rowCount} 条正式标签`)
+    },
+    onError: (error) => toast.error(error.message),
+  })
 
   if (view === "decisions") {
     const pending = (regressions.data?.items ?? []).filter(
@@ -665,6 +702,75 @@ export function ReleaseWorkspacePage({ view }: { view: "decisions" | "metrics" |
                 release.status === "pending_review" && me.data?.is_admin ? <Button key="publish" size="sm" onClick={() => publishLabel.mutate(release.id)} disabled={publishLabel.isPending}>二审通过并发布<CheckCircle /></Button> : <span key="noop" className="text-xs text-[var(--muted)]">{release.status === "published" ? "已进入消费流" : "等待管理员"}</span>,
               ])}
             />
+            <div className="grid gap-4 border-t border-[var(--line-strong)] bg-[#fafbf8] px-5 py-5 md:grid-cols-2 xl:grid-cols-4 xl:items-end">
+              <label>
+                <span className="mb-2 block text-xs font-semibold">导出范围</span>
+                <select
+                  className="h-11 w-full border border-[var(--line-strong)] bg-white px-3 text-sm"
+                  value={exportScope}
+                  onChange={(event) => setExportScope(event.target.value as "current" | "history")}
+                >
+                  <option value="current">当前生效标签</option>
+                  <option value="history">全部历史版本</option>
+                </select>
+              </label>
+              <label>
+                <span className="mb-2 block text-xs font-semibold">文件格式</span>
+                <select
+                  className="h-11 w-full border border-[var(--line-strong)] bg-white px-3 text-sm"
+                  value={exportFormat}
+                  onChange={(event) => setExportFormat(event.target.value as "xlsx" | "csv" | "json")}
+                >
+                  <option value="xlsx">Excel（推荐）</option>
+                  <option value="csv">CSV</option>
+                  <option value="json">JSON</option>
+                </select>
+              </label>
+              <label>
+                <span className="mb-2 block text-xs font-semibold">类目筛选</span>
+                <select
+                  className="h-11 w-full border border-[var(--line-strong)] bg-white px-3 text-sm"
+                  value={exportCategory}
+                  onChange={(event) => setExportCategory(event.target.value)}
+                >
+                  <option value="">全部类目</option>
+                  {(categoryProfiles.data?.items ?? []).map((category) => (
+                    <option key={category.category_key} value={category.category_key}>
+                      {category.display_name}（{category.category_key}）
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                <span className="mb-2 block text-xs font-semibold">发布时间起</span>
+                <Input
+                  type="date"
+                  value={exportPublishedFrom}
+                  max={exportPublishedTo || undefined}
+                  onChange={(event) => setExportPublishedFrom(event.target.value)}
+                />
+              </label>
+              <label>
+                <span className="mb-2 block text-xs font-semibold">发布时间止</span>
+                <Input
+                  type="date"
+                  value={exportPublishedTo}
+                  min={exportPublishedFrom || undefined}
+                  onChange={(event) => setExportPublishedTo(event.target.value)}
+                />
+              </label>
+              <Button
+                type="button"
+                onClick={() => exportLabels.mutate()}
+                disabled={exportLabels.isPending}
+              >
+                <DownloadSimple />
+                {exportLabels.isPending ? "正在生成" : "下载正式标签"}
+              </Button>
+              <p className="text-xs leading-5 text-[var(--muted)] md:col-span-2 xl:col-span-3">
+                只导出已通过二审的正式标签；当前生效范围不会包含已被新版本替代的记录。单次最多 10,000 条。
+              </p>
+            </div>
           </section>
           <DataTable
             loading={regressions.isLoading}

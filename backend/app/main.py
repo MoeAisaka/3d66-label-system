@@ -197,6 +197,7 @@ from .label_governance import (
     release_payload,
     rollback_release,
 )
+from .label_export import build_export
 from .review_panel import (
     KEY_FIELD_PATHS,
     ReviewPanelRevisionConflict,
@@ -440,6 +441,28 @@ class LabelReleaseRequest(BaseModel):
 
 class LabelRollbackRequest(BaseModel):
     rollback_key: str = Field(min_length=1, max_length=160)
+
+
+class PublishedLabelExportRequest(BaseModel):
+    format: Literal["xlsx", "csv", "json"] = "xlsx"
+    scope: Literal["current", "history"] = "current"
+    category_key: str | None = Field(default=None, pattern=CATEGORY_KEY_PATTERN.pattern)
+    published_from: datetime | None = None
+    published_to: datetime | None = None
+
+    @model_validator(mode="after")
+    def validate_date_range(self) -> "PublishedLabelExportRequest":
+        if self.published_from is None or self.published_to is None:
+            return self
+        start = self.published_from
+        end = self.published_to
+        if start.tzinfo is None:
+            start = start.replace(tzinfo=timezone.utc)
+        if end.tzinfo is None:
+            end = end.replace(tzinfo=timezone.utc)
+        if start > end:
+            raise ValueError("发布时间起点不能晚于终点")
+        return self
 
 
 class ConsumerCheckpointRequest(BaseModel):
@@ -5987,6 +6010,86 @@ def integration_status(_user: User = Depends(require_permission("releases:read")
         },
         "external_writes_enabled": False,
     }
+
+
+@app.post(
+    "/api/published-labels/export",
+    response_class=Response,
+    responses={
+        200: {
+            "description": "正式标签导出文件",
+            "content": {
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": {},
+                "text/csv": {},
+                "application/json": {},
+            },
+            "headers": {
+                "Content-Disposition": {
+                    "description": "附件文件名",
+                    "schema": {"type": "string"},
+                },
+                "X-Export-Row-Count": {
+                    "description": "导出的正式标签行数",
+                    "schema": {"type": "integer"},
+                },
+            },
+        },
+        413: {"description": "导出超过 10,000 条"},
+    },
+)
+def export_published_labels(
+    payload: PublishedLabelExportRequest,
+    user: User = Depends(require_permission("releases:read")),
+    db: Session = Depends(get_db),
+) -> Response:
+    statement = select(PublishedLabel).order_by(
+        PublishedLabel.content_key.asc(),
+        PublishedLabel.version.desc(),
+        PublishedLabel.id.desc(),
+    )
+    if payload.scope == "current":
+        statement = statement.where(PublishedLabel.status == "published")
+    if payload.category_key is not None:
+        statement = statement.where(PublishedLabel.category_key == payload.category_key)
+    if payload.published_from is not None:
+        statement = statement.where(PublishedLabel.published_at >= payload.published_from)
+    if payload.published_to is not None:
+        statement = statement.where(PublishedLabel.published_at <= payload.published_to)
+    labels = db.scalars(statement.limit(10_001)).all()
+    if len(labels) > 10_000:
+        raise HTTPException(status_code=413, detail="导出超过 10000 条，请按类目或发布时间缩小范围")
+    export = build_export(labels, format=payload.format, scope=payload.scope)
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    category_fragment = payload.category_key or "all"
+    filename = f"published-labels-{payload.scope}-{category_fragment}-{timestamp}.{export.extension}"
+    append_audit_event(
+        db,
+        category="label_export",
+        action="downloaded",
+        subject_type="published_labels",
+        subject_id=f"{payload.scope}:{category_fragment}:{timestamp}",
+        actor=user.username,
+        payload={
+            "format": payload.format,
+            "scope": payload.scope,
+            "category_key": payload.category_key,
+            "published_from": payload.published_from.isoformat() if payload.published_from else None,
+            "published_to": payload.published_to.isoformat() if payload.published_to else None,
+            "row_count": len(labels),
+        },
+        event_key=f"label-export:{user.id}:{uuid.uuid4().hex}",
+    )
+    db.commit()
+    return Response(
+        content=export.content,
+        media_type=export.media_type,
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "X-Export-Row-Count": str(len(labels)),
+            "X-Content-Type-Options": "nosniff",
+            "Cache-Control": "no-store",
+        },
+    )
 
 
 def _consumer_label_payload(label: PublishedLabel) -> dict[str, Any]:

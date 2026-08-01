@@ -78,6 +78,54 @@ export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   return response.json() as Promise<T>
 }
 
+function downloadFilename(response: Response, fallback: string): string {
+  const disposition = response.headers.get("Content-Disposition") ?? ""
+  const utf8 = disposition.match(/filename\*=UTF-8''([^;]+)/i)?.[1]
+  const plain = disposition.match(/filename="?([^";]+)"?/i)?.[1]
+  const encoded = utf8 ?? plain
+  if (!encoded) return fallback
+  try {
+    return decodeURIComponent(encoded)
+  } catch {
+    return fallback
+  }
+}
+
+export async function downloadApi(
+  path: string,
+  fallbackFilename: string,
+  init: RequestInit = {},
+): Promise<{ filename: string; rowCount: number | null }> {
+  const headers = new Headers(init.headers)
+  if (init.body && !(init.body instanceof FormData) && !headers.has("Content-Type")) {
+    headers.set("Content-Type", "application/json")
+  }
+  const response = await fetch(path, { ...init, headers, credentials: "include" })
+  if (!response.ok) {
+    let message = `导出失败 (${response.status})`
+    try {
+      const data = await response.json() as { detail?: unknown }
+      if (typeof data.detail === "string") message = data.detail
+    } catch {
+      // 保留通用错误信息
+    }
+    throw new ApiError(message, response.status)
+  }
+  const blob = await response.blob()
+  const objectUrl = URL.createObjectURL(blob)
+  const anchor = document.createElement("a")
+  const filename = downloadFilename(response, fallbackFilename)
+  anchor.href = objectUrl
+  anchor.download = filename
+  document.body.appendChild(anchor)
+  anchor.click()
+  anchor.remove()
+  URL.revokeObjectURL(objectUrl)
+  const rawCount = response.headers.get("X-Export-Row-Count")
+  const parsedCount = rawCount == null ? null : Number(rawCount)
+  return { filename, rowCount: Number.isFinite(parsedCount) ? parsedCount : null }
+}
+
 export function jsonBody(value: unknown): RequestInit {
   return { body: JSON.stringify(value) }
 }

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+import csv
+import io
+import zipfile
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
@@ -14,9 +17,11 @@ from sqlalchemy.pool import StaticPool
 from app import main
 from app.database import Base, get_db
 from app.main import app, current_user
+from app.label_export import build_export
 from app.migrations import run_migrations
 from app.models import (
     Asset,
+    AuditEvent,
     ContentIngressEvent,
     EvaluationJob,
     EvaluationResult,
@@ -228,3 +233,120 @@ def test_ingress_awaits_material_and_outbox_is_append_only(
         db.rollback()
     finally:
         _close(engine, db)
+
+
+def test_operator_can_export_current_labels_and_version_history() -> None:
+    engine, db, user, result = _database()
+    client = _client(db, user)
+    try:
+        release = client.post(
+            "/api/label-releases",
+            json={
+                "release_key": "export-release-1",
+                "evaluation_id": result.id,
+                "content_key": None,
+            },
+        ).json()["release"]
+        client.post(f"/api/label-releases/{release['id']}/approve-and-publish")
+        first = db.scalar(
+            select(PublishedLabel).where(PublishedLabel.release_id == release["id"])
+        )
+        assert first is not None
+        client.post(
+            f"/api/published-labels/{first.id}/rollback",
+            json={"rollback_key": "export-rollback-1"},
+        )
+
+        current_csv = client.post(
+            "/api/published-labels/export",
+            json={"format": "csv", "scope": "current", "category_key": "space_image"},
+        )
+        assert current_csv.status_code == 200
+        assert current_csv.headers["content-disposition"].endswith('.csv"')
+        assert current_csv.headers["x-export-row-count"] == "1"
+        csv_rows = list(csv.DictReader(io.StringIO(current_csv.content.decode("utf-8-sig"))))
+        assert len(csv_rows) == 1
+        assert csv_rows[0]["content_key"] == first.content_key
+        assert csv_rows[0]["status"] == "published"
+        assert csv_rows[0]["level"] == "L2"
+        assert "raw_response" not in current_csv.text
+
+        history_json = client.post(
+            "/api/published-labels/export",
+            json={"format": "json", "scope": "history"},
+        )
+        assert history_json.status_code == 200
+        assert history_json.json()["schema_version"] == "published-label-export-v1"
+        assert history_json.json()["count"] == 2
+        assert {item["status"] for item in history_json.json()["items"]} == {
+            "published",
+            "superseded",
+        }
+
+        workbook = client.post(
+            "/api/published-labels/export",
+            json={"format": "xlsx", "scope": "current"},
+        )
+        assert workbook.status_code == 200
+        assert workbook.content.startswith(b"PK")
+        with zipfile.ZipFile(io.BytesIO(workbook.content)) as archive:
+            assert archive.testzip() is None
+            assert "xl/worksheets/sheet1.xml" in archive.namelist()
+            sheet = archive.read("xl/worksheets/sheet1.xml").decode("utf-8")
+            assert "正式标签" not in sheet
+            assert "L2" in sheet
+            assert "raw_response" not in sheet
+        export_audits = db.scalars(
+            select(AuditEvent)
+            .where(
+                AuditEvent.category == "label_export",
+                AuditEvent.action == "downloaded",
+            )
+            .order_by(AuditEvent.id)
+        ).all()
+        assert len(export_audits) == 3
+        assert [json.loads(item.payload_json)["row_count"] for item in export_audits] == [
+            1,
+            2,
+            1,
+        ]
+    finally:
+        _close(engine, db)
+
+
+def test_label_export_requires_release_read_permission_and_valid_filters() -> None:
+    engine, db, user, _result = _database()
+    client = _client(db, user)
+    try:
+        app.dependency_overrides.pop(current_user)
+        assert client.post("/api/published-labels/export", json={}).status_code == 401
+        app.dependency_overrides[current_user] = lambda: user
+        assert client.post(
+            "/api/published-labels/export", json={"category_key": "INVALID"}
+        ).status_code == 422
+        assert client.post(
+            "/api/published-labels/export",
+            json={
+                "published_from": "2026-08-02T00:00:00Z",
+                "published_to": "2026-08-01T00:00:00Z",
+            },
+        ).status_code == 422
+    finally:
+        _close(engine, db)
+
+
+def test_csv_export_neutralizes_spreadsheet_formula_prefixes() -> None:
+    label = PublishedLabel(
+        release_id=1,
+        content_key="=2+3",
+        category_key="space_image",
+        version=1,
+        label_schema_version="published-label-v1",
+        label_payload_json=json.dumps({"level": "L1", "score": 99}),
+        payload_hash="a" * 64,
+        status="published",
+        published_at=datetime.now(timezone.utc),
+    )
+    export = build_export([label], format="csv", scope="current")
+    row = next(csv.DictReader(io.StringIO(export.content.decode("utf-8-sig"))))
+    assert row["content_key"] == "'=2+3"

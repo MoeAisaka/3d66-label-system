@@ -1283,3 +1283,4 @@ npm.cmd run build
 - 上游和下游使用独立凭据：`CONTENT_INGRESS_TOKEN` / `content-ingress.token` 与
   `LABEL_CONSUMER_TOKEN` / `label-consumer.token`，避免单侧凭据泄露扩大权限。
 - ADR-0029 固化了三层标签、事件幂等、发布门禁、cursor 对账和最终一致性合同。
+- 发布工作台现已提供正式标签手动导出：当前生效/全部历史版本、类目和发布时间筛选，支持 XLSX、CSV、JSON。导出只读取 `PublishedLabel`，要求 `releases:read`，单次最多 10,000 条并写入只追加审计；CSV 已防公式注入。
