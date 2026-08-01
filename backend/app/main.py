@@ -3150,6 +3150,18 @@ def delete_material_package(
         return {"package_id": package.id, "deleted": True, "deleted_assets": 0, "history_retained": True}
     asset_ids = list(dict.fromkeys(item.asset_id for item in package.items))
     if not asset_ids:
+        package.status = "deleted"
+        append_audit_event(
+            db,
+            category="materials",
+            action="material_package_deleted",
+            subject_type="material_package",
+            subject_id=package.id,
+            actor=user.username,
+            payload={"asset_ids": [], "history_retained": True},
+            event_key=f"material-package:{package.id}:deleted",
+        )
+        db.commit()
         return {"package_id": package.id, "deleted": True, "deleted_assets": 0, "history_retained": True}
     result = _soft_delete_assets(db, asset_ids=asset_ids, actor=user.username, source=f"package:{package_id}")
     package.status = "deleted"
