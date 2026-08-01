@@ -174,11 +174,18 @@ from .regression import (
     SAMPLE_ROLES,
     complete_paired_regression_item,
     dimension_contract_for_result,
+    fail_regression_item,
     paired_gate_policy,
     refresh_paired_regression_run,
     reviewed_truth_snapshot,
     latest_review_for_result,
     truth_from_result,
+)
+from .evaluation_credentials import (
+    default_evaluation_model,
+    job_has_required_credentials,
+    job_primary_model,
+    model_has_credentials,
 )
 from .prompt_metrics import (
     calculate_prompt_metrics,
@@ -2082,6 +2089,8 @@ def queue_status(
     running = {queue: 0 for queue in QUEUE_CLASSES}
     dispatchable = {queue: 0 for queue in QUEUE_CLASSES}
     delayed = {queue: 0 for queue in QUEUE_CLASSES}
+    credential_blocked = {queue: 0 for queue in QUEUE_CLASSES}
+    control_blocked = {queue: 0 for queue in QUEUE_CLASSES}
     rows = db.execute(
         select(
             EvaluationJob.queue_class,
@@ -2108,10 +2117,27 @@ def queue_status(
             ).where(CircuitBreaker.state == "open")
         ).all()
     )
+    configured_model = default_evaluation_model(db)
+    control = db.get(EvaluationControl, 1)
+    control_paused = bool(control and control.paused)
     now = datetime.now(timezone.utc)
-    for job in db.scalars(
+    queued_jobs = db.scalars(
         select(EvaluationJob).where(EvaluationJob.status == "queued")
-    ):
+    ).all()
+    if configured_model is None:
+        configured_model = next(
+            (
+                model
+                for job in queued_jobs
+                if (
+                    (model := job_primary_model(db, job)) is not None
+                    and model_has_credentials(model)
+                )
+            ),
+            None,
+        )
+    credentials_configured = configured_model is not None
+    for job in queued_jobs:
         queue = job.queue_class or "production_batch"
         strategy_blocked = (
             job.strategy_bundle_id is not None
@@ -2132,15 +2158,28 @@ def queue_status(
             blocked[queue] += 1
         if retry_delayed:
             delayed[queue] += 1
-        if not breaker_blocked and not retry_delayed:
+        otherwise_dispatchable = not breaker_blocked and not retry_delayed
+        job_credentials_configured = job_has_required_credentials(
+            db,
+            job,
+            fallback_model=configured_model,
+        )
+        if otherwise_dispatchable and not job_credentials_configured:
+            credential_blocked[queue] += 1
+        if otherwise_dispatchable and control_paused:
+            control_blocked[queue] += 1
+        if (
+            otherwise_dispatchable
+            and job_credentials_configured
+            and not control_paused
+        ):
             dispatchable[queue] += 1
-    model = db.scalar(
-        select(ModelConfig)
-        .where(ModelConfig.active.is_(True))
-        .order_by(ModelConfig.id.asc())
-    )
     policy = QueuePolicy(
-        global_limit=model.max_concurrency if model else 2
+        global_limit=(
+            configured_model.max_concurrency
+            if configured_model is not None
+            else 2
+        )
     )
     persisted = db.get(QueueSchedulerState, 1)
     scheduler = DeterministicQueueScheduler(
@@ -2184,8 +2223,12 @@ def queue_status(
         item["pending"] = pending[queue]
         item["pending_total"] = pending[queue]
         item["blocked_by_breaker"] = blocked[queue]
+        item["blocked_by_credentials"] = credential_blocked[queue]
+        item["blocked_by_control"] = control_blocked[queue]
         item["delayed_by_retry_after"] = delayed[queue]
         item["dispatchable_pending"] = dispatchable[queue]
+    snapshot["credentials_configured"] = credentials_configured
+    snapshot["control_paused"] = control_paused
     return snapshot
 
 
@@ -3089,7 +3132,7 @@ def _asset_evaluation_status(
         return "queued"
     if any(job.status == "completed" for job in current_jobs):
         return "evaluated_current"
-    if any(job.status in {"failed", "cancelled"} for job in current_jobs):
+    if any(job.status in {"failed", "canceled", "cancelled"} for job in current_jobs):
         return "failed"
     if jobs:
         return "evaluated_old"
@@ -3848,6 +3891,19 @@ def cancel_all_jobs(
     ).all()
     now = datetime.now(timezone.utc)
     for job in active_jobs:
+        if job.regression_item_id is not None:
+            fail_regression_item(
+                db,
+                job.regression_item_id,
+                "technical:operator_canceled",
+            )
+        if job.baseline_regression_item_id is not None:
+            fail_baseline_item(
+                db,
+                item_id=job.baseline_regression_item_id,
+                error_code="technical:operator_canceled",
+                job_id=job.id,
+            )
         has_result = db.scalar(
             select(EvaluationResult.id)
             .where(EvaluationResult.asset_id == job.asset_id)
@@ -5945,6 +6001,26 @@ def request_label_release(
     except ValueError as exc:
         db.rollback()
         raise HTTPException(status_code=409, detail=str(exc)) from None
+    except IntegrityError:
+        db.rollback()
+        existing = db.scalar(
+            select(LabelRelease).where(
+                LabelRelease.release_key == payload.release_key
+            )
+        )
+        if (
+            existing is not None
+            and existing.evaluation_id == payload.evaluation_id
+            and (
+                payload.content_key is None
+                or existing.content_key == payload.content_key
+            )
+        ):
+            return {"duplicate": True, "release": release_payload(existing)}
+        raise HTTPException(
+            status_code=409,
+            detail="发布请求发生并发冲突，请刷新后重试",
+        ) from None
     db.commit()
     db.refresh(release)
     return {"duplicate": duplicate, "release": release_payload(release)}
@@ -5964,6 +6040,30 @@ def approve_and_publish_label_release(
     except ValueError as exc:
         db.rollback()
         raise HTTPException(status_code=409, detail=str(exc)) from None
+    except IntegrityError:
+        db.rollback()
+        concurrent_release = db.get(LabelRelease, release_id)
+        concurrent_published = db.scalar(
+            select(PublishedLabel).where(
+                PublishedLabel.release_id == release_id
+            )
+        )
+        if (
+            concurrent_release is not None
+            and concurrent_published is not None
+            and concurrent_release.status == "published"
+        ):
+            return {
+                "duplicate": True,
+                "release": release_payload(
+                    concurrent_release,
+                    concurrent_published,
+                ),
+            }
+        raise HTTPException(
+            status_code=409,
+            detail="正式标签版本发生并发冲突，请刷新后重试",
+        ) from None
     db.commit()
     db.refresh(release)
     db.refresh(published)
@@ -5980,6 +6080,7 @@ def rollback_published_label(
     target = db.get(PublishedLabel, published_label_id)
     if target is None:
         raise HTTPException(status_code=404, detail="历史发布标签不存在")
+    target_release_id = target.release_id
     try:
         release, published, duplicate = rollback_release(
             db, target=target, rollback_key=payload.rollback_key, actor=user.username
@@ -5987,6 +6088,38 @@ def rollback_published_label(
     except ValueError as exc:
         db.rollback()
         raise HTTPException(status_code=409, detail=str(exc)) from None
+    except IntegrityError:
+        db.rollback()
+        concurrent_release = db.scalar(
+            select(LabelRelease).where(
+                LabelRelease.release_key == payload.rollback_key
+            )
+        )
+        concurrent_published = (
+            db.scalar(
+                select(PublishedLabel).where(
+                    PublishedLabel.release_id == concurrent_release.id
+                )
+            )
+            if concurrent_release is not None
+            else None
+        )
+        if (
+            concurrent_release is not None
+            and concurrent_release.source_release_id == target_release_id
+            and concurrent_published is not None
+        ):
+            return {
+                "duplicate": True,
+                "release": release_payload(
+                    concurrent_release,
+                    concurrent_published,
+                ),
+            }
+        raise HTTPException(
+            status_code=409,
+            detail="回滚版本发生并发冲突，请刷新后重试",
+        ) from None
     db.commit()
     db.refresh(release)
     db.refresh(published)

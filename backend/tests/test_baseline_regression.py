@@ -212,6 +212,98 @@ def test_baseline_api_freezes_truth_reports_and_enqueues_idempotently() -> None:
         engine.dispose()
 
 
+def test_cancel_jobs_finishes_baseline_run_and_allows_next_run() -> None:
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    db = Session(engine, expire_on_commit=False)
+    user = User(
+        username="baseline-cancel-tester",
+        password_hash="unused",
+        display_name="基准取消测试员",
+    )
+    asset = Asset(
+        original_name="cancel-L2.jpg",
+        stored_name="cancel-L2.jpg",
+        mime_type="image/jpeg",
+        size_bytes=10,
+        sha256="1" * 64,
+        status="uploaded",
+    )
+    model = ModelConfig(
+        name="test",
+        provider="doubao",
+        base_url="https://example.test",
+        api_path="/chat",
+        model_id="model",
+        active=True,
+    )
+    prompt_a = PromptVersion(
+        stage="A",
+        name="A",
+        version="cancel-A1",
+        system_prompt="classification prompt",
+        user_prompt="classify",
+        rubric_version="R1",
+        status="published",
+    )
+    prompt_b = PromptVersion(
+        stage="B",
+        name="B",
+        version="cancel-B1",
+        system_prompt="aesthetic prompt",
+        user_prompt="evaluate",
+        rubric_version="R1",
+        status="published",
+    )
+    db.add_all([user, asset, model, prompt_a, prompt_b])
+    db.commit()
+
+    app.dependency_overrides[get_db] = lambda: (yield db)
+    app.dependency_overrides[current_user] = lambda: user
+    client = TestClient(app)
+    try:
+        baseline_set = client.post(
+            "/api/baseline-sets",
+            json={
+                "name": "可取消基准集",
+                "default_expected_level": "L2",
+                "items": [{"asset_id": asset.id}],
+            },
+        ).json()
+        first = client.post(
+            f"/api/baseline-sets/{baseline_set['id']}/runs"
+        )
+        assert first.status_code == 200
+        first_run = db.get(BaselineRegressionRun, first.json()["id"])
+        first_item = first_run.items[0]
+
+        canceled = client.post("/api/jobs/control/cancel")
+        assert canceled.status_code == 200
+        db.expire_all()
+        assert db.get(EvaluationJob, first_item.job_id).status == "canceled"
+        assert db.get(BaselineRegressionItem, first_item.id).status == "failed"
+        assert db.get(BaselineRegressionRun, first_run.id).status == "failed"
+        assert (
+            db.get(BaselineRegressionRun, first_run.id).finished_at
+            is not None
+        )
+
+        second = client.post(
+            f"/api/baseline-sets/{baseline_set['id']}/runs"
+        )
+        assert second.status_code == 200
+        assert second.json()["sequence_no"] == 2
+        assert second.json()["previous_run_id"] == first_run.id
+    finally:
+        app.dependency_overrides.clear()
+        db.close()
+        engine.dispose()
+
+
 def test_package_baseline_prefills_filename_level_and_accepts_manual_override() -> None:
     engine = create_engine(
         "sqlite://",

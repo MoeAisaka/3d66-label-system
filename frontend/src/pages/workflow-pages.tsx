@@ -1,4 +1,5 @@
 import {
+  ArrowCounterClockwise,
   ArrowRight,
   CheckCircle,
   Clock,
@@ -566,6 +567,15 @@ export function ReleaseWorkspacePage({ view }: { view: "decisions" | "metrics" |
     queryKey: ["label-releases"],
     queryFn: () => api<{ items: LabelRelease[] }>("/api/label-releases?limit=200"),
   })
+  const currentPublishedVersionByContent = useMemo(() => {
+    const versions = new Map<string, number>()
+    for (const release of labelReleases.data?.items ?? []) {
+      if (release.is_current && release.published_version != null) {
+        versions.set(release.content_key, release.published_version)
+      }
+    }
+    return versions
+  }, [labelReleases.data?.items])
   const integrations = useQuery({
     queryKey: ["integration-status"],
     queryFn: () => api<IntegrationStatus>("/api/integration-status"),
@@ -642,6 +652,18 @@ export function ReleaseWorkspacePage({ view }: { view: "decisions" | "metrics" |
     },
     onError: (error) => toast.error(error.message),
   })
+  const rollbackLabel = useMutation({
+    mutationFn: ({ publishedLabelId, rollbackKey }: { publishedLabelId: number; rollbackKey: string }) =>
+      api<{ release: LabelRelease }>(
+        `/api/published-labels/${publishedLabelId}/rollback`,
+        { method: "POST", ...jsonBody({ rollback_key: rollbackKey }) },
+      ),
+    onSuccess: async ({ release }) => {
+      await queryClient.invalidateQueries({ queryKey: ["label-releases"] })
+      toast.success(`已回滚并生成当前版本 v${release.published_version ?? "—"}`)
+    },
+    onError: (error) => toast.error(error.message),
+  })
   const exportLabels = useMutation({
     mutationFn: () => {
       return downloadApi(
@@ -699,7 +721,35 @@ export function ReleaseWorkspacePage({ view }: { view: "decisions" | "metrics" |
                 <span key="source" className="font-data text-xs">评测 #{release.evaluation_id ?? "—"} · 审核 #{release.final_review_id ?? "—"}</span>,
                 <Badge key="status" tone={release.status === "published" ? "success" : release.status === "pending_review" ? "warning" : "neutral"}>{release.status === "published" ? "已发布" : release.status === "pending_review" ? "待二审" : release.status}</Badge>,
                 <span key="version" className="font-data">{release.published_version == null ? "—" : `v${release.published_version}`}</span>,
-                release.status === "pending_review" && me.data?.is_admin ? <Button key="publish" size="sm" onClick={() => publishLabel.mutate(release.id)} disabled={publishLabel.isPending}>二审通过并发布<CheckCircle /></Button> : <span key="noop" className="text-xs text-[var(--muted)]">{release.status === "published" ? "已进入消费流" : "等待管理员"}</span>,
+                release.status === "pending_review" && me.data?.is_admin ? (
+                  <Button key="publish" size="sm" onClick={() => publishLabel.mutate(release.id)} disabled={publishLabel.isPending}>二审通过并发布<CheckCircle /></Button>
+                ) : release.status === "published" && release.is_current ? (
+                  <span key="current" className="text-xs font-semibold text-[#3f6b35]">当前生效</span>
+                ) : release.status === "published" && release.published_label_id != null && release.published_version != null && me.data?.is_admin ? (
+                  <Button
+                    key="rollback"
+                    size="sm"
+                    variant="danger"
+                    disabled={rollbackLabel.isPending}
+                    onClick={() => {
+                      const publishedLabelId = release.published_label_id
+                      const currentVersion = currentPublishedVersionByContent.get(release.content_key)
+                      if (publishedLabelId == null || currentVersion == null) {
+                        toast.error("无法确认当前生效版本，请刷新页面后重试")
+                        return
+                      }
+                      if (!window.confirm(`将“${release.content_key}”从当前 v${currentVersion} 回滚到历史 v${release.published_version}？\n\n系统会生成一个新的正式版本并通知下游，不会删除任何历史记录。`)) return
+                      rollbackLabel.mutate({
+                        publishedLabelId,
+                        rollbackKey: `manual-ui:published-${publishedLabelId}:from-v${currentVersion}`,
+                      })
+                    }}
+                  >
+                    回滚到 v{release.published_version}<ArrowCounterClockwise />
+                  </Button>
+                ) : (
+                  <span key="noop" className="text-xs text-[var(--muted)]">{release.status === "published" ? "历史版本" : "等待管理员"}</span>
+                ),
               ])}
             />
             <div className="grid gap-4 border-t border-[var(--line-strong)] bg-[#fafbf8] px-5 py-5 md:grid-cols-2 xl:grid-cols-4 xl:items-end">

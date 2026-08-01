@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
@@ -20,6 +21,7 @@ from app.main import app, current_user
 from app.models import (
     Asset,
     CircuitBreaker,
+    EvaluationControl,
     EvaluationJob,
     LoopAttempt,
     LoopRun,
@@ -675,7 +677,10 @@ def test_enqueue_compatibility_manual_canary_queue_status_and_breaker_api() -> N
         user_prompt="aesthetic input",
         status="published",
     )
-    model = ModelConfig(max_concurrency=20)
+    model = ModelConfig(
+        max_concurrency=20,
+        encrypted_api_key="configured-test-reference",
+    )
     db.add_all([user, asset, prompt_a, prompt_b, model])
     db.commit()
 
@@ -744,9 +749,13 @@ def test_enqueue_compatibility_manual_canary_queue_status_and_breaker_api() -> N
         assert queue_rows["interactive"]["pending"] == 1
         assert queue_rows["production_batch"]["pending"] == 2
         assert queue_rows["production_batch"]["pending_total"] == 2
+        assert status.json()["credentials_configured"] is True
+        assert status.json()["control_paused"] is False
         assert (
             queue_rows["production_batch"]["dispatchable_pending"] == 1
         )
+        assert queue_rows["production_batch"]["blocked_by_credentials"] == 0
+        assert queue_rows["production_batch"]["blocked_by_control"] == 0
         assert (
             queue_rows["production_batch"]["delayed_by_retry_after"] == 1
         )
@@ -779,6 +788,199 @@ def test_enqueue_compatibility_manual_canary_queue_status_and_breaker_api() -> N
         assert reset.status_code == 200
         assert reset.json()["state"] == "closed"
         assert reset.json()["reset_by"] == "queue-tester"
+    finally:
+        app.dependency_overrides.clear()
+        db.close()
+        engine.dispose()
+
+
+def test_queue_status_matches_worker_credential_and_pause_gates(
+    monkeypatch,
+) -> None:
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    db = Session(engine, expire_on_commit=False)
+    user = User(
+        username="queue-observer",
+        password_hash="unused",
+        display_name="Queue Observer",
+    )
+    model = ModelConfig(max_concurrency=2)
+    asset = Asset(
+        original_name="blocked.jpg",
+        stored_name="blocked.jpg",
+        mime_type="image/jpeg",
+        size_bytes=10,
+        sha256="9" * 64,
+    )
+    job = EvaluationJob(
+        asset=asset,
+        queue_class="interactive",
+        origin_queue_class="interactive",
+    )
+    control = EvaluationControl(id=1, paused=False)
+    db.add_all([user, model, job, control])
+    db.commit()
+
+    def test_db():
+        yield db
+
+    app.dependency_overrides[get_db] = test_db
+    app.dependency_overrides[current_user] = lambda: user
+    client = TestClient(app)
+    try:
+        model.encrypted_api_key = "   "
+        db.commit()
+        blank = client.get("/api/queues/status").json()
+        blank_row = next(
+            item
+            for item in blank["queues"]
+            if item["queue_class"] == "interactive"
+        )
+        assert blank["credentials_configured"] is False
+        assert blank_row["blocked_by_credentials"] == 1
+
+        @contextmanager
+        def test_scope():
+            try:
+                yield db
+                db.commit()
+            except Exception:
+                db.rollback()
+                raise
+
+        monkeypatch.setattr(worker, "session_scope", test_scope)
+        assert worker.claim_next_job() is None
+
+        model.encrypted_api_key = None
+        db.commit()
+        missing = client.get("/api/queues/status").json()
+        missing_row = next(
+            item
+            for item in missing["queues"]
+            if item["queue_class"] == "interactive"
+        )
+        assert missing["credentials_configured"] is False
+        assert missing_row["pending_total"] == 1
+        assert missing_row["blocked_by_credentials"] == 1
+        assert missing_row["dispatchable_pending"] == 0
+
+        model.encrypted_api_key = "configured-test-reference"
+        control.paused = True
+        db.commit()
+        paused = client.get("/api/queues/status").json()
+        paused_row = next(
+            item
+            for item in paused["queues"]
+            if item["queue_class"] == "interactive"
+        )
+        assert paused["credentials_configured"] is True
+        assert paused["control_paused"] is True
+        assert paused_row["blocked_by_credentials"] == 0
+        assert paused_row["blocked_by_control"] == 1
+        assert paused_row["dispatchable_pending"] == 0
+    finally:
+        app.dependency_overrides.clear()
+        db.close()
+        engine.dispose()
+
+
+def test_queue_status_and_worker_use_each_jobs_frozen_model_credentials(
+    monkeypatch,
+) -> None:
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    db = Session(engine, expire_on_commit=False)
+    user = User(
+        username="frozen-credential-observer",
+        password_hash="unused",
+        display_name="Frozen Credential Observer",
+    )
+    fallback_model = ModelConfig(
+        name="configured fallback",
+        encrypted_api_key="configured-test-reference",
+        max_concurrency=4,
+        active=False,
+    )
+    missing_model = ModelConfig(
+        name="frozen model without key",
+        encrypted_api_key=None,
+    )
+    asset = Asset(
+        original_name="frozen-model.jpg",
+        stored_name="frozen-model.jpg",
+        mime_type="image/jpeg",
+        size_bytes=10,
+        sha256="8" * 64,
+    )
+    db.add_all([user, fallback_model, missing_model, asset])
+    db.flush()
+    blocked = EvaluationJob(
+        asset=asset,
+        queue_class="interactive",
+        origin_queue_class="interactive",
+        category_profile_snapshot_json=json.dumps(
+            {
+                "model_config_id": missing_model.id,
+                "pdf_summary_model_config_id": None,
+            }
+        ),
+    )
+    available = EvaluationJob(
+        asset=asset,
+        queue_class="interactive",
+        origin_queue_class="interactive",
+        category_profile_snapshot_json=json.dumps(
+            {
+                "model_config_id": fallback_model.id,
+                "pdf_summary_model_config_id": None,
+            }
+        ),
+    )
+    db.add_all([blocked, available])
+    db.commit()
+
+    def test_db():
+        yield db
+
+    @contextmanager
+    def test_scope():
+        try:
+            yield db
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+
+    app.dependency_overrides[get_db] = test_db
+    app.dependency_overrides[current_user] = lambda: user
+    monkeypatch.setattr(worker, "session_scope", test_scope)
+    client = TestClient(app)
+    try:
+        status = client.get("/api/queues/status").json()
+        row = next(
+            item
+            for item in status["queues"]
+            if item["queue_class"] == "interactive"
+        )
+        assert status["credentials_configured"] is True
+        assert row["pending_total"] == 2
+        assert row["blocked_by_credentials"] == 1
+        assert row["dispatchable_pending"] == 1
+
+        assert worker.claim_next_job() == available.id
+        db.refresh(blocked)
+        db.refresh(available)
+        assert blocked.status == "queued"
+        assert available.status == "processing"
     finally:
         app.dependency_overrides.clear()
         db.close()

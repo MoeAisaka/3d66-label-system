@@ -4,14 +4,15 @@ import json
 import csv
 import io
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 from fastapi.testclient import TestClient
 import pytest
-from sqlalchemy import create_engine, select, text
+from sqlalchemy import create_engine, func, select, text
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from app import main
@@ -26,6 +27,7 @@ from app.models import (
     EvaluationJob,
     EvaluationResult,
     HumanReview,
+    LabelRelease,
     LabelOutboxEvent,
     ModelConfig,
     PromptVersion,
@@ -173,7 +175,15 @@ def test_ingress_publish_consumer_cursor_and_rollback_are_versioned(
         published = client.post(f"/api/label-releases/{release_id}/approve-and-publish")
         assert published.status_code == 200
         assert published.json()["release"]["status"] == "published"
+        assert published.json()["release"]["published_label_id"] is not None
         assert published.json()["release"]["published_version"] == 1
+
+        listed_release = client.get("/api/label-releases").json()["items"][0]
+        assert (
+            listed_release["published_label_id"]
+            == published.json()["release"]["published_label_id"]
+        )
+        assert listed_release["is_current"] is True
 
         read = client.get("/api/consumer/v1/labels/content-hub:content-001", headers=headers)
         assert read.status_code == 200
@@ -190,20 +200,175 @@ def test_ingress_publish_consumer_cursor_and_rollback_are_versioned(
 
         first = db.scalar(select(PublishedLabel).where(PublishedLabel.content_key == "content-hub:content-001"))
         assert first is not None
+        next_release = client.post("/api/label-releases", json={
+            "release_key": "release-2", "evaluation_id": result.id,
+            "content_key": "content-hub:content-001",
+        }).json()["release"]
+        next_published = client.post(
+            f"/api/label-releases/{next_release['id']}/approve-and-publish"
+        )
+        assert next_published.status_code == 200
+        assert next_published.json()["release"]["published_version"] == 2
         rollback = client.post(f"/api/published-labels/{first.id}/rollback", json={"rollback_key": "rollback-1"})
         assert rollback.status_code == 200
-        assert rollback.json()["release"]["published_version"] == 2
+        assert rollback.json()["release"]["published_version"] == 3
+        assert rollback.json()["release"]["is_current"] is True
+        duplicate_rollback = client.post(
+            f"/api/published-labels/{first.id}/rollback",
+            json={"rollback_key": "rollback-1"},
+        )
+        assert duplicate_rollback.status_code == 200
+        assert duplicate_rollback.json()["duplicate"] is True
         second = db.scalar(select(PublishedLabel).where(
             PublishedLabel.content_key == "content-hub:content-001",
             PublishedLabel.status == "published",
         ))
         assert second is not None
+        no_op_rollback = client.post(
+            f"/api/published-labels/{second.id}/rollback",
+            json={"rollback_key": "rollback-current"},
+        )
+        assert no_op_rollback.status_code == 409
+        assert "当前生效版本" in no_op_rollback.json()["detail"]
         rollback_drift = client.post(f"/api/published-labels/{second.id}/rollback", json={"rollback_key": "rollback-1"})
         assert rollback_drift.status_code == 409
+        listed = client.get("/api/label-releases").json()["items"]
+        current_release = next(item for item in listed if item["id"] == rollback.json()["release"]["id"])
+        original_release = next(item for item in listed if item["id"] == release_id)
+        assert current_release["is_current"] is True
+        assert original_release["is_current"] is False
         assert db.scalar(select(LabelOutboxEvent).where(LabelOutboxEvent.operation == "rolled_back")) is not None
-        assert client.get("/api/consumer/v1/reconciliation", headers=headers).json()["outbox_high_watermark"] == 2
+        assert client.get("/api/consumer/v1/reconciliation", headers=headers).json()["outbox_high_watermark"] == 3
     finally:
         _close(engine, db)
+
+
+def test_release_write_endpoints_recover_concurrent_idempotent_requests(
+    tmp_path,
+) -> None:
+    engine = create_engine(
+        f"sqlite:///{tmp_path / 'concurrent-labels.db'}",
+        connect_args={"check_same_thread": False, "timeout": 10},
+    )
+    Base.metadata.create_all(engine)
+    with engine.begin() as connection:
+        run_migrations(connection)
+    session_factory = sessionmaker(bind=engine, expire_on_commit=False)
+    with session_factory() as db:
+        user = User(
+            username="concurrent-release-admin",
+            password_hash="unused",
+            display_name="并发发布管理员",
+        )
+        release = LabelRelease(
+            release_key="concurrent-publish",
+            content_key="content:concurrent",
+            category_key="space_image",
+            label_schema_version="published-label-v1",
+            label_payload_json='{"level":"L2"}',
+            payload_hash="a" * 64,
+            status="pending_review",
+            requested_by=user.username,
+        )
+        db.add_all([user, release])
+        db.commit()
+        user_id = user.id
+        release_id = release.id
+
+    def test_db():
+        with session_factory() as db:
+            yield db
+
+    with session_factory() as db:
+        detached_user = db.get(User, user_id)
+        assert detached_user is not None
+        db.expunge(detached_user)
+
+    app.dependency_overrides[get_db] = test_db
+    app.dependency_overrides[current_user] = lambda: detached_user
+
+    def approve() -> tuple[int, dict[str, object]]:
+        client = TestClient(app)
+        try:
+            response = client.post(
+                f"/api/label-releases/{release_id}/approve-and-publish"
+            )
+            return response.status_code, response.json()
+        finally:
+            client.close()
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            publish_results = list(pool.map(lambda _index: approve(), range(2)))
+        assert [status for status, _payload in publish_results] == [200, 200]
+        assert sorted(
+            bool(payload["duplicate"])
+            for _status, payload in publish_results
+        ) == [False, True]
+
+        with session_factory() as db:
+            target = db.scalar(
+                select(PublishedLabel).where(
+                    PublishedLabel.release_id == release_id
+                )
+            )
+            assert target is not None
+            next_release = LabelRelease(
+                release_key="concurrent-current",
+                content_key=target.content_key,
+                category_key=target.category_key,
+                label_schema_version=target.label_schema_version,
+                label_payload_json=target.label_payload_json,
+                payload_hash=target.payload_hash,
+                status="pending_review",
+                requested_by=detached_user.username,
+            )
+            db.add(next_release)
+            db.commit()
+            next_release_id = next_release.id
+            target_id = target.id
+
+        client = TestClient(app)
+        try:
+            assert client.post(
+                f"/api/label-releases/{next_release_id}/approve-and-publish"
+            ).status_code == 200
+        finally:
+            client.close()
+
+        def rollback() -> tuple[int, dict[str, object]]:
+            client = TestClient(app)
+            try:
+                response = client.post(
+                    f"/api/published-labels/{target_id}/rollback",
+                    json={"rollback_key": "concurrent-rollback"},
+                )
+                return response.status_code, response.json()
+            finally:
+                client.close()
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            rollback_results = list(pool.map(lambda _index: rollback(), range(2)))
+        assert [status for status, _payload in rollback_results] == [200, 200]
+        assert sorted(
+            bool(payload["duplicate"])
+            for _status, payload in rollback_results
+        ) == [False, True]
+
+        with session_factory() as db:
+            assert db.scalar(
+                select(func.count(PublishedLabel.id)).where(
+                    PublishedLabel.release_id == release_id
+                )
+            ) == 1
+            assert db.scalar(
+                select(func.count(LabelRelease.id)).where(
+                    LabelRelease.release_key == "concurrent-rollback"
+                )
+            ) == 1
+    finally:
+        app.dependency_overrides.clear()
+        engine.dispose()
 
 
 def test_ingress_awaits_material_and_outbox_is_append_only(
@@ -252,6 +417,18 @@ def test_operator_can_export_current_labels_and_version_history() -> None:
             select(PublishedLabel).where(PublishedLabel.release_id == release["id"])
         )
         assert first is not None
+        next_release = client.post(
+            "/api/label-releases",
+            json={
+                "release_key": "export-release-2",
+                "evaluation_id": result.id,
+                "content_key": None,
+            },
+        ).json()["release"]
+        next_published = client.post(
+            f"/api/label-releases/{next_release['id']}/approve-and-publish"
+        )
+        assert next_published.status_code == 200
         client.post(
             f"/api/published-labels/{first.id}/rollback",
             json={"rollback_key": "export-rollback-1"},
@@ -277,7 +454,7 @@ def test_operator_can_export_current_labels_and_version_history() -> None:
         )
         assert history_json.status_code == 200
         assert history_json.json()["schema_version"] == "published-label-export-v1"
-        assert history_json.json()["count"] == 2
+        assert history_json.json()["count"] == 3
         assert {item["status"] for item in history_json.json()["items"]} == {
             "published",
             "superseded",
@@ -307,7 +484,7 @@ def test_operator_can_export_current_labels_and_version_history() -> None:
         assert len(export_audits) == 3
         assert [json.loads(item.payload_json)["row_count"] for item in export_audits] == [
             1,
-            2,
+            3,
             1,
         ]
     finally:

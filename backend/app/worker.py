@@ -23,6 +23,12 @@ from .category_pipeline import (
     validate_pipeline_config,
 )
 from .database import init_database, session_scope
+from .evaluation_credentials import (
+    default_evaluation_model,
+    job_has_required_credentials,
+    job_primary_model,
+    model_has_credentials,
+)
 from .doubao import DoubaoClient
 from .loop_engine import (
     advance_loop_attempt,
@@ -367,14 +373,7 @@ def claim_next_job() -> int | None:
         control = db.get(EvaluationControl, 1)
         if control is not None and control.paused:
             return None
-        evaluation_binding = db.scalar(select(ModelNodeBinding).where(ModelNodeBinding.node_key == "evaluation_main", ModelNodeBinding.category_key.is_(None), ModelNodeBinding.enabled.is_(True)))
-        configured_model = (
-            evaluation_binding.model
-            if evaluation_binding is not None and evaluation_binding.model.active and evaluation_binding.model.encrypted_api_key
-            else db.scalar(select(ModelConfig).where(ModelConfig.encrypted_api_key.is_not(None), ModelConfig.active.is_(True)).order_by(ModelConfig.id.asc()).limit(1))
-        )
-        if configured_model is None:
-            return None
+        configured_model = default_evaluation_model(db)
         now = datetime.now(timezone.utc)
         queued_jobs = db.scalars(
             select(EvaluationJob)
@@ -389,6 +388,20 @@ def claim_next_job() -> int | None:
         ).all()
         if not queued_jobs:
             return None
+        if configured_model is None:
+            configured_model = next(
+                (
+                    model
+                    for job in queued_jobs
+                    if (
+                        (model := job_primary_model(db, job)) is not None
+                        and model_has_credentials(model)
+                    )
+                ),
+                None,
+            )
+        if configured_model is None:
+            return None
         open_breakers = set(
             db.execute(
                 select(
@@ -401,6 +414,11 @@ def claim_next_job() -> int | None:
             job
             for job in queued_jobs
             if not _is_job_breaker_open(job, open_breakers)
+            and job_has_required_credentials(
+                db,
+                job,
+                fallback_model=configured_model,
+            )
         ]
         if not eligible_jobs:
             return None

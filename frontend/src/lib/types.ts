@@ -880,7 +880,9 @@ export type LabelRelease = {
   approved_by: string | null
   approved_at: string | null
   published_at: string | null
+  published_label_id: number | null
   published_version: number | null
+  is_current: boolean | null
 }
 
 export type IntegrationStatus = {

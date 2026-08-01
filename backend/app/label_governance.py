@@ -381,6 +381,8 @@ def rollback_release(
         if published is None:
             raise RuntimeError("回滚 release 缺少发布标签")
         return existing, published, True
+    if target.status == "published":
+        raise LabelIntegrationConflict("目标标签已是当前生效版本，无需回滚")
     release = LabelRelease(
         release_key=rollback_key,
         content_key=target.content_key,
@@ -418,5 +420,7 @@ def release_payload(release: LabelRelease, published: PublishedLabel | None = No
         "approved_by": release.approved_by,
         "approved_at": release.approved_at,
         "published_at": release.published_at,
+        "published_label_id": published.id if published else None,
         "published_version": published.version if published else None,
+        "is_current": published.status == "published" if published else None,
     }

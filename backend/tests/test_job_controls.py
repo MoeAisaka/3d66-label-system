@@ -140,6 +140,14 @@ def test_jobs_pin_prompts_and_support_pause_resume_cancel() -> None:
         db.expire_all()
         assert db.get(EvaluationJob, job_id).status == "canceled"
         assert db.get(Asset, asset.id).status == "uploaded"
+        canceled_asset = client.get(
+            "/api/assets",
+            params={
+                "prompt_a_id": prompt_a.id,
+                "prompt_b_id": prompt_b.id,
+            },
+        ).json()["items"][0]
+        assert canceled_asset["evaluation_status"] == "failed"
 
         single = client.post(
             "/api/jobs/enqueue",
