@@ -74,8 +74,9 @@ def _aesthetic() -> dict[str, Any]:
 
 
 class State:
-    def __init__(self, state_dir: Path):
+    def __init__(self, state_dir: Path, *, timeout_seconds: float = 12.0):
         self.state_dir = state_dir
+        self.timeout_seconds = timeout_seconds
         self.state_dir.mkdir(parents=True, exist_ok=True)
         self.mode_file = self.state_dir / "mode.txt"
         self.requests_file = self.state_dir / "requests.jsonl"
@@ -94,14 +95,18 @@ class State:
         with self.lock:
             self.count += 1
             count = self.count
+            mode = self.mode()
             with self.requests_file.open("a", encoding="utf-8") as handle:
                 handle.write(
                     json.dumps(
                         {
                             "request": count,
-                            "mode": self.mode(),
+                            "mode": mode,
                             "model": payload.get("model"),
                             "stage": _stage(payload),
+                            "response_status": 503 if mode == "provider5xx" else 200,
+                            "usage_included": mode not in {"missing_usage", "provider5xx"},
+                            "response_delayed": mode == "timeout",
                         },
                         ensure_ascii=False,
                     )
@@ -172,7 +177,11 @@ def _handler(state: State) -> type[BaseHTTPRequestHandler]:
             self.send_header("Content-Length", str(len(body)))
             self.send_header("x-request-id", f"mock-{uuid.uuid4().hex[:12]}")
             self.end_headers()
-            self.wfile.write(body)
+            try:
+                self.wfile.write(body)
+            except (BrokenPipeError, ConnectionResetError):
+                # Expected when a timeout scenario closes the client connection.
+                return
 
         def do_GET(self) -> None:
             if self.path == "/health":
@@ -193,7 +202,7 @@ def _handler(state: State) -> type[BaseHTTPRequestHandler]:
                 self._json(503, {"error": {"message": "injected provider failure"}})
                 return
             if mode == "timeout":
-                time.sleep(12)
+                time.sleep(state.timeout_seconds)
             if mode == "invalid_json":
                 content = "{invalid"
             else:
@@ -218,8 +227,13 @@ def main() -> None:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=19091)
     parser.add_argument("--state-dir", type=Path, required=True)
+    parser.add_argument("--timeout-seconds", type=float, default=12.0)
     args = parser.parse_args()
-    state = State(args.state_dir.resolve())
+    if args.timeout_seconds <= 0:
+        parser.error("--timeout-seconds must be positive")
+    state = State(
+        args.state_dir.resolve(), timeout_seconds=args.timeout_seconds
+    )
     server = ThreadingHTTPServer((args.host, args.port), _handler(state))
     print(f"mock model listening on http://{args.host}:{args.port}", flush=True)
     server.serve_forever()
