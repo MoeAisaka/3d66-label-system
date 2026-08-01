@@ -62,6 +62,8 @@ from .models import (
     AgentPlanVersion,
     Asset,
     AuditEvent,
+    ContentIngressEvent,
+    ContentRecord,
     AutomationOptimizationRun,
     AutomationPolicy,
     BaselineRegressionItem,
@@ -104,6 +106,10 @@ from .models import (
     ReviewWorkflowPolicy,
     OptimizationCaseQueue,
     ProductionFeedbackEvent,
+    LabelOutboxEvent,
+    LabelRelease,
+    PublishedLabel,
+    ConsumerSyncCheckpoint,
     User,
 )
 from .audit import append_audit_event, canonical_json
@@ -154,7 +160,7 @@ from .security import (
     verify_password,
     hash_password,
 )
-from .authz import ROLE_LABELS, ROLE_PERMISSIONS, effective_role, has_permission
+from .authz import ROLE_LABELS, ROLE_PERMISSIONS, effective_role, has_permission, require_permission
 from .optimizer import run_prompt_optimization, stage_audit_payload
 from .optimization_automation import (
     automation_budget_status,
@@ -182,6 +188,14 @@ from .prompt_metrics import (
 from .production_feedback import (
     FeedbackConflict,
     ingest_production_feedback,
+)
+from .label_governance import (
+    LabelIntegrationConflict,
+    create_release,
+    ingest_content_event,
+    publish_release,
+    release_payload,
+    rollback_release,
 )
 from .review_panel import (
     KEY_FIELD_PATHS,
@@ -407,6 +421,30 @@ class ProductionFeedbackRequest(BaseModel):
         if not self.payload.get("category_key"):
             raise ValueError("生产反馈 payload 必须填写 category_key")
         return self
+
+
+class ContentIngressRequest(BaseModel):
+    event_id: str = Field(min_length=1, max_length=160)
+    schema_version: Literal["content-ingress-v1"]
+    event_type: Literal["content.created", "content.updated", "content.deleted"]
+    source_system: str = Field(min_length=1, max_length=120)
+    occurred_at: datetime
+    payload: dict[str, Any]
+
+
+class LabelReleaseRequest(BaseModel):
+    release_key: str = Field(min_length=1, max_length=160)
+    evaluation_id: int = Field(ge=1)
+    content_key: str | None = Field(default=None, max_length=320)
+
+
+class LabelRollbackRequest(BaseModel):
+    rollback_key: str = Field(min_length=1, max_length=160)
+
+
+class ConsumerCheckpointRequest(BaseModel):
+    consumer_name: str = Field(min_length=1, max_length=120)
+    cursor: int = Field(ge=0)
 
 
 class BenchmarkVariantRequest(BaseModel):
@@ -1137,6 +1175,32 @@ def production_feedback_sender(
             headers={"WWW-Authenticate": "Bearer"},
         )
     return "production-feedback-sender"
+
+
+def content_ingress_sender(
+    authorization: str | None = Header(default=None),
+) -> str:
+    configured = settings.content_ingress_token
+    if configured is None:
+        raise HTTPException(status_code=503, detail="标签平台接入未配置")
+    prefix = "Bearer "
+    supplied = authorization[len(prefix):] if authorization and authorization.startswith(prefix) else ""
+    if not supplied or not hmac.compare_digest(supplied, configured):
+        raise HTTPException(status_code=401, detail="标签平台接入认证失败", headers={"WWW-Authenticate": "Bearer"})
+    return "content-ingress"
+
+
+def label_consumer_sender(
+    authorization: str | None = Header(default=None),
+) -> str:
+    configured = settings.label_consumer_token
+    if configured is None:
+        raise HTTPException(status_code=503, detail="标签平台消费接口未配置")
+    prefix = "Bearer "
+    supplied = authorization[len(prefix):] if authorization and authorization.startswith(prefix) else ""
+    if not supplied or not hmac.compare_digest(supplied, configured):
+        raise HTTPException(status_code=401, detail="标签平台消费认证失败", headers={"WWW-Authenticate": "Bearer"})
+    return "label-consumer"
 
 
 app.include_router(build_canary_router(current_user))
@@ -5754,6 +5818,269 @@ def production_feedback_config_status(
         "configured": settings.production_feedback_token is not None,
         "authentication": "dedicated_bearer_token",
         "browser_session_accepted": False,
+    }
+
+
+def _content_record_payload(record: ContentRecord) -> dict[str, Any]:
+    return {
+        "id": record.id,
+        "source_system": record.source_system,
+        "content_id": record.source_content_id,
+        "content_key": f"{record.source_system}:{record.source_content_id}",
+        "category_key": record.category_key,
+        "content_version": record.source_version,
+        "asset_id": record.asset_id,
+        "status": record.status,
+        "source_occurred_at": record.source_occurred_at,
+        "created_at": record.created_at,
+        "updated_at": record.updated_at,
+    }
+
+
+@app.post("/api/content-ingress/events")
+def create_content_ingress_event(
+    payload: ContentIngressRequest,
+    _sender: str = Depends(content_ingress_sender),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    try:
+        event, record, duplicate = ingest_content_event(
+            db,
+            event_id=payload.event_id,
+            schema_version=payload.schema_version,
+            event_type=payload.event_type,
+            source_system=payload.source_system,
+            occurred_at=payload.occurred_at,
+            payload=payload.payload,
+            received_by=_sender,
+        )
+    except LabelIntegrationConflict as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail={"code": "INGRESS_EVENT_CONFLICT", "message": str(exc)}) from None
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(status_code=422, detail=str(exc)) from None
+    db.commit()
+    db.refresh(event)
+    db.refresh(record)
+    return {
+        "event_id": event.event_id,
+        "duplicate": duplicate,
+        "event_status": event.status,
+        "content": _content_record_payload(record),
+        "material_required": record.status == "awaiting_material",
+        "writes_evaluation_job": False,
+    }
+
+
+@app.get("/api/content-ingress/records")
+def list_content_ingress_records(
+    limit: int = 200,
+    _user: User = Depends(require_permission("releases:read")),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    records = db.scalars(
+        select(ContentRecord).order_by(ContentRecord.updated_at.desc(), ContentRecord.id.desc()).limit(min(max(limit, 1), 500))
+    ).all()
+    return {"items": [_content_record_payload(record) for record in records]}
+
+
+@app.get("/api/label-releases")
+def list_label_releases(
+    status: Literal["pending_review", "approved", "published", "rejected"] | None = None,
+    limit: int = 200,
+    _user: User = Depends(require_permission("releases:read")),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    statement = select(LabelRelease).order_by(LabelRelease.requested_at.desc(), LabelRelease.id.desc())
+    if status is not None:
+        statement = statement.where(LabelRelease.status == status)
+    releases = db.scalars(statement.limit(min(max(limit, 1), 500))).all()
+    published_by_release = {
+        item.release_id: item
+        for item in db.scalars(
+            select(PublishedLabel).where(PublishedLabel.release_id.in_([item.id for item in releases]))
+        ).all()
+    } if releases else {}
+    return {"items": [release_payload(item, published_by_release.get(item.id)) for item in releases]}
+
+
+@app.post("/api/label-releases")
+def request_label_release(
+    payload: LabelReleaseRequest,
+    user: User = Depends(require_permission("releases:write")),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    try:
+        release, duplicate = create_release(
+            db,
+            release_key=payload.release_key,
+            evaluation_id=payload.evaluation_id,
+            content_key=payload.content_key,
+            requested_by=user.username,
+        )
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail=str(exc)) from None
+    db.commit()
+    db.refresh(release)
+    return {"duplicate": duplicate, "release": release_payload(release)}
+
+
+@app.post("/api/label-releases/{release_id}/approve-and-publish")
+def approve_and_publish_label_release(
+    release_id: int,
+    user: User = Depends(admin_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    release = db.get(LabelRelease, release_id)
+    if release is None:
+        raise HTTPException(status_code=404, detail="发布版本不存在")
+    try:
+        published, duplicate = publish_release(db, release=release, actor=user.username)
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail=str(exc)) from None
+    db.commit()
+    db.refresh(release)
+    db.refresh(published)
+    return {"duplicate": duplicate, "release": release_payload(release, published)}
+
+
+@app.post("/api/published-labels/{published_label_id}/rollback")
+def rollback_published_label(
+    published_label_id: int,
+    payload: LabelRollbackRequest,
+    user: User = Depends(admin_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    target = db.get(PublishedLabel, published_label_id)
+    if target is None:
+        raise HTTPException(status_code=404, detail="历史发布标签不存在")
+    try:
+        release, published, duplicate = rollback_release(
+            db, target=target, rollback_key=payload.rollback_key, actor=user.username
+        )
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail=str(exc)) from None
+    db.commit()
+    db.refresh(release)
+    db.refresh(published)
+    return {"duplicate": duplicate, "release": release_payload(release, published)}
+
+
+@app.get("/api/integration-status")
+def integration_status(_user: User = Depends(require_permission("releases:read"))) -> dict[str, Any]:
+    return {
+        "upstream_content_ingress": {
+            "configured": settings.content_ingress_token is not None,
+            "schema_version": "content-ingress-v1",
+            "events": ["content.created", "content.updated", "content.deleted"],
+            "material_fetch": False,
+        },
+        "downstream_label_consumer": {
+            "configured": settings.label_consumer_token is not None,
+            "schema_version": "label-change-event-v1",
+            "read_model": "published_labels",
+            "cursor_api": "/api/consumer/v1/changes",
+        },
+        "external_writes_enabled": False,
+    }
+
+
+def _consumer_label_payload(label: PublishedLabel) -> dict[str, Any]:
+    return {
+        "id": label.id,
+        "content_key": label.content_key,
+        "category_key": label.category_key,
+        "version": label.version,
+        "label_schema_version": label.label_schema_version,
+        "payload_hash": label.payload_hash,
+        "label": json.loads(label.label_payload_json),
+        "published_at": label.published_at,
+    }
+
+
+@app.get("/api/consumer/v1/labels/{content_key:path}")
+def get_published_label_for_consumer(
+    content_key: str,
+    response: Response,
+    _sender: str = Depends(label_consumer_sender),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    label = db.scalar(
+        select(PublishedLabel).where(
+            PublishedLabel.content_key == content_key,
+            PublishedLabel.status == "published",
+        ).order_by(PublishedLabel.version.desc())
+    )
+    if label is None:
+        raise HTTPException(status_code=404, detail="当前没有已发布标签")
+    response.headers["ETag"] = f'"{label.payload_hash}"'
+    return _consumer_label_payload(label)
+
+
+@app.get("/api/consumer/v1/changes")
+def list_label_changes_for_consumer(
+    after: int = 0,
+    limit: int = 100,
+    _sender: str = Depends(label_consumer_sender),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    if after < 0:
+        raise HTTPException(status_code=422, detail="after 不能小于 0")
+    events = db.scalars(
+        select(LabelOutboxEvent).where(LabelOutboxEvent.id > after).order_by(LabelOutboxEvent.id.asc()).limit(min(max(limit, 1), 500))
+    ).all()
+    high_watermark = db.scalar(select(func.max(LabelOutboxEvent.id))) or 0
+    return {
+        "schema_version": "label-change-event-v1",
+        "items": [json.loads(item.payload_json) | {"event_id": item.event_id, "sequence": item.id, "created_at": item.created_at} for item in events],
+        "next_cursor": events[-1].id if events else after,
+        "high_watermark": high_watermark,
+        "has_more": bool(events and events[-1].id < high_watermark),
+    }
+
+
+@app.post("/api/consumer/v1/checkpoints")
+def save_consumer_checkpoint(
+    payload: ConsumerCheckpointRequest,
+    _sender: str = Depends(label_consumer_sender),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    high_watermark = db.scalar(select(func.max(LabelOutboxEvent.id))) or 0
+    if payload.cursor > high_watermark:
+        raise HTTPException(status_code=409, detail="cursor 尚未存在于发布事件流")
+    checkpoint = db.scalar(select(ConsumerSyncCheckpoint).where(ConsumerSyncCheckpoint.consumer_name == payload.consumer_name))
+    if checkpoint is None:
+        checkpoint = ConsumerSyncCheckpoint(consumer_name=payload.consumer_name, cursor=payload.cursor)
+        db.add(checkpoint)
+    elif payload.cursor < checkpoint.cursor:
+        raise HTTPException(status_code=409, detail="consumer cursor 只能前进，不能回退")
+    else:
+        checkpoint.cursor = payload.cursor
+        checkpoint.updated_at = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(checkpoint)
+    return {"consumer_name": checkpoint.consumer_name, "cursor": checkpoint.cursor, "updated_at": checkpoint.updated_at}
+
+
+@app.get("/api/consumer/v1/reconciliation")
+def consumer_reconciliation(
+    _sender: str = Depends(label_consumer_sender),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    high_watermark = db.scalar(select(func.max(LabelOutboxEvent.id))) or 0
+    published_count = db.scalar(select(func.count(PublishedLabel.id)).where(PublishedLabel.status == "published")) or 0
+    latest_version = db.scalar(select(func.max(PublishedLabel.version))) or 0
+    return {
+        "schema_version": "label-reconciliation-v1",
+        "outbox_high_watermark": high_watermark,
+        "current_published_label_count": published_count,
+        "max_content_version": latest_version,
+        "external_sync_is_eventual": True,
+        "external_writes_enabled": False,
     }
 
 

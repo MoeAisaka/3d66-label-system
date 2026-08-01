@@ -1268,3 +1268,18 @@ npm.cmd run build
 ## 管理员模块化类目流水线（2026-08-01）
 
 已移除类目表固定三值约束。管理员可创建草稿类目，并配置输入 MIME/后缀、有序前处理模块、跟随/单提示词/A-B 模式、类目附加指令、现役八维指标重点范围、各节点模型和自动化策略；启用后素材上传、ZIP 过滤、任务排队与 Worker 执行均读取类目合同。新任务冻结 `evaluation-category-profile-v2`，旧 v1 快照继续兼容。处理器、指标和模型节点均为服务端受控注册表，未知模块、未知指标和错误顺序 fail-closed，不开放任意代码插件。Docker v39→v40 迁移、动态类目创建、非法合同拒绝、容器重启读回及 1440/390 响应式验收通过。架构决策见 ADR-0028。
+## 最新完成：统一标签生产与治理平台基础接口（2026-08-01）
+
+- 新增本地一等内容投影、上游增量事件、标签发布变更集、版本化正式标签、Outbox
+  变更事件和下游消费者 checkpoint。外部系统未连接前，接口可在本地按合同验收。
+- 上游仅接收 `content.created`、`content.updated`、`content.deleted`；同一 `event_id`
+  可安全重放，载荷漂移返回冲突，乱序事件保留审计但不覆盖新状态。没有本地素材的
+  内容明确停在 `awaiting_material`，不会伪造评测成功。
+- 人工完成初审的 `approved`/`corrected` 真值才可建立发布请求；管理员二审通过后才
+  生成 `PublishedLabel` 与 Outbox。消费者仅能读取发布层，不能读取候选、评测原始响应
+  或人工过程数据。
+- 回滚会引用历史标签创建新的发布版本和 `rolled_back` 事件，不删除或重写历史。
+  当前不调用下游 webhook、不直连下游数据库，保持 `external_writes_enabled=false`。
+- 上游和下游使用独立凭据：`CONTENT_INGRESS_TOKEN` / `content-ingress.token` 与
+  `LABEL_CONSUMER_TOKEN` / `label-consumer.token`，避免单侧凭据泄露扩大权限。
+- ADR-0029 固化了三层标签、事件幂等、发布门禁、cursor 对账和最终一致性合同。

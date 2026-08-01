@@ -863,6 +863,42 @@ export type AuditEvent = {
   created_at: string
 }
 
+export type LabelRelease = {
+  id: number
+  release_key: string
+  content_key: string
+  category_key: string
+  evaluation_id: number | null
+  final_review_id: number | null
+  source_release_id: number | null
+  status: "pending_review" | "approved" | "published" | "rejected"
+  label_schema_version: string
+  payload_hash: string
+  label: Record<string, unknown>
+  requested_by: string
+  requested_at: string
+  approved_by: string | null
+  approved_at: string | null
+  published_at: string | null
+  published_version: number | null
+}
+
+export type IntegrationStatus = {
+  upstream_content_ingress: {
+    configured: boolean
+    schema_version: string
+    events: string[]
+    material_fetch: boolean
+  }
+  downstream_label_consumer: {
+    configured: boolean
+    schema_version: string
+    read_model: string
+    cursor_api: string
+  }
+  external_writes_enabled: boolean
+}
+
 export type PromptOptimizationRun = {
   id: number
   base_prompt_id: number

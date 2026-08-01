@@ -43,6 +43,27 @@ def _production_feedback_token(data_dir: Path) -> str | None:
     return token or None
 
 
+def _integration_token(
+    data_dir: Path,
+    *,
+    environment_name: str,
+    file_name: str,
+) -> str | None:
+    environment_token = os.getenv(environment_name, "").strip()
+    if environment_token:
+        return environment_token
+    token_file = Path(
+        os.getenv(
+            f"{environment_name}_FILE",
+            str(data_dir / "secrets" / file_name),
+        )
+    ).expanduser()
+    if not token_file.is_file():
+        return None
+    token = token_file.read_text(encoding="utf-8").strip()
+    return token or None
+
+
 @dataclass(frozen=True)
 class Settings:
     project_root: Path
@@ -56,6 +77,8 @@ class Settings:
     port: int
     session_days: int
     production_feedback_token: str | None
+    content_ingress_token: str | None
+    label_consumer_token: str | None
     database_url: str
 
 
@@ -77,6 +100,16 @@ def get_settings() -> Settings:
         port=int(os.getenv("APP_PORT", "8080")),
         session_days=max(1, int(os.getenv("SESSION_DAYS", "7"))),
         production_feedback_token=_production_feedback_token(data_dir),
+        content_ingress_token=_integration_token(
+            data_dir,
+            environment_name="CONTENT_INGRESS_TOKEN",
+            file_name="content-ingress.token",
+        ),
+        label_consumer_token=_integration_token(
+            data_dir,
+            environment_name="LABEL_CONSUMER_TOKEN",
+            file_name="label-consumer.token",
+        ),
         database_url=os.getenv(
             "DATABASE_URL", f"sqlite:///{(data_dir / 'database' / 'app.db').as_posix()}"
         ),

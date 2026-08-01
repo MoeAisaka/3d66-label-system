@@ -21,6 +21,8 @@ import type {
   AuditEvent,
   AutomationPolicy,
   AutomationRun,
+  IntegrationStatus,
+  LabelRelease,
   ModelBenchmark,
   ModelConfig,
   OptimizationCase,
@@ -545,6 +547,10 @@ export function AuditEventsPage() {
 }
 
 export function ReleaseWorkspacePage({ view }: { view: "decisions" | "metrics" | "history" }) {
+  const me = useQuery({
+    queryKey: ["me"],
+    queryFn: () => api<User>("/api/auth/me"),
+  })
   const prompts = useQuery({
     queryKey: ["prompts"],
     queryFn: () => api<{ items: PromptVersion[] }>("/api/prompts"),
@@ -553,6 +559,14 @@ export function ReleaseWorkspacePage({ view }: { view: "decisions" | "metrics" |
   const regressions = useQuery({
     queryKey: ["prompt-regressions"],
     queryFn: () => api<{ items: RegressionSummary[] }>("/api/prompt-regressions?limit=200"),
+  })
+  const labelReleases = useQuery({
+    queryKey: ["label-releases"],
+    queryFn: () => api<{ items: LabelRelease[] }>("/api/label-releases?limit=200"),
+  })
+  const integrations = useQuery({
+    queryKey: ["integration-status"],
+    queryFn: () => api<IntegrationStatus>("/api/integration-status"),
   })
   const queryClient = useQueryClient()
   const [metricPromptId, setMetricPromptId] = useState("")
@@ -607,6 +621,16 @@ export function ReleaseWorkspacePage({ view }: { view: "decisions" | "metrics" |
     },
     onError: (error) => toast.error(error.message),
   })
+  const publishLabel = useMutation({
+    mutationFn: (releaseId: number) => api<{ release: LabelRelease }>(
+      `/api/label-releases/${releaseId}/approve-and-publish`, { method: "POST" },
+    ),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["label-releases"] })
+      toast.success("人工二审通过，标签已生成新的发布版本")
+    },
+    onError: (error) => toast.error(error.message),
+  })
 
   if (view === "decisions") {
     const pending = (regressions.data?.items ?? []).filter(
@@ -616,6 +640,32 @@ export function ReleaseWorkspacePage({ view }: { view: "decisions" | "metrics" |
       <>
         <PageHeader index="04.1" title="待发布决策" description="人工二审面向提示词候选与回归证据，不重新审核图片。只有系统建议通过且人工批准后，候选才具备显式发布资格。" />
         <div className="mx-auto max-w-[1540px] px-5 py-8 md:px-8 lg:px-10">
+          <section className="mb-8 border-y border-[var(--line-strong)] bg-white">
+            <div className="flex flex-wrap items-start justify-between gap-4 border-b border-[var(--line)] px-5 py-4">
+              <div>
+                <h2 className="font-editorial text-xl font-bold">正式标签发布</h2>
+                <p className="mt-1 text-xs leading-5 text-[var(--muted)]">只有已完成人工初审的结果可以进入发布；模型候选和人工过程数据不会暴露给下游消费方。</p>
+              </div>
+              <div className="flex flex-wrap gap-2 text-xs">
+                <Badge tone={integrations.data?.upstream_content_ingress.configured ? "success" : "warning"}>上游 {integrations.data?.upstream_content_ingress.configured ? "已留接口" : "待配置令牌"}</Badge>
+                <Badge tone={integrations.data?.downstream_label_consumer.configured ? "success" : "warning"}>下游 {integrations.data?.downstream_label_consumer.configured ? "可拉取" : "待配置令牌"}</Badge>
+                <Badge>外部写入关闭</Badge>
+              </div>
+            </div>
+            <DataTable
+              loading={labelReleases.isLoading}
+              empty="还没有人工确认标签进入发布队列"
+              headers={["内容", "类目", "人工来源", "状态", "版本", "操作"]}
+              rows={(labelReleases.data?.items ?? []).map((release) => [
+                <span key="content" className="font-data text-xs">{release.content_key}</span>,
+                <span key="category">{release.category_key}</span>,
+                <span key="source" className="font-data text-xs">评测 #{release.evaluation_id ?? "—"} · 审核 #{release.final_review_id ?? "—"}</span>,
+                <Badge key="status" tone={release.status === "published" ? "success" : release.status === "pending_review" ? "warning" : "neutral"}>{release.status === "published" ? "已发布" : release.status === "pending_review" ? "待二审" : release.status}</Badge>,
+                <span key="version" className="font-data">{release.published_version == null ? "—" : `v${release.published_version}`}</span>,
+                release.status === "pending_review" && me.data?.is_admin ? <Button key="publish" size="sm" onClick={() => publishLabel.mutate(release.id)} disabled={publishLabel.isPending}>二审通过并发布<CheckCircle /></Button> : <span key="noop" className="text-xs text-[var(--muted)]">{release.status === "published" ? "已进入消费流" : "等待管理员"}</span>,
+              ])}
+            />
+          </section>
           <DataTable
             loading={regressions.isLoading}
             empty="当前没有待人工决策的配对回归"

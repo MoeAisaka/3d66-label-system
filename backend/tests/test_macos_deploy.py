@@ -238,6 +238,28 @@ def test_production_feedback_environment_token_overrides_secret_file(
         config.get_settings.cache_clear()
 
 
+def test_label_integration_uses_separate_ingress_and_consumer_secrets(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    data_dir = tmp_path / "runtime data"
+    secrets = data_dir / "secrets"
+    secrets.mkdir(parents=True)
+    (secrets / "content-ingress.token").write_text("ingress-token\n", encoding="utf-8")
+    (secrets / "label-consumer.token").write_text("consumer-token\n", encoding="utf-8")
+    monkeypatch.setenv("DATA_DIR", str(data_dir))
+    monkeypatch.delenv("CONTENT_INGRESS_TOKEN", raising=False)
+    monkeypatch.delenv("LABEL_CONSUMER_TOKEN", raising=False)
+    config.get_settings.cache_clear()
+    try:
+        settings = config.get_settings()
+        assert settings.content_ingress_token == "ingress-token"
+        assert settings.label_consumer_token == "consumer-token"
+        assert settings.content_ingress_token != settings.label_consumer_token
+    finally:
+        config.get_settings.cache_clear()
+
+
 def test_doctor_accepts_complete_offline_install_without_reading_keychain(
     tmp_path: Path,
 ) -> None:

@@ -2488,6 +2488,171 @@ class ProductionFeedbackEvent(Base):
     )
 
 
+class ContentRecord(Base):
+    """Local projection of an upstream content item, never a remote DB mirror."""
+
+    __tablename__ = "content_records"
+    __table_args__ = (
+        UniqueConstraint(
+            "source_system", "source_content_id", name="uq_content_records_source_content"
+        ),
+        CheckConstraint(
+            "status IN ('awaiting_material','ready','deleted')",
+            name="ck_content_records_status",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    source_system: Mapped[str] = mapped_column(String(120), index=True)
+    source_content_id: Mapped[str] = mapped_column(String(160), index=True)
+    category_key: Mapped[str] = mapped_column(String(40), index=True)
+    source_version: Mapped[str] = mapped_column(String(120))
+    source_occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    asset_id: Mapped[int | None] = mapped_column(
+        ForeignKey("assets.id", ondelete="RESTRICT"), nullable=True, index=True
+    )
+    status: Mapped[str] = mapped_column(String(30), default="awaiting_material", index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+    asset: Mapped[Asset | None] = relationship()
+
+
+class ContentIngressEvent(Base):
+    __tablename__ = "content_ingress_events"
+    __table_args__ = (
+        UniqueConstraint("event_id", name="uq_content_ingress_event_id"),
+        CheckConstraint(
+            "event_type IN ('content.created','content.updated','content.deleted')",
+            name="ck_content_ingress_event_type",
+        ),
+        CheckConstraint(
+            "status IN ('applied','stale','awaiting_material')",
+            name="ck_content_ingress_event_status",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    event_id: Mapped[str] = mapped_column(String(160), unique=True, index=True)
+    schema_version: Mapped[str] = mapped_column(String(40))
+    event_type: Mapped[str] = mapped_column(String(40), index=True)
+    source_system: Mapped[str] = mapped_column(String(120), index=True)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    payload_hash: Mapped[str] = mapped_column(String(64), index=True)
+    payload_json: Mapped[str] = mapped_column(Text)
+    content_record_id: Mapped[int | None] = mapped_column(
+        ForeignKey("content_records.id", ondelete="RESTRICT"), nullable=True, index=True
+    )
+    status: Mapped[str] = mapped_column(String(30), index=True)
+    received_by: Mapped[str] = mapped_column(String(80), default="system")
+    received_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, index=True
+    )
+
+    content_record: Mapped[ContentRecord | None] = relationship()
+
+
+class LabelRelease(Base):
+    __tablename__ = "label_releases"
+    __table_args__ = (
+        UniqueConstraint("release_key", name="uq_label_releases_key"),
+        CheckConstraint(
+            "status IN ('pending_review','approved','published','rejected')",
+            name="ck_label_releases_status",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    release_key: Mapped[str] = mapped_column(String(160), unique=True, index=True)
+    content_key: Mapped[str] = mapped_column(String(320), index=True)
+    category_key: Mapped[str] = mapped_column(String(40), index=True)
+    evaluation_id: Mapped[int | None] = mapped_column(
+        ForeignKey("evaluation_results.id", ondelete="RESTRICT"), nullable=True, index=True
+    )
+    final_review_id: Mapped[int | None] = mapped_column(
+        ForeignKey("human_reviews.id", ondelete="RESTRICT"), nullable=True, index=True
+    )
+    source_release_id: Mapped[int | None] = mapped_column(
+        ForeignKey("label_releases.id", ondelete="RESTRICT"), nullable=True, index=True
+    )
+    label_schema_version: Mapped[str] = mapped_column(String(40))
+    label_payload_json: Mapped[str] = mapped_column(Text)
+    payload_hash: Mapped[str] = mapped_column(String(64), index=True)
+    status: Mapped[str] = mapped_column(String(30), default="pending_review", index=True)
+    requested_by: Mapped[str] = mapped_column(String(80))
+    requested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    approved_by: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class PublishedLabel(Base):
+    __tablename__ = "published_labels"
+    __table_args__ = (
+        UniqueConstraint("release_id", name="uq_published_labels_release"),
+        UniqueConstraint("content_key", "version", name="uq_published_labels_content_version"),
+        CheckConstraint(
+            "status IN ('published','superseded')", name="ck_published_labels_status"
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    release_id: Mapped[int] = mapped_column(
+        ForeignKey("label_releases.id", ondelete="RESTRICT"), unique=True, index=True
+    )
+    content_key: Mapped[str] = mapped_column(String(320), index=True)
+    category_key: Mapped[str] = mapped_column(String(40), index=True)
+    version: Mapped[int] = mapped_column(Integer)
+    label_schema_version: Mapped[str] = mapped_column(String(40))
+    label_payload_json: Mapped[str] = mapped_column(Text)
+    payload_hash: Mapped[str] = mapped_column(String(64), index=True)
+    status: Mapped[str] = mapped_column(String(20), default="published", index=True)
+    published_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    superseded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class LabelOutboxEvent(Base):
+    __tablename__ = "label_outbox_events"
+    __table_args__ = (
+        UniqueConstraint("event_id", name="uq_label_outbox_event_id"),
+        UniqueConstraint("release_id", "operation", name="uq_label_outbox_release_operation"),
+        CheckConstraint(
+            "operation IN ('published','rolled_back')", name="ck_label_outbox_operation"
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    event_id: Mapped[str] = mapped_column(String(160), unique=True, index=True)
+    release_id: Mapped[int] = mapped_column(
+        ForeignKey("label_releases.id", ondelete="RESTRICT"), index=True
+    )
+    published_label_id: Mapped[int] = mapped_column(
+        ForeignKey("published_labels.id", ondelete="RESTRICT"), index=True
+    )
+    content_key: Mapped[str] = mapped_column(String(320), index=True)
+    operation: Mapped[str] = mapped_column(String(30), index=True)
+    payload_hash: Mapped[str] = mapped_column(String(64), index=True)
+    payload_json: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+
+
+class ConsumerSyncCheckpoint(Base):
+    __tablename__ = "consumer_sync_checkpoints"
+    __table_args__ = (
+        UniqueConstraint("consumer_name", name="uq_consumer_sync_checkpoints_name"),
+        CheckConstraint("cursor >= 0", name="ck_consumer_sync_checkpoints_cursor"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    consumer_name: Mapped[str] = mapped_column(String(120), unique=True, index=True)
+    cursor: Mapped[int] = mapped_column(Integer, default=0)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+
 class AuditEvent(Base):
     __tablename__ = "audit_events"
     __table_args__ = (

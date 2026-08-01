@@ -54,6 +54,7 @@ MIGRATION_NAMES = [
     "add_material_package_status",
     "add_accounts_and_model_registry",
     "modular_category_pipelines",
+    "unified_label_platform_contract",
 ]
 
 

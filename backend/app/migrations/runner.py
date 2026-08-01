@@ -5852,6 +5852,143 @@ def _migration_040_modular_category_pipelines(connection: Connection) -> None:
         raise RuntimeError(f"v40 类目模板迁移后外键校验失败：{violations[:3]}")
 
 
+def _migration_041_unified_label_platform_contract(connection: Connection) -> None:
+    """Local-first upstream projection, publish read model and transactional outbox."""
+    connection.exec_driver_sql("""
+        CREATE TABLE IF NOT EXISTS content_records (
+            id INTEGER PRIMARY KEY,
+            source_system VARCHAR(120) NOT NULL,
+            source_content_id VARCHAR(160) NOT NULL,
+            category_key VARCHAR(40) NOT NULL,
+            source_version VARCHAR(120) NOT NULL,
+            source_occurred_at DATETIME NOT NULL,
+            asset_id INTEGER REFERENCES assets(id) ON DELETE RESTRICT,
+            status VARCHAR(30) NOT NULL DEFAULT 'awaiting_material'
+                CHECK(status IN ('awaiting_material','ready','deleted')),
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(source_system, source_content_id)
+        )
+    """)
+    connection.exec_driver_sql("""
+        CREATE TABLE IF NOT EXISTS content_ingress_events (
+            id INTEGER PRIMARY KEY,
+            event_id VARCHAR(160) NOT NULL UNIQUE,
+            schema_version VARCHAR(40) NOT NULL,
+            event_type VARCHAR(40) NOT NULL
+                CHECK(event_type IN ('content.created','content.updated','content.deleted')),
+            source_system VARCHAR(120) NOT NULL,
+            occurred_at DATETIME NOT NULL,
+            payload_hash VARCHAR(64) NOT NULL,
+            payload_json TEXT NOT NULL,
+            content_record_id INTEGER REFERENCES content_records(id) ON DELETE RESTRICT,
+            status VARCHAR(30) NOT NULL
+                CHECK(status IN ('applied','stale','awaiting_material')),
+            received_by VARCHAR(80) NOT NULL DEFAULT 'system',
+            received_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    connection.exec_driver_sql("""
+        CREATE TABLE IF NOT EXISTS label_releases (
+            id INTEGER PRIMARY KEY,
+            release_key VARCHAR(160) NOT NULL UNIQUE,
+            content_key VARCHAR(320) NOT NULL,
+            category_key VARCHAR(40) NOT NULL,
+            evaluation_id INTEGER REFERENCES evaluation_results(id) ON DELETE RESTRICT,
+            final_review_id INTEGER REFERENCES human_reviews(id) ON DELETE RESTRICT,
+            source_release_id INTEGER REFERENCES label_releases(id) ON DELETE RESTRICT,
+            label_schema_version VARCHAR(40) NOT NULL,
+            label_payload_json TEXT NOT NULL,
+            payload_hash VARCHAR(64) NOT NULL,
+            status VARCHAR(30) NOT NULL DEFAULT 'pending_review'
+                CHECK(status IN ('pending_review','approved','published','rejected')),
+            requested_by VARCHAR(80) NOT NULL,
+            requested_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            approved_by VARCHAR(80),
+            approved_at DATETIME,
+            published_at DATETIME
+        )
+    """)
+    connection.exec_driver_sql("""
+        CREATE TABLE IF NOT EXISTS published_labels (
+            id INTEGER PRIMARY KEY,
+            release_id INTEGER NOT NULL UNIQUE REFERENCES label_releases(id) ON DELETE RESTRICT,
+            content_key VARCHAR(320) NOT NULL,
+            category_key VARCHAR(40) NOT NULL,
+            version INTEGER NOT NULL,
+            label_schema_version VARCHAR(40) NOT NULL,
+            label_payload_json TEXT NOT NULL,
+            payload_hash VARCHAR(64) NOT NULL,
+            status VARCHAR(20) NOT NULL DEFAULT 'published'
+                CHECK(status IN ('published','superseded')),
+            published_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            superseded_at DATETIME,
+            UNIQUE(content_key, version)
+        )
+    """)
+    connection.exec_driver_sql("""
+        CREATE TABLE IF NOT EXISTS label_outbox_events (
+            id INTEGER PRIMARY KEY,
+            event_id VARCHAR(160) NOT NULL UNIQUE,
+            release_id INTEGER NOT NULL REFERENCES label_releases(id) ON DELETE RESTRICT,
+            published_label_id INTEGER NOT NULL REFERENCES published_labels(id) ON DELETE RESTRICT,
+            content_key VARCHAR(320) NOT NULL,
+            operation VARCHAR(30) NOT NULL CHECK(operation IN ('published','rolled_back')),
+            payload_hash VARCHAR(64) NOT NULL,
+            payload_json TEXT NOT NULL,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(release_id, operation)
+        )
+    """)
+    connection.exec_driver_sql("""
+        CREATE TABLE IF NOT EXISTS consumer_sync_checkpoints (
+            id INTEGER PRIMARY KEY,
+            consumer_name VARCHAR(120) NOT NULL UNIQUE,
+            cursor INTEGER NOT NULL DEFAULT 0 CHECK(cursor >= 0),
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    for statement in (
+        "CREATE INDEX IF NOT EXISTS ix_content_records_status ON content_records(status)",
+        "CREATE INDEX IF NOT EXISTS ix_content_records_category ON content_records(category_key)",
+        "CREATE INDEX IF NOT EXISTS ix_content_ingress_received_at ON content_ingress_events(received_at)",
+        "CREATE INDEX IF NOT EXISTS ix_label_releases_content_status ON label_releases(content_key, status)",
+        "CREATE INDEX IF NOT EXISTS ix_published_labels_current ON published_labels(content_key, status, version)",
+        "CREATE INDEX IF NOT EXISTS ix_label_outbox_cursor ON label_outbox_events(id)",
+    ):
+        connection.exec_driver_sql(statement)
+    for statement in (
+        """CREATE TRIGGER IF NOT EXISTS trg_content_ingress_events_append_only
+        BEFORE UPDATE ON content_ingress_events
+        BEGIN SELECT RAISE(ABORT, 'ContentIngressEvent is append-only'); END""",
+        """CREATE TRIGGER IF NOT EXISTS trg_content_ingress_events_no_delete
+        BEFORE DELETE ON content_ingress_events
+        BEGIN SELECT RAISE(ABORT, 'ContentIngressEvent cannot be deleted'); END""",
+        """CREATE TRIGGER IF NOT EXISTS trg_label_outbox_events_append_only
+        BEFORE UPDATE ON label_outbox_events
+        BEGIN SELECT RAISE(ABORT, 'LabelOutboxEvent is append-only'); END""",
+        """CREATE TRIGGER IF NOT EXISTS trg_label_outbox_events_no_delete
+        BEFORE DELETE ON label_outbox_events
+        BEGIN SELECT RAISE(ABORT, 'LabelOutboxEvent cannot be deleted'); END""",
+        """CREATE TRIGGER IF NOT EXISTS trg_published_labels_immutable
+        BEFORE UPDATE ON published_labels
+        WHEN OLD.status = 'superseded'
+          OR NEW.release_id <> OLD.release_id
+          OR NEW.content_key <> OLD.content_key
+          OR NEW.category_key <> OLD.category_key
+          OR NEW.version <> OLD.version
+          OR NEW.label_schema_version <> OLD.label_schema_version
+          OR NEW.label_payload_json <> OLD.label_payload_json
+          OR NEW.payload_hash <> OLD.payload_hash
+          OR NEW.published_at <> OLD.published_at
+        BEGIN SELECT RAISE(ABORT, 'PublishedLabel is immutable'); END""",
+    ):
+        connection.exec_driver_sql(statement)
+    violations = connection.exec_driver_sql("PRAGMA foreign_key_check").fetchall()
+    if violations:
+        raise RuntimeError(f"v41 统一标签平台迁移外键校验失败：{violations[:3]}")
+
+
 MIGRATIONS = [
     Migration(1, "add_sample_expected_level", _migration_001_add_sample_expected_level),
     Migration(2, "add_review_corrections", _migration_002_add_review_corrections),
@@ -6008,6 +6145,11 @@ MIGRATIONS = [
         40,
         "modular_category_pipelines",
         _migration_040_modular_category_pipelines,
+    ),
+    Migration(
+        41,
+        "unified_label_platform_contract",
+        _migration_041_unified_label_platform_contract,
     ),
 ]
 

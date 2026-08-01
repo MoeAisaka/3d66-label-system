@@ -41,6 +41,7 @@
 | [0026](0026-automatic-category-isolated-optimization-and-asset-management.md) | Accepted | 类目隔离自动优化与素材管理 |
 | [0027](0027-account-rbac-model-registry-and-docker-persistence.md) | Accepted | 多人账号、统一模型管理与 Docker 持久化 |
 | [0028](0028-admin-composable-category-pipelines.md) | Accepted | 管理员可组合的模块化类目流水线 |
+| [0029](0029-unified-label-production-and-consumption-contract.md) | Accepted | 统一标签生产、版本化发布与下游消费合同 |
 
 ## 新增 ADR 的规则
 
