@@ -84,6 +84,7 @@ from .strategy_bundle import (
     ROUTED_STRATEGY_SCHEMA_VERSION,
     STRATEGY_SCHEMA_VERSION,
     build_evaluation_strategy_snapshot,
+    build_model_config_snapshot,
     build_strategy_snapshot,
     get_or_create_bundle,
     resolve_frozen_dimension_entry,
@@ -106,6 +107,79 @@ WORKER_ID = f"{socket.gethostname()}-{id(object())}"
 
 class JobInterrupted(RuntimeError):
     """The operator paused or canceled a job while a model call was in flight."""
+
+
+def _frozen_category_contract(
+    job: EvaluationJob,
+    asset: Asset,
+) -> dict[str, object] | None:
+    if not job.category_profile_snapshot_json:
+        return None
+    try:
+        snapshot = json.loads(job.category_profile_snapshot_json)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("任务冻结类目配置损坏") from exc
+    if (
+        not isinstance(snapshot, dict)
+        or snapshot.get("schema_version") != "evaluation-category-profile-v1"
+        or snapshot.get("category_key") != job.category_key
+        or snapshot.get("prompt_a_id") != job.prompt_a_id
+        or snapshot.get("prompt_b_id") != job.prompt_b_id
+    ):
+        raise RuntimeError("任务冻结类目配置与 Job 不一致")
+
+    profile_id = snapshot.get("profile_id")
+    model_config_id = snapshot.get("model_config_id")
+    if (
+        not isinstance(profile_id, int)
+        or isinstance(profile_id, bool)
+        or profile_id < 1
+        or not isinstance(model_config_id, int)
+        or isinstance(model_config_id, bool)
+        or model_config_id < 1
+    ):
+        raise RuntimeError("任务冻结类目配置身份损坏")
+
+    allowed_mime_types = snapshot.get("allowed_mime_types")
+    if (
+        not isinstance(allowed_mime_types, list)
+        or not allowed_mime_types
+        or any(
+            not isinstance(item, str) or not item
+            for item in allowed_mime_types
+        )
+        or asset.mime_type not in allowed_mime_types
+    ):
+        raise RuntimeError("任务冻结类目 MIME 合同损坏")
+    if not isinstance(snapshot.get("preprocess_config"), dict):
+        raise RuntimeError("任务冻结类目前处理配置损坏")
+    rubric_version = snapshot.get("rubric_version")
+    if not isinstance(rubric_version, str) or not rubric_version:
+        raise RuntimeError("任务冻结类目 rubric 配置损坏")
+    dimension_schema_key = snapshot.get("dimension_schema_key")
+    dimension_schema_version = snapshot.get("dimension_schema_version")
+    if (
+        (dimension_schema_key is None) != (dimension_schema_version is None)
+        or dimension_schema_key is not None
+        and (
+            not isinstance(dimension_schema_key, str)
+            or not dimension_schema_key
+            or not isinstance(dimension_schema_version, str)
+            or not dimension_schema_version
+        )
+    ):
+        raise RuntimeError("任务冻结类目维度配置损坏")
+
+    frozen_model = snapshot.get("model_config")
+    if not isinstance(frozen_model, dict):
+        raise RuntimeError("任务冻结类目模型快照损坏")
+    try:
+        rebuilt_model = build_model_config_snapshot(SimpleNamespace(**frozen_model))
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise RuntimeError("任务冻结类目模型快照损坏") from exc
+    if rebuilt_model != frozen_model:
+        raise RuntimeError("任务冻结类目模型快照损坏")
+    return snapshot
 
 
 def aesthetic_grade_collapse(aesthetic: dict[str, object] | None) -> bool:
@@ -424,12 +498,23 @@ async def evaluate_job(job_id: int) -> None:
         asset = db.get(Asset, job.asset_id)
         if not asset:
             raise RuntimeError("图片不存在")
-        category_profile = db.scalar(
-            select(EvaluationCategoryProfile).where(
-                EvaluationCategoryProfile.category_key == job.category_key,
+        category_profile_snapshot = _frozen_category_contract(job, asset)
+        if category_profile_snapshot is not None:
+            category_preprocess_config = category_profile_snapshot[
+                "preprocess_config"
+            ]
+            category_model_config_id = category_profile_snapshot[
+                "model_config_id"
+            ]
+            frozen_category_model = category_profile_snapshot["model_config"]
+        else:
+            category_profile = db.scalar(
+                select(EvaluationCategoryProfile).where(
+                    EvaluationCategoryProfile.category_key == job.category_key,
+                )
             )
-        )
-        if category_profile is None:
+            category_model_config_id = None
+        if category_profile_snapshot is None and category_profile is None:
             # Older direct callers created jobs before category profiles were
             # introduced. Materialize only the compatibility default; normal
             # production databases are seeded by migrations and can still
@@ -448,14 +533,17 @@ async def evaluate_job(job_id: int) -> None:
             )
             db.add(category_profile)
             db.flush()
-        elif category_profile.status != "active":
+        elif category_profile_snapshot is None and category_profile.status != "active":
             raise RuntimeError("评测类目配置不存在或已停用")
-        try:
-            category_preprocess_config = json.loads(
-                category_profile.preprocess_config_json or "{}"
-            )
-        except json.JSONDecodeError as exc:
-            raise RuntimeError("评测类目前处理配置损坏") from exc
+        if category_profile_snapshot is None:
+            try:
+                category_preprocess_config = json.loads(
+                    category_profile.preprocess_config_json or "{}"
+                )
+            except json.JSONDecodeError as exc:
+                raise RuntimeError("评测类目前处理配置损坏") from exc
+            category_model_config_id = category_profile.model_config_id
+            frozen_category_model = None
         prompt_a_id = job.prompt_a_id
         prompt_b_id = job.prompt_b_id
         strategy_bundle_id = job.strategy_bundle_id
@@ -560,14 +648,29 @@ async def evaluate_job(job_id: int) -> None:
                 sampling_policy=sampling_policy,
             )
         else:
-            model_statement = select(ModelConfig).where(ModelConfig.active.is_(True))
-            if category_profile.model_config_id is not None:
-                model_statement = model_statement.where(
-                    ModelConfig.id == category_profile.model_config_id
+            if frozen_category_model is not None:
+                credential = db.get(ModelConfig, category_model_config_id)
+                if credential is None or credential.encrypted_api_key is None:
+                    raise RuntimeError("任务冻结类目模型缺少可用凭据")
+                model_config = SimpleNamespace(
+                    **frozen_category_model,
+                    encrypted_api_key=credential.encrypted_api_key,
                 )
-            model_config = db.scalar(model_statement.order_by(ModelConfig.id.asc()))
-            if model_config is None:
-                raise RuntimeError("模型配置不存在")
+            else:
+                model_statement = select(ModelConfig)
+                if category_model_config_id is None:
+                    model_statement = model_statement.where(
+                        ModelConfig.active.is_(True)
+                    )
+                else:
+                    model_statement = model_statement.where(
+                        ModelConfig.id == category_model_config_id
+                    )
+                model_config = db.scalar(
+                    model_statement.order_by(ModelConfig.id.asc())
+                )
+                if model_config is None:
+                    raise RuntimeError("模型配置不存在")
             prompt_a = None
             prompt_b = None
             sampling_policy = None
@@ -1183,6 +1286,9 @@ def _handle_technical_failure(
                 child = EvaluationJob(
                     asset_id=parent.asset_id,
                     category_key=parent.category_key,
+                    category_profile_snapshot_json=(
+                        parent.category_profile_snapshot_json
+                    ),
                     prompt_a_id=parent.prompt_a_id,
                     prompt_b_id=parent.prompt_b_id,
                     regression_item_id=parent.regression_item_id,

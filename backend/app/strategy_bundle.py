@@ -541,6 +541,11 @@ def _build_model_config_snapshot(config: ModelConfig) -> dict[str, Any]:
     return _redact_secrets(snapshot)
 
 
+def build_model_config_snapshot(config: ModelConfig) -> dict[str, Any]:
+    """Public safe snapshot used by Job-level execution contracts."""
+    return _build_model_config_snapshot(config)
+
+
 def _build_prompt_definition(prompt: PromptVersion) -> dict[str, Any]:
     """Capture prompt identity and exact persisted contents."""
     if prompt.id is None:

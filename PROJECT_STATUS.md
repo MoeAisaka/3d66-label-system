@@ -15,6 +15,9 @@
 - 新增三个互相隔离的评测类目合同：`space_image`、`pdf_text`、`material_image`。
   素材包、评测 Job、Prompt/模型绑定和 MIME 校验均携带 `category_key`，重试 Job
   继承原类目，不会把 PDF 或材质图混入空间图片流水线。
+- 评测 Job 在入队时冻结完整类目执行合同（MIME、前处理、提示词、模型非密参数、
+  rubric 与维度标识），迁移已到 v34；worker 只从原模型配置记录读取当前系统凭据
+  引用，API Key 不进入快照。类目或模型后续停用不影响已排队任务，重试继承同一快照。
 - PDF 类目先做内容 SHA 缓存的文本抽取、页图接触表渲染和可选 Tesseract OCR，
   以明确的 OCR 状态和多模态上下文进入同一评测 Worker；原始 PDF 始终保留。
   结果冻结页数、OCR 状态、文本字符数和 2000 字摘要，人工可在审核页展开查看。
@@ -29,7 +32,7 @@
 
 - 后端：`580 passed, 1 skipped`（Homebrew Python 3.14；仅 Windows doctor 的
   Python 3.11/3.12 版本门禁测试因本机解释器版本不匹配而未计入通过）。
-- 专项：PDF/类目隔离/迁移/素材包 `37 passed`；前端 `npm run lint`、
+- 专项：PDF/类目隔离/迁移/素材包与任务冻结合同通过；前端 `npm run lint`、
   `npm run build`、`git diff --check` 通过。
 
 仍待完成：

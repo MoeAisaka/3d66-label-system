@@ -408,6 +408,9 @@ class EvaluationJob(Base):
     category_key: Mapped[str] = mapped_column(
         String(40), default="space_image", server_default="space_image", index=True
     )
+    category_profile_snapshot_json: Mapped[str | None] = mapped_column(
+        Text, nullable=True
+    )
     prompt_a_id: Mapped[int | None] = mapped_column(
         ForeignKey("prompt_versions.id", ondelete="SET NULL"), nullable=True, index=True
     )

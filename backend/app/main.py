@@ -187,6 +187,7 @@ from .scoring import (
 )
 from .dimension_schema_registry import canonical_hash
 from .strategy_bundle import (
+    build_model_config_snapshot,
     build_strategy_snapshot,
     get_or_create_bundle,
     safe_strategy_snapshot_payload,
@@ -2147,6 +2148,41 @@ def _category_profile_payload(profile: EvaluationCategoryProfile) -> dict[str, A
     }
 
 
+def _category_execution_snapshot(
+    profile: EvaluationCategoryProfile,
+    *,
+    prompt_a_id: int,
+    prompt_b_id: int | None,
+    model_config: ModelConfig,
+) -> str:
+    return canonical_json(
+        {
+            "schema_version": "evaluation-category-profile-v1",
+            "profile_id": profile.id,
+            "category_key": profile.category_key,
+            "display_name": profile.display_name,
+            "allowed_mime_types": json.loads(
+                profile.allowed_mime_types_json or "[]"
+            ),
+            "preprocess_config": json.loads(
+                profile.preprocess_config_json or "{}"
+            ),
+            "prompt_a_id": prompt_a_id,
+            "prompt_b_id": prompt_b_id,
+            "model_config_id": model_config.id,
+            "model_config": build_model_config_snapshot(model_config),
+            "rubric_version": profile.rubric_version,
+            "dimension_schema_key": profile.dimension_schema_key,
+            "dimension_schema_version": profile.dimension_schema_version,
+            "profile_updated_at": (
+                profile.updated_at.isoformat()
+                if profile.updated_at is not None
+                else None
+            ),
+        }
+    )
+
+
 @app.get("/api/evaluation-categories")
 def list_evaluation_categories(
     _user: User = Depends(current_user),
@@ -3053,6 +3089,27 @@ def enqueue_jobs(
         raise HTTPException(status_code=400, detail="单提示词版本无效")
     prompt_a = None if single_prompt else selected_prompt("A", selected_a_id)
     prompt_b = None if single_prompt else selected_prompt("B", selected_b_id)
+    frozen_prompt_a_id = single_prompt.id if single_prompt else prompt_a.id
+    frozen_prompt_b_id = None if single_prompt else prompt_b.id
+    selected_model = (
+        db.get(ModelConfig, profile.model_config_id)
+        if profile.model_config_id is not None
+        else db.scalar(
+            select(ModelConfig)
+            .where(ModelConfig.active.is_(True))
+            .order_by(ModelConfig.id.asc())
+        )
+    )
+    if selected_model is None:
+        selected_model = ModelConfig(active=True)
+        db.add(selected_model)
+        db.flush()
+    category_profile_snapshot = _category_execution_snapshot(
+        profile,
+        prompt_a_id=frozen_prompt_a_id,
+        prompt_b_id=frozen_prompt_b_id,
+        model_config=selected_model,
+    )
     jobs = []
     queue_class = (
         "interactive"
@@ -3064,8 +3121,9 @@ def enqueue_jobs(
         job = EvaluationJob(
             asset_id=asset.id,
             category_key=payload.category_key,
-            prompt_a_id=single_prompt.id if single_prompt else prompt_a.id,
-            prompt_b_id=None if single_prompt else prompt_b.id,
+            category_profile_snapshot_json=category_profile_snapshot,
+            prompt_a_id=frozen_prompt_a_id,
+            prompt_b_id=frozen_prompt_b_id,
             queue_class=queue_class,
             origin_queue_class=queue_class,
             batch_key=batch_key,

@@ -315,6 +315,7 @@ def test_worker_technical_retry_uses_recovery_and_never_exceeds_two(
     db.flush()
     original = EvaluationJob(
         asset=asset,
+        category_profile_snapshot_json='{"schema_version":"evaluation-category-profile-v1","category_key":"space_image"}',
         prompt_a_id=101,
         prompt_b_id=102,
         regression_item_id=201,
@@ -369,6 +370,10 @@ def test_worker_technical_retry_uses_recovery_and_never_exceeds_two(
         assert jobs[1].regression_item_id == 201
         assert jobs[1].prompt_a_id == 101
         assert jobs[1].prompt_b_id == 102
+        assert (
+            jobs[1].category_profile_snapshot_json
+            == original.category_profile_snapshot_json
+        )
         assert worker._handle_technical_failure(
             original.id, TimeoutError("duplicate callback")
         )

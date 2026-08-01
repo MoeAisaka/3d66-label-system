@@ -47,6 +47,7 @@ MIGRATION_NAMES = [
     "add_evaluation_category_profiles",
     "repair_evaluation_category_profiles",
     "add_evaluation_preprocess_snapshot",
+    "freeze_job_category_profile",
 ]
 
 

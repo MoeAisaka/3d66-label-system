@@ -5360,6 +5360,25 @@ def _migration_033_add_evaluation_preprocess_snapshot(connection: Connection) ->
         )
 
 
+def _migration_034_freeze_job_category_profile(connection: Connection) -> None:
+    tables = {
+        row[0]
+        for row in connection.exec_driver_sql(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )
+    }
+    if "evaluation_jobs" not in tables:
+        return
+    columns = {
+        row[1]
+        for row in connection.exec_driver_sql("PRAGMA table_info(evaluation_jobs)")
+    }
+    if "category_profile_snapshot_json" not in columns:
+        connection.exec_driver_sql(
+            "ALTER TABLE evaluation_jobs ADD COLUMN category_profile_snapshot_json TEXT"
+        )
+
+
 MIGRATIONS = [
     Migration(1, "add_sample_expected_level", _migration_001_add_sample_expected_level),
     Migration(2, "add_review_corrections", _migration_002_add_review_corrections),
@@ -5481,6 +5500,11 @@ MIGRATIONS = [
         33,
         "add_evaluation_preprocess_snapshot",
         _migration_033_add_evaluation_preprocess_snapshot,
+    ),
+    Migration(
+        34,
+        "freeze_job_category_profile",
+        _migration_034_freeze_job_category_profile,
     ),
 ]
 
