@@ -1,8 +1,10 @@
 from app.schema_adapter import (
     adapt_combined_aesthetic_response,
     is_combined_aesthetic_response,
+    normalize_aesthetic_dimensions_for_schema,
     normalize_precheck_business_rules,
 )
+from app.dimension_schema_registry import space_schema_definition_for_scoring_profile
 from app.scoring import calculate_score
 
 
@@ -80,6 +82,28 @@ def test_combined_response_applies_declared_level_cap() -> None:
     assert scoring["raw_level"] == "L5"
     assert scoring["level"] == "L3"
     assert scoring["caps"][-1]["reason"] == "现场记录图最高 L3"
+
+
+def test_aesthetic_aliases_are_canonicalized_without_dropping_unknown_keys() -> None:
+    original = {
+        "dimensions": {
+            "spatial_design_coherence": {"grade": 3},
+            "detail_finish": {"grade": 4},
+            "contemporary_relevance": {"grade": 5},
+            "future_dimension": {"grade": 2},
+        }
+    }
+    schema = space_schema_definition_for_scoring_profile("space_aesthetic_v1.3")
+
+    normalized = normalize_aesthetic_dimensions_for_schema(original, schema)
+
+    assert normalized is not original
+    assert normalized["dimensions"]["spatial_design_furnishing"]["grade"] == 3
+    assert normalized["dimensions"]["detail_completion"]["grade"] == 4
+    assert normalized["dimensions"]["inspiration_reference"]["grade"] == 5
+    assert "spatial_design_coherence" not in normalized["dimensions"]
+    assert normalized["dimensions"]["future_dimension"] == {"grade": 2}
+    assert "spatial_design_coherence" in original["dimensions"]
 
 
 def test_partial_space_is_not_normal_or_professional_in_business_rules() -> None:

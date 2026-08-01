@@ -211,7 +211,7 @@ def test_pdf_worker_summarizes_before_single_prompt_evaluation(
             return DoubaoResponse(
                 parsed=_combined_payload(),
                 raw_text="{}",
-                raw_payload={},
+                raw_payload=_combined_payload(),
             )
 
     monkeypatch.setattr(worker, "session_scope", test_scope)
@@ -243,11 +243,21 @@ def test_pdf_worker_summarizes_before_single_prompt_evaluation(
         completed_job = db.get(EvaluationJob, job.id)
         result = db.query(EvaluationResult).filter_by(job_id=job.id).one()
         preprocess = json.loads(result.preprocess_json)
+        aesthetic = json.loads(result.aesthetic_json)
+        raw_response_a = json.loads(result.raw_response_a)
         assert completed_job.status == "completed"
         assert result.level in {"L1", "L2", "L3", "L4", "L5"}
         assert preprocess["category_key"] == "pdf_text"
         assert preprocess["multimodal_summary"]["status"] == "completed"
         assert preprocess["multimodal_summary"]["model_id"] == "vision-v1"
+        assert "spatial_design_coherence" not in aesthetic["dimensions"]
+        assert aesthetic["dimensions"]["spatial_design_furnishing"]["grade"] == 3
+        assert "detail_finish" not in aesthetic["dimensions"]
+        assert aesthetic["dimensions"]["detail_completion"]["grade"] == 3
+        assert "contemporary_relevance" not in aesthetic["dimensions"]
+        assert aesthetic["dimensions"]["inspiration_reference"]["grade"] == 3
+        assert "spatial_design_coherence" in raw_response_a["dimensions"]
+        assert "spatial_design_furnishing" not in raw_response_a["dimensions"]
     finally:
         db.close()
         engine.dispose()

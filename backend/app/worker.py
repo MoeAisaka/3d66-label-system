@@ -82,6 +82,7 @@ from .scoring import ENGINE_VERSION, calculate_score
 from .schema_adapter import (
     adapt_combined_aesthetic_response,
     is_combined_aesthetic_response,
+    normalize_aesthetic_dimensions_for_schema,
     normalize_precheck_business_rules,
 )
 from .dimension_schema_registry import (
@@ -1102,6 +1103,10 @@ async def evaluate_job(job_id: int) -> None:
             if isinstance(aesthetic, dict)
             else None
         )
+    )
+    aesthetic = normalize_aesthetic_dimensions_for_schema(
+        aesthetic,
+        dimension_definition,
     )
     preliminary_scoring = calculate_score(
         precheck,

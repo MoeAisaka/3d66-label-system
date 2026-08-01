@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from typing import Any
 
 from sqlalchemy import select
@@ -8,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from .dimension_schema_registry import SPACE_INPUT_DIMENSION_ALIASES
 from .models import EvaluationResult
-from .scoring import ENGINE_VERSION, calculate_score
+from .scoring import ENGINE_VERSION, calculate_score, normalize_dimension_aliases
 
 
 QUALITY_RANK = {
@@ -116,6 +117,33 @@ def normalize_precheck_business_rules(precheck: dict[str, Any]) -> dict[str, Any
 
 
 COMBINED_DIMENSION_ALIASES = SPACE_INPUT_DIMENSION_ALIASES
+
+
+def normalize_aesthetic_dimensions_for_schema(
+    aesthetic: dict[str, Any] | None,
+    dimension_schema: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Canonicalize supported aliases before scoring and persistence."""
+    if aesthetic is None:
+        return None
+
+    normalized = deepcopy(aesthetic)
+    dimensions = normalized.get("dimensions")
+    output_contract = dimension_schema.get("output_contract")
+    if not isinstance(dimensions, dict) or not isinstance(output_contract, dict):
+        return normalized
+
+    dimension_keys = output_contract.get("dimension_output_keys")
+    if not isinstance(dimension_keys, list) or any(
+        not isinstance(key, str) or not key for key in dimension_keys
+    ):
+        return normalized
+
+    normalized["dimensions"] = normalize_dimension_aliases(
+        dimensions,
+        dimension_keys,
+    )
+    return normalized
 
 
 def is_combined_aesthetic_response(payload: dict[str, Any]) -> bool:
