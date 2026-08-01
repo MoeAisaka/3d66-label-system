@@ -4,7 +4,9 @@ import importlib.util
 import json
 import subprocess
 import sys
+from contextlib import contextmanager
 from pathlib import Path
+from typing import Iterator
 
 import pytest
 
@@ -46,6 +48,27 @@ def _load_module(path: Path, name: str):
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+@contextmanager
+def _isolated_backend_imports() -> Iterator[None]:
+    """Reload backend globals for this test, then restore the pytest host."""
+    cached_modules = {
+        name: module
+        for name, module in sys.modules.items()
+        if name == "app" or name.startswith("app.")
+    }
+    original_sys_path = list(sys.path)
+    for name in cached_modules:
+        sys.modules.pop(name, None)
+    try:
+        yield
+    finally:
+        for name in tuple(sys.modules):
+            if name == "app" or name.startswith("app."):
+                sys.modules.pop(name, None)
+        sys.modules.update(cached_modules)
+        sys.path[:] = original_sys_path
 
 
 def _run(*args: str) -> tuple[subprocess.CompletedProcess[str], list[dict]]:
@@ -160,6 +183,11 @@ def test_failed_scenario_worker_emits_json_and_exits_nonzero(tmp_path: Path) -> 
 def test_cross_category_policy_budget_regression_and_candidate_isolation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    monkeypatch.setenv(
+        "API_KEY_MASTER_KEY_FILE",
+        str(tmp_path / "secrets/master.key"),
+    )
     state_dir = tmp_path / "mock-state"
     state_dir.mkdir()
     seeded = subprocess.run(
@@ -179,35 +207,36 @@ def test_cross_category_policy_budget_regression_and_candidate_isolation(
     )
     assert seeded.returncode == 0, seeded.stderr
 
-    runner = _load_module(RUNNER, "automation_fault_matrix_cross_category")
-    runner.backend(tmp_path)
-    from app import optimization_automation
-    from app.optimizer import AutomationCandidateGeneration
+    with _isolated_backend_imports(), monkeypatch.context() as isolated_patch:
+        runner = _load_module(RUNNER, "automation_fault_matrix_cross_category")
+        runner.backend(tmp_path)
+        from app import optimization_automation
+        from app.optimizer import AutomationCandidateGeneration
 
-    async def fake_generation(**_kwargs):
-        return AutomationCandidateGeneration(
-            candidates=[
-                {
-                    "system_prompt": "isolated candidate system",
-                    "user_prompt": "isolated candidate user",
-                    "change_note": "category-specific candidate",
-                }
-            ],
-            input_tokens=200,
-            output_tokens=100,
-            total_tokens=300,
+        async def fake_generation(**_kwargs):
+            return AutomationCandidateGeneration(
+                candidates=[
+                    {
+                        "system_prompt": "isolated candidate system",
+                        "user_prompt": "isolated candidate user",
+                        "change_note": "category-specific candidate",
+                    }
+                ],
+                input_tokens=200,
+                output_tokens=100,
+                total_tokens=300,
+            )
+
+        isolated_patch.setattr(
+            optimization_automation,
+            "generate_automation_candidates",
+            fake_generation,
         )
-
-    monkeypatch.setattr(
-        optimization_automation,
-        "generate_automation_candidates",
-        fake_generation,
-    )
-    result = runner.scenario_cross_category(
-        tmp_path,
-        "http://127.0.0.1:1/v1",
-        state_dir,
-    )
+        result = runner.scenario_cross_category(
+            tmp_path,
+            "http://127.0.0.1:1/v1",
+            state_dir,
+        )
 
     assert result["pass"] is True
     assert result["observed"]["case_counts"] == {
