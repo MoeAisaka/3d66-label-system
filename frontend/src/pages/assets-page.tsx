@@ -18,7 +18,9 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { api, jsonBody } from "@/lib/api"
-import type { Asset, MaterialPackage, PromptVersion } from "@/lib/types"
+import type { Asset, EvaluationCategoryProfile, MaterialPackage, PromptVersion } from "@/lib/types"
+
+type CategoryKey = EvaluationCategoryProfile["category_key"]
 
 type UploadResult = {
   items: Asset[]
@@ -61,7 +63,12 @@ export function AssetsPage() {
   const [excludeCurrent, setExcludeCurrent] = useState(true)
   const [uploadedFrom, setUploadedFrom] = useState("")
   const [uploadedTo, setUploadedTo] = useState("")
+  const [categoryKey, setCategoryKey] = useState<CategoryKey>("space_image")
   const queryClient = useQueryClient()
+  const categories = useQuery({
+    queryKey: ["evaluation-categories"],
+    queryFn: () => api<{ items: EvaluationCategoryProfile[] }>("/api/evaluation-categories"),
+  })
 
   const prompts = useQuery({
     queryKey: ["prompts"],
@@ -119,6 +126,7 @@ export function AssetsPage() {
       const form = new FormData()
       files.forEach((file) => form.append("files", file))
       if (packageName?.trim()) form.append("package_name", packageName.trim())
+      form.append("category_key", categoryKey)
       return api<UploadResult>("/api/assets/upload", { method: "POST", body: form })
     },
     onSuccess: async (data) => {
@@ -138,6 +146,7 @@ export function AssetsPage() {
       const form = new FormData()
       form.append("archive", archive)
       if (packageName?.trim()) form.append("package_name", packageName.trim())
+      form.append("category_key", categoryKey)
       return api<UploadResult>("/api/material-packages/import-archive", {
         method: "POST",
         body: form,
@@ -160,6 +169,7 @@ export function AssetsPage() {
       ...jsonBody({
         name: manualPackageName.trim(),
         asset_ids: Array.from(selected),
+        category_key: categoryKey,
       }),
     }),
     onSuccess: async (created) => {
@@ -198,6 +208,7 @@ export function AssetsPage() {
           prompt_id: effectivePromptMode === "single" ? effectivePromptId : null,
           prompt_a_id: effectivePromptMode === "split" ? effectivePromptAId : null,
           prompt_b_id: effectivePromptMode === "split" ? effectivePromptBId : null,
+          category_key: categoryKey,
         }),
       }),
     onSuccess: async (data) => {
@@ -246,7 +257,7 @@ export function AssetsPage() {
           ref={fileInputRef}
           type="file"
           multiple
-          accept="image/jpeg,image/png,image/webp,image/gif"
+          accept={categoryKey === "pdf_text" ? "application/pdf,.pdf" : "image/jpeg,image/png,image/webp,image/gif"}
           className="sr-only"
           onChange={(event) => {
             const files = snapshotFiles(event.target.files)
@@ -262,7 +273,7 @@ export function AssetsPage() {
           }}
           type="file"
           multiple
-          accept="image/jpeg,image/png,image/webp,image/gif"
+          accept={categoryKey === "pdf_text" ? "application/pdf,.pdf" : "image/jpeg,image/png,image/webp,image/gif"}
           className="sr-only"
           onChange={(event) => {
             const files = snapshotFiles(event.target.files)
@@ -295,9 +306,15 @@ export function AssetsPage() {
                 onChange={(event) => setUploadPackageName(event.target.value)}
               />
             </label>
+            <label>
+              <span className="mb-2 block text-xs font-semibold">评测类目</span>
+              <select className="h-11 w-full rounded-[4px] border border-[var(--line-strong)] bg-white px-3 text-sm" value={categoryKey} onChange={(event) => setCategoryKey(event.target.value as CategoryKey)}>
+                {(categories.data?.items ?? []).filter((item) => item.status !== "retired").map((item) => <option key={item.category_key} value={item.category_key}>{item.display_name}</option>)}
+              </select>
+            </label>
             <div className="flex flex-wrap gap-2">
               <Button variant="secondary" onClick={() => fileInputRef.current?.click()} disabled={uploadBusy}>
-                <CloudArrowUp />批量图片
+                <CloudArrowUp />{categoryKey === "pdf_text" ? "批量 PDF" : "批量图片"}
               </Button>
               <Button variant="secondary" onClick={() => folderInputRef.current?.click()} disabled={uploadBusy}>
                 <FolderOpen />整个文件夹
@@ -324,10 +341,10 @@ export function AssetsPage() {
           >
             <CloudArrowUp size={28} weight="light" />
             <p className="mt-3 font-editorial text-xl font-bold">
-              {uploadBusy ? "正在生成素材包" : "拖入一批图片，自动汇总成一个素材包"}
+              {uploadBusy ? "正在生成素材包" : categoryKey === "pdf_text" ? "拖入 PDF 方案，自动汇总成文本评测包" : "拖入一批图片，自动汇总成一个素材包"}
             </p>
             <p className="mt-2 text-sm text-[var(--muted)]">
-              图片/文件夹单次最多 1000 张；更多素材用 ZIP，最多 10000 张；单张不超过 25MB
+              {categoryKey === "pdf_text" ? "PDF 单文件不超过 25MB；上传后先做文本提取、OCR 和页图预处理" : "图片/文件夹单次最多 1000 张；更多素材用 ZIP，最多 10000 张；单张不超过 25MB"}
             </p>
           </button>
         </section>
@@ -372,7 +389,7 @@ export function AssetsPage() {
                     >
                       <td className="px-4 py-4">
                         <p className="font-semibold">{item.name}</p>
-                        <p className="font-data mt-1 text-xs text-[var(--muted)]">{item.package_key}</p>
+                        <p className="font-data mt-1 text-xs text-[var(--muted)]">{item.package_key} · {item.category_key}</p>
                       </td>
                       <td className="font-data px-3 py-4">
                         {item.active_asset_count} 可用 / {item.unique_asset_count} 唯一 / {item.item_count} 条来源

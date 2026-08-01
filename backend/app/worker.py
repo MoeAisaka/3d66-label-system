@@ -26,11 +26,13 @@ from .loop_engine import (
     request_fingerprint,
     validate_result_scope,
 )
-from .media import prepare_model_image
+from .media import prepare_model_image, prepare_pdf_model_input
 from .models import (
     Asset,
     CircuitBreaker,
     EvaluationControl,
+    EvaluationCategoryProfile,
+    CATEGORY_PROFILE_DEFAULTS,
     EvaluationJob,
     EvaluationResult,
     ModelConfig,
@@ -422,6 +424,38 @@ async def evaluate_job(job_id: int) -> None:
         asset = db.get(Asset, job.asset_id)
         if not asset:
             raise RuntimeError("图片不存在")
+        category_profile = db.scalar(
+            select(EvaluationCategoryProfile).where(
+                EvaluationCategoryProfile.category_key == job.category_key,
+            )
+        )
+        if category_profile is None:
+            # Older direct callers created jobs before category profiles were
+            # introduced. Materialize only the compatibility default; normal
+            # production databases are seeded by migrations and can still
+            # explicitly retire a profile.
+            defaults = CATEGORY_PROFILE_DEFAULTS.get(job.category_key)
+            if defaults is None:
+                raise RuntimeError("评测类目配置不存在或已停用")
+            category_profile = EvaluationCategoryProfile(
+                category_key=job.category_key,
+                display_name=defaults["display_name"],
+                allowed_mime_types_json=defaults["allowed_mime_types_json"],
+                preprocess_config_json=defaults["preprocess_config_json"],
+                status="active",
+                rubric_version="rubric-v2.1",
+                created_by="compatibility-default",
+            )
+            db.add(category_profile)
+            db.flush()
+        elif category_profile.status != "active":
+            raise RuntimeError("评测类目配置不存在或已停用")
+        try:
+            category_preprocess_config = json.loads(
+                category_profile.preprocess_config_json or "{}"
+            )
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("评测类目前处理配置损坏") from exc
         prompt_a_id = job.prompt_a_id
         prompt_b_id = job.prompt_b_id
         strategy_bundle_id = job.strategy_bundle_id
@@ -526,11 +560,12 @@ async def evaluate_job(job_id: int) -> None:
                 sampling_policy=sampling_policy,
             )
         else:
-            model_config = db.scalar(
-                select(ModelConfig)
-                .where(ModelConfig.active.is_(True))
-                .order_by(ModelConfig.id.asc())
-            )
+            model_statement = select(ModelConfig).where(ModelConfig.active.is_(True))
+            if category_profile.model_config_id is not None:
+                model_statement = model_statement.where(
+                    ModelConfig.id == category_profile.model_config_id
+                )
+            model_config = db.scalar(model_statement.order_by(ModelConfig.id.asc()))
             if model_config is None:
                 raise RuntimeError("模型配置不存在")
             prompt_a = None
@@ -549,23 +584,60 @@ async def evaluate_job(job_id: int) -> None:
         prompt_b = _prompt_for_job("B", prompt_b_id)
     image_path = settings.upload_dir / asset.stored_name
     if not image_path.exists():
-        raise RuntimeError("原始图片文件不存在")
-    model_image_path, model_mime_type = prepare_model_image(
-        image_path,
-        mime_type=asset.mime_type,
-        content_sha256=asset.sha256,
-        cache_dir=settings.upload_dir / ".derived" / "evaluation",
-    )
+        raise RuntimeError("原始素材文件不存在")
+    document_context: dict[str, object] | None = None
+    if job.category_key == "pdf_text":
+        pdf_input = prepare_pdf_model_input(
+            image_path,
+            content_sha256=asset.sha256,
+            cache_dir=settings.upload_dir / ".derived" / "pdf",
+            max_pages=int(category_preprocess_config.get("max_pages", 4)),
+            max_text_chars=int(
+                category_preprocess_config.get("max_text_chars", 24_000)
+            ),
+        )
+        model_image_path = pdf_input.preview_path
+        model_mime_type = pdf_input.preview_mime_type
+        document_context = pdf_input.context
+    else:
+        model_image_path, model_mime_type = prepare_model_image(
+            image_path,
+            mime_type=asset.mime_type,
+            content_sha256=asset.sha256,
+            cache_dir=settings.upload_dir / ".derived" / "evaluation",
+        )
+
+    preprocess_snapshot: dict[str, object] = {
+        "schema_version": "evaluation-preprocess-v1",
+        "status": "completed",
+        "category_key": job.category_key,
+        "source_mime_type": asset.mime_type,
+        "model_mime_type": model_mime_type,
+        "config": category_preprocess_config,
+    }
+    if document_context is not None:
+        document_text = str(document_context.get("text") or "")
+        preprocess_snapshot["pdf"] = {
+            key: value
+            for key, value in document_context.items()
+            if key != "text"
+        }
+        preprocess_snapshot["text_excerpt"] = document_text[:2_000]
 
     metadata = {
         "width": asset.width,
         "height": asset.height,
         "mime_type": asset.mime_type,
         "size_bytes": asset.size_bytes,
+        "category_key": job.category_key,
     }
     user_a = prompt_a.user_prompt.replace(
         "{{image_metadata}}", json.dumps(metadata, ensure_ascii=False)
     )
+    if document_context is not None:
+        user_a += "\n\nPDF 前处理上下文（先理解文档，再输出评测 JSON）：\n" + json.dumps(
+            document_context, ensure_ascii=False
+        )
     if single_mode:
         _set_job(job_id, stage="single", progress=20)
     client_config = SimpleNamespace(
@@ -795,6 +867,9 @@ async def evaluate_job(job_id: int) -> None:
             job_id=job_id,
             strategy_bundle_id=bundle.id,
             strategy_snapshot_json=strategy_snapshot,
+            preprocess_json=json.dumps(
+                preprocess_snapshot, ensure_ascii=False, sort_keys=True
+            ),
             precheck_json=json.dumps(precheck, ensure_ascii=False),
             aesthetic_json=json.dumps(aesthetic, ensure_ascii=False) if aesthetic else None,
             scoring_json=json.dumps(scoring, ensure_ascii=False),
@@ -1107,6 +1182,7 @@ def _handle_technical_failure(
                 )
                 child = EvaluationJob(
                     asset_id=parent.asset_id,
+                    category_key=parent.category_key,
                     prompt_a_id=parent.prompt_a_id,
                     prompt_b_id=parent.prompt_b_id,
                     regression_item_id=parent.regression_item_id,

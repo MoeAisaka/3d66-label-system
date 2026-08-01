@@ -37,6 +37,7 @@
 | [0022](0022-baseline-prompt-version-selection.md) | Accepted | 基准回归手选提示词版本与维度版本预留 |
 | [0023](0023-windows-server-dpapi-scope-and-health-gate.md) | Accepted | Windows Server DPAPI 显式存储范围、真实回环门禁与脱敏诊断 |
 | [0024](0024-filename-level-explanation-and-guided-optimization.md) | Accepted | 文件名建议等级、可解释基准回归与连续安全优化工作流 |
+| [0025](0025-category-isolated-pipelines-pdf-preprocess-and-generic-models.md) | Accepted | 多类目隔离流水线、PDF 前处理与通用模型渠道 |
 
 ## 新增 ADR 的规则
 

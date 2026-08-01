@@ -284,6 +284,15 @@ export function ReviewPage({ user }: { user: User }) {
               </div>
             ) : (
               <>
+                {evaluation.preprocess?.category_key === "pdf_text" && (
+                  <div className="border-b border-[var(--line)] bg-[#f5f8fb] px-5 py-4">
+                    <div className="flex flex-wrap items-center justify-between gap-3">
+                      <div><p className="text-sm font-bold">PDF 前处理依据</p><p className="font-data mt-1 text-[0.68rem] text-[var(--muted)]">{evaluation.preprocess.pdf?.page_count ?? "—"} 页 · 渲染 {evaluation.preprocess.pdf?.rendered_pages ?? "—"} 页 · 文本 {evaluation.preprocess.pdf?.text_chars ?? 0} 字</p></div>
+                      <Badge tone={evaluation.preprocess.pdf?.ocr_status === "unavailable" ? "warning" : "success"}>OCR {evaluation.preprocess.pdf?.ocr_status === "completed" ? "已执行" : evaluation.preprocess.pdf?.ocr_status === "unavailable" ? "不可用" : "无需执行"}</Badge>
+                    </div>
+                    {evaluation.preprocess.text_excerpt && <details className="mt-3"><summary className="cursor-pointer text-xs font-semibold">查看文本摘要</summary><pre className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap border border-[var(--line)] bg-white p-3 text-xs leading-5 text-[var(--muted)]">{evaluation.preprocess.text_excerpt}</pre></details>}
+                  </div>
+                )}
                 {sampling && (
                   <div className="border-b border-[var(--line)] bg-[#fafbf8] px-5 py-4">
                     <div className="flex flex-wrap items-center justify-between gap-3">

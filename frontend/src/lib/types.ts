@@ -175,6 +175,22 @@ export type Evaluation = {
   prompt_id: number | null
   prompt_a_id: number | null
   prompt_b_id: number | null
+  preprocess: {
+    schema_version: "evaluation-preprocess-v1"
+    status: "completed"
+    category_key: "space_image" | "pdf_text" | "material_image"
+    source_mime_type: string
+    model_mime_type: string
+    config: Record<string, unknown>
+    pdf?: {
+      page_count?: number
+      rendered_pages?: number
+      text_extraction?: string
+      ocr_status?: string
+      text_chars?: number
+    }
+    text_excerpt?: string
+  } | null
   precheck: Record<string, any>
   aesthetic: Record<string, any> | null
   dimension_schema: EvaluationDimensionSchema
@@ -437,6 +453,7 @@ export type MaterialPackage = {
   package_key: string
   name: string
   source: "manual_upload" | "production_import" | "legacy_backfill"
+  category_key: "space_image" | "pdf_text" | "material_image"
   item_count: number
   unique_asset_count: number
   active_asset_count: number
@@ -445,6 +462,22 @@ export type MaterialPackage = {
   status_summary: Record<NonNullable<Asset["evaluation_status"]>, number>
   created_by: string
   created_at: string
+}
+
+export type EvaluationCategoryProfile = {
+  id: number
+  category_key: "space_image" | "pdf_text" | "material_image"
+  display_name: string
+  status: "draft" | "active" | "retired"
+  allowed_mime_types: string[]
+  preprocess_config: Record<string, unknown>
+  prompt_a_id: number | null
+  prompt_b_id: number | null
+  model_config_id: number | null
+  rubric_version: string
+  dimension_schema_key: string | null
+  dimension_schema_version: string | null
+  updated_at: string
 }
 
 export type ReviewPanelSummary = {

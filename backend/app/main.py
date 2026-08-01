@@ -61,6 +61,8 @@ from .models import (
     CircuitBreaker,
     DimensionRoutePolicy,
     DimensionSchema,
+    EvaluationCategoryProfile,
+    CATEGORY_PROFILE_DEFAULTS,
     EvaluationControl,
     EvaluationJob,
     EvaluationResult,
@@ -201,6 +203,9 @@ MAX_ARCHIVE_UNCOMPRESSED_BYTES = 30 * 1024 * 1024 * 1024
 MAX_ARCHIVE_COMPRESSION_RATIO = 200
 ALLOWED_MIME = {"image/jpeg", "image/png", "image/webp", "image/gif"}
 ALLOWED_IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
+CATEGORY_KEYS = ("space_image", "pdf_text", "material_image")
+ALLOWED_CATEGORY_KEYS = set(CATEGORY_KEYS)
+ALLOWED_PDF_SUFFIXES = {".pdf"}
 
 
 def _protected_api_key(
@@ -253,6 +258,7 @@ class LoginRequest(BaseModel):
 
 class ModelConfigUpdate(BaseModel):
     name: str = Field(min_length=1, max_length=120)
+    provider: str = Field(default="doubao", min_length=1, max_length=40)
     base_url: str = Field(min_length=8, max_length=300)
     api_path: str = Field(min_length=1, max_length=120)
     model_id: str = Field(min_length=1, max_length=200)
@@ -275,6 +281,7 @@ class ModelConfigUpdate(BaseModel):
 
 class OptimizerConfigUpdate(BaseModel):
     name: str = Field(min_length=1, max_length=120)
+    provider: str = Field(default="openai", min_length=1, max_length=40)
     base_url: str = Field(min_length=8, max_length=300)
     api_path: str = Field(min_length=1, max_length=120)
     model_id: str = Field(min_length=1, max_length=200)
@@ -293,7 +300,7 @@ class OptimizerConfigUpdate(BaseModel):
 
 
 class BenchmarkModelConfigCreate(ModelConfigUpdate):
-    provider: Literal["openai", "doubao"] = "openai"
+    provider: str = Field(default="openai", min_length=1, max_length=40)
 
 
 class SamplingPolicyUpdate(BaseModel):
@@ -416,6 +423,7 @@ class BenchmarkRunRequest(BaseModel):
 class MaterialPackageCreateRequest(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     asset_ids: list[int] = Field(min_length=1, max_length=1000)
+    category_key: Literal["space_image", "pdf_text", "material_image"] = "space_image"
 
     @model_validator(mode="after")
     def validate_unique_assets(self) -> "MaterialPackageCreateRequest":
@@ -436,6 +444,7 @@ class EnqueueRequest(BaseModel):
         "canary",
     ] | None = None
     manual_recheck: bool = False
+    category_key: Literal["space_image", "pdf_text", "material_image"] = "space_image"
 
     @model_validator(mode="after")
     def validate_prompt_mode(self) -> "EnqueueRequest":
@@ -446,6 +455,19 @@ class EnqueueRequest(BaseModel):
         if self.manual_recheck and self.queue_class not in (None, "interactive"):
             raise ValueError("人工单图复判固定进入 interactive")
         return self
+
+
+class EvaluationCategoryProfileUpdate(BaseModel):
+    display_name: str = Field(min_length=1, max_length=120)
+    status: Literal["draft", "active", "retired"] = "active"
+    allowed_mime_types: list[str] = Field(min_length=1, max_length=8)
+    preprocess_config: dict[str, Any] = Field(default_factory=dict)
+    prompt_a_id: int | None = Field(default=None, ge=1)
+    prompt_b_id: int | None = Field(default=None, ge=1)
+    model_config_id: int | None = Field(default=None, ge=1)
+    rubric_version: str = Field(default="rubric-v2.1", min_length=1, max_length=40)
+    dimension_schema_key: str | None = Field(default=None, max_length=80)
+    dimension_schema_version: str | None = Field(default=None, max_length=64)
 
 
 class PromptCreateRequest(BaseModel):
@@ -1145,6 +1167,11 @@ def _result_payload(result: EvaluationResult | None) -> dict[str, Any] | None:
         "prompt_id": result.job.prompt_a_id if single_prompt else None,
         "prompt_a_id": result.job.prompt_a_id if not single_prompt else None,
         "prompt_b_id": result.job.prompt_b_id,
+        "preprocess": (
+            json.loads(result.preprocess_json)
+            if result.preprocess_json
+            else None
+        ),
         "precheck": json.loads(result.precheck_json),
         "aesthetic": json.loads(result.aesthetic_json) if result.aesthetic_json else None,
         "dimension_schema": _evaluation_dimension_schema_payload(result),
@@ -2069,6 +2096,129 @@ def _upload_package_name(value: str | None, *, fallback: str) -> str:
     return normalized
 
 
+def _category_profile(
+    db: Session,
+    category_key: str,
+    *,
+    require_active: bool = False,
+) -> EvaluationCategoryProfile:
+    if category_key not in ALLOWED_CATEGORY_KEYS:
+        raise HTTPException(status_code=422, detail="不支持的评测类目")
+    profile = db.scalar(
+        select(EvaluationCategoryProfile).where(
+            EvaluationCategoryProfile.category_key == category_key,
+        )
+    )
+    if profile is None:
+        defaults = CATEGORY_PROFILE_DEFAULTS[category_key]
+        profile = EvaluationCategoryProfile(
+            category_key=category_key,
+            display_name=defaults["display_name"],
+            allowed_mime_types_json=defaults["allowed_mime_types_json"],
+            preprocess_config_json=defaults["preprocess_config_json"],
+            status="active",
+            rubric_version="rubric-v2.1",
+            created_by="compatibility-default",
+        )
+        db.add(profile)
+        db.flush()
+    if require_active and profile.status != "active":
+        raise HTTPException(status_code=409, detail="评测类目未启用")
+    return profile
+
+
+def _category_profile_payload(profile: EvaluationCategoryProfile) -> dict[str, Any]:
+    return {
+        "id": profile.id,
+        "category_key": profile.category_key,
+        "display_name": profile.display_name,
+        "status": profile.status,
+        "allowed_mime_types": json.loads(profile.allowed_mime_types_json or "[]"),
+        "preprocess_config": json.loads(profile.preprocess_config_json or "{}"),
+        "prompt_a_id": profile.prompt_a_id,
+        "prompt_b_id": profile.prompt_b_id,
+        "model_config_id": profile.model_config_id,
+        "rubric_version": profile.rubric_version,
+        "dimension_schema_key": profile.dimension_schema_key,
+        "dimension_schema_version": profile.dimension_schema_version,
+        "created_by": profile.created_by,
+        "created_at": profile.created_at,
+        "updated_at": profile.updated_at,
+    }
+
+
+@app.get("/api/evaluation-categories")
+def list_evaluation_categories(
+    _user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    for category_key in CATEGORY_KEYS:
+        _category_profile(db, category_key)
+    db.commit()
+    profiles = db.scalars(
+        select(EvaluationCategoryProfile).order_by(EvaluationCategoryProfile.id.asc())
+    ).all()
+    return {"items": [_category_profile_payload(profile) for profile in profiles]}
+
+
+@app.put("/api/evaluation-categories/{category_key}")
+def update_evaluation_category(
+    category_key: str,
+    payload: EvaluationCategoryProfileUpdate,
+    user: User = Depends(admin_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    profile = _category_profile(db, category_key)
+    expected_mimes = (
+        {"application/pdf"}
+        if category_key == "pdf_text"
+        else ALLOWED_MIME
+    )
+    if not set(payload.allowed_mime_types).issubset(expected_mimes):
+        raise HTTPException(status_code=422, detail="类目 MIME 类型与流水线不匹配")
+    preprocess_config = dict(payload.preprocess_config)
+    if category_key == "pdf_text":
+        max_pages = preprocess_config.get("max_pages", 4)
+        max_text_chars = preprocess_config.get("max_text_chars", 24_000)
+        if (
+            not isinstance(max_pages, int)
+            or isinstance(max_pages, bool)
+            or not 1 <= max_pages <= 20
+            or not isinstance(max_text_chars, int)
+            or isinstance(max_text_chars, bool)
+            or not 1_000 <= max_text_chars <= 100_000
+        ):
+            raise HTTPException(status_code=422, detail="PDF 前处理参数超出允许范围")
+    if category_key == "material_image" and not isinstance(
+        preprocess_config.get("material_focus", True), bool
+    ):
+        raise HTTPException(status_code=422, detail="材质专项关注必须是布尔值")
+    if payload.prompt_a_id is not None:
+        prompt_a = db.get(PromptVersion, payload.prompt_a_id)
+        if prompt_a is None or prompt_a.stage != "A":
+            raise HTTPException(status_code=422, detail="类目 A 提示词必须是有效的 A 阶段版本")
+    if payload.prompt_b_id is not None:
+        prompt_b = db.get(PromptVersion, payload.prompt_b_id)
+        if prompt_b is None or prompt_b.stage != "B":
+            raise HTTPException(status_code=422, detail="类目 B 提示词必须是有效的 B 阶段版本")
+    if payload.model_config_id is not None and db.get(ModelConfig, payload.model_config_id) is None:
+        raise HTTPException(status_code=422, detail="类目模型配置不存在")
+    profile.display_name = payload.display_name.strip()
+    profile.status = payload.status
+    profile.allowed_mime_types_json = canonical_json(payload.allowed_mime_types)
+    profile.preprocess_config_json = canonical_json(preprocess_config)
+    profile.prompt_a_id = payload.prompt_a_id
+    profile.prompt_b_id = payload.prompt_b_id
+    profile.model_config_id = payload.model_config_id
+    profile.rubric_version = payload.rubric_version.strip()
+    profile.dimension_schema_key = payload.dimension_schema_key
+    profile.dimension_schema_version = payload.dimension_schema_version
+    profile.created_by = profile.created_by or user.username
+    db.commit()
+    db.refresh(profile)
+    return _category_profile_payload(profile)
+
+
 def _validate_image_bytes(
     data: bytes,
     *,
@@ -2100,6 +2250,29 @@ def _validate_image_bytes(
     return mime_type, width, height
 
 
+def _validate_asset_bytes(
+    data: bytes,
+    *,
+    filename: str,
+    content_type: str | None,
+    category_key: str,
+) -> tuple[str, int | None, int | None]:
+    if category_key == "pdf_text":
+        if not data or len(data) > MAX_UPLOAD_BYTES:
+            raise HTTPException(status_code=400, detail=f"{filename} 为空或超过 25MB")
+        if not data.startswith(b"%PDF-"):
+            raise HTTPException(status_code=400, detail=f"{filename} 不是有效 PDF")
+        return "application/pdf", None, None
+    if content_type == "application/pdf":
+        raise HTTPException(status_code=400, detail="PDF 必须选择 PDF 文本类目")
+    mime_type, width, height = _validate_image_bytes(
+        data, filename=filename, content_type=content_type
+    )
+    if category_key == "material_image" and mime_type not in ALLOWED_MIME:
+        raise HTTPException(status_code=400, detail="材质图仅支持 JPG、PNG、WebP、GIF")
+    return mime_type, width, height
+
+
 def _store_package_asset(
     *,
     db: Session,
@@ -2109,13 +2282,15 @@ def _store_package_asset(
     content_type: str | None,
     data: bytes,
     actor: str,
+    category_key: str,
     created_paths: list[Path],
 ) -> dict[str, Any]:
     normalized_name = (filename.strip() or f"image-{position}")[:500]
-    mime_type, width, height = _validate_image_bytes(
+    mime_type, width, height = _validate_asset_bytes(
         data,
         filename=normalized_name,
         content_type=content_type,
+        category_key=category_key,
     )
     digest = hashlib.sha256(data).hexdigest()
     existing = db.scalar(
@@ -2199,6 +2374,7 @@ def _upload_result(
             "package_key": package.package_key,
             "name": package.name,
             "source": package.source,
+            "category_key": package.category_key,
             "item_count": len(uploaded),
             "unique_asset_count": len({item["id"] for item in uploaded}),
             "duplicate_count": sum(
@@ -2224,11 +2400,13 @@ def _cleanup_failed_upload(db: Session, created_paths: list[Path]) -> None:
 async def upload_assets(
     files: list[UploadFile] = File(...),
     package_name: str | None = Form(default=None),
+    category_key: str = Form(default="space_image"),
     user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
+    profile = _category_profile(db, category_key, require_active=True)
     if not files:
-        raise HTTPException(status_code=422, detail="至少选择一张图片")
+        raise HTTPException(status_code=422, detail="至少选择一个素材")
     if len(files) > MAX_UPLOAD_FILES:
         raise HTTPException(
             status_code=400,
@@ -2244,6 +2422,7 @@ async def upload_assets(
             ),
         ),
         source="manual_upload",
+        category_key=category_key,
         created_by=user.username,
     )
     db.add(package)
@@ -2261,6 +2440,7 @@ async def upload_assets(
                     content_type=upload.content_type,
                     data=await upload.read(),
                     actor=user.username,
+                    category_key=category_key,
                     created_paths=created_paths,
                 )
             )
@@ -2291,9 +2471,11 @@ async def upload_assets(
 async def import_material_package_archive(
     archive: UploadFile = File(...),
     package_name: str | None = Form(default=None),
+    category_key: str = Form(default="space_image"),
     user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
+    profile = _category_profile(db, category_key, require_active=True)
     filename = archive.filename or "archive.zip"
     if Path(filename).suffix.lower() != ".zip":
         raise HTTPException(status_code=400, detail="压缩包仅支持 ZIP 格式")
@@ -2308,6 +2490,7 @@ async def import_material_package_archive(
             fallback=Path(filename).stem or "ZIP 素材包",
         ),
         source="manual_upload",
+        category_key=category_key,
         created_by=user.username,
     )
     db.add(package)
@@ -2336,7 +2519,9 @@ async def import_material_package_archive(
                 if (
                     "__MACOSX" in path.parts
                     or path.name in {".DS_Store", "Thumbs.db"}
-                    or path.suffix.lower() not in ALLOWED_IMAGE_SUFFIXES
+                    or path.suffix.lower() not in (
+                        ALLOWED_PDF_SUFFIXES if category_key == "pdf_text" else ALLOWED_IMAGE_SUFFIXES
+                    )
                 ):
                     ignored_count += 1
                     continue
@@ -2385,6 +2570,7 @@ async def import_material_package_archive(
                         content_type=mimetypes.guess_type(info.filename)[0],
                         data=data,
                         actor=user.username,
+                        category_key=category_key,
                         created_paths=created_paths,
                     )
                 )
@@ -2479,10 +2665,16 @@ def create_material_package_from_assets(
             status_code=404,
             detail="部分素材不存在或已删除，请刷新后重试",
         )
+    allowed_mimes = set(
+        json.loads(_category_profile(db, payload.category_key, require_active=True).allowed_mime_types_json or "[]")
+    )
+    if any(asset.mime_type not in allowed_mimes for asset in assets_by_id.values()):
+        raise HTTPException(status_code=422, detail="素材 MIME 类型与评测类目不匹配")
     package = MaterialPackage(
         package_key=f"selection:{uuid.uuid4().hex}",
         name=payload.name.strip(),
         source="manual_upload",
+        category_key=payload.category_key,
         created_by=user.username,
     )
     db.add(package)
@@ -2517,6 +2709,7 @@ def create_material_package_from_assets(
         "package_key": package.package_key,
         "name": package.name,
         "source": package.source,
+        "category_key": package.category_key,
         "item_count": len(asset_ids),
         "unique_asset_count": len(asset_ids),
         "active_asset_count": len(asset_ids),
@@ -2545,6 +2738,7 @@ def list_material_packages(
     prompt_id: int | None = None,
     prompt_a_id: int | None = None,
     prompt_b_id: int | None = None,
+    category_key: str | None = None,
     limit: int = 100,
     _user: User = Depends(current_user),
     db: Session = Depends(get_db),
@@ -2556,6 +2750,9 @@ def list_material_packages(
         statement = statement.where(MaterialPackage.created_at >= created_from)
     if created_to is not None:
         statement = statement.where(MaterialPackage.created_at <= created_to)
+    if category_key is not None:
+        _category_profile(db, category_key)
+        statement = statement.where(MaterialPackage.category_key == category_key)
     packages = db.scalars(statement.limit(min(max(limit, 1), 500))).all()
     items = []
     for package in packages:
@@ -2579,6 +2776,7 @@ def list_material_packages(
                 "package_key": package.package_key,
                 "name": package.name,
                 "source": package.source,
+                "category_key": package.category_key,
                 "item_count": len(package.items),
                 "unique_asset_count": len(
                     {item.asset_id for item in package.items}
@@ -2801,6 +2999,7 @@ def enqueue_jobs(
     _user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
+    profile = _category_profile(db, payload.category_key, require_active=True)
     assets = db.scalars(
         select(Asset).where(
             Asset.id.in_(payload.asset_ids),
@@ -2809,6 +3008,9 @@ def enqueue_jobs(
     ).all()
     if len(assets) != len(set(payload.asset_ids)):
         raise HTTPException(status_code=404, detail="部分图片不存在或已删除")
+    allowed_mimes = set(json.loads(profile.allowed_mime_types_json or "[]"))
+    if any(asset.mime_type not in allowed_mimes for asset in assets):
+        raise HTTPException(status_code=422, detail="素材 MIME 类型与评测类目不匹配")
 
     def selected_prompt(stage: str, prompt_id: int | None) -> PromptVersion:
         if prompt_id is not None:
@@ -2826,11 +3028,31 @@ def enqueue_jobs(
             raise HTTPException(status_code=400, detail=f"没有可用的提示词 {stage} 发布版本")
         return prompt
 
-    single_prompt = db.get(PromptVersion, payload.prompt_id) if payload.prompt_id else None
+    explicit_pair = payload.prompt_a_id is not None or payload.prompt_b_id is not None
+    profile_single_id = (
+        profile.prompt_a_id
+        if not explicit_pair
+        and payload.prompt_id is None
+        and profile.prompt_a_id is not None
+        and profile.prompt_b_id is None
+        else None
+    )
+    selected_single_id = payload.prompt_id or profile_single_id
+    selected_a_id = (
+        payload.prompt_a_id
+        if explicit_pair
+        else profile.prompt_a_id
+    )
+    selected_b_id = (
+        payload.prompt_b_id
+        if explicit_pair
+        else profile.prompt_b_id
+    )
+    single_prompt = db.get(PromptVersion, selected_single_id) if selected_single_id else None
     if payload.prompt_id and not single_prompt:
         raise HTTPException(status_code=400, detail="单提示词版本无效")
-    prompt_a = None if single_prompt else selected_prompt("A", payload.prompt_a_id)
-    prompt_b = None if single_prompt else selected_prompt("B", payload.prompt_b_id)
+    prompt_a = None if single_prompt else selected_prompt("A", selected_a_id)
+    prompt_b = None if single_prompt else selected_prompt("B", selected_b_id)
     jobs = []
     queue_class = (
         "interactive"
@@ -2841,6 +3063,7 @@ def enqueue_jobs(
     for asset in assets:
         job = EvaluationJob(
             asset_id=asset.id,
+            category_key=payload.category_key,
             prompt_a_id=single_prompt.id if single_prompt else prompt_a.id,
             prompt_b_id=None if single_prompt else prompt_b.id,
             queue_class=queue_class,
@@ -2856,6 +3079,7 @@ def enqueue_jobs(
         "job_ids": jobs,
         "batch_key": batch_key,
         "queue_class": queue_class,
+        "category_key": payload.category_key,
     }
 
 
@@ -2880,6 +3104,7 @@ def list_jobs(
                 "id": job.id,
                 "asset_id": job.asset_id,
                 "asset_name": job.asset.original_name,
+                "category_key": job.category_key,
                 "prompt_a_version": (
                     job.prompt_a.version if job.prompt_a and job.prompt_b else
                     result_versions[job.id].prompt_a_version if job.id in result_versions else None
@@ -3221,6 +3446,7 @@ def update_model_config(
         db.add(config)
     for field in (
         "name",
+        "provider",
         "base_url",
         "api_path",
         "model_id",
@@ -3308,6 +3534,7 @@ def update_optimizer_config(
         db.add(config)
     for field in (
         "name",
+        "provider",
         "base_url",
         "api_path",
         "model_id",
@@ -5959,7 +6186,6 @@ def create_baseline_set(
             status_code=404,
             detail="部分基准素材不存在或已删除",
         )
-
     frozen_items: list[dict[str, Any]] = []
     for requested in requested_items:
         asset = assets_by_id[requested.asset_id]

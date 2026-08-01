@@ -3,6 +3,43 @@
 > 最后更新：2026-08-01
 > 本文件只记录“现在做到哪里”；长期原则见 `PRODUCT.md` 和 `AGENTS.md`，历史背景见 `CODEX_HANDOFF.md`。
 
+## 规划功能迭代候选：多类目流水线、PDF 前处理、材质图与通用模型渠道（2026-08-01）
+
+当前开发分支：`feature/planned-iteration-20260801`，基于 Codeup
+`main@c0a31fa`。本节改动完成后再安全快进合入 `main` 与 `windows-deploy`。
+
+已完成：
+
+- 维度管理器 P2 已合入：路由策略、冻结 profile、解析快照、隔离维度校准持久化
+  和管理页面均可用，数据库迁移已到 v30。
+- 新增三个互相隔离的评测类目合同：`space_image`、`pdf_text`、`material_image`。
+  素材包、评测 Job、Prompt/模型绑定和 MIME 校验均携带 `category_key`，重试 Job
+  继承原类目，不会把 PDF 或材质图混入空间图片流水线。
+- PDF 类目先做内容 SHA 缓存的文本抽取、页图接触表渲染和可选 Tesseract OCR，
+  以明确的 OCR 状态和多模态上下文进入同一评测 Worker；原始 PDF 始终保留。
+  结果冻结页数、OCR 状态、文本字符数和 2000 字摘要，人工可在审核页展开查看。
+- GIF 动图沿用已交付的最多四帧接触表策略，原始动画仍用于页面展示。
+- 主模型、提示词诊断模型和横评配置的 `provider` 均为通用渠道标识，不再锁死
+  火山豆包或 SOL；类目页可
+  独立选择主模型、A/B 或单提示词版本、PDF 页数/文本上限和材质专项开关。
+- 基准回归已支持单提示词模式，并在结果页冻结完整维度、画质封顶证据、置信度、
+  复核状态及模型/rubric/engine 版本，为人工判断提供依据。
+
+验证：
+
+- 后端：`580 passed, 1 skipped`（Homebrew Python 3.14；仅 Windows doctor 的
+  Python 3.11/3.12 版本门禁测试因本机解释器版本不匹配而未计入通过）。
+- 专项：PDF/类目隔离/迁移/素材包 `37 passed`；前端 `npm run lint`、
+  `npm run build`、`git diff --check` 通过。
+
+仍待完成：
+
+- 在公司 Windows 实例部署本候选，真实验证非空 API Key 保存、DPAPI 引用和 PDF/GIF
+  Worker；代码侧已有 Windows 5.1 修复，但线上实例尚未验收。
+- 真实模型通道端到端跑一条 PDF 与材质图样本，确认 OCR/多模态上下文在目标渠道的
+  输入限制下稳定工作。
+- 完成 Codeup 远端历史核对后快进推送，并在云效/Windows 环境跑同一套回归门禁。
+
 ## 最新交付候选：基准回归单提示词模式与判断信息增强（2026-08-01）
 
 当前工作树：`delivery/baseline-single-prompt-20260801`，基于 Codeup

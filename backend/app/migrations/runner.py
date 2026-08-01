@@ -5219,6 +5219,147 @@ def _migration_030_add_dimension_calibration_results(
         )
 
 
+def _migration_031_add_evaluation_category_profiles(connection: Connection) -> None:
+    """Add isolated category contracts without rewriting existing jobs."""
+    connection.exec_driver_sql(
+        """
+        CREATE TABLE IF NOT EXISTS evaluation_category_profiles (
+            id INTEGER PRIMARY KEY,
+            category_key VARCHAR(40) NOT NULL UNIQUE,
+            display_name VARCHAR(120) NOT NULL,
+            status VARCHAR(20) NOT NULL DEFAULT 'active',
+            allowed_mime_types_json TEXT NOT NULL DEFAULT '[]',
+            preprocess_config_json TEXT NOT NULL DEFAULT '{}',
+            prompt_a_id INTEGER REFERENCES prompt_versions(id) ON DELETE SET NULL,
+            prompt_b_id INTEGER REFERENCES prompt_versions(id) ON DELETE SET NULL,
+            model_config_id INTEGER REFERENCES model_configs(id) ON DELETE SET NULL,
+            rubric_version VARCHAR(40) NOT NULL DEFAULT 'rubric-v2.1',
+            dimension_schema_key VARCHAR(80),
+            dimension_schema_version VARCHAR(64),
+            created_by VARCHAR(80) NOT NULL DEFAULT 'system',
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            CHECK (category_key IN ('space_image','pdf_text','material_image')),
+            CHECK (status IN ('draft','active','retired'))
+        )
+        """
+    )
+    tables = {
+        row[0]
+        for row in connection.exec_driver_sql(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )
+    }
+    package_columns = {
+        row[1]
+        for row in connection.exec_driver_sql("PRAGMA table_info(material_packages)")
+    } if "material_packages" in tables else set()
+    if "material_packages" in tables and "category_key" not in package_columns:
+        connection.exec_driver_sql(
+            "ALTER TABLE material_packages ADD COLUMN category_key VARCHAR(40) NOT NULL DEFAULT 'space_image'"
+        )
+    job_columns = {
+        row[1]
+        for row in connection.exec_driver_sql("PRAGMA table_info(evaluation_jobs)")
+    } if "evaluation_jobs" in tables else set()
+    if "evaluation_jobs" in tables and "category_key" not in job_columns:
+        connection.exec_driver_sql(
+            "ALTER TABLE evaluation_jobs ADD COLUMN category_key VARCHAR(40) NOT NULL DEFAULT 'space_image'"
+        )
+    # Partial historical fixtures may not have the referenced credential and
+    # prompt tables yet. SQLite refuses inserts into a table whose FK target is
+    # absent, so defer seeding until the complete schema exists; the repair/API
+    # compatibility path will seed it later.
+    if not {"prompt_versions", "model_configs"}.issubset(tables):
+        return
+    profiles = (
+        ("space_image", "空间图片", '["image/jpeg","image/png","image/webp","image/gif"]', '{"preprocess":"image"}'),
+        ("pdf_text", "PDF 方案文本", '["application/pdf"]', '{"preprocess":"pdf","max_pages":4,"max_text_chars":24000}'),
+        ("material_image", "材质图", '["image/jpeg","image/png","image/webp","image/gif"]', '{"preprocess":"image","material_focus":true}'),
+    )
+    for category_key, display_name, mime_types, preprocess in profiles:
+        connection.exec_driver_sql(
+            """
+            INSERT OR IGNORE INTO evaluation_category_profiles
+              (category_key, display_name, status, allowed_mime_types_json,
+               preprocess_config_json, rubric_version, created_by,
+               created_at, updated_at)
+            VALUES (?, ?, 'active', ?, ?, 'rubric-v2.1', 'system',
+                    CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            """,
+            (category_key, display_name, mime_types, preprocess),
+        )
+
+
+def _migration_032_repair_evaluation_category_profiles(connection: Connection) -> None:
+    """Backfill seeds for databases that applied v31 against ORM-created tables.
+
+    v31 originally relied on SQL defaults that are not present when the table
+    already exists from ``Base.metadata.create_all``. ``INSERT OR IGNORE`` then
+    hid NOT NULL failures and left an apparently migrated database empty.
+    This repair is deliberately idempotent and also tolerates historical
+    partial databases that do not yet have material/job tables.
+    """
+    tables = {
+        row[0]
+        for row in connection.exec_driver_sql(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )
+    }
+    if "evaluation_category_profiles" not in tables:
+        _migration_031_add_evaluation_category_profiles(connection)
+        return
+    if not {"prompt_versions", "model_configs"}.issubset(tables):
+        return
+    for category_key, display_name, mime_types, preprocess in (
+        ("space_image", "空间图片", '["image/jpeg","image/png","image/webp","image/gif"]', '{"preprocess":"image"}'),
+        ("pdf_text", "PDF 方案文本", '["application/pdf"]', '{"preprocess":"pdf","max_pages":4,"max_text_chars":24000}'),
+        ("material_image", "材质图", '["image/jpeg","image/png","image/webp","image/gif"]', '{"preprocess":"image","material_focus":true}'),
+    ):
+        connection.exec_driver_sql(
+            """
+            INSERT OR IGNORE INTO evaluation_category_profiles
+              (category_key, display_name, status, allowed_mime_types_json,
+               preprocess_config_json, rubric_version, created_by,
+               created_at, updated_at)
+            VALUES (?, ?, 'active', ?, ?, 'rubric-v2.1', 'system',
+                    CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            """,
+            (category_key, display_name, mime_types, preprocess),
+        )
+    if "material_packages" in tables:
+        columns = {row[1] for row in connection.exec_driver_sql("PRAGMA table_info(material_packages)")}
+        if "category_key" not in columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE material_packages ADD COLUMN category_key VARCHAR(40) NOT NULL DEFAULT 'space_image'"
+            )
+    if "evaluation_jobs" in tables:
+        columns = {row[1] for row in connection.exec_driver_sql("PRAGMA table_info(evaluation_jobs)")}
+        if "category_key" not in columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE evaluation_jobs ADD COLUMN category_key VARCHAR(40) NOT NULL DEFAULT 'space_image'"
+            )
+
+
+def _migration_033_add_evaluation_preprocess_snapshot(connection: Connection) -> None:
+    tables = {
+        row[0]
+        for row in connection.exec_driver_sql(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )
+    }
+    if "evaluation_results" not in tables:
+        return
+    columns = {
+        row[1]
+        for row in connection.exec_driver_sql("PRAGMA table_info(evaluation_results)")
+    }
+    if "preprocess_json" not in columns:
+        connection.exec_driver_sql(
+            "ALTER TABLE evaluation_results ADD COLUMN preprocess_json TEXT"
+        )
+
+
 MIGRATIONS = [
     Migration(1, "add_sample_expected_level", _migration_001_add_sample_expected_level),
     Migration(2, "add_review_corrections", _migration_002_add_review_corrections),
@@ -5325,6 +5466,21 @@ MIGRATIONS = [
         30,
         "add_dimension_calibration_results",
         _migration_030_add_dimension_calibration_results,
+    ),
+    Migration(
+        31,
+        "add_evaluation_category_profiles",
+        _migration_031_add_evaluation_category_profiles,
+    ),
+    Migration(
+        32,
+        "repair_evaluation_category_profiles",
+        _migration_032_repair_evaluation_category_profiles,
+    ),
+    Migration(
+        33,
+        "add_evaluation_preprocess_snapshot",
+        _migration_033_add_evaluation_preprocess_snapshot,
     ),
 ]
 

@@ -35,6 +35,27 @@ PROMPT_OPTIMIZATION_AUDIT_DEFAULT = (
     '"output_budget":null,"reasoning_effort":null}'
 )
 
+# Kept in one place so migrations, API compatibility paths, and direct worker
+# tests all use the same category contract. Values are JSON strings because
+# they are persisted verbatim in the profile table.
+CATEGORY_PROFILE_DEFAULTS: dict[str, dict[str, str]] = {
+    "space_image": {
+        "display_name": "空间图片",
+        "allowed_mime_types_json": '["image/jpeg","image/png","image/webp","image/gif"]',
+        "preprocess_config_json": '{"preprocess":"image"}',
+    },
+    "pdf_text": {
+        "display_name": "PDF 方案文本",
+        "allowed_mime_types_json": '["application/pdf"]',
+        "preprocess_config_json": '{"preprocess":"pdf","max_pages":4,"max_text_chars":24000}',
+    },
+    "material_image": {
+        "display_name": "材质图",
+        "allowed_mime_types_json": '["image/jpeg","image/png","image/webp","image/gif"]',
+        "preprocess_config_json": '{"preprocess":"image","material_focus":true}',
+    },
+}
+
 
 class User(Base):
     __tablename__ = "users"
@@ -217,6 +238,47 @@ class Asset(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
+class EvaluationCategoryProfile(Base):
+    """Per-category pipeline contract; configuration never leaks across categories."""
+
+    __tablename__ = "evaluation_category_profiles"
+    __table_args__ = (
+        CheckConstraint(
+            "category_key IN ('space_image','pdf_text','material_image')",
+            name="ck_evaluation_category_profiles_key",
+        ),
+        CheckConstraint(
+            "status IN ('draft','active','retired')",
+            name="ck_evaluation_category_profiles_status",
+        ),
+        UniqueConstraint("category_key", name="uq_evaluation_category_profiles_key"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    category_key: Mapped[str] = mapped_column(String(40), index=True)
+    display_name: Mapped[str] = mapped_column(String(120))
+    status: Mapped[str] = mapped_column(String(20), default="active", index=True)
+    allowed_mime_types_json: Mapped[str] = mapped_column(Text, default="[]")
+    preprocess_config_json: Mapped[str] = mapped_column(Text, default="{}")
+    prompt_a_id: Mapped[int | None] = mapped_column(
+        ForeignKey("prompt_versions.id", ondelete="SET NULL"), nullable=True
+    )
+    prompt_b_id: Mapped[int | None] = mapped_column(
+        ForeignKey("prompt_versions.id", ondelete="SET NULL"), nullable=True
+    )
+    model_config_id: Mapped[int | None] = mapped_column(
+        ForeignKey("model_configs.id", ondelete="SET NULL"), nullable=True
+    )
+    rubric_version: Mapped[str] = mapped_column(String(40), default="rubric-v2.1")
+    dimension_schema_key: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    dimension_schema_version: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_by: Mapped[str] = mapped_column(String(80), default="system")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+
 class MaterialPackage(Base):
     __tablename__ = "material_packages"
     __table_args__ = (
@@ -231,6 +293,9 @@ class MaterialPackage(Base):
     name: Mapped[str] = mapped_column(String(200))
     source: Mapped[str] = mapped_column(
         String(30), default="manual_upload", index=True
+    )
+    category_key: Mapped[str] = mapped_column(
+        String(40), default="space_image", server_default="space_image", index=True
     )
     created_by: Mapped[str] = mapped_column(String(80), default="system")
     created_at: Mapped[datetime] = mapped_column(
@@ -340,6 +405,9 @@ class EvaluationJob(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     asset_id: Mapped[int] = mapped_column(ForeignKey("assets.id", ondelete="CASCADE"), index=True)
+    category_key: Mapped[str] = mapped_column(
+        String(40), default="space_image", server_default="space_image", index=True
+    )
     prompt_a_id: Mapped[int | None] = mapped_column(
         ForeignKey("prompt_versions.id", ondelete="SET NULL"), nullable=True, index=True
     )
@@ -1235,6 +1303,7 @@ class EvaluationResult(Base):
         ForeignKey("strategy_bundles.id", ondelete="RESTRICT"), nullable=True, index=True
     )
     strategy_snapshot_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    preprocess_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     precheck_json: Mapped[str] = mapped_column(Text)
     aesthetic_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     scoring_json: Mapped[str] = mapped_column(Text)

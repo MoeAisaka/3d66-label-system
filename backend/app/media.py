@@ -1,10 +1,20 @@
 from __future__ import annotations
 
 import os
+import io
+import json
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 
 from PIL import Image, UnidentifiedImageError
+
+
+@dataclass(frozen=True)
+class PdfPreprocessResult:
+    preview_path: Path
+    preview_mime_type: str
+    context: dict[str, object]
 
 
 def prepare_model_image(
@@ -77,3 +87,115 @@ def prepare_model_image(
                 pass
         raise RuntimeError("动图评测预览写入失败") from exc
     return preview_path, "image/png"
+
+
+def prepare_pdf_model_input(
+    source_path: Path,
+    *,
+    content_sha256: str,
+    cache_dir: Path,
+    max_pages: int = 4,
+    max_text_chars: int = 24_000,
+) -> PdfPreprocessResult:
+    """Extract PDF text/OCR and render a bounded page contact sheet.
+
+    The original PDF remains immutable. Derived files are content-addressed so
+    retries and repeated evaluations reuse exactly the same preprocessing.
+    OCR is opportunistic: an unavailable local tesseract binary is recorded in
+    the context instead of silently pretending OCR happened.
+    """
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    preview_path = cache_dir / f"{content_sha256}.png"
+    context_path = cache_dir / f"{content_sha256}.json"
+    if preview_path.exists() and context_path.exists():
+        try:
+            context = json.loads(context_path.read_text(encoding="utf-8"))
+            if isinstance(context, dict):
+                return PdfPreprocessResult(preview_path, "image/png", context)
+        except (OSError, json.JSONDecodeError):
+            pass
+
+    try:
+        import fitz  # type: ignore[import-not-found]
+        from pypdf import PdfReader  # type: ignore[import-not-found]
+    except ImportError as exc:
+        raise RuntimeError("PDF 前处理依赖未安装") from exc
+
+    try:
+        reader = PdfReader(str(source_path))
+        page_count = len(reader.pages)
+        extracted_pages: list[str] = []
+        for page in reader.pages[:max_pages]:
+            extracted_pages.append((page.extract_text() or "").strip())
+        document_text = "\n\n".join(
+            f"[第 {index + 1} 页]\n{text}" for index, text in enumerate(extracted_pages) if text
+        )[:max_text_chars]
+
+        document = fitz.open(str(source_path))
+        rendered: list[Image.Image] = []
+        ocr_pages: list[str] = []
+        ocr_status = "not_needed"
+        try:
+            for index in range(min(max_pages, document.page_count)):
+                page = document.load_page(index)
+                pixmap = page.get_pixmap(matrix=fitz.Matrix(1.25, 1.25), alpha=False)
+                frame = Image.open(io.BytesIO(pixmap.tobytes("png"))).convert("RGB")
+                rendered.append(frame)
+                if not extracted_pages[index].strip():
+                    try:
+                        import pytesseract  # type: ignore[import-not-found]
+                        ocr_pages.append(pytesseract.image_to_string(frame, lang="chi_sim+eng"))
+                        ocr_status = "completed"
+                    except Exception:
+                        ocr_status = "unavailable"
+        finally:
+            document.close()
+    except Exception as exc:
+        raise RuntimeError("PDF 前处理失败") from exc
+
+    ocr_text = "\n\n".join(
+        f"[第 {index + 1} 页 OCR]\n{text.strip()}"
+        for index, text in enumerate(ocr_pages) if text.strip()
+    )[:max_text_chars]
+    if ocr_text:
+        document_text = "\n\n".join(item for item in (document_text, ocr_text) if item)
+    if not rendered:
+        raise RuntimeError("PDF 没有可渲染页面")
+
+    width = max(frame.width for frame in rendered)
+    height = max(frame.height for frame in rendered)
+    columns = 2 if len(rendered) > 1 else 1
+    rows = (len(rendered) + columns - 1) // columns
+    sheet = Image.new("RGB", (width * columns, height * rows), "white")
+    for position, frame in enumerate(rendered):
+        sheet.paste(frame, ((position % columns) * width, (position // columns) * height))
+    temporary_path: str | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            dir=cache_dir, prefix=f".{content_sha256}.", suffix=".tmp", delete=False
+        ) as temporary:
+            temporary_path = temporary.name
+        sheet.save(temporary_path, format="PNG", optimize=True)
+        os.replace(temporary_path, preview_path)
+        context = {
+            "schema_version": "pdf-preprocess-v1",
+            "page_count": page_count,
+            "rendered_pages": len(rendered),
+            "text_extraction": "pypdf",
+            "ocr_status": ocr_status,
+            "text_chars": len(document_text),
+            "text": document_text,
+            "multimodal_summary": {
+                "status": "ready",
+                "instruction": "结合 PDF 文本与页图接触表判断方案内容，不要把页眉页脚当成评测主体。",
+            },
+        }
+        context_path.write_text(json.dumps(context, ensure_ascii=False, sort_keys=True), encoding="utf-8")
+    except OSError as exc:
+        if temporary_path:
+            try:
+                Path(temporary_path).unlink()
+            except OSError:
+                pass
+        raise RuntimeError("PDF 前处理结果写入失败") from exc
+    return PdfPreprocessResult(preview_path, "image/png", context)

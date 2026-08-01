@@ -8,13 +8,17 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { api, jsonBody } from "@/lib/api"
-import type { ModelConfig, OptimizerConfig, ReviewWorkflowPolicy, SamplingPolicy, User } from "@/lib/types"
+import type { EvaluationCategoryProfile, ModelConfig, OptimizerConfig, PromptVersion, ReviewWorkflowPolicy, SamplingPolicy, User } from "@/lib/types"
 
-type FormState = Omit<ModelConfig, "id" | "provider" | "api_key_mask" | "updated_at" | "has_api_key" | "active"> & { api_key: string }
-type OptimizerFormState = Omit<OptimizerConfig, "id" | "provider" | "api_key_mask" | "updated_at" | "has_api_key"> & { api_key: string }
+type FormState = Omit<ModelConfig, "id" | "api_key_mask" | "updated_at" | "has_api_key" | "active"> & { api_key: string }
+type OptimizerFormState = Omit<OptimizerConfig, "id" | "api_key_mask" | "updated_at" | "has_api_key"> & { api_key: string }
 type BenchmarkConfigDraft = Omit<FormState, "benchmark_enabled"> & {
-  provider: "openai" | "doubao"
+  provider: string
   benchmark_enabled: boolean
+}
+
+type CategoryDraft = EvaluationCategoryProfile & {
+  api_key?: string
 }
 
 const emptyBenchmarkConfig: BenchmarkConfigDraft = {
@@ -45,6 +49,8 @@ export function ModelPage() {
   const optimizerConfig = useQuery({ queryKey: ["optimizer-config"], queryFn: () => api<OptimizerConfig>("/api/optimizer-config") })
   const samplingPolicy = useQuery({ queryKey: ["sampling-policy"], queryFn: () => api<SamplingPolicy>("/api/sampling-policy") })
   const reviewWorkflowPolicy = useQuery({ queryKey: ["review-workflow-policy"], queryFn: () => api<ReviewWorkflowPolicy>("/api/review-workflow-policy") })
+  const categoryProfiles = useQuery({ queryKey: ["evaluation-categories"], queryFn: () => api<{ items: EvaluationCategoryProfile[] }>("/api/evaluation-categories") })
+  const prompts = useQuery({ queryKey: ["prompts"], queryFn: () => api<{ items: PromptVersion[] }>("/api/prompts") })
   const [form, setForm] = useState<FormState | null>(null)
   const [optimizerForm, setOptimizerForm] = useState<OptimizerFormState | null>(null)
   const [samplingForm, setSamplingForm] = useState<SamplingPolicy | null>(null)
@@ -52,14 +58,15 @@ export function ModelPage() {
   const [benchmarkForm, setBenchmarkForm] = useState<BenchmarkConfigDraft>(emptyBenchmarkConfig)
   const [mainBenchmarkConfirmed, setMainBenchmarkConfirmed] = useState(false)
   const [benchmarkCreateConfirmed, setBenchmarkCreateConfirmed] = useState(false)
+  const [categoryDrafts, setCategoryDrafts] = useState<Record<string, CategoryDraft>>({})
   useEffect(() => {
     if (!config.data) return
-    const { id: _id, provider: _provider, api_key_mask: _mask, updated_at: _updated, has_api_key: _hasApiKey, active: _active, ...rest } = config.data
+    const { id: _id, api_key_mask: _mask, updated_at: _updated, has_api_key: _hasApiKey, active: _active, ...rest } = config.data
     setForm({ ...rest, api_key: "" })
   }, [config.data])
   useEffect(() => {
     if (!optimizerConfig.data) return
-    const { id: _id, provider: _provider, api_key_mask: _mask, updated_at: _updated, has_api_key: _hasApiKey, ...rest } = optimizerConfig.data
+    const { id: _id, api_key_mask: _mask, updated_at: _updated, has_api_key: _hasApiKey, ...rest } = optimizerConfig.data
     setOptimizerForm({ ...rest, api_key: "" })
   }, [optimizerConfig.data])
   useEffect(() => {
@@ -68,6 +75,10 @@ export function ModelPage() {
   useEffect(() => {
     if (reviewWorkflowPolicy.data) setReviewWorkflowForm(reviewWorkflowPolicy.data)
   }, [reviewWorkflowPolicy.data])
+  useEffect(() => {
+    if (!categoryProfiles.data) return
+    setCategoryDrafts(Object.fromEntries(categoryProfiles.data.items.map((item) => [item.category_key, { ...item }])))
+  }, [categoryProfiles.data])
 
   const save = useMutation({
     mutationFn: () => api("/api/model-config", { method: "PUT", ...jsonBody(form) }),
@@ -138,6 +149,29 @@ export function ModelPage() {
     },
     onError: (error) => toast.error(error.message),
   })
+  const saveCategory = useMutation({
+    mutationFn: (draft: CategoryDraft) => api<EvaluationCategoryProfile>(`/api/evaluation-categories/${draft.category_key}`, {
+      method: "PUT",
+      ...jsonBody({
+        display_name: draft.display_name,
+        status: draft.status,
+        allowed_mime_types: draft.allowed_mime_types,
+        preprocess_config: draft.preprocess_config,
+        prompt_a_id: draft.prompt_a_id,
+        prompt_b_id: draft.prompt_b_id,
+        model_config_id: draft.model_config_id,
+        rubric_version: draft.rubric_version,
+        dimension_schema_key: draft.dimension_schema_key,
+        dimension_schema_version: draft.dimension_schema_version,
+      }),
+    }),
+    onSuccess: async (data) => {
+      setCategoryDrafts((current) => ({ ...current, [data.category_key]: { ...data } }))
+      await categoryProfiles.refetch()
+      toast.success(`${data.display_name}类目配置已保存`)
+    },
+    onError: (error) => toast.error(error.message),
+  })
 
   function update<K extends keyof FormState>(key: K, value: FormState[K]) {
     setForm((current) => current ? { ...current, [key]: value } : current)
@@ -157,6 +191,13 @@ export function ModelPage() {
 
   function updateBenchmark<K extends keyof BenchmarkConfigDraft>(key: K, value: BenchmarkConfigDraft[K]) {
     setBenchmarkForm((current) => ({ ...current, [key]: value }))
+  }
+
+  function updateCategory(categoryKey: string, patch: Partial<CategoryDraft>) {
+    setCategoryDrafts((current) => ({
+      ...current,
+      [categoryKey]: { ...current[categoryKey], ...patch },
+    }))
   }
 
   if (me.data && !me.data.is_admin) {
@@ -179,8 +220,8 @@ export function ModelPage() {
         description="主评测模型、提示词优化模型与横评模型分别配置。API Key 仅写入当前电脑的系统凭据库，页面和 API 不返回明文。"
         actions={
           <>
-            <Button variant="secondary" onClick={() => test.mutate()} disabled={!config.data?.has_api_key || test.isPending}><PlugsConnected />测试豆包连接</Button>
-            <Button onClick={() => save.mutate()} disabled={!form || save.isPending || (form.benchmark_enabled && !mainBenchmarkConfirmed)}><FloppyDisk />保存豆包配置</Button>
+            <Button variant="secondary" onClick={() => test.mutate()} disabled={!config.data?.has_api_key || test.isPending}><PlugsConnected />测试主模型连接</Button>
+            <Button onClick={() => save.mutate()} disabled={!form || save.isPending || (form.benchmark_enabled && !mainBenchmarkConfirmed)}><FloppyDisk />保存主模型配置</Button>
           </>
         }
       />
@@ -189,11 +230,12 @@ export function ModelPage() {
           <div>
             <div className="flex size-10 items-center justify-center rounded-[4px] bg-primary"><PlugsConnected size={21} weight="bold" /></div>
             <h2 className="font-editorial mt-5 text-2xl font-bold">连接信息</h2>
-            <p className="mt-2 text-sm leading-6 text-[var(--muted)]">支持火山方舟 OpenAI 兼容的 Chat Completions 接口。模型 ID 也可以填写推理接入点 ID。</p>
+            <p className="mt-2 text-sm leading-6 text-[var(--muted)]">支持 OpenAI-compatible Chat Completions 接口。可配置任意兼容渠道的 Base URL、路径和模型 ID，火山方舟不再是固定前提。</p>
           </div>
           {form ? (
             <div className="grid gap-5 md:grid-cols-2">
               <Field label="配置名称"><Input value={form.name} onChange={(event) => update("name", event.target.value)} /></Field>
+              <Field label="渠道标识"><Input value={form.provider} onChange={(event) => update("provider", event.target.value)} placeholder="doubao / openai / deepseek" /></Field>
               <Field label="模型 / 端点 ID"><Input value={form.model_id} onChange={(event) => update("model_id", event.target.value)} /></Field>
               <Field label="Base URL"><Input value={form.base_url} onChange={(event) => update("base_url", event.target.value)} /></Field>
               <Field label="API 路径"><Input value={form.api_path} onChange={(event) => update("api_path", event.target.value)} /></Field>
@@ -213,6 +255,40 @@ export function ModelPage() {
               <Badge tone={config.data?.has_api_key ? "success" : "warning"}>{config.data?.has_api_key ? "当前电脑已保存密钥" : "尚未保存密钥"}</Badge>
             </div>
             <Field label="输入新的 API Key"><Input type="password" value={form?.api_key ?? ""} onChange={(event) => update("api_key", event.target.value)} placeholder={config.data?.has_api_key ? "留空以保留当前密钥" : "请输入火山方舟 API Key"} autoComplete="new-password" /></Field>
+          </div>
+        </section>
+
+        <section className="mt-8 border-y border-[var(--line-strong)] bg-white">
+          <div className="grid gap-7 border-b border-[var(--line)] px-5 py-6 lg:grid-cols-[230px_1fr] lg:px-7">
+            <div>
+              <div className="flex size-10 items-center justify-center rounded-[4px] border border-[var(--line-strong)]"><SlidersHorizontal size={21} /></div>
+              <h2 className="font-editorial mt-5 text-2xl font-bold">评测类目配置</h2>
+              <p className="mt-2 text-sm leading-6 text-[var(--muted)]">每个类目独立绑定提示词、模型和前处理规则。保存后只影响新建任务，历史任务继续使用自己的冻结快照。</p>
+            </div>
+            <div className="space-y-5">
+              {(categoryProfiles.data?.items ?? []).map((profile) => {
+                const draft = categoryDrafts[profile.category_key]
+                if (!draft) return null
+                const categoryPrompts = (prompts.data?.items ?? []).filter((item) => item.status === "published")
+                const preprocess = draft.preprocess_config
+                return (
+                  <div key={profile.category_key} className="border border-[var(--line)] bg-[#fafbf8] p-4">
+                    <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+                      <div><h3 className="font-semibold">{draft.display_name}</h3><p className="font-data mt-1 text-xs text-[var(--muted)]">{draft.category_key} · MIME {draft.allowed_mime_types.join(", ")}</p></div>
+                      <Button size="sm" onClick={() => saveCategory.mutate(draft)} disabled={saveCategory.isPending}><FloppyDisk />保存类目</Button>
+                    </div>
+                    <div className="grid gap-4 md:grid-cols-2">
+                      <Field label="显示名称"><Input value={draft.display_name} onChange={(event) => updateCategory(draft.category_key, { display_name: event.target.value })} /></Field>
+                      <Field label="绑定主模型"><select className="flex h-11 w-full rounded-[4px] border border-input bg-transparent px-3 text-sm" value={draft.model_config_id ?? ""} onChange={(event) => updateCategory(draft.category_key, { model_config_id: event.target.value ? Number(event.target.value) : null })}><option value="">跟随主模型</option>{(modelConfigs.data?.items ?? []).map((item) => <option key={item.id} value={item.id}>{item.name} · {item.model_id}</option>)}</select></Field>
+                      <Field label="A / 单提示词版本"><select className="flex h-11 w-full rounded-[4px] border border-input bg-transparent px-3 text-sm" value={draft.prompt_a_id ?? ""} onChange={(event) => updateCategory(draft.category_key, { prompt_a_id: event.target.value ? Number(event.target.value) : null })}><option value="">跟随任务选择</option>{categoryPrompts.filter((item) => item.stage === "A").map((item) => <option key={item.id} value={item.id}>{item.version} · {item.name}</option>)}</select></Field>
+                      <Field label="B 版本（留空即单提示词）"><select className="flex h-11 w-full rounded-[4px] border border-input bg-transparent px-3 text-sm" value={draft.prompt_b_id ?? ""} onChange={(event) => updateCategory(draft.category_key, { prompt_b_id: event.target.value ? Number(event.target.value) : null })}><option value="">单提示词 / 跟随任务选择</option>{categoryPrompts.filter((item) => item.stage === "B").map((item) => <option key={item.id} value={item.id}>{item.version} · {item.name}</option>)}</select></Field>
+                      {draft.category_key === "pdf_text" && <><Field label="最多处理页数"><Input type="number" min="1" max="20" value={Number(preprocess.max_pages ?? 4)} onChange={(event) => updateCategory(draft.category_key, { preprocess_config: { ...preprocess, max_pages: Number(event.target.value) } })} /></Field><Field label="文本上限字符数"><Input type="number" min="1000" max="100000" value={Number(preprocess.max_text_chars ?? 24000)} onChange={(event) => updateCategory(draft.category_key, { preprocess_config: { ...preprocess, max_text_chars: Number(event.target.value) } })} /></Field></>}
+                      {draft.category_key === "material_image" && <label className="flex min-h-20 items-center justify-between gap-4 border border-[var(--line)] bg-white px-4"><span><span className="block text-sm font-semibold">材质专项关注</span><span className="mt-1 block text-xs text-[var(--muted)]">提示模型优先判断纹理、反光、接缝和工艺真实性。</span></span><input type="checkbox" checked={Boolean(preprocess.material_focus)} onChange={(event) => updateCategory(draft.category_key, { preprocess_config: { ...preprocess, material_focus: event.target.checked } })} className="size-5 accent-[#11130f]" /></label>}
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
           </div>
         </section>
 
@@ -245,6 +321,7 @@ export function ModelPage() {
             </div>
             {optimizerForm ? <div className="grid gap-5 md:grid-cols-2">
               <Field label="配置名称"><Input value={optimizerForm.name} onChange={(event) => updateOptimizer("name", event.target.value)} /></Field>
+              <Field label="渠道标识"><Input value={optimizerForm.provider} onChange={(event) => updateOptimizer("provider", event.target.value)} placeholder="openai / deepseek / custom" /></Field>
               <Field label="模型 ID"><Input value={optimizerForm.model_id} onChange={(event) => updateOptimizer("model_id", event.target.value)} /></Field>
               <Field label="Base URL"><Input value={optimizerForm.base_url} onChange={(event) => updateOptimizer("base_url", event.target.value)} /></Field>
               <Field label="API 路径"><Input value={optimizerForm.api_path} onChange={(event) => updateOptimizer("api_path", event.target.value)} /></Field>
@@ -268,7 +345,7 @@ export function ModelPage() {
             <div className="grid gap-5 md:grid-cols-2">
               <Field label="配置名称"><Input value={benchmarkForm.name} onChange={(event) => updateBenchmark("name", event.target.value)} /></Field>
               <Field label="模型 ID"><Input value={benchmarkForm.model_id} onChange={(event) => updateBenchmark("model_id", event.target.value)} /></Field>
-              <Field label="协议"><select className="h-11 w-full rounded-[4px] border border-[var(--line-strong)] bg-white px-3 text-sm" value={benchmarkForm.provider} onChange={(event) => updateBenchmark("provider", event.target.value as "openai" | "doubao")}><option value="openai">OpenAI-compatible</option><option value="doubao">Doubao-compatible</option></select></Field>
+              <Field label="渠道标识"><Input value={benchmarkForm.provider} onChange={(event) => updateBenchmark("provider", event.target.value)} placeholder="openai / deepseek / claude-compatible" /></Field>
               <Field label="API 路径"><Input value={benchmarkForm.api_path} onChange={(event) => updateBenchmark("api_path", event.target.value)} /></Field>
               <div className="md:col-span-2"><Field label="Base URL"><Input value={benchmarkForm.base_url} onChange={(event) => updateBenchmark("base_url", event.target.value)} /></Field></div>
               <div className="md:col-span-2"><Field label="API Key"><Input type="password" value={benchmarkForm.api_key} onChange={(event) => updateBenchmark("api_key", event.target.value)} autoComplete="new-password" /></Field></div>

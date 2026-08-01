@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import io
 
+import pytest
 from PIL import Image
 
-from app.media import prepare_model_image
+from app.media import prepare_model_image, prepare_pdf_model_input
 
 
 def _gif_bytes() -> bytes:
@@ -52,3 +53,47 @@ def test_gif_model_preview_is_deterministic_and_keeps_source_animated(tmp_path) 
     )
     assert cached_preview == preview
     assert cached_mime == "image/png"
+
+
+def test_pdf_preprocess_extracts_text_renders_contact_sheet_and_caches(tmp_path) -> None:
+    import fitz
+
+    source = tmp_path / "方案.pdf"
+    document = fitz.open()
+    page = document.new_page(width=240, height=160)
+    page.insert_text((24, 48), "Living room proposal", fontsize=16)
+    page.insert_text((24, 82), "Material and lighting", fontsize=11)
+    document.save(source)
+    document.close()
+
+    result = prepare_pdf_model_input(
+        source,
+        content_sha256="b" * 64,
+        cache_dir=tmp_path / "derived",
+        max_pages=4,
+    )
+    assert result.preview_mime_type == "image/png"
+    assert result.preview_path.exists()
+    assert result.context["schema_version"] == "pdf-preprocess-v1"
+    assert result.context["page_count"] == 1
+    assert "Living room proposal" in str(result.context["text"])
+    assert result.context["multimodal_summary"]["status"] == "ready"
+
+    cached = prepare_pdf_model_input(
+        source,
+        content_sha256="b" * 64,
+        cache_dir=tmp_path / "derived",
+    )
+    assert cached.preview_path == result.preview_path
+    assert cached.context == result.context
+
+
+def test_pdf_preprocess_reports_invalid_input_without_partial_cache(tmp_path) -> None:
+    source = tmp_path / "not-a-pdf.pdf"
+    source.write_bytes(b"not a PDF")
+    with pytest.raises(RuntimeError, match="PDF 前处理"):
+        prepare_pdf_model_input(
+            source,
+            content_sha256="c" * 64,
+            cache_dir=tmp_path / "derived",
+        )

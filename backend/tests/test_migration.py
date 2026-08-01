@@ -44,6 +44,9 @@ MIGRATION_NAMES = [
     "add_dimension_route_policies",
     "add_routed_strategy_bundles",
     "add_dimension_calibration_results",
+    "add_evaluation_category_profiles",
+    "repair_evaluation_category_profiles",
+    "add_evaluation_preprocess_snapshot",
 ]
 
 

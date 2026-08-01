@@ -140,6 +140,69 @@ def test_gif_upload_preserves_animated_asset_mime(tmp_path: Path) -> None:
     assert uploaded.json()["items"][0]["mime_type"] == "image/gif"
 
 
+def test_category_contracts_keep_pdf_and_material_inputs_isolated(tmp_path: Path) -> None:
+    with _api_context(tmp_path) as (client, _sessions):
+        image_upload = client.post(
+            "/api/assets/upload",
+            data={"category_key": "material_image", "package_name": "材质图"},
+            files={"files": ("fabric.png", _image_bytes((12, 34, 56), format_name="PNG"), "image/png")},
+        )
+        assert image_upload.status_code == 200, image_upload.text
+        assert image_upload.json()["package"]["category_key"] == "material_image"
+
+        wrong_pdf = client.post(
+            "/api/assets/upload",
+            data={"category_key": "pdf_text"},
+            files={"files": ("looks-like.pdf", _image_bytes((1, 2, 3)), "image/jpeg")},
+        )
+        assert wrong_pdf.status_code == 400
+        assert "PDF" in wrong_pdf.json()["detail"]
+
+        categories = client.get("/api/evaluation-categories")
+        assert categories.status_code == 200
+        assert {item["category_key"] for item in categories.json()["items"]} == {
+            "space_image", "pdf_text", "material_image"
+        }
+
+        pdf_profile = next(
+            item for item in categories.json()["items"]
+            if item["category_key"] == "pdf_text"
+        )
+        invalid_profile = {
+            key: value
+            for key, value in pdf_profile.items()
+            if key not in {"id", "category_key", "created_by", "created_at", "updated_at"}
+        }
+        invalid_profile["allowed_mime_types"] = ["image/jpeg"]
+        rejected = client.put(
+            "/api/evaluation-categories/pdf_text",
+            json=invalid_profile,
+        )
+        assert rejected.status_code == 422
+
+        material_profile = next(
+            item for item in categories.json()["items"]
+            if item["category_key"] == "material_image"
+        )
+        retired_profile = {
+            key: value
+            for key, value in material_profile.items()
+            if key not in {"id", "category_key", "created_by", "created_at", "updated_at"}
+        }
+        retired_profile["status"] = "retired"
+        retired = client.put(
+            "/api/evaluation-categories/material_image",
+            json=retired_profile,
+        )
+        assert retired.status_code == 200
+        blocked = client.post(
+            "/api/assets/upload",
+            data={"category_key": "material_image"},
+            files={"files": ("blocked.png", _image_bytes((3, 2, 1), format_name="PNG"), "image/png")},
+        )
+        assert blocked.status_code == 409
+
+
 def test_zip_upload_aggregates_nested_images_and_ignores_metadata(
     tmp_path: Path,
 ) -> None:
