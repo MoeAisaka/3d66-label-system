@@ -6,7 +6,7 @@
 ## 当前交付候选：以最终评测包为主线的审核与自动优化（2026-08-02）
 
 当前分支：`feature/planned-iteration-20260801`；前端、后端、集成脚本与操作手册已在
-同一候选中完成本地验收，等待最终提交并纯快进推送 Codeup。
+同一候选中完成验收，并纯快进交付 Codeup `main`、`windows-deploy` 与功能分支。
 
 已完成：
 
@@ -58,7 +58,6 @@
   PDF/GIF Worker 与完整评测包主链验收；当前无远程执行通道。
 - 钉钉文档链接当前停在扫码登录页。仓库内新版手册和真实截图已完成，但外部文档
   尚未写入，不能把本地成稿表述为钉钉已更新。
-- 完成最终只读复审后，再核对 Codeup 远端并快进推送 `main` 与 `windows-deploy`。
 
 长期决策见 [ADR-0030](docs/decisions/0030-package-review-and-category-baseline-promotion.md)。
 
