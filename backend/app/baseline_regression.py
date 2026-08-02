@@ -11,10 +11,12 @@ from typing import Any, Iterable, Mapping
 from sqlalchemy.orm import Session
 
 from .models import (
+    BaselineCorrectionRun,
     BaselineRegressionItem,
     BaselineRegressionRun,
     EvaluationResult,
 )
+from .category_pipeline import dimension_selection_from_job_snapshot
 
 
 LEVELS = ("L1", "L2", "L3", "L4", "L5")
@@ -49,9 +51,14 @@ def canonical_json(value: Any) -> str:
     )
 
 
-def baseline_set_fingerprint(items: Iterable[Mapping[str, Any]]) -> str:
+def baseline_set_fingerprint(
+    items: Iterable[Mapping[str, Any]],
+    *,
+    category_key: str = "space_image",
+) -> str:
     manifest = {
-        "schema_version": "baseline-set-v1",
+        "schema_version": "baseline-set-v2",
+        "category_key": category_key,
         "items": sorted(
             (
                 {
@@ -261,11 +268,19 @@ def result_snapshot(result: EvaluationResult) -> dict[str, Any]:
     aesthetic = _json_object(result.aesthetic_json)
     scoring = _json_object(result.scoring_json)
     predicted_level = result.level if result.level in LEVELS else None
+    job = result.job
+    dimension_selection = dimension_selection_from_job_snapshot(
+        job.category_profile_snapshot_json if job is not None else None
+    )
     return {
-        "schema_version": "baseline-result-v2",
+        "schema_version": "baseline-result-v3",
         "evaluation_id": result.id,
         "job_id": result.job_id,
         "strategy_bundle_id": result.strategy_bundle_id,
+        "category_key": (
+            job.category_key if job is not None else result.asset.category_key
+        ),
+        "dimension_selection": dimension_selection,
         "predicted_level": predicted_level,
         "authoritative_score": result.score,
         "cap_reasons": scoring.get("caps")
@@ -391,6 +406,16 @@ def complete_baseline_item(
         raise ValueError("基准回归结果素材与冻结条目不一致")
     if result.strategy_bundle_id != item.run.strategy_bundle_id:
         raise ValueError("基准回归结果策略与冻结 run 不一致")
+    run_execution = _json_object(item.run.execution_snapshot_json)
+    frozen_selection = run_execution.get("dimension_selection")
+    if frozen_selection is not None:
+        if result.job is None or result.job.category_key != item.run.category_key:
+            raise ValueError("基准回归结果类目与冻结 run 不一致")
+        result_selection = dimension_selection_from_job_snapshot(
+            result.job.category_profile_snapshot_json
+        )
+        if result_selection != frozen_selection:
+            raise ValueError("基准回归结果维度选择与冻结 run 不一致")
     item.evaluation_id = result.id
     item.job_id = result.job_id
     item.result_snapshot_json = canonical_json(result_snapshot(result))
@@ -463,3 +488,280 @@ def run_comparison(
             else None
         ),
     }
+
+
+def correction_input_snapshot(
+    run: BaselineRegressionRun,
+    selected_items: Iterable[BaselineRegressionItem],
+) -> dict[str, Any]:
+    """Freeze validated deviation rows for deterministic correction analysis."""
+
+    items = sorted(selected_items, key=lambda item: item.id)
+    if run.status not in TERMINAL_RUN_STATUSES:
+        raise ValueError("基准回归尚未结束，不能创建纠偏分析")
+    if not items:
+        raise ValueError("至少选择一个已完成偏差样本")
+    if any(item.run_id != run.id for item in items):
+        raise ValueError("纠偏样本不属于同一基准回归")
+
+    try:
+        execution_snapshot = json.loads(run.execution_snapshot_json or "{}")
+    except json.JSONDecodeError as exc:
+        raise ValueError("基准回归执行快照损坏") from exc
+    if not isinstance(execution_snapshot, dict):
+        raise ValueError("基准回归执行快照损坏")
+    dimension_selection = execution_snapshot.get("dimension_selection")
+    if dimension_selection is not None and not isinstance(
+        dimension_selection, dict
+    ):
+        raise ValueError("基准回归冻结维度选择损坏")
+
+    frozen_rows: list[dict[str, Any]] = []
+    for item in items:
+        try:
+            result = json.loads(item.result_snapshot_json or "{}")
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"条目 #{item.id} 结果快照损坏") from exc
+        if not isinstance(result, dict):
+            raise ValueError(f"条目 #{item.id} 结果快照损坏")
+        predicted = result.get("predicted_level")
+        if (
+            item.status != "completed"
+            or predicted not in LEVELS
+            or predicted == item.expected_level
+        ):
+            raise ValueError(f"条目 #{item.id} 不是已完成偏差样本")
+        frozen_rows.append(
+            {
+                "item_id": item.id,
+                "asset_id": item.asset_id,
+                "evaluation_id": item.evaluation_id,
+                "expected_level": item.expected_level,
+                "predicted_level": predicted,
+                "authoritative_score": result.get("authoritative_score"),
+                "confidence": result.get("confidence"),
+                "needs_review": result.get("needs_review"),
+                "level_explanation": result.get("level_explanation") or {},
+                "category_key": result.get("category_key") or run.category_key,
+                "dimension_selection": result.get("dimension_selection"),
+                "versions": result.get("versions") or {},
+            }
+        )
+    if any(row["category_key"] != run.category_key for row in frozen_rows):
+        raise ValueError("偏差样本与基准回归类目不一致")
+
+    return {
+        "schema_version": "baseline-correction-input-v1",
+        "baseline_run_id": run.id,
+        "baseline_set_id": run.baseline_set_id,
+        "baseline_set_fingerprint": run.baseline_set_fingerprint,
+        "category_key": run.category_key,
+        "strategy_bundle_id": run.strategy_bundle_id,
+        "execution_snapshot": execution_snapshot,
+        "dimension_selection": dimension_selection,
+        "run_metrics": _json_object(run.metrics_json),
+        "items": frozen_rows,
+    }
+
+
+def _rank_counts(counter: dict[str, int]) -> list[dict[str, Any]]:
+    return [
+        {"key": key, "count": count}
+        for key, count in sorted(
+            counter.items(), key=lambda pair: (-pair[1], pair[0])
+        )
+    ]
+
+
+def deterministic_correction_report(
+    input_snapshot: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Analyze frozen deviations without a model call or publication side effect."""
+
+    raw_items = input_snapshot.get("items")
+    if not isinstance(raw_items, list) or not raw_items:
+        raise ValueError("纠偏分析输入不包含样本")
+    rows: list[dict[str, Any]] = []
+    direction_counts: dict[str, int] = {}
+    distance_counts: dict[str, int] = {}
+    pair_counts: dict[str, int] = {}
+    weak_dimension_counts: dict[str, int] = {}
+    quality_counts: dict[str, int] = {}
+    cap_counts: dict[str, int] = {}
+    for raw in raw_items:
+        if not isinstance(raw, dict):
+            raise ValueError("纠偏分析样本结构损坏")
+        expected = raw.get("expected_level")
+        predicted = raw.get("predicted_level")
+        if expected not in LEVELS or predicted not in LEVELS or expected == predicted:
+            raise ValueError("纠偏分析仅接受有效偏差样本")
+        expected_index = LEVELS.index(expected)
+        predicted_index = LEVELS.index(predicted)
+        distance = abs(expected_index - predicted_index)
+        direction = "under_rated" if predicted_index > expected_index else "over_rated"
+        pair = f"{expected}→{predicted}"
+        direction_counts[direction] = direction_counts.get(direction, 0) + 1
+        distance_counts[str(distance)] = distance_counts.get(str(distance), 0) + 1
+        pair_counts[pair] = pair_counts.get(pair, 0) + 1
+        explanation = raw.get("level_explanation")
+        explanation = explanation if isinstance(explanation, dict) else {}
+        for dimension in explanation.get("weak_dimensions") or []:
+            if isinstance(dimension, dict) and isinstance(dimension.get("key"), str):
+                key = dimension["key"]
+                weak_dimension_counts[key] = weak_dimension_counts.get(key, 0) + 1
+        quality = explanation.get("image_quality")
+        if isinstance(quality, dict) and isinstance(quality.get("severity"), str):
+            key = quality["severity"]
+            quality_counts[key] = quality_counts.get(key, 0) + 1
+        for cap in explanation.get("caps") or []:
+            if isinstance(cap, dict):
+                reason = cap.get("reason") or cap.get("cap")
+            else:
+                reason = cap
+            if isinstance(reason, str) and reason.strip():
+                key = reason.strip()
+                cap_counts[key] = cap_counts.get(key, 0) + 1
+        rows.append(
+            {
+                "status": "completed",
+                "expected_level": expected,
+                "predicted_level": predicted,
+            }
+        )
+
+    accuracy = compute_level_metrics(rows)
+    average_distance = sum(
+        int(distance) * count for distance, count in distance_counts.items()
+    ) / len(raw_items)
+    dimension_selection = input_snapshot.get("dimension_selection")
+    dimension_selection = (
+        dimension_selection if isinstance(dimension_selection, dict) else {}
+    )
+    top_direction = _rank_counts(direction_counts)[0]["key"]
+    prompt_recommendations = [
+        {
+            "code": "inspect_level_anchors",
+            "priority": "high" if direction_counts[top_direction] >= len(raw_items) * 0.6 else "medium",
+            "message": (
+                "模型更常给出低于真值质量的等级，优先检查负向证据和封顶措辞。"
+                if top_direction == "under_rated"
+                else "模型更常给出高于真值质量的等级，优先收紧高等级锚点和反例。"
+            ),
+            "supporting_samples": direction_counts[top_direction],
+        }
+    ]
+    if cap_counts:
+        prompt_recommendations.append(
+            {
+                "code": "inspect_cap_evidence",
+                "priority": "medium",
+                "message": "偏差样本集中出现等级限制，核对提示词证据与服务端封顶条件。",
+                "supporting_samples": sum(cap_counts.values()),
+            }
+        )
+    if dimension_selection.get("mode") == "none":
+        dimension_recommendations = []
+    elif weak_dimension_counts:
+        top_dimensions = [
+            item["key"] for item in _rank_counts(weak_dimension_counts)[:3]
+        ]
+        dimension_recommendations = [
+            {
+                "dimension_key": key,
+                "priority": "high" if weak_dimension_counts[key] >= max(3, len(raw_items) // 2) else "medium",
+                "message": "复核该维度的定义、权重和证据锚点。",
+                "signals": {"weak_dimension": weak_dimension_counts[key]},
+            }
+            for key in top_dimensions
+        ]
+    else:
+        dimension_recommendations = []
+
+    return {
+        "schema_version": "baseline-correction-report-v1",
+        "status": "optimization_suggestion_pending_confirmation",
+        "category_key": input_snapshot.get("category_key"),
+        "baseline_run_id": input_snapshot.get("baseline_run_id"),
+        "selection": {
+            "policy": "explicit_completed_deviations",
+            "count": len(raw_items),
+            "item_ids": [int(item["item_id"]) for item in raw_items],
+        },
+        "accuracy_report": {
+            "run_metrics": input_snapshot.get("run_metrics") or {},
+            "selected_deviation_count": len(raw_items),
+            "average_level_distance": round(average_distance, 3),
+            "direction_counts": direction_counts,
+            "confusion_pairs": [
+                {"pair": pair, "count": count}
+                for pair, count in sorted(pair_counts.items(), key=lambda item: (-item[1], item[0]))
+            ],
+        },
+        "attribution": {
+            "dominant_direction": top_direction,
+            "prompt_only": dimension_selection.get("mode") == "none",
+            "dimension_signal_count": len(weak_dimension_counts),
+        },
+        "prompt_suggestions": prompt_recommendations,
+        "dimension_suggestions": dimension_recommendations,
+        "confidence": "high" if len(raw_items) >= 30 else "medium" if len(raw_items) >= 10 else "low",
+        "risks": (["差异样本少于 10，建议仅作优化候选。"] if len(raw_items) < 10 else []),
+        "publication": {
+            "allowed": False,
+            "next_state": "awaiting_confirmation",
+            "message": "分析仅提供纠偏建议，不创建、不覆盖、不发布提示词或维度版本。",
+        },
+    }
+
+
+def execute_correction_run(correction: BaselineCorrectionRun) -> None:
+    """Advance one persisted correction run to its human confirmation gate."""
+
+    try:
+        snapshot = json.loads(correction.input_snapshot_json)
+    except json.JSONDecodeError as exc:
+        raise ValueError("纠偏分析冻结输入损坏") from exc
+    if not isinstance(snapshot, dict):
+        raise ValueError("纠偏分析冻结输入损坏")
+    correction.status = "processing"
+    correction.progress = 25
+    correction.report_json = canonical_json(
+        deterministic_correction_report(snapshot)
+    )
+    correction.status = "awaiting_confirmation"
+    correction.progress = 100
+    correction.blockers_json = canonical_json(
+        [
+            {
+                "code": "human_confirmation_required",
+                "message": "提示词或维度调整必须由人工确认后另行创建候选版本。",
+                "retryable": False,
+            }
+        ]
+    )
+    correction.error_code = ""
+    correction.error_message = ""
+    correction.finished_at = datetime.now(timezone.utc)
+
+
+def fail_correction_run(
+    correction: BaselineCorrectionRun,
+    *,
+    error_code: str,
+    error_message: str,
+) -> None:
+    correction.status = "failed"
+    correction.progress = 0
+    correction.report_json = "{}"
+    correction.blockers_json = canonical_json(
+        [
+            {
+                "code": error_code,
+                "message": error_message[:500],
+                "retryable": correction.attempt_count < 3,
+            }
+        ]
+    )
+    correction.error_code = error_code[:80]
+    correction.error_message = error_message[:500]
+    correction.finished_at = datetime.now(timezone.utc)

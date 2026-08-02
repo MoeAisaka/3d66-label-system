@@ -1,5 +1,7 @@
 import json
+import importlib
 
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
@@ -12,13 +14,17 @@ from app.baseline_regression import (
     filename_level_suggestion,
     level_explanation,
 )
+from app.audit import canonical_json
+from app.category_pipeline import default_pipeline
 from app.database import Base, get_db
 from app.main import app, current_user
 from app.models import (
     Asset,
+    BaselineCorrectionRun,
     BaselineRegressionItem,
     BaselineRegressionRun,
     EvaluationJob,
+    EvaluationCategoryProfile,
     EvaluationResult,
     MaterialPackage,
     MaterialPackageItem,
@@ -525,11 +531,8 @@ def test_baseline_run_can_freeze_manual_prompt_pair_and_reserves_dimension_choic
             f"/api/baseline-sets/{set_id}/runs",
             json={"dimension_schema_id": 1},
         )
-        assert reserved_dimension.status_code == 409
-        assert (
-            reserved_dimension.json()["detail"]["code"]
-            == "DIMENSION_VERSION_SELECTION_NOT_ENABLED"
-        )
+        assert reserved_dimension.status_code == 404
+        assert "维度版本不存在" in reserved_dimension.text
 
         missing = client.post(
             f"/api/baseline-sets/{set_id}/runs",
@@ -562,12 +565,12 @@ def test_baseline_run_can_freeze_manual_prompt_pair_and_reserves_dimension_choic
         assert payload["selection"]["prompt_a"]["version"] == "A-draft"
         assert payload["selection"]["prompt_b"]["id"] == draft_b.id
         assert payload["selection"]["prompt_b"]["version"] == "B-draft"
-        assert payload["selection"]["dimension"] == {
-            "mode": "strategy_snapshot",
-            "manual_selection_supported": False,
-            "route_policy_id": None,
-            "schemas": [],
-        }
+        assert payload["selection"]["dimension"]["mode"] == "all"
+        assert payload["selection"]["dimension"]["effective_keys"]
+        assert (
+            payload["selection"]["dimension"]["manual_selection_supported"]
+            is True
+        )
 
         run = db.get(BaselineRegressionRun, payload["id"])
         assert run is not None
@@ -579,7 +582,7 @@ def test_baseline_run_can_freeze_manual_prompt_pair_and_reserves_dimension_choic
         detail = client.get(
             f"/api/baseline-regressions/{run.id}"
         )
-        assert detail.status_code == 200
+        assert detail.status_code == 200, detail.text
         assert (
             detail.json()["summary"]["selection"]["prompt_b"]["version"]
             == "B-draft"
@@ -589,6 +592,268 @@ def test_baseline_run_can_freeze_manual_prompt_pair_and_reserves_dimension_choic
             set_detail.json()["runs"][0]["selection"]["prompt_a"]["version"]
             == "A-draft"
         )
+    finally:
+        app.dependency_overrides.clear()
+        db.close()
+        engine.dispose()
+
+
+def test_category_dimension_snapshot_and_isolated_correction_retry(
+    monkeypatch,
+) -> None:
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    db = Session(engine, expire_on_commit=False)
+    user = User(
+        username="baseline-analysis-tester",
+        password_hash="unused",
+        display_name="基准分析测试员",
+    )
+    asset = Asset(
+        original_name="material-L1.jpg",
+        stored_name="material-L1.jpg",
+        mime_type="image/jpeg",
+        size_bytes=10,
+        sha256="9" * 64,
+        category_key="material_image",
+        status="uploaded",
+    )
+    model = ModelConfig(
+        name="material-model",
+        provider="generic",
+        base_url="https://example.test",
+        api_path="/chat",
+        model_id="material-model-v1",
+        active=True,
+    )
+    prompt = PromptVersion(
+        stage="A",
+        name="材质单提示词",
+        version="material-single-v1",
+        system_prompt="evaluate material",
+        user_prompt="evaluate",
+        rubric_version="R-material-1",
+        status="draft",
+    )
+    pipeline = default_pipeline("material_image")
+    pipeline["dimensions"] = {
+        "enabled": True,
+        "mode": "selected",
+        "selected_keys": [
+            "color_material",
+            "detail_completion",
+        ],
+    }
+    profile = EvaluationCategoryProfile(
+        category_key="material_image",
+        display_name="材质图",
+        status="active",
+        allowed_mime_types_json='["image/jpeg"]',
+        preprocess_config_json='{"preprocess":"image"}',
+        pipeline_config_json=canonical_json(pipeline),
+        rubric_version="R-material-1",
+        created_by=user.username,
+    )
+    db.add_all([user, asset, model, prompt, profile])
+    db.commit()
+
+    app.dependency_overrides[get_db] = lambda: (yield db)
+    app.dependency_overrides[current_user] = lambda: user
+    client = TestClient(app)
+    try:
+        cross_category = client.post(
+            "/api/baseline-sets",
+            json={
+                "name": "错误类目基准",
+                "category_key": "space_image",
+                "default_expected_level": "L1",
+                "items": [{"asset_id": asset.id}],
+            },
+        )
+        assert cross_category.status_code == 409
+        assert "不允许混入" in cross_category.text
+
+        created_set = client.post(
+            "/api/baseline-sets",
+            json={
+                "name": "材质存量基准",
+                "category_key": "material_image",
+                "default_expected_level": "L1",
+                "items": [{"asset_id": asset.id}],
+            },
+        )
+        assert created_set.status_code == 200
+        assert created_set.json()["category_key"] == "material_image"
+
+        created_run = client.post(
+            f"/api/baseline-sets/{created_set.json()['id']}/runs",
+            json={"prompt_id": prompt.id},
+        )
+        assert created_run.status_code == 200
+        run = db.get(BaselineRegressionRun, created_run.json()["id"])
+        assert run is not None
+        assert run.category_key == "material_image"
+        selection = created_run.json()["selection"]["dimension"]
+        assert selection["mode"] == "selected"
+        assert selection["effective_keys"] == [
+            "color_material",
+            "detail_completion",
+        ]
+        job = db.get(EvaluationJob, run.items[0].job_id)
+        assert job is not None
+        assert job.category_key == "material_image"
+        frozen_job = json.loads(job.category_profile_snapshot_json)
+        assert frozen_job["dimension_selection"] == {
+            key: selection[key]
+            for key in (
+                "schema_version",
+                "enabled",
+                "mode",
+                "selected_keys",
+                "effective_keys",
+                "prompt_only",
+                "source_schema",
+            )
+        }
+
+        result = EvaluationResult(
+            asset_id=asset.id,
+            job_id=job.id,
+            strategy_bundle_id=run.strategy_bundle_id,
+            strategy_snapshot_json=run.strategy_snapshot_json,
+            precheck_json=json.dumps(
+                {"classification": {"scope_status": "in_scope"}}
+            ),
+            aesthetic_json=json.dumps(
+                {
+                    "dimensions": {
+                        "color_material": {
+                            "grade": 1,
+                            "evidence": ["材质失真"],
+                            "defects": ["纹理模糊"],
+                        },
+                        "detail_completion": {
+                            "grade": 2,
+                            "evidence": ["收口粗糙"],
+                            "defects": ["边缘破损"],
+                        },
+                    }
+                }
+            ),
+            scoring_json=json.dumps({"caps": [], "review_reasons": []}),
+            raw_response_a="{}",
+            raw_response_b=None,
+            score=45,
+            level="L3",
+            confidence=0.8,
+            needs_review=True,
+            model_id=model.model_id,
+            prompt_a_version=prompt.version,
+            prompt_b_version=None,
+            rubric_version=prompt.rubric_version,
+            engine_version=run.strategy_bundle.engine_version,
+            risk_review_version=run.strategy_bundle.risk_review_version,
+        )
+        db.add(result)
+        db.flush()
+        job.category_key = "space_image"
+        with pytest.raises(ValueError, match="类目与冻结 run 不一致"):
+            complete_baseline_item(
+                db,
+                item_id=run.items[0].id,
+                result=result,
+            )
+        job.category_key = "material_image"
+        complete_baseline_item(
+            db,
+            item_id=run.items[0].id,
+            result=result,
+        )
+        db.commit()
+        frozen_result = json.loads(run.items[0].result_snapshot_json)
+        assert frozen_result["category_key"] == "material_image"
+        assert frozen_result["dimension_selection"]["effective_keys"] == [
+            "color_material",
+            "detail_completion",
+        ]
+
+        correction = client.post(
+            f"/api/baseline-regressions/{run.id}/corrections",
+            json={
+                "item_ids": [run.items[0].id],
+                "idempotency_key": "material-correction-001",
+            },
+        )
+        assert correction.status_code == 200
+        correction_payload = correction.json()
+        assert correction_payload["status"] == "awaiting_confirmation"
+        assert correction_payload["report"]["accuracy_report"] == {
+            "run_metrics": json.loads(run.metrics_json),
+            "selected_deviation_count": 1,
+            "average_level_distance": 2.0,
+            "direction_counts": {"under_rated": 1},
+            "confusion_pairs": [{"pair": "L1→L3", "count": 1}],
+        }
+        assert correction_payload["report"]["publication"]["allowed"] is False
+        assert correction_payload["blockers"][0]["code"] == (
+            "human_confirmation_required"
+        )
+        assert db.query(PromptVersion).count() == 1
+
+        main_module = importlib.import_module("app.main")
+        original_builder = main_module.execute_correction_run
+
+        def fail_report(_row):
+            raise ValueError("deterministic-analysis-test-failure")
+
+        monkeypatch.setattr(main_module, "execute_correction_run", fail_report)
+        failed = client.post(
+            f"/api/baseline-regressions/{run.id}/corrections",
+            json={
+                "item_ids": [run.items[0].id],
+                "idempotency_key": "material-correction-002",
+            },
+        )
+        assert failed.status_code == 200
+        assert failed.json()["status"] == "failed"
+        assert failed.json()["error"]["retryable"] is True
+
+        monkeypatch.setattr(
+            main_module,
+            "execute_correction_run",
+            original_builder,
+        )
+        retried = client.post(
+            f"/api/baseline-corrections/{failed.json()['id']}/retry"
+        )
+        assert retried.status_code == 200
+        assert retried.json()["status"] == "awaiting_confirmation"
+        assert retried.json()["attempt_count"] == 2
+        frozen_analysis = db.get(BaselineCorrectionRun, failed.json()["id"])
+        assert frozen_analysis is not None
+        assert json.loads(frozen_analysis.input_snapshot_json)["items"][0][
+            "predicted_level"
+        ] == "L3"
+        assert db.query(PromptVersion).count() == 1
+
+        prompt_only = client.post(
+            f"/api/baseline-sets/{created_set.json()['id']}/runs",
+            json={"prompt_id": prompt.id, "dimension_mode": "none"},
+        )
+        assert prompt_only.status_code == 200
+        assert prompt_only.json()["selection"]["dimension"]["mode"] == "none"
+        assert prompt_only.json()["selection"]["dimension"]["prompt_only"] is True
+        prompt_only_run = db.get(BaselineRegressionRun, prompt_only.json()["id"])
+        assert prompt_only_run is not None
+        prompt_only_job = db.get(EvaluationJob, prompt_only_run.items[0].job_id)
+        assert prompt_only_job is not None
+        prompt_only_snapshot = json.loads(prompt_only_job.category_profile_snapshot_json)
+        assert prompt_only_snapshot["dimension_contract"] is None
+        assert prompt_only_snapshot["dimension_selection"]["effective_keys"] == []
     finally:
         app.dependency_overrides.clear()
         db.close()

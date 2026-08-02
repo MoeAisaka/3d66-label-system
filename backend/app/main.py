@@ -77,6 +77,7 @@ from .models import (
     AutomationPolicy,
     BaselineRegressionItem,
     BaselineRegressionRun,
+    BaselineCorrectionRun,
     BaselineSet,
     BaselineSetItem,
     CircuitBreaker,
@@ -129,6 +130,9 @@ from .baseline_regression import (
     baseline_set_fingerprint,
     canonical_json as baseline_canonical_json,
     compute_level_metrics,
+    correction_input_snapshot,
+    execute_correction_run,
+    fail_correction_run,
     fail_baseline_item,
     filename_level_suggestion,
     run_comparison,
@@ -829,6 +833,7 @@ class BaselineSetCreateRequest(BaseModel):
     name: str = Field(min_length=1, max_length=160)
     description: str = Field(default="", max_length=2000)
     default_expected_level: Literal["L1", "L2", "L3", "L4", "L5"]
+    category_key: str = Field(default="space_image", pattern=r"^[a-z][a-z0-9_]{2,39}$")
     source_package_id: int | None = Field(default=None, ge=1)
     items: list[BaselineSetItemCreateRequest] = Field(
         default_factory=list, max_length=10_000
@@ -856,6 +861,7 @@ class BaselineRunCreateRequest(BaseModel):
     prompt_a_id: int | None = Field(default=None, ge=1)
     prompt_b_id: int | None = Field(default=None, ge=1)
     dimension_schema_id: int | None = Field(default=None, ge=1)
+    dimension_mode: Literal["category_default", "all", "none"] = "category_default"
 
     @model_validator(mode="after")
     def validate_prompt_pair(self) -> "BaselineRunCreateRequest":
@@ -875,6 +881,17 @@ class BaselineOptimizationQueueRequest(BaseModel):
     def validate_unique_items(self) -> "BaselineOptimizationQueueRequest":
         if len(self.item_ids) != len(set(self.item_ids)):
             raise ValueError("偏差条目不能重复")
+        return self
+
+
+class BaselineCorrectionCreateRequest(BaseModel):
+    item_ids: list[int] = Field(min_length=1, max_length=1000)
+    idempotency_key: str = Field(min_length=8, max_length=160)
+
+    @model_validator(mode="after")
+    def validate_unique_items(self) -> "BaselineCorrectionCreateRequest":
+        if len(self.item_ids) != len(set(self.item_ids)):
+            raise ValueError("纠偏样本不能重复")
         return self
 
 
@@ -2722,6 +2739,8 @@ def _category_execution_snapshot(
     model_config: ModelConfig,
     pdf_summary_model_config: ModelConfig | None = None,
     dimension_contract: Any | None = None,
+    dimension_mode_override: Literal["all", "none"] | None = None,
+    rubric_version_override: str | None = None,
 ) -> str:
     pipeline = _profile_pipeline(
         profile,
@@ -2730,6 +2749,14 @@ def _category_execution_snapshot(
             if dimension_contract is not None else None
         ),
     )
+    if dimension_mode_override is not None:
+        pipeline = dict(pipeline)
+        pipeline["dimensions"] = {
+            "enabled": dimension_mode_override != "none",
+            "mode": dimension_mode_override,
+            "selected_keys": [],
+            "enabled_keys": [],
+        }
     dimension_options = (
         dimension_options_from_definition(dimension_contract.definition)
         if dimension_contract is not None
@@ -2767,9 +2794,17 @@ def _category_execution_snapshot(
                 build_model_config_snapshot(pdf_summary_model_config)
                 if pdf_summary_model_config is not None else None
             ),
-            "rubric_version": profile.rubric_version,
-            "dimension_schema_key": profile.dimension_schema_key,
-            "dimension_schema_version": profile.dimension_schema_version,
+            "rubric_version": rubric_version_override or profile.rubric_version,
+            "dimension_schema_key": (
+                dimension_contract.schema_key
+                if dimension_contract is not None
+                else profile.dimension_schema_key
+            ),
+            "dimension_schema_version": (
+                dimension_contract.version
+                if dimension_contract is not None
+                else profile.dimension_schema_version
+            ),
             "dimension_contract": (
                 {
                     "schema_id": dimension_contract.schema_id,
@@ -7718,6 +7753,25 @@ def _baseline_run_selection(
             "rubric_version": raw.get("rubric_version"),
         }
 
+    try:
+        execution = json.loads(run.execution_snapshot_json or "{}")
+    except json.JSONDecodeError:
+        execution = {}
+    frozen_selection = execution.get("dimension_selection")
+    frozen_contract = execution.get("dimension_contract")
+    if isinstance(frozen_selection, dict):
+        return {
+            "schema_version": "baseline-run-selection-v2",
+            "category_key": execution.get("category_key"),
+            "prompt_mode": (execution.get("pipeline_config") or {}).get("prompt_mode"),
+            "prompt_a": prompt_identity("A"),
+            "prompt_b": prompt_identity("B"),
+            "dimension": {
+                **frozen_selection,
+                "manual_selection_supported": True,
+                "contract": frozen_contract if isinstance(frozen_contract, dict) else None,
+            },
+        }
     dimension_set = strategy.get("dimension_schema_set")
     raw_schemas = (
         dimension_set.get("schemas")
@@ -7758,6 +7812,7 @@ def _baseline_run_summary(run: BaselineRegressionRun) -> dict[str, Any]:
     return {
         "id": run.id,
         "baseline_set_id": run.baseline_set_id,
+        "category_key": run.category_key,
         "sequence_no": run.sequence_no,
         "previous_run_id": run.previous_run_id,
         "strategy_bundle_id": run.strategy_bundle_id,
@@ -7780,6 +7835,7 @@ def _baseline_set_summary(baseline_set: BaselineSet) -> dict[str, Any]:
     return {
         "id": baseline_set.id,
         "name": baseline_set.name,
+        "category_key": baseline_set.category_key,
         "description": baseline_set.description,
         "default_expected_level": baseline_set.default_expected_level,
         "fingerprint": baseline_set.fingerprint,
@@ -7812,6 +7868,7 @@ def create_baseline_set(
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     name = payload.name.strip()
+    _category_profile(db, payload.category_key, require_active=True)
     if db.scalar(select(BaselineSet.id).where(BaselineSet.name == name)):
         raise HTTPException(status_code=409, detail="基准集名称已存在")
 
@@ -7821,6 +7878,8 @@ def create_baseline_set(
         source_package = db.get(MaterialPackage, payload.source_package_id)
         if source_package is None:
             raise HTTPException(status_code=404, detail="所选素材包不存在")
+        if source_package.category_key != payload.category_key:
+            raise HTTPException(status_code=409, detail="素材包与基准集流水线类目不一致")
         seen_asset_ids: set[int] = set()
         requested_items = []
         for package_item in source_package.items:
@@ -7884,6 +7943,8 @@ def create_baseline_set(
             status_code=404,
             detail="部分基准素材不存在或已删除",
         )
+    if any(asset.category_key != payload.category_key for asset in assets):
+        raise HTTPException(status_code=409, detail="基准集不允许混入其他流水线类目素材")
     frozen_items: list[dict[str, Any]] = []
     for requested in requested_items:
         asset = assets_by_id[requested.asset_id]
@@ -7924,6 +7985,7 @@ def create_baseline_set(
         asset_snapshot = {
             "schema_version": "baseline-asset-v1",
             "asset_id": asset.id,
+            "category_key": payload.category_key,
             "name": source_name,
             "sha256": asset.sha256,
             "mime_type": asset.mime_type,
@@ -7945,15 +8007,19 @@ def create_baseline_set(
         )
 
     fingerprint = baseline_set_fingerprint(
-        {
-            "asset_id": entry["asset"].id,
-            "asset_sha256": entry["asset"].sha256,
-            "expected_level": entry["expected_level"],
-        }
-        for entry in frozen_items
+        (
+            {
+                "asset_id": entry["asset"].id,
+                "asset_sha256": entry["asset"].sha256,
+                "expected_level": entry["expected_level"],
+            }
+            for entry in frozen_items
+        ),
+        category_key=payload.category_key,
     )
     baseline_set = BaselineSet(
         name=name,
+        category_key=payload.category_key,
         description=payload.description.strip(),
         default_expected_level=payload.default_expected_level,
         fingerprint=fingerprint,
@@ -7984,6 +8050,7 @@ def create_baseline_set(
             "fingerprint": fingerprint,
             "item_count": len(frozen_items),
             "default_expected_level": payload.default_expected_level,
+            "category_key": payload.category_key,
             "source_package_id": payload.source_package_id,
         },
         event_key=f"baseline-set:{baseline_set.id}:created",
@@ -8036,17 +8103,7 @@ def create_baseline_run(
         raise HTTPException(status_code=404, detail="基准集不存在")
     if not baseline_set.items:
         raise HTTPException(status_code=409, detail="空基准集不能创建 run")
-    if request.dimension_schema_id is not None:
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "code": "DIMENSION_VERSION_SELECTION_NOT_ENABLED",
-                "message": (
-                    "维度版本手动选择能力已预留，当前回归仍使用"
-                    " StrategyBundle 冻结的维度集合"
-                ),
-            },
-        )
+    profile = _category_profile(db, baseline_set.category_key, require_active=True)
     running = db.scalar(
         select(BaselineRegressionRun.id).where(
             BaselineRegressionRun.baseline_set_id == baseline_set.id,
@@ -8128,6 +8185,64 @@ def create_baseline_run(
                 else "当前已发布 A/B 提示词或启用模型配置不完整"
             ),
         )
+    prompt_rubrics = {prompt_a.rubric_version}
+    if prompt_b is not None:
+        prompt_rubrics.add(prompt_b.rubric_version)
+    if len(prompt_rubrics) != 1:
+        raise HTTPException(
+            status_code=409,
+            detail="基准回归所选提示词的 rubric 版本不一致",
+        )
+    if request.dimension_mode == "none" and not single_prompt_mode:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "prompt_mode_mismatch",
+                "message": "关闭维度的基准回归必须使用单提示词模式。",
+            },
+        )
+    dimension_schema = (
+        db.get(DimensionSchema, request.dimension_schema_id)
+        if request.dimension_schema_id is not None
+        else None
+    )
+    if request.dimension_schema_id is not None and dimension_schema is None:
+        raise HTTPException(status_code=404, detail="维度版本不存在")
+    schema_key = (
+        dimension_schema.schema_key if dimension_schema is not None else profile.dimension_schema_key
+    )
+    schema_version = (
+        dimension_schema.version if dimension_schema is not None else profile.dimension_schema_version
+    )
+    # Preserve the legacy strategy-snapshot path for installations that have
+    # not seeded the registry yet. Once a caller explicitly selects a version,
+    # the contract is mandatory; prompt-only mode intentionally freezes no
+    # scoring contract.
+    require_contract = request.dimension_schema_id is not None or (
+        request.dimension_mode == "category_default"
+        and db.scalar(
+            select(DimensionSchema.id).where(
+                DimensionSchema.schema_key == schema_key,
+                DimensionSchema.version == schema_version,
+            )
+        ) is not None
+    )
+    try:
+        dimension_contract = (
+            resolve_published_dimension_contract(
+                db,
+                schema_key=schema_key,
+                version=schema_version,
+                require_configured=True,
+            )
+            if require_contract and request.dimension_mode != "none"
+            else None
+        )
+    except ProductionDimensionContractError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": exc.code, "message": str(exc)},
+        ) from exc
     sampling_policy = db.get(SamplingPolicy, 1)
     bundle = get_or_create_bundle(
         db=db,
@@ -8153,6 +8268,25 @@ def create_baseline_run(
         prompt_b=prompt_b,
         sampling_policy=sampling_policy,
     )
+    execution_snapshot = _category_execution_snapshot(
+        profile,
+        prompt_a_id=prompt_a.id,
+        prompt_b_id=prompt_b.id if prompt_b is not None else None,
+        model_config=model_config,
+        dimension_contract=dimension_contract,
+        dimension_mode_override=(
+            request.dimension_mode
+            if request.dimension_mode in {"all", "none"}
+            else None
+        ),
+        rubric_version_override=next(iter(prompt_rubrics)),
+    )
+    execution_payload = json.loads(execution_snapshot)
+    execution_payload["selection_explicit"] = bool(
+        request.dimension_schema_id is not None
+        or request.dimension_mode != "category_default"
+    )
+    execution_snapshot = baseline_canonical_json(execution_payload)
     previous = db.scalar(
         select(BaselineRegressionRun)
         .where(
@@ -8176,7 +8310,9 @@ def create_baseline_run(
         sequence_no=sequence_no,
         previous_run_id=previous.id if previous else None,
         strategy_bundle_id=bundle.id,
+        category_key=baseline_set.category_key,
         strategy_snapshot_json=strategy_snapshot,
+        execution_snapshot_json=execution_snapshot,
         baseline_set_fingerprint=baseline_set.fingerprint,
         status="running",
         total=len(baseline_set.items),
@@ -8199,6 +8335,8 @@ def create_baseline_run(
         db.flush()
         job = EvaluationJob(
             asset_id=frozen_item.asset_id,
+            category_key=baseline_set.category_key,
+            category_profile_snapshot_json=execution_snapshot,
             prompt_a_id=prompt_a.id,
             prompt_b_id=prompt_b.id if prompt_b is not None else None,
             baseline_regression_item_id=run_item.id,
@@ -8226,7 +8364,9 @@ def create_baseline_run(
             "prompt_a_id": prompt_a.id,
             "prompt_b_id": prompt_b.id if prompt_b is not None else None,
             "prompt_mode": "single" if single_prompt_mode else "ab",
-            "dimension_selection_mode": "strategy_snapshot",
+            "category_key": baseline_set.category_key,
+            "dimension_selection_mode": json.loads(execution_snapshot)["dimension_selection"]["mode"],
+            "dimension_schema_id": dimension_contract.schema_id if dimension_contract else None,
             "total": run.total,
         },
         event_key=f"baseline-run:{run.id}:created",
@@ -8371,6 +8511,168 @@ def baseline_run_detail(
         "filter": {"deviations_only": deviations_only},
         "items": item_payloads,
     }
+
+
+def _baseline_correction_payload(row: BaselineCorrectionRun) -> dict[str, Any]:
+    return {
+        "id": row.id,
+        "baseline_run_id": row.baseline_run_id,
+        "category_key": row.category_key,
+        "selected_item_ids": json.loads(row.selected_item_ids_json),
+        "status": row.status,
+        "progress": row.progress,
+        "report": json.loads(row.report_json or "{}"),
+        "blockers": json.loads(row.blockers_json or "[]"),
+        "error": {
+            "code": row.error_code,
+            "message": row.error_message,
+            "retryable": row.status == "failed" and row.attempt_count < 3,
+        } if row.error_code else None,
+        "attempt_count": row.attempt_count,
+        "created_by": row.created_by,
+        "created_at": row.created_at,
+        "updated_at": row.updated_at,
+        "finished_at": row.finished_at,
+    }
+
+
+def _execute_baseline_correction(
+    db: Session, row: BaselineCorrectionRun
+) -> None:
+    try:
+        execute_correction_run(row)
+    except (ValueError, TypeError, json.JSONDecodeError) as exc:
+        fail_correction_run(
+            row,
+            error_code="CORRECTION_ANALYSIS_FAILED",
+            error_message=str(exc),
+        )
+        row.finished_at = datetime.now(timezone.utc)
+
+
+@app.post("/api/baseline-regressions/{run_id}/corrections")
+def create_baseline_correction(
+    run_id: int,
+    payload: BaselineCorrectionCreateRequest,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    run = db.get(BaselineRegressionRun, run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="基准回归 run 不存在")
+    if run.status not in BASELINE_TERMINAL_STATUSES:
+        raise HTTPException(status_code=409, detail="基准回归尚未结束，不能创建纠偏分析")
+    request_hash = hashlib.sha256(
+        baseline_canonical_json(
+            {"run_id": run_id, "item_ids": sorted(payload.item_ids)}
+        ).encode("utf-8")
+    ).hexdigest()
+    existing = db.scalar(
+        select(BaselineCorrectionRun).where(
+            BaselineCorrectionRun.idempotency_key == payload.idempotency_key
+        )
+    )
+    if existing is not None:
+        frozen = json.loads(existing.input_snapshot_json or "{}")
+        if frozen.get("request_hash") != request_hash:
+            raise HTTPException(status_code=409, detail="幂等键已用于不同纠偏请求")
+        return _baseline_correction_payload(existing)
+    selected = db.scalars(
+        select(BaselineRegressionItem).where(
+            BaselineRegressionItem.run_id == run.id,
+            BaselineRegressionItem.id.in_(payload.item_ids),
+        )
+    ).all()
+    if {item.id for item in selected} != set(payload.item_ids):
+        raise HTTPException(status_code=400, detail="存在不属于该 run 的样本")
+    try:
+        frozen_input = correction_input_snapshot(run, selected)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    frozen_input["request_hash"] = request_hash
+    frozen_input["strategy_canonical_id"] = run.strategy_bundle.canonical_hash
+    row = BaselineCorrectionRun(
+        idempotency_key=payload.idempotency_key,
+        baseline_run_id=run.id,
+        category_key=run.category_key,
+        selected_item_ids_json=baseline_canonical_json(sorted(payload.item_ids)),
+        input_snapshot_json=baseline_canonical_json(frozen_input),
+        created_by=user.username,
+    )
+    db.add(row)
+    db.flush()
+    _execute_baseline_correction(db, row)
+    append_audit_event(
+        db,
+        category="baseline_regression",
+        action="correction_created",
+        subject_type="baseline_correction_run",
+        subject_id=row.id,
+        actor=user.username,
+        payload={"baseline_run_id": run.id, "item_count": len(payload.item_ids)},
+        event_key=f"baseline-correction:{row.id}:attempt:1",
+    )
+    db.commit()
+    return _baseline_correction_payload(row)
+
+
+@app.get("/api/baseline-regressions/{run_id}/corrections")
+def list_baseline_corrections(
+    run_id: int,
+    _user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    if db.get(BaselineRegressionRun, run_id) is None:
+        raise HTTPException(status_code=404, detail="基准回归 run 不存在")
+    rows = db.scalars(
+        select(BaselineCorrectionRun)
+        .where(BaselineCorrectionRun.baseline_run_id == run_id)
+        .order_by(BaselineCorrectionRun.created_at.desc(), BaselineCorrectionRun.id.desc())
+    ).all()
+    return {"items": [_baseline_correction_payload(row) for row in rows]}
+
+
+@app.get("/api/baseline-corrections/{correction_id}")
+def get_baseline_correction(
+    correction_id: int,
+    _user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    row = db.get(BaselineCorrectionRun, correction_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="基准回归纠偏任务不存在")
+    return _baseline_correction_payload(row)
+
+
+@app.post("/api/baseline-corrections/{correction_id}/retry")
+def retry_baseline_correction(
+    correction_id: int,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    row = db.get(BaselineCorrectionRun, correction_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="基准回归纠偏任务不存在")
+    if row.status != "failed":
+        raise HTTPException(status_code=409, detail="只有失败的纠偏任务可重试")
+    if row.attempt_count >= 3:
+        raise HTTPException(status_code=409, detail="纠偏任务已达到最大重试次数")
+    row.status = "processing"
+    row.progress = 10
+    row.attempt_count += 1
+    _execute_baseline_correction(db, row)
+    append_audit_event(
+        db,
+        category="baseline_regression",
+        action="correction_retried",
+        subject_type="baseline_correction_run",
+        subject_id=row.id,
+        actor=user.username,
+        payload={"attempt_count": row.attempt_count},
+        event_key=f"baseline-correction:{row.id}:attempt:{row.attempt_count}",
+    )
+    db.commit()
+    return _baseline_correction_payload(row)
 
 
 @app.post("/api/baseline-regressions/{run_id}/optimization-cases")

@@ -21,8 +21,11 @@ import { submitReviewDecision } from "@/lib/review-submit"
 import type {
   Asset,
   BaselineLevel,
+  BaselineCorrectionRun,
   BaselineRegressionItem,
   BaselineRegressionRun,
+  DimensionSchemaRegistryItem,
+  EvaluationCategoryProfile,
   MaterialPackage,
   PromptVersion,
   ReviewCorrection,
@@ -39,9 +42,12 @@ const levelNames: Record<BaselineLevel, string> = {
   L5: "过滤",
 }
 
+type DimensionChoice = "category_default" | "none" | `schema:${number}`
+
 export function BaselineRegressionPage() {
   const queryClient = useQueryClient()
   const uploadRef = useRef<HTMLInputElement>(null)
+  const [selectedCategoryKey, setSelectedCategoryKey] = useState("space_image")
   const [selectedAssetIds, setSelectedAssetIds] = useState<Set<number>>(new Set())
   const [expectedByAsset, setExpectedByAsset] = useState<Record<number, BaselineLevel>>({})
   const [defaultLevel, setDefaultLevel] = useState<BaselineLevel>("L1")
@@ -54,22 +60,35 @@ export function BaselineRegressionPage() {
   const [promptSelectionMode, setPromptSelectionMode] = useState<"published" | "manual" | "single">("published")
   const [selectedPromptAId, setSelectedPromptAId] = useState(0)
   const [selectedPromptBId, setSelectedPromptBId] = useState(0)
+  const [dimensionChoice, setDimensionChoice] = useState<DimensionChoice>("category_default")
+
+  const categories = useQuery({
+    queryKey: ["evaluation-categories"],
+    queryFn: () => api<{ items: EvaluationCategoryProfile[] }>("/api/evaluation-categories"),
+  })
+  const dimensionSchemas = useQuery({
+    queryKey: ["dimension-schemas"],
+    queryFn: () => api<{ items: DimensionSchemaRegistryItem[] }>("/api/dimension-schemas"),
+  })
 
   const assets = useQuery({
-    queryKey: ["baseline-assets", selectedPackageId],
-    queryFn: () => baselineRegressionApi.listAssets(selectedPackageId || undefined),
+    queryKey: ["baseline-assets", selectedCategoryKey, selectedPackageId],
+    queryFn: () => baselineRegressionApi.listAssets(
+      selectedPackageId || undefined,
+      selectedCategoryKey,
+    ),
   })
   const packages = useQuery({
-    queryKey: ["baseline-packages"],
-    queryFn: baselineRegressionApi.listPackages,
+    queryKey: ["baseline-packages", selectedCategoryKey],
+    queryFn: () => baselineRegressionApi.listPackages(selectedCategoryKey),
   })
   const prompts = useQuery({
     queryKey: ["prompts"],
     queryFn: baselineRegressionApi.listPrompts,
   })
   const baselineSets = useQuery({
-    queryKey: ["baseline-sets"],
-    queryFn: baselineRegressionApi.listSets,
+    queryKey: ["baseline-sets", selectedCategoryKey],
+    queryFn: () => baselineRegressionApi.listSets(selectedCategoryKey),
     refetchInterval: (query) =>
       query.state.data?.items.some((item) => item.latest_run?.status === "running")
         ? 3000
@@ -108,10 +127,41 @@ export function BaselineRegressionPage() {
   const publishedPromptB = promptBOptions.find(
     (prompt) => prompt.status === "published",
   )
+  const activeCategories = useMemo(
+    () => (categories.data?.items ?? []).filter((category) => category.status === "active"),
+    [categories.data?.items],
+  )
+  const selectedCategory = activeCategories.find(
+    (category) => category.category_key === selectedCategoryKey,
+  )
+  const selectableDimensionSchemas = useMemo(
+    () => (dimensionSchemas.data?.items ?? []).filter((schema) => (
+      schema.status === "published"
+      && (!selectedCategory?.dimension_schema_key
+        || schema.schema_key === selectedCategory.dimension_schema_key)
+    )),
+    [dimensionSchemas.data?.items, selectedCategory?.dimension_schema_key],
+  )
 
   useEffect(() => {
-    if (!selectedSetId && baselineSets.data?.items.length) {
-      setSelectedSetId(baselineSets.data.items[0].id)
+    if (!activeCategories.length) return
+    if (!activeCategories.some((category) => category.category_key === selectedCategoryKey)) {
+      setSelectedCategoryKey(
+        activeCategories.find((category) => category.category_key === "space_image")?.category_key
+        ?? activeCategories[0].category_key,
+      )
+    }
+  }, [activeCategories, selectedCategoryKey])
+
+  useEffect(() => {
+    const items = baselineSets.data?.items ?? []
+    if (items.length && !items.some((item) => item.id === selectedSetId)) {
+      setSelectedSetId(items[0].id)
+      setSelectedRunId(0)
+    }
+    if (!items.length && selectedSetId) {
+      setSelectedSetId(0)
+      setSelectedRunId(0)
     }
   }, [baselineSets.data?.items, selectedSetId])
 
@@ -159,7 +209,11 @@ export function BaselineRegressionPage() {
   ])
 
   const upload = useMutation({
-    mutationFn: (files: File[]) => baselineRegressionApi.uploadAssets(files),
+    mutationFn: (files: File[]) => baselineRegressionApi.uploadAssets(
+      files,
+      undefined,
+      selectedCategoryKey,
+    ),
     onSuccess: async ({ items, package: uploadedPackage }) => {
       setSelectedPackageId(uploadedPackage.id)
       setUseWholePackage(true)
@@ -214,6 +268,7 @@ export function BaselineRegressionPage() {
         name: name.trim(),
         description: description.trim(),
         default_expected_level: defaultLevel,
+        category_key: selectedCategoryKey,
         ...(useWholePackage && selectedPackageId
           ? {
               source_package_id: selectedPackageId,
@@ -249,17 +304,28 @@ export function BaselineRegressionPage() {
   })
 
   const createRun = useMutation({
-    mutationFn: () => baselineRegressionApi.createRun(
-      selectedSetId,
-      promptSelectionMode === "single"
+    mutationFn: () => {
+      const promptPayload = promptSelectionMode === "single"
         ? { prompt_id: selectedPromptAId }
         : promptSelectionMode === "manual"
           ? {
-            prompt_a_id: selectedPromptAId,
-            prompt_b_id: selectedPromptBId,
+              prompt_a_id: selectedPromptAId,
+              prompt_b_id: selectedPromptBId,
             }
-          : {},
-    ),
+          : {}
+      const dimensionPayload = dimensionChoice === "none"
+        ? { dimension_mode: "none" as const }
+        : dimensionChoice.startsWith("schema:")
+          ? {
+              dimension_mode: "all" as const,
+              dimension_schema_id: Number(dimensionChoice.slice("schema:".length)),
+            }
+          : { dimension_mode: "category_default" as const }
+      return baselineRegressionApi.createRun(selectedSetId, {
+        ...promptPayload,
+        ...dimensionPayload,
+      })
+    },
     onSuccess: async (run) => {
       setSelectedRunId(run.id)
       await Promise.all([
@@ -296,19 +362,36 @@ export function BaselineRegressionPage() {
     setSelectedRunId(0)
   }
 
+  function selectCategory(categoryKey: string) {
+    if (categoryKey === selectedCategoryKey) return
+    setSelectedCategoryKey(categoryKey)
+    setSelectedPackageId(0)
+    setUseWholePackage(false)
+    setSelectedAssetIds(new Set())
+    setExpectedByAsset({})
+    setSelectedSetId(0)
+    setSelectedRunId(0)
+    setDimensionChoice("category_default")
+  }
+
   return (
     <>
       <PageHeader
         index="03.7"
         title="基准回归"
-        description="冻结素材与 L1–L5 期望等级，可使用当前发布版、手动指定 A/B，或单提示词一次调用重复运行；准确率、混淆矩阵和逐张偏差均来自服务端权威结果。"
+        description="按类目冻结素材与 L1–L5 期望等级，可独立选择提示词和维度版本重复运行；回归结果与后续纠偏分析互相隔离，均不会自动发布。"
         actions={
           <>
             <input
               ref={uploadRef}
               className="hidden"
               type="file"
-              accept="image/jpeg,image/png,image/webp,image/gif"
+              accept={(selectedCategory?.allowed_mime_types ?? [
+                "image/jpeg",
+                "image/png",
+                "image/webp",
+                "image/gif",
+              ]).join(",")}
               multiple
               onChange={(event) => {
                 const files = event.target.files
@@ -340,6 +423,39 @@ export function BaselineRegressionPage() {
           </>
         }
       />
+
+      <section className="mx-auto max-w-[1720px] border-b border-[var(--line-strong)] bg-[#f8faed] px-5 py-5 md:px-8 lg:px-10">
+        <div className="grid gap-4 lg:grid-cols-[minmax(260px,420px)_minmax(0,1fr)] lg:items-end">
+          <label>
+            <span className="mb-2 block text-xs font-bold">评测类目</span>
+            <select
+              className="h-12 w-full rounded-[4px] border-2 border-[var(--line-strong)] bg-white px-3 text-base font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+              value={selectedCategoryKey}
+              onChange={(event) => selectCategory(event.target.value)}
+            >
+              {activeCategories.map((category) => (
+                <option key={category.category_key} value={category.category_key}>
+                  {category.display_name} · {category.category_key}
+                </option>
+              ))}
+            </select>
+          </label>
+          <div className="border-l-2 border-primary pl-4">
+            <div className="flex flex-wrap items-center gap-2">
+              <strong className="text-sm">当前流水线：{selectedCategory?.display_name ?? selectedCategoryKey}</strong>
+              <Badge tone="active">类目隔离</Badge>
+              <Badge>
+                {selectedCategory?.pipeline_config.dimensions.enabled === false
+                  ? "当前仅提示词"
+                  : `当前维度 ${selectedCategory?.dimension_schema_version ?? "未绑定"}`}
+              </Badge>
+            </div>
+            <p className="mt-2 text-xs leading-5 text-[var(--muted)]">
+              {selectedCategory?.description || "素材包、冻结基准集、回归运行和纠偏分析均只在当前类目内流转。"}
+            </p>
+          </div>
+        </div>
+      </section>
 
       <div className="mx-auto grid max-w-[1720px] lg:grid-cols-[310px_minmax(0,1fr)]">
         <aside className="border-r border-[var(--line)] bg-white p-4 lg:min-h-[calc(100dvh-125px)]">
@@ -644,13 +760,17 @@ export function BaselineRegressionPage() {
                   <label>
                     <span className="mb-2 block text-xs font-semibold">维度版本</span>
                     <select
-                      disabled
-                      className="h-11 w-full rounded-[4px] border border-[var(--line)] bg-[#f1f3ef] px-3 text-sm text-[var(--muted)]"
-                      value="strategy_snapshot"
+                      className="h-11 w-full rounded-[4px] border border-[var(--line-strong)] bg-white px-3 text-sm"
+                      value={dimensionChoice}
+                      onChange={(event) => setDimensionChoice(event.target.value as DimensionChoice)}
                     >
-                      <option value="strategy_snapshot">
-                        跟随策略快照（手动选择已预留）
-                      </option>
+                      <option value="category_default">跟随类目当前配置</option>
+                      {selectableDimensionSchemas.map((schema) => (
+                        <option key={schema.id} value={`schema:${schema.id}`}>
+                          {schema.display_name} · {schema.version}（已发布）
+                        </option>
+                      ))}
+                      <option value="none">关闭维度 · 仅提示词评级</option>
                     </select>
                   </label>
                   <Button
@@ -675,6 +795,12 @@ export function BaselineRegressionPage() {
                     : promptSelectionMode === "manual"
                       ? "本轮会冻结所选 A/B 的完整内容，不会改变线上发布指针。"
                       : "本轮启动时自动冻结当时的已发布 A/B；以后发布新版本也不会改写历史 run。"}
+                  {" "}
+                  {dimensionChoice === "none"
+                    ? "维度评测关闭，本轮不会生成逐维分数或进入维度纠偏。"
+                    : dimensionChoice === "category_default"
+                      ? "维度使用当前类目配置并在启动时冻结。"
+                      : "所选已发布维度版本会独立冻结，不改变类目现役配置。"}
                 </p>
               </div>
 
@@ -756,6 +882,7 @@ function RegressionResults({
   const [selectedDeviationIds, setSelectedDeviationIds] = useState<Set<number>>(
     new Set(),
   )
+  const [activeView, setActiveView] = useState<"results" | "correction">("results")
   const [reviewingItemId, setReviewingItemId] = useState<number | null>(null)
   const [reviewNotes, setReviewNotes] = useState<Record<number, string>>({})
 
@@ -846,15 +973,36 @@ function RegressionResults({
         />
         <SelectionFact
           label="本轮维度版本"
-          value={
-            run.selection.dimension.schemas.length
-              ? run.selection.dimension.schemas
-                .map((schema) => schema.version ?? schema.schema_key ?? "未知")
-                .join(" / ")
-              : "跟随旧版策略快照"
-          }
+          value={dimensionSelectionName(run.selection.dimension)}
         />
       </section>
+      <div
+        className="mt-6 flex gap-0 overflow-x-auto border-b border-[var(--line-strong)]"
+        role="tablist"
+        aria-label="基准回归工作区"
+      >
+        <button
+          type="button"
+          role="tab"
+          aria-selected={activeView === "results"}
+          className={`min-h-11 shrink-0 border-x border-t px-4 text-sm font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary ${activeView === "results" ? "border-[var(--line-strong)] bg-white" : "border-transparent bg-[#f3f5f0] text-[var(--muted)]"}`}
+          onClick={() => setActiveView("results")}
+        >
+          回归结果
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={activeView === "correction"}
+          className={`min-h-11 shrink-0 border-x border-t px-4 text-sm font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary ${activeView === "correction" ? "border-[var(--line-strong)] bg-white" : "border-transparent bg-[#f3f5f0] text-[var(--muted)]"}`}
+          onClick={() => setActiveView("correction")}
+        >
+          基准回归处理纠偏 · {availableDeviationIds.length}
+        </button>
+      </div>
+
+      {activeView === "results" ? (
+        <>
       <section className="mt-6 grid gap-px border-y border-[var(--line)] bg-[var(--line)] sm:grid-cols-2 xl:grid-cols-4">
         <Metric label="总体准确率" value={percent(metrics.exact_accuracy)} />
         <Metric label="相邻等级准确率" value={percent(metrics.adjacent_accuracy)} />
@@ -1115,7 +1263,342 @@ function RegressionResults({
           </div>
         </div>
       </section>
+        </>
+      ) : (
+        <BaselineCorrectionPanel run={run} items={items} loading={loading} />
+      )}
     </>
+  )
+}
+
+function BaselineCorrectionPanel({
+  run,
+  items,
+  loading,
+}: {
+  run: BaselineRegressionRun
+  items: BaselineRegressionItem[]
+  loading: boolean
+}) {
+  const queryClient = useQueryClient()
+  const deviations = useMemo(
+    () => items.filter((item) => item.status === "completed" && item.deviation),
+    [items],
+  )
+  const deviationIds = useMemo(() => deviations.map((item) => item.id), [deviations])
+  const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set())
+  const correctionRuns = useQuery({
+    queryKey: ["baseline-correction-runs", run.id],
+    queryFn: () => baselineRegressionApi.listCorrectionRuns(run.id),
+    refetchInterval: (query) => (
+      query.state.data?.items.some((item) => item.status === "processing") ? 2500 : false
+    ),
+  })
+  const latest = correctionRuns.data?.items[0]
+
+  useEffect(() => {
+    setSelectedIds(new Set(deviationIds))
+  }, [run.id, deviationIds.join(",")])
+
+  const createCorrection = useMutation({
+    mutationFn: () => baselineRegressionApi.createCorrectionRun(
+      run.id,
+      Array.from(selectedIds),
+      `baseline-correction-${run.id}-${Date.now()}`,
+    ),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["baseline-correction-runs", run.id] })
+      toast.success("纠偏分析已启动；只生成报告与建议，不会自动发布")
+    },
+    onError: (error) => toast.error(error.message),
+  })
+  const retryCorrection = useMutation({
+    mutationFn: (correctionRunId: number) => baselineRegressionApi.retryCorrectionRun(correctionRunId),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["baseline-correction-runs", run.id] })
+      toast.success("已重新启动纠偏分析")
+    },
+    onError: (error) => toast.error(error.message),
+  })
+
+  const allSelected = deviations.length > 0 && selectedIds.size === deviations.length
+  const report = latest?.report ?? {}
+  const accuracyReport = recordValue(report.accuracy_report)
+  const reportMetrics = recordValue(accuracyReport.run_metrics)
+  const directionCounts = recordValue(accuracyReport.direction_counts)
+  const promptSuggestions = recordArray(report.prompt_suggestions)
+  const dimensionSuggestions = recordArray(report.dimension_suggestions)
+  const risks = stringArray(report.risks)
+  const blockers = (latest?.blockers ?? []).map((blocker) => (
+    typeof blocker === "string" ? blocker : readableRecord(blocker)
+  )).filter(Boolean)
+
+  return (
+    <section className="mt-6 border-y border-[var(--line-strong)] bg-white" role="tabpanel">
+      <div className="grid gap-5 border-b border-[var(--line)] px-5 py-5 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-end">
+        <div>
+          <div className="flex flex-wrap items-center gap-2">
+            <h3 className="font-editorial text-2xl font-bold">基准回归处理纠偏</h3>
+            <Badge tone="active">独立分析流水线</Badge>
+            <Badge tone="neutral">不自动发布</Badge>
+          </div>
+          <p className="mt-2 max-w-3xl text-xs leading-5 text-[var(--muted)]">
+            从本轮偏差中冻结一批样本，生成准确性归因与提示词/维度改进建议。它不会改写基准结果、现役提示词、类目维度或发布指针；建议必须由人工确认后另行进入候选验证。
+          </p>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          <Button
+            variant="secondary"
+            onClick={() => correctionRuns.refetch()}
+            disabled={correctionRuns.isFetching}
+          >
+            <ArrowClockwise />刷新状态
+          </Button>
+          <Button
+            onClick={() => createCorrection.mutate()}
+            disabled={
+              run.status === "running"
+              || !selectedIds.size
+              || createCorrection.isPending
+              || latest?.status === "processing"
+            }
+          >
+            <Play weight="fill" />
+            {createCorrection.isPending ? "正在启动" : `启动纠偏分析 (${selectedIds.size})`}
+          </Button>
+        </div>
+      </div>
+
+      <div className="grid min-w-0 lg:grid-cols-[minmax(320px,0.88fr)_minmax(0,1.12fr)]">
+        <div className="min-w-0 border-b border-[var(--line)] lg:border-r lg:border-b-0">
+          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[var(--line)] bg-[#fafbf8] px-4 py-3">
+            <div>
+              <p className="text-sm font-bold">选择偏差样本</p>
+              <p className="mt-1 text-xs text-[var(--muted)]">已选 {selectedIds.size} / {deviations.length}</p>
+            </div>
+            <Button
+              variant="ghost"
+              size="sm"
+              disabled={!deviations.length || latest?.status === "processing"}
+              onClick={() => setSelectedIds(allSelected ? new Set() : new Set(deviationIds))}
+            >
+              {allSelected ? <CheckSquare weight="fill" /> : <Square />}
+              {allSelected ? "取消全选" : "全选偏差"}
+            </Button>
+          </div>
+          <div className="max-h-[620px] overflow-auto">
+            {loading ? (
+              <div className="h-64 animate-pulse bg-white" />
+            ) : deviations.length ? (
+              <div className="divide-y divide-[var(--line)]">
+                {deviations.map((item) => (
+                  <label key={item.id} className="grid cursor-pointer grid-cols-[auto_52px_minmax(0,1fr)] gap-3 px-4 py-3 hover:bg-[#fafbf8]">
+                    <input
+                      type="checkbox"
+                      className="mt-4 size-4 accent-[#9dbb1c]"
+                      checked={selectedIds.has(item.id)}
+                      disabled={latest?.status === "processing"}
+                      onChange={(event) => setSelectedIds((current) => {
+                        const next = new Set(current)
+                        if (event.target.checked) next.add(item.id)
+                        else next.delete(item.id)
+                        return next
+                      })}
+                    />
+                    <img src={item.image_url} alt="" className="size-12 border border-[var(--line)] object-cover" />
+                    <div className="min-w-0">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <p className="file-name min-w-0 truncate text-sm">{item.asset.name}</p>
+                        <Badge tone="danger">{item.expected_level} → {item.predicted_level ?? "—"}</Badge>
+                      </div>
+                      <p className="mt-1 line-clamp-2 text-xs leading-5 text-[var(--muted)]">{levelExplanationSummary(item)}</p>
+                    </div>
+                  </label>
+                ))}
+              </div>
+            ) : (
+              <p className="px-5 py-12 text-center text-sm text-[var(--muted)]">
+                当前运行没有可分析的已完成偏差样本。
+              </p>
+            )}
+          </div>
+        </div>
+
+        <div className="min-w-0 px-5 py-5">
+          {!latest ? (
+            <div className="border-y border-[var(--line)] px-4 py-12 text-center">
+              <p className="text-sm font-bold">尚未启动纠偏分析</p>
+              <p className="mt-2 text-xs leading-5 text-[var(--muted)]">选择左侧偏差样本后启动。报告只提供归因和优化建议，不执行修改或发布。</p>
+            </div>
+          ) : (
+            <>
+              <div className="flex flex-wrap items-start justify-between gap-4 border-b border-[var(--line-strong)] pb-4">
+                <div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <h4 className="text-base font-bold">纠偏分析 #{latest.id}</h4>
+                    <Badge tone={correctionStatusTone(latest)}>{correctionStatusName(latest)}</Badge>
+                    <Badge>第 {latest.attempt_count} 次尝试</Badge>
+                  </div>
+                  <p className="font-data mt-2 text-[0.68rem] text-[var(--muted)]">
+                    {latest.selected_item_ids.length} 个冻结样本 · {latest.updated_at}
+                  </p>
+                </div>
+                {latest.status === "failed" && (
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    disabled={retryCorrection.isPending}
+                    onClick={() => retryCorrection.mutate(latest.id)}
+                  >
+                    <ArrowClockwise />{retryCorrection.isPending ? "正在重试" : "重试分析"}
+                  </Button>
+                )}
+              </div>
+
+              {latest.status === "processing" && (
+                <div className="mt-4 border border-[#d6dfb1] bg-[#f7fadf] px-4 py-3">
+                  <div className="flex justify-between gap-4 text-xs font-bold">
+                    <span>正在分析偏差方向、准确率与维度信号</span>
+                    <span className="font-data">{latest.progress}%</span>
+                  </div>
+                  <div className="mt-2 h-1.5 overflow-hidden bg-white">
+                    <div className="h-full bg-primary transition-[width] duration-300" style={{ width: `${latest.progress}%` }} />
+                  </div>
+                </div>
+              )}
+
+              {latest.status === "failed" && (
+                <div className="mt-4 border border-[#e2b4af] bg-[#fff5f3] px-4 py-3 text-xs leading-5 text-[#8d2924]">
+                  <p className="font-bold">分析失败{latest.error?.code ? ` · ${latest.error.code}` : ""}</p>
+                  <p className="mt-1">{latest.error?.message || "未返回具体失败原因，可重试本次冻结样本。"}</p>
+                </div>
+              )}
+
+              {(blockers.length > 0) && (
+                <div className="mt-4 border border-[#e2c188] bg-[#fff9ea] px-4 py-3 text-xs leading-5 text-[#7d4308]">
+                  <p className="font-bold">当前阻塞</p>
+                  {blockers.map((blocker, index) => <p key={`${blocker}-${index}`} className="mt-1">{blocker}</p>)}
+                </div>
+              )}
+
+              {latest.status === "awaiting_confirmation" && (
+                <>
+                  <div className="mt-5 grid gap-px border-y border-[var(--line)] bg-[var(--line)] sm:grid-cols-2 xl:grid-cols-4">
+                    <Metric label="原回归准确率" value={percent(numberValue(reportMetrics.exact_accuracy) ?? run.metrics.exact_accuracy)} />
+                    <Metric label="相邻准确率" value={percent(numberValue(reportMetrics.adjacent_accuracy) ?? run.metrics.adjacent_accuracy)} />
+                    <Metric label="分析偏差样本" value={String(numberValue(accuracyReport.selected_deviation_count) ?? latest.selected_item_ids.length)} />
+                    <Metric label="平均等级距离" value={formatDecimal(numberValue(accuracyReport.average_level_distance))} />
+                  </div>
+                  <div className="mt-5 grid gap-4 sm:grid-cols-2">
+                    <ReportFact label="高估样本" value={`${numberValue(directionCounts.over_rated) ?? 0} 张`} />
+                    <ReportFact label="低估样本" value={`${numberValue(directionCounts.under_rated) ?? 0} 张`} />
+                  </div>
+                  <div className="mt-6">
+                    <h5 className="font-editorial text-xl font-bold">改进建议</h5>
+                    <p className="mt-1 text-xs text-[var(--muted)]">以下内容是待人工确认的分析建议，不是已生效配置。</p>
+                    <div className="mt-3 divide-y divide-[var(--line)] border-y border-[var(--line)]">
+                      {[...promptSuggestions, ...dimensionSuggestions].map((suggestion, index) => (
+                        <div key={`${stringValue(suggestion.code) || stringValue(suggestion.dimension_key) || "suggestion"}-${index}`} className="grid gap-2 py-3 text-xs sm:grid-cols-[120px_minmax(0,1fr)]">
+                          <span className="font-bold">
+                            {stringValue(suggestion.dimension_key) || "提示词建议"}
+                            {stringValue(suggestion.priority) ? ` · ${priorityName(stringValue(suggestion.priority))}` : ""}
+                          </span>
+                          <span className="leading-5 text-[var(--muted)]">{stringValue(suggestion.message) || readableRecord(suggestion)}</span>
+                        </div>
+                      ))}
+                      {!promptSuggestions.length && !dimensionSuggestions.length && (
+                        <p className="py-5 text-center text-xs text-[var(--muted)]">本次未形成可展示的改进建议。</p>
+                      )}
+                    </div>
+                  </div>
+                  {risks.length > 0 && (
+                    <div className="mt-5 border border-[#e2c188] bg-[#fff9ea] px-4 py-3 text-xs leading-5 text-[#7d4308]">
+                      <p className="font-bold">报告风险提示</p>
+                      {risks.map((risk) => <p key={risk} className="mt-1">{risk}</p>)}
+                    </div>
+                  )}
+                  <div className="mt-5 border-l-2 border-primary bg-[#f8faed] px-4 py-3 text-xs leading-5">
+                    <strong>状态：等待人工确认。</strong> 当前页面不会自动修改或发布提示词、维度版本；如要落地建议，需另建候选并通过配对回归与人工发布门。
+                  </div>
+                </>
+              )}
+            </>
+          )}
+        </div>
+      </div>
+    </section>
+  )
+}
+
+function recordValue(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {}
+}
+
+function recordArray(value: unknown): Array<Record<string, unknown>> {
+  return Array.isArray(value) ? value.map(recordValue).filter((item) => Object.keys(item).length) : []
+}
+
+function stringArray(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : []
+}
+
+function stringValue(value: unknown): string {
+  return typeof value === "string" ? value : ""
+}
+
+function numberValue(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null
+}
+
+function readableRecord(value: unknown): string {
+  const record = recordValue(value)
+  return stringValue(record.message) || stringValue(record.title) || stringValue(record.code)
+}
+
+function formatDecimal(value: number | null) {
+  return value === null ? "—" : value.toFixed(2)
+}
+
+function priorityName(priority: string) {
+  if (priority === "high") return "高优先"
+  if (priority === "medium") return "中优先"
+  if (priority === "low") return "低优先"
+  return priority
+}
+
+function dimensionSelectionName(selection: BaselineRegressionRun["selection"]["dimension"]) {
+  if (selection.mode === "none" || selection.prompt_only) return "已关闭 · 仅提示词评级"
+  if (selection.source_schema?.version) {
+    const count = selection.effective_keys?.length
+    return `${selection.source_schema.version}${typeof count === "number" ? ` · ${count} 维` : ""}`
+  }
+  const schemas = selection.schemas ?? []
+  if (schemas.length) {
+    return schemas.map((schema) => schema.version ?? schema.schema_key ?? "未知").join(" / ")
+  }
+  return "跟随旧版策略快照"
+}
+
+function correctionStatusName(run: BaselineCorrectionRun) {
+  if (run.status === "processing") return "分析中"
+  if (run.status === "awaiting_confirmation") return "等待人工确认"
+  return "分析失败"
+}
+
+function correctionStatusTone(run: BaselineCorrectionRun): "active" | "success" | "danger" {
+  if (run.status === "processing") return "active"
+  if (run.status === "awaiting_confirmation") return "success"
+  return "danger"
+}
+
+function ReportFact({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="border-y border-[var(--line)] px-4 py-3">
+      <p className="text-xs text-[var(--muted)]">{label}</p>
+      <p className="font-data mt-1 text-lg font-bold">{value}</p>
+    </div>
   )
 }
 

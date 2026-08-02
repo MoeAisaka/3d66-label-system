@@ -6312,6 +6312,106 @@ def _migration_047_bind_default_production_dimension(connection: Connection) -> 
     )
 
 
+def _migration_048_add_baseline_stock_pipeline(connection: Connection) -> None:
+    """Freeze category execution and add isolated correction-analysis runs."""
+    tables = {
+        row[0]
+        for row in connection.exec_driver_sql(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )
+    }
+    if "baseline_sets" in tables:
+        columns = {
+            row[1]
+            for row in connection.exec_driver_sql("PRAGMA table_info(baseline_sets)")
+        }
+        if "category_key" not in columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE baseline_sets ADD COLUMN category_key "
+                "VARCHAR(40) NOT NULL DEFAULT 'space_image'"
+            )
+        connection.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_baseline_sets_category "
+            "ON baseline_sets(category_key)"
+        )
+    if "baseline_regression_runs" in tables:
+        columns = {
+            row[1]
+            for row in connection.exec_driver_sql(
+                "PRAGMA table_info(baseline_regression_runs)"
+            )
+        }
+        if "execution_snapshot_json" not in columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE baseline_regression_runs ADD COLUMN "
+                "execution_snapshot_json TEXT NOT NULL DEFAULT '{}'"
+            )
+        if "category_key" not in columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE baseline_regression_runs ADD COLUMN "
+                "category_key VARCHAR(40) NOT NULL DEFAULT 'space_image'"
+            )
+            connection.exec_driver_sql(
+                "UPDATE baseline_regression_runs SET category_key = "
+                "COALESCE((SELECT category_key FROM baseline_sets "
+                "WHERE baseline_sets.id = baseline_regression_runs.baseline_set_id), "
+                "'space_image')"
+            )
+        connection.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_baseline_runs_category "
+            "ON baseline_regression_runs(category_key)"
+        )
+        connection.exec_driver_sql("DROP TRIGGER IF EXISTS trg_baseline_runs_frozen")
+        connection.exec_driver_sql(
+            "CREATE TRIGGER trg_baseline_runs_frozen BEFORE UPDATE OF "
+            "baseline_set_id, sequence_no, previous_run_id, strategy_bundle_id, "
+            "category_key, strategy_snapshot_json, execution_snapshot_json, "
+            "baseline_set_fingerprint, total, created_by, created_at "
+            "ON baseline_regression_runs BEGIN SELECT RAISE(ABORT, "
+            "'BaselineRegressionRun snapshot is immutable'); END"
+        )
+    connection.exec_driver_sql(
+        """
+        CREATE TABLE IF NOT EXISTS baseline_correction_runs (
+            id INTEGER PRIMARY KEY,
+            idempotency_key VARCHAR(160) NOT NULL UNIQUE,
+            baseline_run_id INTEGER NOT NULL
+                REFERENCES baseline_regression_runs(id) ON DELETE RESTRICT,
+            category_key VARCHAR(40) NOT NULL,
+            selected_item_ids_json TEXT NOT NULL
+                CHECK(json_valid(selected_item_ids_json)
+                      AND json_type(selected_item_ids_json, '$') = 'array'),
+            input_snapshot_json TEXT NOT NULL
+                CHECK(json_valid(input_snapshot_json)
+                      AND json_type(input_snapshot_json, '$') = 'object'),
+            status VARCHAR(40) NOT NULL DEFAULT 'processing'
+                CHECK(status IN ('processing','awaiting_confirmation','failed')),
+            progress INTEGER NOT NULL DEFAULT 0 CHECK(progress BETWEEN 0 AND 100),
+            report_json TEXT NOT NULL DEFAULT '{}'
+                CHECK(json_valid(report_json) AND json_type(report_json, '$') = 'object'),
+            blockers_json TEXT NOT NULL DEFAULT '[]'
+                CHECK(json_valid(blockers_json) AND json_type(blockers_json, '$') = 'array'),
+            error_code VARCHAR(80) NOT NULL DEFAULT '',
+            error_message TEXT NOT NULL DEFAULT '',
+            attempt_count INTEGER NOT NULL DEFAULT 1 CHECK(attempt_count >= 1),
+            created_by VARCHAR(80) NOT NULL DEFAULT 'system',
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            finished_at DATETIME
+        )
+        """
+    )
+    for statement in (
+        "CREATE INDEX IF NOT EXISTS ix_baseline_corrections_run ON baseline_correction_runs(baseline_run_id)",
+        "CREATE INDEX IF NOT EXISTS ix_baseline_corrections_category ON baseline_correction_runs(category_key)",
+        "CREATE INDEX IF NOT EXISTS ix_baseline_corrections_status ON baseline_correction_runs(status)",
+    ):
+        connection.exec_driver_sql(statement)
+    violations = connection.exec_driver_sql("PRAGMA foreign_key_check").fetchall()
+    if violations:
+        raise RuntimeError(f"v48 基准存量流水线迁移外键校验失败：{violations[:3]}")
+
+
 MIGRATIONS = [
     Migration(1, "add_sample_expected_level", _migration_001_add_sample_expected_level),
     Migration(2, "add_review_corrections", _migration_002_add_review_corrections),
@@ -6503,6 +6603,11 @@ MIGRATIONS = [
         47,
         "bind_default_production_dimension",
         _migration_047_bind_default_production_dimension,
+    ),
+    Migration(
+        48,
+        "add_baseline_stock_pipeline",
+        _migration_048_add_baseline_stock_pipeline,
     ),
 ]
 

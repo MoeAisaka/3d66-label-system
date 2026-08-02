@@ -61,6 +61,7 @@ MIGRATION_NAMES = [
     "persist_worker_readiness",
     "bind_budget_settlement_to_run",
     "bind_default_production_dimension",
+    "add_baseline_stock_pipeline",
 ]
 
 
@@ -169,6 +170,78 @@ def test_v47_binds_only_profiles_without_a_dimension_contract(tmp_path) -> None:
             assert connection.exec_driver_sql(
                 "SELECT name FROM schema_migrations WHERE version=47"
             ).scalar_one() == "bind_default_production_dimension"
+    finally:
+        engine.dispose()
+
+
+def test_v48_freezes_baseline_category_and_adds_correction_state(tmp_path) -> None:
+    engine = _engine(tmp_path, "v48-baseline-stock.db")
+    try:
+        with engine.begin() as connection:
+            connection.exec_driver_sql(
+                "CREATE TABLE baseline_sets ("
+                "id INTEGER PRIMARY KEY, name VARCHAR(160) NOT NULL)"
+            )
+            connection.exec_driver_sql(
+                "CREATE TABLE baseline_regression_runs ("
+                "id INTEGER PRIMARY KEY, baseline_set_id INTEGER NOT NULL "
+                "REFERENCES baseline_sets(id) ON DELETE RESTRICT)"
+            )
+            connection.exec_driver_sql(
+                "CREATE TABLE schema_migrations ("
+                "version INTEGER PRIMARY KEY, name VARCHAR(200) NOT NULL, "
+                "applied_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP)"
+            )
+            for version, name in enumerate(MIGRATION_NAMES[:47], start=1):
+                connection.exec_driver_sql(
+                    "INSERT INTO schema_migrations(version, name) VALUES (?, ?)",
+                    (version, name),
+                )
+            connection.exec_driver_sql(
+                "INSERT INTO baseline_sets(id, name) VALUES (1, 'legacy')"
+            )
+            connection.exec_driver_sql(
+                "INSERT INTO baseline_regression_runs(id, baseline_set_id) "
+                "VALUES (1, 1)"
+            )
+
+            run_migrations(connection)
+
+            set_columns = {
+                row[1]
+                for row in connection.exec_driver_sql(
+                    "PRAGMA table_info(baseline_sets)"
+                )
+            }
+            run_columns = {
+                row[1]
+                for row in connection.exec_driver_sql(
+                    "PRAGMA table_info(baseline_regression_runs)"
+                )
+            }
+            assert "category_key" in set_columns
+            assert {"category_key", "execution_snapshot_json"}.issubset(
+                run_columns
+            )
+            assert connection.exec_driver_sql(
+                "SELECT category_key, execution_snapshot_json "
+                "FROM baseline_regression_runs WHERE id=1"
+            ).one() == ("space_image", "{}")
+            assert connection.exec_driver_sql(
+                "SELECT name FROM sqlite_master WHERE type='table' "
+                "AND name='baseline_correction_runs'"
+            ).scalar_one() == "baseline_correction_runs"
+            assert connection.exec_driver_sql(
+                "SELECT name FROM schema_migrations WHERE version=48"
+            ).scalar_one() == "add_baseline_stock_pipeline"
+            with pytest.raises(Exception, match="snapshot is immutable"):
+                connection.exec_driver_sql(
+                    "UPDATE baseline_regression_runs "
+                    "SET execution_snapshot_json='{\"changed\":true}' WHERE id=1"
+                )
+            assert connection.exec_driver_sql(
+                "PRAGMA foreign_key_check"
+            ).all() == []
     finally:
         engine.dispose()
 

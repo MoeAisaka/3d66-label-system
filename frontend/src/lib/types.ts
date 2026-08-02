@@ -313,21 +313,36 @@ export type BaselinePromptSelection = {
 }
 
 export type BaselineDimensionSelection = {
-  mode: "strategy_snapshot"
-  manual_selection_supported: false
-  route_policy_id: string | null
-  schemas: Array<{
+  mode: "strategy_snapshot" | "category_default" | "all" | "selected" | "none"
+  manual_selection_supported: boolean
+  enabled?: boolean
+  selected_keys?: string[]
+  effective_keys?: string[]
+  dimension_schema_id?: number | null
+  schema_key?: string | null
+  version?: string | null
+  display_name?: string | null
+  prompt_only?: boolean
+  route_policy_id?: string | null
+  schemas?: Array<{
     schema_key: string | null
     version: string | null
     schema_type: string | null
     family_key: string | null
     canonical_hash: string | null
   }>
+  source_schema?: {
+    schema_key: string
+    version: string
+    canonical_hash: string
+  } | null
+  contract?: Record<string, unknown> | null
 }
 
 export type BaselineRegressionRun = {
   id: number
   baseline_set_id: number
+  category_key: string
   sequence_no: number
   previous_run_id: number | null
   strategy_bundle_id: number
@@ -339,7 +354,9 @@ export type BaselineRegressionRun = {
   failed: number
   metrics: BaselineLevelMetrics
   selection: {
-    schema_version: "baseline-run-selection-v1"
+    schema_version: "baseline-run-selection-v1" | "baseline-run-selection-v2"
+    category_key?: string | null
+    prompt_mode?: "single" | "dual" | "ab" | null
     prompt_a: BaselinePromptSelection | null
     prompt_b: BaselinePromptSelection | null
     dimension: BaselineDimensionSelection
@@ -352,6 +369,7 @@ export type BaselineRegressionRun = {
 export type BaselineSetSummary = {
   id: number
   name: string
+  category_key: string
   description: string
   default_expected_level: BaselineLevel
   fingerprint: string
@@ -474,6 +492,68 @@ export type BaselineRegressionDetail = {
   }
   filter: { deviations_only: boolean }
   items: BaselineRegressionItem[]
+}
+
+export type BaselineCorrectionStatus =
+  | "processing"
+  | "awaiting_confirmation"
+  | "failed"
+
+export type BaselineCorrectionReport = {
+  schema_version: "baseline-correction-report-v1"
+  status: "optimization_suggestion_pending_confirmation"
+  accuracy_report: {
+    run_metrics: BaselineLevelMetrics
+    selected_deviation_count: number
+    average_level_distance: number
+    direction_counts: Record<string, number>
+    confusion_pairs: Array<{ pair: string; count: number }>
+  }
+  attribution: {
+    dominant_direction: string
+    prompt_only: boolean
+    dimension_signal_count: number
+  }
+  prompt_suggestions: Array<{
+    code: string
+    priority: "high" | "medium" | "low"
+    message: string
+    supporting_samples: number
+  }>
+  dimension_suggestions: Array<{
+    dimension_key: string
+    priority: "high" | "medium" | "low"
+    message: string
+    signals: Record<string, number>
+  }>
+  confidence: "high" | "medium" | "low"
+  risks: string[]
+  publication: {
+    allowed: false
+    next_state: "awaiting_confirmation"
+    message: string
+  }
+}
+
+export type BaselineCorrectionRun = {
+  id: number
+  baseline_run_id: number
+  category_key: string
+  selected_item_ids: number[]
+  status: BaselineCorrectionStatus
+  progress: number
+  attempt_count: number
+  report: BaselineCorrectionReport | Record<string, never>
+  blockers: Array<{ code: string; message: string; retryable: boolean }>
+  error: {
+    code: string
+    message: string
+    retryable: boolean
+  } | null
+  created_by: string
+  created_at: string
+  updated_at: string
+  finished_at: string | null
 }
 
 export type MaterialPackage = {

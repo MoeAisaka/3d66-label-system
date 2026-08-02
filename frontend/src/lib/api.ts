@@ -1,5 +1,6 @@
 import type {
   Asset,
+  BaselineCorrectionRun,
   BaselineLevel,
   BaselineRegressionDetail,
   BaselineRegressionRun,
@@ -131,27 +132,43 @@ export function jsonBody(value: unknown): RequestInit {
 }
 
 export const baselineRegressionApi = {
-  listAssets: (packageId?: number) => {
+  listAssets: (packageId?: number, categoryKey?: string) => {
     const params = new URLSearchParams({ limit: "1000" })
     if (packageId) params.set("package_id", String(packageId))
+    if (categoryKey) params.set("category_key", categoryKey)
     return api<{ items: Asset[]; total: number }>(`/api/assets?${params.toString()}`)
   },
-  listPackages: () => api<{ items: MaterialPackage[] }>("/api/material-packages?limit=500"),
-  uploadAssets: (files: readonly File[], packageName?: string) => {
+  listPackages: (categoryKey?: string) => {
+    const params = new URLSearchParams({ limit: "500" })
+    if (categoryKey) params.set("category_key", categoryKey)
+    return api<{ items: MaterialPackage[] }>(`/api/material-packages?${params.toString()}`)
+  },
+  uploadAssets: (files: readonly File[], packageName?: string, categoryKey?: string) => {
     const form = new FormData()
     files.forEach((file) => form.append("files", file))
     if (packageName?.trim()) form.append("package_name", packageName.trim())
+    if (categoryKey) form.append("category_key", categoryKey)
     return api<{
       items: Asset[]
       package: { id: number; name: string; item_count: number }
     }>("/api/assets/upload", { method: "POST", body: form })
   },
-  listSets: () => api<{ items: BaselineSetSummary[] }>("/api/baseline-sets"),
+  listSets: (categoryKey?: string) => {
+    const params = new URLSearchParams()
+    if (categoryKey) params.set("category_key", categoryKey)
+    const query = params.size ? `?${params.toString()}` : ""
+    return api<{ items: BaselineSetSummary[] }>(`/api/baseline-sets${query}`).then((result) => ({
+      items: categoryKey
+        ? result.items.filter((item) => item.category_key === categoryKey)
+        : result.items,
+    }))
+  },
   getSet: (setId: number) => api<BaselineSetDetail>(`/api/baseline-sets/${setId}`),
   createSet: (payload: {
     name: string
     description: string
     default_expected_level: BaselineLevel
+    category_key: string
     source_package_id?: number
     expected_level_overrides?: Record<number, BaselineLevel>
     items: Array<{
@@ -169,6 +186,7 @@ export const baselineRegressionApi = {
     prompt_a_id?: number
     prompt_b_id?: number
     dimension_schema_id?: number
+    dimension_mode?: "category_default" | "all" | "none"
   } = {}) => api<BaselineRegressionRun & { job_ids: number[] }>(
     `/api/baseline-sets/${setId}/runs`,
     { method: "POST", ...jsonBody(payload) },
@@ -185,4 +203,22 @@ export const baselineRegressionApi = {
     method: "POST",
     ...jsonBody({ item_ids: itemIds }),
   }),
+  listCorrectionRuns: (runId: number) => api<{ items: BaselineCorrectionRun[] }>(
+    `/api/baseline-regressions/${runId}/corrections`,
+  ),
+  createCorrectionRun: (
+    runId: number,
+    itemIds: number[],
+    idempotencyKey: string,
+  ) => api<BaselineCorrectionRun>(
+    `/api/baseline-regressions/${runId}/corrections`,
+    {
+      method: "POST",
+      ...jsonBody({ item_ids: itemIds, idempotency_key: idempotencyKey }),
+    },
+  ),
+  retryCorrectionRun: (correctionRunId: number) => api<BaselineCorrectionRun>(
+    `/api/baseline-corrections/${correctionRunId}/retry`,
+    { method: "POST" },
+  ),
 }

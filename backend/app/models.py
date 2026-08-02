@@ -2972,6 +2972,9 @@ class BaselineSet(Base):
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    category_key: Mapped[str] = mapped_column(
+        String(40), default="space_image", server_default="space_image", index=True
+    )
     name: Mapped[str] = mapped_column(String(160), unique=True, index=True)
     description: Mapped[str] = mapped_column(Text, default="")
     default_expected_level: Mapped[str] = mapped_column(String(10), index=True)
@@ -3055,7 +3058,13 @@ class BaselineRegressionRun(Base):
     strategy_bundle_id: Mapped[int] = mapped_column(
         ForeignKey("strategy_bundles.id", ondelete="RESTRICT"), index=True
     )
+    category_key: Mapped[str] = mapped_column(
+        String(40), default="space_image", server_default="space_image", index=True
+    )
     strategy_snapshot_json: Mapped[str] = mapped_column(Text)
+    execution_snapshot_json: Mapped[str] = mapped_column(
+        Text, default="{}", server_default="{}"
+    )
     baseline_set_fingerprint: Mapped[str] = mapped_column(String(64), index=True)
     status: Mapped[str] = mapped_column(String(30), default="running", index=True)
     total: Mapped[int] = mapped_column(Integer)
@@ -3138,6 +3147,68 @@ class BaselineRegressionItem(Base):
     evaluation: Mapped[EvaluationResult | None] = relationship(
         foreign_keys=[evaluation_id]
     )
+
+
+class BaselineCorrectionRun(Base):
+    """Independent correction analysis for one frozen baseline run."""
+
+    __tablename__ = "baseline_correction_runs"
+    __table_args__ = (
+        UniqueConstraint("idempotency_key", name="uq_baseline_correction_key"),
+        CheckConstraint(
+            "status IN ('processing','awaiting_confirmation','failed')",
+            name="ck_baseline_correction_status",
+        ),
+        CheckConstraint("attempt_count >= 1", name="ck_baseline_correction_attempts"),
+        CheckConstraint(
+            "progress BETWEEN 0 AND 100",
+            name="ck_baseline_correction_progress",
+        ),
+        CheckConstraint(
+            "json_valid(selected_item_ids_json) AND "
+            "json_type(selected_item_ids_json, '$') = 'array'",
+            name="ck_baseline_correction_selected_items",
+        ),
+        CheckConstraint(
+            "json_valid(input_snapshot_json) AND "
+            "json_type(input_snapshot_json, '$') = 'object'",
+            name="ck_baseline_correction_input",
+        ),
+        CheckConstraint(
+            "json_valid(report_json) AND json_type(report_json, '$') = 'object'",
+            name="ck_baseline_correction_report",
+        ),
+        CheckConstraint(
+            "json_valid(blockers_json) AND json_type(blockers_json, '$') = 'array'",
+            name="ck_baseline_correction_blockers",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    idempotency_key: Mapped[str] = mapped_column(String(160), unique=True, index=True)
+    baseline_run_id: Mapped[int] = mapped_column(
+        ForeignKey("baseline_regression_runs.id", ondelete="RESTRICT"), index=True
+    )
+    category_key: Mapped[str] = mapped_column(String(40), index=True)
+    selected_item_ids_json: Mapped[str] = mapped_column(Text)
+    input_snapshot_json: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(40), default="processing", index=True)
+    progress: Mapped[int] = mapped_column(Integer, default=0)
+    report_json: Mapped[str] = mapped_column(Text, default="{}")
+    blockers_json: Mapped[str] = mapped_column(Text, default="[]")
+    error_code: Mapped[str] = mapped_column(String(80), default="")
+    error_message: Mapped[str] = mapped_column(Text, default="")
+    attempt_count: Mapped[int] = mapped_column(Integer, default=1)
+    created_by: Mapped[str] = mapped_column(String(80), default="system")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    baseline_run: Mapped[BaselineRegressionRun] = relationship()
 
 
 class BaselineFrozenError(ValueError):
