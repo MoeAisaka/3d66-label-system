@@ -47,15 +47,17 @@
   `scrollWidth=390`。截图与新版手册见 `docs/user-guide.md`。
 - GIF、PDF、材质图与单提示词/A-B 基础实现的 61 项专项测试通过；入队新增稳定
   `prompt_mode_mismatch` 门禁，固定 single/ab 类目不能再绕过冻结模式。
-- Windows 10、PowerShell 5.1、Python 3.11.4 的既有实机证据覆盖五脚本解析、
-  install `-Check`、CurrentUser/LocalMachine doctor 九项与 DPAPI 回环。本候选另以
-  33 项 Windows 部署合同测试覆盖只读 SQLite 句柄关闭等修复；公司 Windows 实例
-  尚未部署本候选，因此不把自动化合同测试表述为线上部署通过。
+- Windows 11 `10.0.26200`、PowerShell 5.1、Python 3.11.4 原生实机通过五脚本解析、
+  install `-Check`、CurrentUser/LocalMachine doctor 九项与 DPAPI 回环。部署与安全
+  全套为 `60 passed, 1 skipped`；正常 restore 与故障回滚 restore 各在独立进程连续
+  复跑 5 次，合计 `10/10`，未再出现 `WinError 32` 或回滚失败。公司 Windows 正式
+  实例尚未部署本候选，因此上述证据只表述为原生 Windows 验收，不表述为线上部署通过。
 
 仍待完成（完成前不得宣称外部环境全部交付）：
 
-- 公司 Windows 实例部署本候选后，仍需执行真实 API Key 保存、DPAPI 回环、restore、
-  PDF/GIF Worker 与完整评测包主链验收；当前无远程执行通道。
+- 公司 Windows 正式实例部署本候选后，仍需执行真实 API Key 保存、DPAPI 回环、
+  PDF/GIF Worker 与完整评测包主链验收；restore 已在隔离 Windows 11 原生环境通过，
+  但尚未对正式业务数据目录执行恢复演练。
 - 钉钉文档链接当前停在扫码登录页。仓库内新版手册和真实截图已完成，但外部文档
   尚未写入，不能把本地成稿表述为钉钉已更新。
 
