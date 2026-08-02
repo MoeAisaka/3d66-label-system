@@ -492,6 +492,15 @@ def _fixture(
             "publishes_automatically": False,
         }
     )
+    profile = db.scalar(
+        select(EvaluationCategoryProfile).where(
+            EvaluationCategoryProfile.category_key == "space_image"
+        )
+    )
+    assert profile is not None
+    pipeline = json.loads(profile.pipeline_config_json)
+    pipeline["prompt_mode"] = "single" if single_prompt else "ab"
+    profile.pipeline_config_json = canonical_json(pipeline)
     db.commit()
     client = _client(db, user)
     return {
@@ -825,6 +834,145 @@ def test_repeated_approval_and_publish_are_idempotent() -> None:
         assert fixture["db"].get(EvaluationCategoryProfile, other_profile.id).prompt_b_id == fixture["base_b"].id
     finally:
         _close(fixture["engine"], fixture["db"])
+
+
+def test_publish_rejects_category_drift_after_package_creation() -> None:
+    fixture = _fixture()
+    client = fixture["client"]
+    db = fixture["db"]
+    try:
+        profile = db.scalar(
+            select(EvaluationCategoryProfile).where(
+                EvaluationCategoryProfile.category_key == "space_image"
+            )
+        )
+        assert profile is not None
+        profile.prompt_a_id = fixture["prompt_a"].id
+        profile.prompt_b_id = fixture["base_b"].id
+        profile.model_config_id = fixture["model"].id
+        profile.rubric_version = fixture["candidate_bundle"].rubric_version
+        profile.dimension_schema_key = "space_aesthetic"
+        profile.dimension_schema_version = "1.3.0"
+        db.commit()
+        package_id = client.post(
+            "/api/evaluation-packages", json=_create_payload(fixture, "stale-package")
+        ).json()["id"]
+        assert client.post(
+            f"/api/evaluation-packages/{package_id}/approve",
+            json={"note": "先批准，等待发布"},
+        ).status_code == 200
+        profile.automation_revision += 1
+        db.commit()
+
+        stale = client.post(
+            f"/api/evaluation-packages/{package_id}/publish", json={}
+        )
+        assert stale.status_code == 409
+        db.expire_all()
+        assert db.get(EvaluationPackage, package_id).status == "approved"
+        assert json.loads(profile.automation_config_json).get(
+            "baseline_strategy_bundle_id"
+        ) != fixture["candidate_bundle"].id
+    finally:
+        _close(fixture["engine"], fixture["db"])
+
+
+def test_publish_rejects_pipeline_drift_after_package_creation() -> None:
+    fixture = _fixture()
+    client = fixture["client"]
+    db = fixture["db"]
+    try:
+        profile = db.scalar(
+            select(EvaluationCategoryProfile).where(
+                EvaluationCategoryProfile.category_key == "space_image"
+            )
+        )
+        assert profile is not None
+        profile.prompt_a_id = fixture["prompt_a"].id
+        profile.prompt_b_id = fixture["base_b"].id
+        profile.model_config_id = fixture["model"].id
+        profile.rubric_version = fixture["candidate_bundle"].rubric_version
+        profile.dimension_schema_key = "space_aesthetic"
+        profile.dimension_schema_version = "1.3.0"
+        db.commit()
+        package_id = client.post(
+            "/api/evaluation-packages",
+            json=_create_payload(fixture, "pipeline-stale-package"),
+        ).json()["id"]
+        assert client.post(
+            f"/api/evaluation-packages/{package_id}/approve",
+            json={"note": "流水线变更前批准"},
+        ).status_code == 200
+        pipeline = json.loads(profile.pipeline_config_json)
+        pipeline["prompt_context"]["instruction"] = "管理员更新后的类目说明"
+        profile.pipeline_config_json = canonical_json(pipeline)
+        profile.pipeline_revision += 1
+        db.commit()
+
+        stale = client.post(
+            f"/api/evaluation-packages/{package_id}/publish", json={}
+        )
+        assert stale.status_code == 409
+        assert "流水线" in stale.text
+        db.expire_all()
+        assert db.get(EvaluationPackage, package_id).status == "approved"
+    finally:
+        _close(fixture["engine"], fixture["db"])
+
+
+def test_package_prompt_mode_must_match_category_pipeline() -> None:
+    fixture = _fixture()
+    try:
+        profile = fixture["db"].scalar(
+            select(EvaluationCategoryProfile).where(
+                EvaluationCategoryProfile.category_key == "space_image"
+            )
+        )
+        assert profile is not None
+        pipeline = json.loads(profile.pipeline_config_json)
+        pipeline["prompt_mode"] = "single"
+        profile.pipeline_config_json = canonical_json(pipeline)
+        fixture["db"].commit()
+        response = fixture["client"].post(
+            "/api/evaluation-packages",
+            json=_create_payload(fixture, "wrong-prompt-mode"),
+        )
+        assert response.status_code == 409
+        assert "提示词模式" in response.text
+    finally:
+        _close(fixture["engine"], fixture["db"])
+
+
+def test_publish_rejects_pipeline_drift_even_when_prompt_mode_is_unchanged() -> None:
+    fixture = _fixture()
+    client = fixture["client"]
+    db = fixture["db"]
+    try:
+        profile = db.scalar(select(EvaluationCategoryProfile).where(
+            EvaluationCategoryProfile.category_key == "space_image"
+        ))
+        assert profile is not None
+        profile.prompt_a_id = fixture["prompt_a"].id
+        profile.prompt_b_id = fixture["base_b"].id
+        profile.model_config_id = fixture["model"].id
+        profile.rubric_version = fixture["candidate_bundle"].rubric_version
+        profile.dimension_schema_key = "space_aesthetic"
+        profile.dimension_schema_version = "1.3.0"
+        db.commit()
+        package_id = client.post("/api/evaluation-packages", json=_create_payload(fixture, "pipeline-stale")).json()["id"]
+        assert client.post(f"/api/evaluation-packages/{package_id}/approve", json={"note": "ok"}).status_code == 200
+        pipeline = json.loads(profile.pipeline_config_json)
+        pipeline["prompt_context"]["instruction"] = "changed after package freeze"
+        profile.pipeline_config_json = canonical_json(pipeline)
+        profile.pipeline_revision += 1
+        db.commit()
+        response = client.post(f"/api/evaluation-packages/{package_id}/publish", json={})
+        assert response.status_code == 409
+        assert "流水线" in response.text
+        db.expire_all()
+        assert db.get(EvaluationPackage, package_id).status == "approved"
+    finally:
+        _close(fixture["engine"], db)
 
 
 def test_old_paired_approval_cannot_bypass_package_gate() -> None:

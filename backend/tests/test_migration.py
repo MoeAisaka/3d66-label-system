@@ -59,6 +59,7 @@ MIGRATION_NAMES = [
     "add_evaluation_packages",
     "add_evaluation_production_runs",
     "persist_worker_readiness",
+    "bind_budget_settlement_to_run",
 ]
 
 
@@ -127,7 +128,7 @@ def test_v44_worker_status_forward_migration_preserves_heartbeat(tmp_path) -> No
             )
             assert connection.exec_driver_sql(
                 "SELECT max(version) FROM schema_migrations"
-            ).scalar_one() == 45
+            ).scalar_one() == 46
     finally:
         engine.dispose()
 

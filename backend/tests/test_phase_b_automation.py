@@ -755,7 +755,7 @@ def test_processing_lease_keeps_worker_active_past_heartbeat_window() -> None:
         _close(engine, db)
 
 
-def test_optimizer_timeout_extends_30_second_lease_and_prevents_recovery(
+def test_real_adapter_claim_uses_timeout_lease_and_prevents_recovery_at_45s(
     tmp_path: Path,
 ) -> None:
     engine = create_engine(
@@ -875,12 +875,15 @@ def test_optimizer_timeout_extends_30_second_lease_and_prevents_recovery(
     assert not thread.is_alive()
     assert worker_errors == []
     assert worker_result["status"] == "succeeded"
+    assert worker_result["effective_lease_seconds"] == 360
     with Session(engine, expire_on_commit=False) as session:
         run = session.scalar(select(AutomationOptimizationRun))
         frozen_policy = json.loads(run.frozen_input_json)["policy"]
         frozen_lease = frozen_policy["execution_lease"]
+        assert frozen_policy["effective_lease_seconds"] == 360
         assert frozen_policy["execution_lease_seconds"] == 360
         assert frozen_lease == {
+            "effective_lease_seconds": 360,
             "effective_seconds": 360,
             "expires_at": (started_at + timedelta(seconds=360)).isoformat(),
             "materialize_regression_safety_seconds": 120,
@@ -891,7 +894,9 @@ def test_optimizer_timeout_extends_30_second_lease_and_prevents_recovery(
             "policy_seconds": 30,
             "source": "optimizer_timeout_budget",
         }
-        assert json.loads(run.result_json)["execution_lease"] == frozen_lease
+        result_payload = json.loads(run.result_json)
+        assert result_payload["effective_lease_seconds"] == 360
+        assert result_payload["execution_lease"] == frozen_lease
         assert worker_result["execution_lease_seconds"] == 360
         planned_audit = session.scalar(
             select(AuditEvent).where(
@@ -899,7 +904,9 @@ def test_optimizer_timeout_extends_30_second_lease_and_prevents_recovery(
                 AuditEvent.subject_id == run.id,
             )
         )
-        assert json.loads(planned_audit.payload_json)["execution_lease"] == frozen_lease
+        planned_payload = json.loads(planned_audit.payload_json)
+        assert planned_payload["effective_lease_seconds"] == 360
+        assert planned_payload["execution_lease"] == frozen_lease
 
 
 def test_worker_tick_records_failure_without_raising(
@@ -2024,6 +2031,134 @@ def test_concurrent_workers_only_invoke_one_optimizer(tmp_path) -> None:
     assert worker_error == []
     assert worker_result["status"] == "succeeded"
     assert calls == 1
+
+
+def test_lost_worker_does_not_settle_retry_worker_reservation(tmp_path) -> None:
+    engine = create_engine(
+        f"sqlite:///{tmp_path / 'lost-worker-budget.db'}",
+        connect_args={"check_same_thread": False},
+    )
+    Base.metadata.create_all(engine)
+    with engine.begin() as connection:
+        run_migrations(connection)
+    with Session(engine, expire_on_commit=False) as seed:
+        policy = AutomationPolicy(
+            id=1,
+            enabled=True,
+            dry_run=False,
+            case_threshold=1,
+            daily_budget_micros=10_000,
+            lease_seconds=30,
+            max_attempts=3,
+            base_retry_seconds=1,
+        )
+        seed.add(policy)
+        _feedback(seed, event_id="lost-worker-budget")
+        seed.commit()
+
+    started = threading.Event()
+    release = threading.Event()
+    old_result: dict[str, object] = {}
+
+    class BlockingAdapter:
+        def estimate_cost_micros(self, *, frozen_input):
+            del frozen_input
+            return 1000
+
+        def optimize(self, *, frozen_input, max_candidates):
+            del frozen_input, max_candidates
+            started.set()
+            assert release.wait(timeout=5)
+            return AutomationAdapterResult(
+                candidates=[{"system_prompt": "s", "user_prompt": "u"}],
+                regression={}, actual_cost_micros=500,
+                input_tokens=10, output_tokens=5, total_tokens=15,
+            )
+
+    def old_worker() -> None:
+        with Session(engine, expire_on_commit=False) as session:
+            old_result.update(
+                consume_optimization_queue_once(
+                    session,
+                    worker_id="old-worker",
+                    adapter=BlockingAdapter(),
+                    now=datetime(2026, 1, 1, tzinfo=timezone.utc),
+                )
+            )
+            session.commit()
+
+    thread = threading.Thread(target=old_worker)
+    thread.start()
+    assert started.wait(timeout=5)
+    with Session(engine, expire_on_commit=False) as recovery:
+        recovered_at = datetime(2026, 1, 1, tzinfo=timezone.utc) + timedelta(seconds=31)
+        assert recover_expired_leases(recovery, now=recovered_at) == 1
+        case = recovery.scalar(select(OptimizationCaseQueue))
+        # Simulate the retry worker owning a fresh reservation before the old
+        # provider call finally returns.
+        case.status = "processing"
+        case.lease_token = "retry-token"
+        case.lease_owner = "retry-worker"
+        case.lease_expires_at = recovered_at + timedelta(minutes=5)
+        budget = recovery.get(AutomationBudgetDay, recovered_at.date().isoformat())
+        budget.reserved_micros += 1000
+        recovery.commit()
+    release.set()
+    thread.join(timeout=5)
+    assert not thread.is_alive()
+    with Session(engine, expire_on_commit=False) as check:
+        budget = check.get(AutomationBudgetDay, "2026-01-01")
+        assert budget.reserved_micros == 1000
+        assert budget.spent_micros == 1000
+    assert old_result["status"] == "failed"
+    engine.dispose()
+
+
+def test_run_budget_claim_is_single_owner_across_sessions(tmp_path) -> None:
+    engine = create_engine(
+        f"sqlite:///{tmp_path / 'run-budget-claim.db'}",
+        connect_args={"check_same_thread": False, "timeout": 10},
+    )
+    Base.metadata.create_all(engine)
+    with engine.begin() as connection:
+        run_migrations(connection)
+    with Session(engine) as seed:
+        run = AutomationOptimizationRun(
+            run_key="budget-claim-once",
+            base_prompt_version="B1",
+            policy_revision=1,
+            status="processing",
+            dry_run=False,
+            trigger_reason="test",
+            case_ids_json="[]",
+            frozen_input_json="{}",
+            estimated_cost_micros=1000,
+        )
+        seed.add(run)
+        seed.commit()
+        run_id = run.id
+
+    barrier = threading.Barrier(2)
+    claims: list[bool] = []
+
+    def claim() -> None:
+        with Session(engine) as session:
+            barrier.wait(timeout=5)
+            claims.append(
+                optimization_automation._try_claim_run_budget(
+                    session, run_id=run_id
+                )
+            )
+            session.commit()
+
+    threads = [threading.Thread(target=claim) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=5)
+    assert all(not thread.is_alive() for thread in threads)
+    assert sorted(claims) == [False, True]
+    engine.dispose()
 
 
 def test_real_optimizer_materializes_new_draft_with_three_role_regression(

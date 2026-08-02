@@ -480,6 +480,9 @@ def test_reconcile_links_real_final_package_without_approving_or_publishing() ->
             )
             db.add(profile)
         profile.rubric_version = "rubric-package-v1"
+        profile.prompt_a_id = fixture["prompt_a"].id
+        profile.prompt_b_id = fixture["base_b"].id
+        profile.model_config_id = fixture["model"].id
         # This case exercises production-run reconciliation, not the separate
         # dimension-candidate calibration gate used by the shared fixture.
         profile.dimension_schema_key = None

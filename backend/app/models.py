@@ -2541,6 +2541,9 @@ class AutomationOptimizationRun(Base):
     candidate_count: Mapped[int] = mapped_column(Integer, default=0)
     estimated_cost_micros: Mapped[int] = mapped_column(Integer, default=0)
     actual_cost_micros: Mapped[int] = mapped_column(Integer, default=0)
+    budget_settled: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=sql_text("0")
+    )
     input_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     output_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     total_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)

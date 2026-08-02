@@ -6255,6 +6255,38 @@ def _migration_045_persist_worker_readiness(connection: Connection) -> None:
         )
 
 
+def _migration_046_bind_budget_settlement_to_run(connection: Connection) -> None:
+    """Make each automation budget reservation settle at most once."""
+    tables = {
+        row[0]
+        for row in connection.exec_driver_sql(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )
+    }
+    if "automation_optimization_runs" not in tables:
+        return
+    columns = {
+        row[1]
+        for row in connection.exec_driver_sql(
+            "PRAGMA table_info(automation_optimization_runs)"
+        )
+    }
+    if "budget_settled" not in columns:
+        connection.exec_driver_sql(
+            "ALTER TABLE automation_optimization_runs "
+            "ADD COLUMN budget_settled BOOLEAN NOT NULL DEFAULT 0"
+        )
+    connection.exec_driver_sql(
+        "UPDATE automation_optimization_runs SET budget_settled = 1 "
+        "WHERE status IN ('succeeded','failed','cancelled')"
+    )
+    violations = connection.exec_driver_sql("PRAGMA foreign_key_check").fetchall()
+    if violations:
+        raise RuntimeError(
+            f"v46 自动化预算结算迁移外键校验失败：{violations[:3]}"
+        )
+
+
 MIGRATIONS = [
     Migration(1, "add_sample_expected_level", _migration_001_add_sample_expected_level),
     Migration(2, "add_review_corrections", _migration_002_add_review_corrections),
@@ -6436,6 +6468,11 @@ MIGRATIONS = [
         45,
         "persist_worker_readiness",
         _migration_045_persist_worker_readiness,
+    ),
+    Migration(
+        46,
+        "bind_budget_settlement_to_run",
+        _migration_046_bind_budget_settlement_to_run,
     ),
 ]
 

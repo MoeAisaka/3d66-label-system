@@ -36,7 +36,13 @@ def test_golden_set_locks_runs_and_preserves_history() -> None:
     )
     Base.metadata.create_all(engine)
     db = Session(engine, expire_on_commit=False)
-    user = User(username="tester", password_hash="unused", display_name="测试员")
+    user = User(
+        username="tester",
+        password_hash="unused",
+        display_name="测试员",
+        is_admin=True,
+        role="admin",
+    )
     asset = Asset(
         original_name="golden.jpg",
         stored_name="golden.jpg",
@@ -173,15 +179,12 @@ def test_golden_set_locks_runs_and_preserves_history() -> None:
             if item["id"] == prompt_b2.id
         )
         assert listed_prompt["updated_at"]
-        assert len(published.json()["regression_run_ids"]) == 1
-        auto_run = db.scalar(
+        assert published.json()["regression_run_ids"] == []
+        assert db.scalar(
             select(PromptRegressionRun).where(
-                PromptRegressionRun.id == published.json()["regression_run_ids"][0]
+                PromptRegressionRun.trigger_prompt_id == prompt_b2.id
             )
-        )
-        assert auto_run is not None
-        assert auto_run.prompt_b_id == prompt_b2.id
-        assert auto_run.total == 1
+        ) is None
     finally:
         app.dependency_overrides.clear()
         db.close()

@@ -772,7 +772,9 @@ def _execution_lease_seconds(
     policy: AutomationPolicy,
     adapter: OptimizationAdapter | None,
 ) -> int:
-    return int(_execution_lease_details(policy, adapter)["effective_seconds"])
+    return int(
+        _execution_lease_details(policy, adapter)["effective_lease_seconds"]
+    )
 
 
 def _execution_lease_details(
@@ -802,6 +804,8 @@ def _execution_lease_details(
         optimizer_timeout_budget + safety_seconds,
     )
     return {
+        "effective_lease_seconds": effective_seconds,
+        # Retain the original generic key for readers of existing audit payloads.
         "effective_seconds": effective_seconds,
         "policy_seconds": policy.lease_seconds,
         "optimizer_timeout_seconds": timeout_seconds,
@@ -924,6 +928,23 @@ def _try_settle_budget(
     return int(updated.rowcount or 0) == 1
 
 
+def _try_claim_run_budget(
+    db: Session,
+    *,
+    run_id: int,
+) -> bool:
+    """Claim one run's reservation before touching the aggregate day balance."""
+    claimed = db.execute(
+        update(AutomationOptimizationRun)
+        .where(
+            AutomationOptimizationRun.id == run_id,
+            AutomationOptimizationRun.budget_settled.is_(False),
+        )
+        .values(budget_settled=True)
+    )
+    return int(claimed.rowcount or 0) == 1
+
+
 def recover_expired_leases(
     db: Session,
     *,
@@ -940,7 +961,56 @@ def recover_expired_leases(
             )
         ).all()
     ))
-    result = db.execute(
+    recovered_cases = 0
+    if run_ids:
+        runs = db.scalars(
+            select(AutomationOptimizationRun).where(
+                AutomationOptimizationRun.id.in_(run_ids),
+                AutomationOptimizationRun.status == "processing",
+            )
+        ).all()
+        for run in runs:
+            claimed_budget = _try_claim_run_budget(db, run_id=run.id)
+            if claimed_budget:
+                _settle_budget(
+                    db,
+                    now=current,
+                    reserved=run.estimated_cost_micros,
+                    actual=run.estimated_cost_micros,
+                )
+            recovered = db.execute(
+                update(OptimizationCaseQueue)
+                .where(
+                    OptimizationCaseQueue.automation_run_id == run.id,
+                    OptimizationCaseQueue.status == "processing",
+                    OptimizationCaseQueue.lease_expires_at.is_not(None),
+                    OptimizationCaseQueue.lease_expires_at <= current,
+                )
+                .values(
+                    status="failed",
+                    lease_owner=None,
+                    lease_token=None,
+                    lease_expires_at=None,
+                    next_attempt_at=current,
+                    last_error="lease_expired",
+                    updated_at=current,
+                )
+            )
+            recovered_cases += int(recovered.rowcount or 0)
+            db.execute(
+                update(AutomationOptimizationRun)
+                .where(
+                    AutomationOptimizationRun.id == run.id,
+                    AutomationOptimizationRun.status == "processing",
+                )
+                .values(
+                    status="failed",
+                    retryable=True,
+                    error_message="lease_expired",
+                    finished_at=current,
+                )
+            )
+    orphaned = db.execute(
         update(OptimizationCaseQueue)
         .where(
             OptimizationCaseQueue.status == "processing",
@@ -957,33 +1027,8 @@ def recover_expired_leases(
             updated_at=current,
         )
     )
-    if run_ids:
-        for run in db.scalars(
-            select(AutomationOptimizationRun).where(
-                AutomationOptimizationRun.id.in_(run_ids),
-                AutomationOptimizationRun.status == "processing",
-            )
-        ).all():
-            _settle_budget(
-                db,
-                now=current,
-                reserved=run.estimated_cost_micros,
-                actual=run.estimated_cost_micros,
-            )
-        db.execute(
-            update(AutomationOptimizationRun)
-            .where(
-                AutomationOptimizationRun.id.in_(run_ids),
-                AutomationOptimizationRun.status == "processing",
-            )
-            .values(
-                status="failed",
-                retryable=True,
-                error_message="lease_expired",
-                finished_at=current,
-            )
-        )
-    return int(result.rowcount or 0)
+    recovered_cases += int(orphaned.rowcount or 0)
+    return recovered_cases
 
 
 def _fair_category_order(
@@ -1385,7 +1430,9 @@ def consume_optimization_queue_once(
 
     lease_token = uuid.uuid4().hex
     execution_lease = _execution_lease_details(policy, adapter)
-    execution_lease_seconds = int(execution_lease["effective_seconds"])
+    execution_lease_seconds = int(execution_lease["effective_lease_seconds"])
+    frozen_input["policy"]["effective_lease_seconds"] = execution_lease_seconds
+    # Compatibility alias for API clients that already consumed this field.
     frozen_input["policy"]["execution_lease_seconds"] = execution_lease_seconds
     lease_until = current + timedelta(seconds=execution_lease_seconds)
     execution_lease["expires_at"] = lease_until.isoformat()
@@ -1509,6 +1556,7 @@ def consume_optimization_queue_once(
             "trigger_reason": run.trigger_reason,
             "case_ids": selected_ids,
             "estimated_cost_micros": estimated_cost,
+            "effective_lease_seconds": execution_lease_seconds,
             "execution_lease_seconds": execution_lease_seconds,
             "execution_lease": execution_lease,
         },
@@ -1538,6 +1586,7 @@ def consume_optimization_queue_once(
     )
     db.commit()
     budget_settled = False
+    budget_claimed = False
     try:
         result = adapter.optimize(
             frozen_input=frozen_input,
@@ -1570,6 +1619,9 @@ def consume_optimization_queue_once(
         )
         if active_leases != len(selected_ids):
             raise RuntimeError("automation_lease_lost")
+        if not _try_claim_run_budget(db, run_id=run.id):
+            raise RuntimeError("automation_lease_lost")
+        budget_claimed = True
         with db.begin_nested():
             materialized = (
                 adapter.materialize(  # type: ignore[attr-defined]
@@ -1593,6 +1645,7 @@ def consume_optimization_queue_once(
                 "candidates": result.candidates,
                 "regression": result.regression,
                 **materialized,
+                "effective_lease_seconds": execution_lease_seconds,
                 "execution_lease": execution_lease,
                 "release_requires_human_review": True,
                 "publishes_automatically": False,
@@ -1630,6 +1683,7 @@ def consume_optimization_queue_once(
                 "candidate_count": run.candidate_count,
                 "actual_cost_micros": run.actual_cost_micros,
                 "auto_publish": False,
+                "effective_lease_seconds": execution_lease_seconds,
                 "execution_lease": execution_lease,
             },
             event_key=f"automation-run-reviewed:{run.run_key}",
@@ -1639,11 +1693,20 @@ def consume_optimization_queue_once(
             "lifecycle_status": automation_lifecycle_status(run.status),
             "run_id": run.id,
             "candidate_count": run.candidate_count,
+            "effective_lease_seconds": execution_lease_seconds,
             "execution_lease_seconds": execution_lease_seconds,
         }
     except Exception as exc:
         safe_error, retryable = _safe_executor_error(exc)
         if not budget_settled:
+            if budget_claimed:
+                _settle_budget(
+                    db,
+                    now=current,
+                    reserved=estimated_cost,
+                    actual=estimated_cost,
+                )
+                budget_settled = True
             active_leases = int(
                 db.scalar(
                     select(func.count())
@@ -1659,17 +1722,20 @@ def consume_optimization_queue_once(
             )
             if active_leases != len(selected_ids):
                 safe_error, retryable = "automation_lease_lost", True
-            settled = _try_settle_budget(
-                db,
-                now=current,
-                reserved=estimated_cost,
-                actual=estimated_cost,
-            )
-            if not settled and safe_error != "automation_lease_lost":
-                safe_error, retryable = (
-                    "automation_budget_settlement_conflict",
-                    False,
-                )
+            elif not budget_claimed:
+                settled = _try_claim_run_budget(db, run_id=run.id)
+                if settled:
+                    _settle_budget(
+                        db,
+                        now=current,
+                        reserved=estimated_cost,
+                        actual=estimated_cost,
+                    )
+                if not settled:
+                    safe_error, retryable = (
+                        "automation_budget_settlement_conflict",
+                        False,
+                    )
         run.status = "failed"
         run.error_message = safe_error
         run.retryable = retryable

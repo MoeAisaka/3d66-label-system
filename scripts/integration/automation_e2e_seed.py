@@ -261,6 +261,14 @@ def main() -> None:
 
         profile.prompt_a_id = prompt_a.id
         profile.prompt_b_id = prompt_b.id
+        pipeline_config = json.loads(profile.pipeline_config_json or "{}")
+        pipeline_config["prompt_mode"] = "ab"
+        profile.pipeline_config_json = json.dumps(
+            pipeline_config,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
         profile.model_config_id = model.id
         profile.optimizer_config_id = optimizer.id
         profile.rubric_version = prompt_b.rubric_version

@@ -4740,7 +4740,7 @@ def create_prompt(
 @app.post("/api/prompts/{prompt_id}/publish")
 def publish_prompt(
     prompt_id: int,
-    user: User = Depends(current_user),
+    user: User = Depends(admin_user),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     prompt = db.get(PromptVersion, prompt_id)
@@ -4775,8 +4775,6 @@ def publish_prompt(
                     "旧配对回归批准不能绕过评测包发布门禁"
                 ),
             )
-        if not user.is_admin:
-            raise HTTPException(status_code=403, detail="仅管理员可发布评测包")
         published_package, duplicate = publish_evaluation_package(
             db,
             package=evaluation_package,
@@ -4789,53 +4787,19 @@ def publish_prompt(
             "evaluation_package_id": published_package.id,
             "duplicate": duplicate,
         }
-    previous_published = db.scalar(
-        select(PromptVersion)
-        .where(
-            PromptVersion.stage == prompt.stage,
-            PromptVersion.status == "published",
-            PromptVersion.id != prompt.id,
-        )
-        .order_by(PromptVersion.updated_at.desc(), PromptVersion.id.desc())
-        .limit(1)
-    )
-    db.execute(
-        update(PromptVersion)
-        .where(PromptVersion.stage == prompt.stage, PromptVersion.status == "published")
-        .values(status="archived")
-    )
-    prompt.rollback_prompt_id = (
-        previous_published.id if previous_published is not None else None
-    )
+    # Legacy manual publication can make an unbound draft discoverable, but it
+    # must not archive versions that remain executable baselines elsewhere.
+    prompt.rollback_prompt_id = None
     prompt.status = "published"
     db.flush()
-    prompt_a = prompt if prompt.stage == "A" else db.scalar(
-        select(PromptVersion)
-        .where(PromptVersion.stage == "A", PromptVersion.status == "published")
-        .order_by(PromptVersion.created_at.desc())
-    )
-    prompt_b = prompt if prompt.stage == "B" else db.scalar(
-        select(PromptVersion)
-        .where(PromptVersion.stage == "B", PromptVersion.status == "published")
-        .order_by(PromptVersion.created_at.desc())
-    )
-    regression_ids: list[int] = []
-    if prompt_a and prompt_b and prompt.source_optimization_run_id is None:
-        regression_ids = _create_regression_runs(
-            db,
-            prompt_a=prompt_a,
-            prompt_b=prompt_b,
-            created_by=user.username,
-            trigger_prompt_id=prompt.id,
-        )
     db.commit()
-    return {"ok": True, "regression_run_ids": regression_ids}
+    return {"ok": True, "regression_run_ids": []}
 
 
 @app.post("/api/prompts/{prompt_id}/rollback")
 def rollback_prompt(
     prompt_id: int,
-    user: User = Depends(current_user),
+    user: User = Depends(admin_user),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     current = db.get(PromptVersion, prompt_id)
@@ -4850,6 +4814,27 @@ def rollback_prompt(
     )
     if target is None or target.stage != current.stage:
         raise HTTPException(status_code=409, detail="当前版本没有可验证的回滚指针")
+    binding_column = (
+        EvaluationCategoryProfile.prompt_a_id
+        if current.stage == "A"
+        else EvaluationCategoryProfile.prompt_b_id
+    )
+    active_bindings = int(
+        db.scalar(
+            select(func.count())
+            .select_from(EvaluationCategoryProfile)
+            .where(
+                EvaluationCategoryProfile.status == "active",
+                binding_column.in_((current.id, target.id)),
+            )
+        )
+        or 0
+    )
+    if active_bindings:
+        raise HTTPException(
+            status_code=409,
+            detail="活动类目使用中的提示词必须通过类目评测包执行回滚",
+        )
     current.status = "archived"
     target.status = "published"
     target.rollback_prompt_id = current.id

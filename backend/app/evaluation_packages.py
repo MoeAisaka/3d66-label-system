@@ -13,6 +13,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from .audit import append_audit_event
+from .category_pipeline import legacy_preprocess_to_pipeline, validate_pipeline_config
 from .database import get_db
 from .models import (
     AutomationOptimizationRun,
@@ -44,6 +45,23 @@ TERMINAL_REGRESSION_STATUSES = frozenset(
 COMPLETED_AUTOMATION_STATUSES = frozenset(
     {"succeeded", "awaiting_release_review"}
 )
+
+
+def _category_pipeline(profile: EvaluationCategoryProfile) -> dict[str, Any]:
+    try:
+        raw = json.loads(profile.pipeline_config_json or "{}")
+    except json.JSONDecodeError:
+        raw = {}
+    if not isinstance(raw, dict) or raw.get("schema_version") != "category-pipeline-v1":
+        try:
+            legacy = json.loads(profile.preprocess_config_json or "{}")
+        except json.JSONDecodeError:
+            legacy = {}
+        raw = legacy_preprocess_to_pipeline(profile.category_key, legacy)
+    try:
+        return validate_pipeline_config(raw)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=f"类目流水线配置损坏：{exc}") from None
 
 
 class EvaluationPackageCreateRequest(BaseModel):
@@ -616,6 +634,9 @@ def _category_snapshot(
     )
     if profile is None:
         return {"category_key": category_key, "profile": None}
+    automation = _loads_object(
+        profile.automation_config_json, label="类目自动化配置快照"
+    )
     return _secret_safe(
         {
             "category_key": category_key,
@@ -627,9 +648,11 @@ def _category_snapshot(
                 "dimension_schema_key": profile.dimension_schema_key,
                 "dimension_schema_version": profile.dimension_schema_version,
                 "pipeline_revision": profile.pipeline_revision,
-                "pipeline_config": _loads_object(
-                    profile.pipeline_config_json, label="类目流水线快照"
+                "automation_revision": profile.automation_revision,
+                "baseline_strategy_bundle_id": automation.get(
+                    "baseline_strategy_bundle_id"
                 ),
+                "pipeline_config": _category_pipeline(profile),
             },
         }
     )
@@ -863,6 +886,21 @@ def _build_package_material(
             EvaluationCategoryProfile.category_key == category_key
         )
     )
+    if category_profile is None:
+        raise HTTPException(status_code=409, detail="评测包类目配置不存在")
+    pipeline = _category_pipeline(category_profile)
+    pipeline_mode = pipeline.get("prompt_mode")
+    package_mode = "single" if prompt_b is None else "ab"
+    if pipeline_mode == "follow":
+        raise HTTPException(
+            status_code=409,
+            detail="跟随任务类目不能发布固定评测包基线，请先由管理员选择单提示词或 A/B 模式",
+        )
+    if pipeline_mode != package_mode:
+        raise HTTPException(
+            status_code=409,
+            detail="评测包提示词模式与类目流水线合同不一致",
+        )
     if (
         dimension_schema is not None
         and category_profile is not None
@@ -1385,6 +1423,34 @@ def _activate_package_category_baseline(
     )
     if profile is None or profile.status != "active":
         raise HTTPException(status_code=409, detail="评测包所属类目不存在或未启用")
+    manifest = _assert_manifest_valid(package)
+    frozen_profile = (manifest.get("category") or {}).get("profile")
+    if not isinstance(frozen_profile, dict):
+        raise HTTPException(status_code=409, detail="评测包缺少冻结类目合同")
+    expected_revision = frozen_profile.get("automation_revision")
+    expected_baseline_id = frozen_profile.get("baseline_strategy_bundle_id")
+    expected_pipeline_revision = frozen_profile.get("pipeline_revision")
+    frozen_pipeline = frozen_profile.get("pipeline_config")
+    if not isinstance(expected_revision, int) or isinstance(expected_revision, bool):
+        raise HTTPException(status_code=409, detail="评测包缺少冻结类目修订号")
+    if not isinstance(expected_pipeline_revision, int) or isinstance(
+        expected_pipeline_revision, bool
+    ):
+        raise HTTPException(status_code=409, detail="评测包缺少冻结流水线修订号")
+    if not isinstance(frozen_pipeline, dict):
+        raise HTTPException(status_code=409, detail="评测包缺少冻结流水线合同")
+    pipeline = _category_pipeline(profile)
+    if (
+        profile.pipeline_revision != expected_pipeline_revision
+        or canonical_json(pipeline) != canonical_json(frozen_pipeline)
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="类目流水线已在评测包创建后变化，请重新回归并生成新评测包",
+        )
+    expected_mode = "single" if package.prompt_mode == "single" else "ab"
+    if pipeline.get("prompt_mode") != expected_mode:
+        raise HTTPException(status_code=409, detail="评测包提示词模式与当前类目流水线合同不一致")
     bundle = package.candidate_strategy_bundle
     try:
         frozen_model = json.loads(bundle.model_config_snapshot)
@@ -1410,14 +1476,12 @@ def _activate_package_category_baseline(
         raise HTTPException(status_code=409, detail="类目自动化配置不是对象")
 
     previous_prompt_ids = (profile.prompt_a_id, profile.prompt_b_id)
-    profile.prompt_a_id = package.prompt_a_id
-    profile.prompt_b_id = package.prompt_b_id
-    profile.model_config_id = model_matches[0].id
-    profile.rubric_version = bundle.rubric_version
+    next_dimension_key = profile.dimension_schema_key
+    next_dimension_version = profile.dimension_schema_version
     if package.dimension_schema is not None:
-        profile.dimension_schema_key = package.dimension_schema.schema_key
-        profile.dimension_schema_version = package.dimension_schema.version
-    elif not profile.dimension_schema_key or not profile.dimension_schema_version:
+        next_dimension_key = package.dimension_schema.schema_key
+        next_dimension_version = package.dimension_schema.version
+    elif not next_dimension_key or not next_dimension_version:
         try:
             schema_set = json.loads(bundle.dimension_schema_set_snapshot or "{}")
         except json.JSONDecodeError as exc:
@@ -1432,25 +1496,85 @@ def _activate_package_category_baseline(
         ]
         if len(candidates) != 1:
             raise HTTPException(status_code=409, detail="候选维度合同无法唯一解析")
-        profile.dimension_schema_key = candidates[0]["schema_key"]
-        profile.dimension_schema_version = candidates[0]["version"]
-    profile.automation_config_json = canonical_json(
-        {**automation, "baseline_strategy_bundle_id": bundle.id}
+        next_dimension_key = candidates[0]["schema_key"]
+        next_dimension_version = candidates[0]["version"]
+    current_baseline_id = automation.get("baseline_strategy_bundle_id")
+    if profile.automation_revision != expected_revision or current_baseline_id != expected_baseline_id:
+        raise HTTPException(
+            status_code=409,
+            detail="类目基线已在评测包创建后变化，请重新回归并生成新评测包",
+        )
+    next_automation_json = canonical_json(
+        {
+            **automation,
+            "baseline_strategy_bundle_id": bundle.id,
+            "baseline_binding_source": "evaluation_package",
+        }
     )
-    profile.automation_revision += 1
-    errors = category_bundle_contract_errors(
-        db,
-        profile=profile,
-        bundle=bundle,
-        require_complete=True,
-        require_prompt_b=package.prompt_b_id is not None,
-        enforce_baseline_id=True,
+    previous_values = (
+        profile.prompt_a_id,
+        profile.prompt_b_id,
+        profile.model_config_id,
+        profile.rubric_version,
+        profile.dimension_schema_key,
+        profile.dimension_schema_version,
+        profile.automation_config_json,
     )
+    with db.no_autoflush:
+        profile.prompt_a_id = package.prompt_a_id
+        profile.prompt_b_id = package.prompt_b_id
+        profile.model_config_id = model_matches[0].id
+        profile.rubric_version = bundle.rubric_version
+        profile.dimension_schema_key = next_dimension_key
+        profile.dimension_schema_version = next_dimension_version
+        profile.automation_config_json = next_automation_json
+        errors = category_bundle_contract_errors(
+            db,
+            profile=profile,
+            bundle=bundle,
+            require_complete=True,
+            require_prompt_b=package.prompt_b_id is not None,
+            enforce_baseline_id=True,
+        )
+        (
+            profile.prompt_a_id,
+            profile.prompt_b_id,
+            profile.model_config_id,
+            profile.rubric_version,
+            profile.dimension_schema_key,
+            profile.dimension_schema_version,
+            profile.automation_config_json,
+        ) = previous_values
     if errors:
         raise HTTPException(
             status_code=409,
             detail="评测包与类目执行合同不一致，不能发布：" + "、".join(errors),
         )
+    updated = db.execute(
+        update(EvaluationCategoryProfile)
+        .where(
+            EvaluationCategoryProfile.id == profile.id,
+            EvaluationCategoryProfile.automation_revision == expected_revision,
+            EvaluationCategoryProfile.pipeline_revision == expected_pipeline_revision,
+            EvaluationCategoryProfile.automation_config_json == profile.automation_config_json,
+        )
+        .values(
+            prompt_a_id=package.prompt_a_id,
+            prompt_b_id=package.prompt_b_id,
+            model_config_id=model_matches[0].id,
+            rubric_version=bundle.rubric_version,
+            dimension_schema_key=next_dimension_key,
+            dimension_schema_version=next_dimension_version,
+            automation_config_json=next_automation_json,
+            automation_revision=expected_revision + 1,
+        )
+    )
+    if int(updated.rowcount or 0) != 1:
+        raise HTTPException(
+            status_code=409,
+            detail="类目基线已被其他发布更新，请刷新后重新生成评测包",
+        )
+    db.expire(profile)
     return previous_prompt_ids
 
 
@@ -1494,9 +1618,13 @@ def publish_evaluation_package(
             status_code=409,
             detail="评测包发布已被其他操作更新，请刷新后重试",
         )
-    previous_prompt_a_id, previous_prompt_b_id = _activate_package_category_baseline(
-        db, package=package
-    )
+    try:
+        previous_prompt_a_id, previous_prompt_b_id = _activate_package_category_baseline(
+            db, package=package
+        )
+    except Exception:
+        db.rollback()
+        raise
     _publish_prompt(
         db,
         package.prompt_a,
