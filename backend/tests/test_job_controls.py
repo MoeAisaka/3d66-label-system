@@ -11,9 +11,11 @@ from sqlalchemy.pool import StaticPool
 
 from app.database import Base, get_db
 from app import worker
+from app.category_pipeline import default_pipeline
 from app.main import _category_execution_snapshot, app, current_user
 from app.models import (
     Asset,
+    DimensionSchema,
     EvaluationCategoryProfile,
     EvaluationControl,
     EvaluationJob,
@@ -21,6 +23,20 @@ from app.models import (
     PromptVersion,
     User,
 )
+from app.dimension_schema_registry import canonical_hash, canonical_json
+from app.dimension_schema_registry import (
+    ACTIVE_V13_VERSION,
+    HISTORICAL_DEFAULT_VERSION,
+    SPACE_SCHEMA_KEY,
+    materialized_space_schema_rows,
+    space_schema_definition_for_version,
+)
+from app.production_dimension_contract import (
+    ProductionDimensionContractError,
+    resolve_frozen_dimension_contract,
+    resolve_published_dimension_contract,
+)
+from app.strategy_bundle import resolve_frozen_dimension_entry
 from app.worker import _frozen_category_contract
 
 
@@ -65,8 +81,17 @@ def test_jobs_pin_prompts_and_support_pause_resume_cancel() -> None:
         model_id="vision-model-v1",
         encrypted_api_key="credential-reference-never-snapshot",
     )
+    schema = _supported_dimension_schema()
     db.add_all(
-        [user, asset, prompt_a, prompt_b, model, EvaluationControl(id=1)]
+        [
+            user,
+            asset,
+            prompt_a,
+            prompt_b,
+            model,
+            schema,
+            EvaluationControl(id=1),
+        ]
     )
     db.commit()
 
@@ -94,6 +119,16 @@ def test_jobs_pin_prompts_and_support_pause_resume_cancel() -> None:
         assert frozen_profile["prompt_a_id"] == prompt_a.id
         assert frozen_profile["prompt_b_id"] == prompt_b.id
         assert frozen_profile["model_config"]["provider"] == "custom-compatible"
+        assert frozen_profile["dimension_contract"] == {
+            "schema_id": schema.id,
+            "schema_key": SPACE_SCHEMA_KEY,
+            "version": ACTIVE_V13_VERSION,
+            "canonical_hash": schema.canonical_hash,
+            "definition": json.loads(schema.definition_json),
+        }
+        frozen_dimension = resolve_frozen_dimension_contract(frozen_profile)
+        assert frozen_dimension is not None
+        assert frozen_dimension.definition == json.loads(schema.definition_json)
         assert "credential-reference-never-snapshot" not in (
             frozen_job.category_profile_snapshot_json
         )
@@ -158,6 +193,44 @@ def test_jobs_pin_prompts_and_support_pause_resume_cancel() -> None:
         assert single_job["prompt_version"] == "A-2.1"
         assert single_job["prompt_a_version"] is None
         assert single_job["prompt_b_version"] is None
+
+        profile.pipeline_config_json = json.dumps(
+            {**default_pipeline("space_image"), "prompt_mode": "single"},
+            ensure_ascii=False,
+        )
+        profile.prompt_a_id = prompt_a.id
+        profile.prompt_b_id = None
+        db.commit()
+        wrong_single = client.post(
+            "/api/jobs/enqueue",
+            json={
+                "asset_ids": [asset.id],
+                "prompt_a_id": prompt_a.id,
+                "prompt_b_id": prompt_b.id,
+            },
+        )
+        assert wrong_single.status_code == 409
+        assert wrong_single.json()["detail"]["code"] == "prompt_mode_mismatch"
+
+        profile.pipeline_config_json = json.dumps(
+            {**default_pipeline("space_image"), "prompt_mode": "ab"},
+            ensure_ascii=False,
+        )
+        profile.prompt_a_id = prompt_a.id
+        profile.prompt_b_id = prompt_b.id
+        db.commit()
+        wrong_ab = client.post(
+            "/api/jobs/enqueue",
+            json={"asset_ids": [asset.id], "prompt_id": prompt_a.id},
+        )
+        assert wrong_ab.status_code == 409
+        assert wrong_ab.json()["detail"]["code"] == "prompt_mode_mismatch"
+
+        incomplete_pair = client.post(
+            "/api/jobs/enqueue",
+            json={"asset_ids": [asset.id], "prompt_a_id": prompt_a.id},
+        )
+        assert incomplete_pair.status_code == 422
     finally:
         app.dependency_overrides.clear()
         db.close()
@@ -263,7 +336,10 @@ def test_worker_uses_frozen_contract_after_live_configuration_is_retired(
         model_config_id=None,
         rubric_version="rubric-v2.1",
     )
-    db.add_all([asset, prompt, model, profile])
+    schema = _supported_dimension_schema()
+    profile.dimension_schema_key = schema.schema_key
+    profile.dimension_schema_version = schema.version
+    db.add_all([asset, prompt, model, profile, schema])
     db.flush()
     snapshot = _category_execution_snapshot(
         profile,
@@ -302,4 +378,457 @@ def test_worker_uses_frozen_contract_after_live_configuration_is_retired(
             asyncio.run(worker.evaluate_job(job.id))
     finally:
         db.close()
+    engine.dispose()
+
+
+def test_worker_rejects_frozen_non_published_dimension_before_asset_access(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    engine = create_engine(
+        "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool
+    )
+    Base.metadata.create_all(engine)
+    db = Session(engine, expire_on_commit=False)
+    schema = _dimension_schema(status="candidate", version="worker-candidate-v1")
+    asset = Asset(
+        original_name="missing.jpg", stored_name="missing.jpg", mime_type="image/jpeg",
+        size_bytes=100, sha256="e" * 64, category_key="space_image",
+    )
+    prompt = PromptVersion(
+        stage="A", name="单提示词", version="worker-candidate-prompt-v1",
+        system_prompt="return complete result", user_prompt="evaluate",
+        rubric_version="rubric-v2.1", status="published",
+    )
+    model = ModelConfig(
+        provider="custom-compatible", model_id="worker-candidate-model-v1",
+        encrypted_api_key="credential-reference",
+    )
+    profile = EvaluationCategoryProfile(
+        category_key="space_image", display_name="空间图片", status="active",
+        allowed_mime_types_json='["image/jpeg"]',
+        preprocess_config_json='{"preprocess":"image"}',
+        rubric_version="rubric-v2.1", dimension_schema_key=schema.schema_key,
+        dimension_schema_version=schema.version,
+    )
+    db.add_all([schema, asset, prompt, model, profile])
+    db.flush()
+    job = EvaluationJob(
+        asset_id=asset.id, category_key="space_image", prompt_a_id=prompt.id,
+        status="processing",
+        category_profile_snapshot_json=_category_execution_snapshot(
+            profile, prompt_a_id=prompt.id, prompt_b_id=None, model_config=model
+        ),
+    )
+    db.add(job)
+    db.commit()
+
+    @contextmanager
+    def test_scope():
+        try:
+            yield db
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+
+    monkeypatch.setattr(worker, "session_scope", test_scope)
+    monkeypatch.setattr(worker, "settings", SimpleNamespace(upload_dir=tmp_path))
+    try:
+        with pytest.raises(ProductionDimensionContractError) as blocked:
+            asyncio.run(worker.evaluate_job(job.id))
+        assert blocked.value.code == "dimension_contract_not_published"
+    finally:
+        db.close()
         engine.dispose()
+
+
+def _dimension_schema(*, status: str, version: str) -> DimensionSchema:
+    definition = {
+        "format_version": "dimension-schema-definition-v1",
+        "dimensions": [{"key": "quality", "required": True}],
+    }
+    published = status in {"published", "retired"}
+    return DimensionSchema(
+        schema_key="test.production",
+        version=version,
+        schema_type="family_pack",
+        family_key="space",
+        display_name=f"测试维度 {version}",
+        status=status,
+        definition_json=canonical_json(definition),
+        canonical_hash=canonical_hash(definition),
+        created_by="test",
+        published_by="test" if published else None,
+        published_at=worker.datetime.now(worker.timezone.utc) if published else None,
+        retired_at=worker.datetime.now(worker.timezone.utc) if status == "retired" else None,
+    )
+
+
+def _supported_dimension_schema() -> DimensionSchema:
+    definition = space_schema_definition_for_version(ACTIVE_V13_VERSION)
+    return DimensionSchema(
+        schema_key=SPACE_SCHEMA_KEY,
+        version=ACTIVE_V13_VERSION,
+        schema_type="family_pack",
+        family_key="space",
+        display_name="空间现役维度",
+        status="published",
+        definition_json=canonical_json(definition),
+        canonical_hash=canonical_hash(definition),
+        created_by="test",
+        published_by="test",
+        published_at=worker.datetime.now(worker.timezone.utc),
+    )
+
+
+def _dimension_enqueue_dependencies(db: Session, *, suffix: str):
+    asset = Asset(
+        original_name=f"dimension-{suffix}.jpg",
+        stored_name=f"dimension-{suffix}.jpg",
+        mime_type="image/jpeg",
+        size_bytes=100,
+        sha256=(suffix[0] if suffix else "e") * 64,
+        category_key="space_image",
+    )
+    prompt_a = PromptVersion(
+        stage="A", name="维度 A", version=f"dimension-a-{suffix}",
+        system_prompt="classify image completely", user_prompt="evaluate",
+        rubric_version="rubric-v2.1", status="published",
+    )
+    prompt_b = PromptVersion(
+        stage="B", name="维度 B", version=f"dimension-b-{suffix}",
+        system_prompt="score image completely", user_prompt="evaluate",
+        rubric_version="rubric-v2.1", status="published",
+    )
+    model = ModelConfig(
+        name="维度测试模型", provider="custom-compatible",
+        model_id=f"dimension-model-{suffix}", active=True,
+    )
+    db.add_all([asset, prompt_a, prompt_b, model])
+    db.flush()
+    return asset, prompt_a, prompt_b, model
+
+
+@pytest.mark.parametrize("status", ["draft", "candidate", "retired"])
+def test_enqueue_rejects_non_published_dimension_contract(status: str) -> None:
+    engine = create_engine(
+        "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool
+    )
+    Base.metadata.create_all(engine)
+    db = Session(engine, expire_on_commit=False)
+    schema = _dimension_schema(status=status, version=f"{status}-v1")
+    user = User(
+        username="dimension-admin",
+        password_hash="unused",
+        display_name="维度管理员",
+        role="admin",
+        is_admin=True,
+    )
+    db.add_all([schema, user])
+    db.commit()
+    app.dependency_overrides[get_db] = lambda: db
+    app.dependency_overrides[current_user] = lambda: user
+    try:
+        client = TestClient(app)
+        client.get("/api/evaluation-categories")
+        profile = db.scalar(
+            select(EvaluationCategoryProfile).where(
+                EvaluationCategoryProfile.category_key == "space_image"
+            )
+        )
+        asset, prompt_a, prompt_b, model = _dimension_enqueue_dependencies(
+            db, suffix=status
+        )
+        profile.prompt_a_id = prompt_a.id
+        profile.prompt_b_id = prompt_b.id
+        profile.model_config_id = model.id
+        profile.rubric_version = "rubric-v2.1"
+        profile.dimension_schema_key = schema.schema_key
+        profile.dimension_schema_version = schema.version
+        db.commit()
+        response = client.post(
+            "/api/jobs/enqueue", json={"asset_ids": [asset.id]}
+        )
+        assert response.status_code == 409
+        assert response.json()["detail"]["code"] == "dimension_contract_not_published"
+    finally:
+        app.dependency_overrides.clear()
+        db.close()
+        engine.dispose()
+
+
+def test_published_dimension_contract_allows_enqueue() -> None:
+    engine = create_engine(
+        "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool
+    )
+    Base.metadata.create_all(engine)
+    db = Session(engine, expire_on_commit=False)
+    schema = _supported_dimension_schema()
+    user = User(
+        username="dimension-admin",
+        password_hash="unused",
+        display_name="维度管理员",
+        role="admin",
+        is_admin=True,
+    )
+    db.add_all([schema, user])
+    db.commit()
+    app.dependency_overrides[get_db] = lambda: db
+    app.dependency_overrides[current_user] = lambda: user
+    try:
+        client = TestClient(app)
+        client.get("/api/evaluation-categories")
+        profile = db.scalar(
+            select(EvaluationCategoryProfile).where(
+                EvaluationCategoryProfile.category_key == "space_image"
+            )
+        )
+        asset, prompt_a, prompt_b, model = _dimension_enqueue_dependencies(
+            db, suffix="published"
+        )
+        profile.prompt_a_id = prompt_a.id
+        profile.prompt_b_id = prompt_b.id
+        profile.model_config_id = model.id
+        profile.rubric_version = "rubric-v2.1"
+        profile.dimension_schema_key = schema.schema_key
+        profile.dimension_schema_version = schema.version
+        db.commit()
+        response = client.post(
+            "/api/jobs/enqueue", json={"asset_ids": [asset.id]}
+        )
+        assert response.status_code == 200
+        assert len(response.json()["job_ids"]) == 1
+    finally:
+        app.dependency_overrides.clear()
+        db.close()
+        engine.dispose()
+
+
+def test_enqueue_requires_explicit_dimension_contract_for_new_jobs() -> None:
+    engine = create_engine(
+        "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool
+    )
+    Base.metadata.create_all(engine)
+    db = Session(engine, expire_on_commit=False)
+    user = User(
+        username="dimension-admin",
+        password_hash="unused",
+        display_name="维度管理员",
+        role="admin",
+        is_admin=True,
+    )
+    db.add(user)
+    db.commit()
+    app.dependency_overrides[get_db] = lambda: db
+    app.dependency_overrides[current_user] = lambda: user
+    try:
+        client = TestClient(app)
+        client.get("/api/evaluation-categories")
+        profile = db.scalar(
+            select(EvaluationCategoryProfile).where(
+                EvaluationCategoryProfile.category_key == "space_image"
+            )
+        )
+        profile.dimension_schema_key = None
+        profile.dimension_schema_version = None
+        db.commit()
+
+        response = client.post("/api/jobs/enqueue", json={"asset_ids": [999]})
+
+        assert response.status_code == 409
+        assert response.json()["detail"]["code"] == "dimension_contract_incomplete"
+    finally:
+        app.dependency_overrides.clear()
+        db.close()
+        engine.dispose()
+
+
+def test_active_category_update_rejects_unexecutable_dimension_contract() -> None:
+    engine = create_engine(
+        "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool
+    )
+    Base.metadata.create_all(engine)
+    db = Session(engine, expire_on_commit=False)
+    user = User(
+        username="dimension-admin",
+        password_hash="unused",
+        display_name="维度管理员",
+        role="admin",
+        is_admin=True,
+    )
+    db.add(user)
+    db.commit()
+    app.dependency_overrides[get_db] = lambda: db
+    app.dependency_overrides[current_user] = lambda: user
+    try:
+        client = TestClient(app)
+        profile = next(
+            item
+            for item in client.get("/api/evaluation-categories").json()["items"]
+            if item["category_key"] == "space_image"
+        )
+        payload = {
+            key: value
+            for key, value in profile.items()
+            if key
+            not in {
+                "id",
+                "category_key",
+                "pipeline_revision",
+                "automation_revision",
+                "created_by",
+                "created_at",
+                "updated_at",
+            }
+        }
+        payload["dimension_schema_key"] = "missing.dimension"
+        payload["dimension_schema_version"] = "v1"
+
+        response = client.put(
+            "/api/evaluation-categories/space_image", json=payload
+        )
+
+        assert response.status_code == 422
+        assert response.json()["detail"]["code"] == "dimension_contract_missing"
+    finally:
+        app.dependency_overrides.clear()
+        db.close()
+        engine.dispose()
+
+
+def test_production_dimension_contract_rejects_missing_and_invalid_definition() -> None:
+    engine = create_engine(
+        "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool
+    )
+    Base.metadata.create_all(engine)
+    db = Session(engine, expire_on_commit=False)
+    try:
+        with pytest.raises(ProductionDimensionContractError) as missing:
+            resolve_published_dimension_contract(
+                db, schema_key="missing", version="v1"
+            )
+        assert missing.value.code == "dimension_contract_missing"
+        assert (
+            resolve_published_dimension_contract(
+                db, schema_key=None, version=None
+            )
+            is None
+        )
+
+        schema = _dimension_schema(status="published", version="tampered-v1")
+        schema.canonical_hash = "f" * 64
+        db.add(schema)
+        db.commit()
+        with pytest.raises(ProductionDimensionContractError) as invalid:
+            resolve_published_dimension_contract(
+                db, schema_key=schema.schema_key, version=schema.version
+            )
+        assert invalid.value.code == "dimension_contract_invalid"
+
+        invalid_definition = _dimension_schema(
+            status="published", version=ACTIVE_V13_VERSION
+        )
+        invalid_definition.schema_key = SPACE_SCHEMA_KEY
+        db.add(invalid_definition)
+        db.commit()
+        with pytest.raises(ProductionDimensionContractError) as not_executable:
+            resolve_published_dimension_contract(
+                db,
+                schema_key=invalid_definition.schema_key,
+                version=invalid_definition.version,
+            )
+        assert not_executable.value.code == "dimension_contract_not_executable"
+
+        custom_definition = space_schema_definition_for_version(
+            ACTIVE_V13_VERSION
+        )
+        custom_definition["package_version"] = "custom-v1"
+        custom_schema = DimensionSchema(
+            schema_key="test.custom-executable",
+            version="v1",
+            schema_type="family_pack",
+            family_key="space",
+            display_name="尚未接入 Bundle 的可执行维度",
+            status="published",
+            definition_json=canonical_json(custom_definition),
+            canonical_hash=canonical_hash(custom_definition),
+            created_by="test",
+            published_by="test",
+            published_at=worker.datetime.now(worker.timezone.utc),
+        )
+        db.add(custom_schema)
+        db.commit()
+        with pytest.raises(ProductionDimensionContractError) as unsupported:
+            resolve_published_dimension_contract(
+                db,
+                schema_key=custom_schema.schema_key,
+                version=custom_schema.version,
+            )
+        assert unsupported.value.code == "dimension_contract_not_executable"
+
+        custom_bundle = SimpleNamespace(
+            dimension_schema_set_snapshot=json.dumps(
+                {
+                    "schemas": [
+                        {
+                            "schema_key": custom_schema.schema_key,
+                            "version": custom_schema.version,
+                            "canonical_hash": custom_schema.canonical_hash,
+                            "definition": custom_definition,
+                        }
+                    ]
+                }
+            )
+        )
+        with pytest.raises(ProductionDimensionContractError) as bundle_bypass:
+            resolve_published_dimension_contract(
+                db,
+                schema_key=custom_schema.schema_key,
+                version=custom_schema.version,
+                bundle=custom_bundle,
+            )
+        assert bundle_bypass.value.code == "dimension_contract_not_executable"
+    finally:
+        db.close()
+        engine.dispose()
+
+
+def test_explicit_category_dimension_overrides_model_scoring_profile_route() -> None:
+    rows = materialized_space_schema_rows()
+    bundle = SimpleNamespace(
+        strategy_schema_version="strategy-bundle-v2",
+        dimension_schema_set_snapshot=json.dumps(
+            {
+                "schemas": [
+                    {
+                        "schema_key": row["schema_key"],
+                        "version": row["version"],
+                        "canonical_hash": row["canonical_hash"],
+                        "definition": json.loads(row["definition_json"]),
+                    }
+                    for row in rows
+                ]
+            }
+        ),
+    )
+    routed = resolve_frozen_dimension_entry(
+        bundle=bundle,
+        aesthetic={"scoring_profile": "not-v1.3"},
+        schema_key=SPACE_SCHEMA_KEY,
+        version=ACTIVE_V13_VERSION,
+    )
+    assert routed["version"] == ACTIVE_V13_VERSION
+    assert routed["version"] != HISTORICAL_DEFAULT_VERSION
+
+
+def test_dimension_contract_error_preserves_worker_error_code() -> None:
+    error = ProductionDimensionContractError(
+        "dimension_contract_not_executable",
+        "维度合同不可执行",
+    )
+
+    failure = worker._technical_failure_from_exception(error)
+
+    assert failure.error_type == "dimension_contract_not_executable"
+    assert failure.retryable is False

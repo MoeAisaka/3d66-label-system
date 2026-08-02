@@ -156,6 +156,7 @@ def main() -> None:
         SampleSet,
         SampleSetItem,
         SamplingPolicy,
+        User,
     )
     from app.production_feedback import ingest_production_feedback
     from app.scoring import ENGINE_VERSION
@@ -163,6 +164,7 @@ def main() -> None:
         MODEL_CONFIG_KEYCHAIN_ACCOUNT,
         OPTIMIZER_CONFIG_KEYCHAIN_ACCOUNT,
         _protect_file_aead,
+        hash_password,
     )
     from app.seed import seed_defaults
     from app.strategy_bundle import (
@@ -174,6 +176,12 @@ def main() -> None:
     init_database()
     with session_scope() as db:
         seed_defaults(db)
+        e2e_password = os.getenv("LABEL_LAB_E2E_PASSWORD")
+        if e2e_password:
+            e2e_user = db.scalar(select(User).where(User.username == "sol"))
+            if e2e_user is None:
+                raise RuntimeError("seed_admin_user_missing")
+            e2e_user.password_hash = hash_password(e2e_password)
         model = db.scalar(select(ModelConfig).order_by(ModelConfig.id.asc()))
         optimizer = db.scalar(select(OptimizerConfig).order_by(OptimizerConfig.id.asc()))
         profile = db.scalar(
@@ -389,6 +397,8 @@ def main() -> None:
                     prompt_b=prompt_b,
                     sampling_policy=sampling,
                     aesthetic=aesthetic,
+                    dimension_schema_key=SPACE_SCHEMA_KEY,
+                    dimension_schema_version=ACTIVE_V13_VERSION,
                 ),
                 preprocess_json='{"schema_version":"automation-e2e-seed-v1"}',
                 precheck_json=json.dumps(_precheck(), ensure_ascii=False),

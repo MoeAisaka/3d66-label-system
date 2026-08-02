@@ -130,6 +130,75 @@ def _read_count(database: Path, table: str, where: str = "") -> int:
     return int(row[0])
 
 
+def test_readonly_connection_context_closes_handle(tmp_path: Path) -> None:
+    database = tmp_path / "app.db"
+    _make_database(database)
+
+    with windows_deploy._sqlite_connect_readonly(database) as connection:
+        assert connection.execute("SELECT 1").fetchone() == (1,)
+
+    with pytest.raises(sqlite3.ProgrammingError, match="closed database"):
+        connection.execute("SELECT 1")
+
+
+def test_database_replace_displaces_existing_file_before_installing_staged(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "database" / "app.db"
+    staged = tmp_path / "stage" / "app.db"
+    target.parent.mkdir(parents=True)
+    staged.parent.mkdir(parents=True)
+    target.write_bytes(b"old")
+    staged.write_bytes(b"new")
+    real_replace = windows_deploy.os.replace
+    calls: list[tuple[Path, Path]] = []
+
+    def record_replace(source, destination) -> None:
+        calls.append((Path(source), Path(destination)))
+        real_replace(source, destination)
+
+    monkeypatch.setattr(windows_deploy.os, "replace", record_replace)
+
+    windows_deploy._replace_database(staged, target)
+
+    assert target.read_bytes() == b"new"
+    assert calls[0][0] == target
+    assert calls[0][1].name.startswith(".app-db-displaced-")
+    assert calls[1] == (staged, target)
+    assert not list(target.parent.glob(".app-db-displaced-*"))
+
+
+def test_database_replace_restores_displaced_file_when_install_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "database" / "app.db"
+    staged = tmp_path / "stage" / "app.db"
+    target.parent.mkdir(parents=True)
+    staged.parent.mkdir(parents=True)
+    target.write_bytes(b"old")
+    staged.write_bytes(b"new")
+    real_replace = windows_deploy.os.replace
+    call_count = 0
+
+    def fail_install(source, destination) -> None:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 2:
+            raise PermissionError("injected staged install failure")
+        real_replace(source, destination)
+
+    monkeypatch.setattr(windows_deploy.os, "replace", fail_install)
+
+    with pytest.raises(PermissionError, match="injected"):
+        windows_deploy._replace_database(staged, target)
+
+    assert target.read_bytes() == b"old"
+    assert staged.read_bytes() == b"new"
+    assert not list(target.parent.glob(".app-db-displaced-*"))
+
+
 def test_windows_data_dir_priority_is_explicit_then_environment_then_dotenv_then_localappdata(
     tmp_path: Path,
 ) -> None:
@@ -324,6 +393,7 @@ def test_doctor_cli_prints_checklist_summary_and_zero_exit(
     repo = _make_repo(tmp_path)
     data_dir = tmp_path / "runtime data"
     monkeypatch.setattr(windows_deploy.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(windows_deploy.sys, "version_info", (3, 12, 4))
     monkeypatch.setattr(
         windows_deploy,
         "_command_version",
@@ -354,6 +424,7 @@ def test_doctor_cli_prints_stable_failure_and_nonzero_exit(
 ) -> None:
     repo = _make_repo(tmp_path)
     monkeypatch.setattr(windows_deploy.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(windows_deploy.sys, "version_info", (3, 12, 4))
     monkeypatch.setattr(
         windows_deploy,
         "_command_version",

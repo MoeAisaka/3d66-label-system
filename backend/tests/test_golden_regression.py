@@ -9,6 +9,7 @@ from app.database import Base, get_db
 from app.main import app, current_user
 from app.models import (
     Asset,
+    EvaluationCategoryProfile,
     EvaluationJob,
     EvaluationResult,
     HumanReview,
@@ -185,6 +186,90 @@ def test_golden_set_locks_runs_and_preserves_history() -> None:
                 PromptRegressionRun.trigger_prompt_id == prompt_b2.id
             )
         ) is None
+    finally:
+        app.dependency_overrides.clear()
+        db.close()
+        engine.dispose()
+
+
+def test_legacy_prompt_publish_requires_admin_and_isolated_from_global_regression() -> None:
+    engine = create_engine(
+        "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool
+    )
+    Base.metadata.create_all(engine)
+    db = Session(engine, expire_on_commit=False)
+    admin = User(username="admin", password_hash="unused", display_name="管理员", is_admin=True, role="admin")
+    reviewer = User(username="reviewer", password_hash="unused", display_name="审核员", is_admin=False, role="reviewer")
+    bound_prompt = PromptVersion(
+        stage="A", name="类目基线", version="bound-a", system_prompt="绑定类目 system prompt",
+        user_prompt="绑定类目 user prompt", rubric_version="R1", status="published"
+    )
+    prompt = PromptVersion(
+        stage="A", name="手工", version="legacy-a", system_prompt="完整手工 system prompt 文本",
+        user_prompt="请返回结构化结果", rubric_version="R1", status="draft"
+    )
+    bound_draft = PromptVersion(
+        stage="B", name="绑定草稿", version="bound-draft-b", system_prompt="绑定草稿 system prompt",
+        user_prompt="绑定草稿 user prompt", rubric_version="R1", status="draft"
+    )
+    rollback_current = PromptVersion(
+        stage="A", name="待回滚版本", version="rollback-current-a", system_prompt="待回滚 system prompt",
+        user_prompt="待回滚 user prompt", rubric_version="R1", status="published"
+    )
+    db.add_all([admin, reviewer, bound_prompt, prompt, bound_draft, rollback_current])
+    db.flush()
+    rollback_current.rollback_prompt_id = bound_prompt.id
+    db.add_all(
+        [
+            EvaluationCategoryProfile(
+                category_key="space_image",
+                display_name="空间图",
+                status="active",
+                prompt_a_id=bound_prompt.id,
+            ),
+            EvaluationCategoryProfile(
+                category_key="material_image",
+                display_name="材质图",
+                status="active",
+                prompt_b_id=bound_draft.id,
+            ),
+        ]
+    )
+    db.commit()
+    app.dependency_overrides[get_db] = lambda: db
+    try:
+        app.dependency_overrides[current_user] = lambda: reviewer
+        denied = TestClient(app).post(f"/api/prompts/{prompt.id}/publish")
+        assert denied.status_code == 403
+        denied_rollback = TestClient(app).post(
+            f"/api/prompts/{rollback_current.id}/rollback"
+        )
+        assert denied_rollback.status_code == 403
+        app.dependency_overrides[current_user] = lambda: admin
+        published = TestClient(app).post(f"/api/prompts/{prompt.id}/publish")
+        assert published.status_code == 200
+        assert published.json()["regression_run_ids"] == []
+        assert db.scalar(
+            select(PromptRegressionRun).where(
+                PromptRegressionRun.trigger_prompt_id == prompt.id
+            )
+        ) is None
+        assert bound_prompt.status == "published"
+
+        bound_publish = TestClient(app).post(
+            f"/api/prompts/{bound_draft.id}/publish"
+        )
+        assert bound_publish.status_code == 409
+        assert "活动类目" in bound_publish.text
+        assert bound_draft.status == "draft"
+
+        bound_rollback = TestClient(app).post(
+            f"/api/prompts/{rollback_current.id}/rollback"
+        )
+        assert bound_rollback.status_code == 409
+        assert "活动类目" in bound_rollback.text
+        assert rollback_current.status == "published"
+        assert bound_prompt.status == "published"
     finally:
         app.dependency_overrides.clear()
         db.close()

@@ -335,6 +335,13 @@ def _seed_pair(
         policy,
     )
     db.flush()
+    category_profile = db.scalar(
+        select(EvaluationCategoryProfile).where(
+            EvaluationCategoryProfile.category_key == "space_image"
+        )
+    )
+    assert category_profile is not None
+    category_profile.rubric_version = "paired-rubric-v1"
 
     sample_set = SampleSet(
         name="P0-C 冻结集",

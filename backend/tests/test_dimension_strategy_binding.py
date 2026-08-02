@@ -258,6 +258,34 @@ def test_same_bundle_resolves_historical_revision_without_identity_drift(
     )
 
 
+def test_explicit_dimension_contract_records_override_reason(
+    db: Session,
+) -> None:
+    bundle, prompt_a, prompt_b, policy = _v2_bundle(db)
+
+    payload = json.loads(
+        build_evaluation_strategy_snapshot(
+            db=db,
+            bundle=bundle,
+            prompt_a=prompt_a,
+            prompt_b=prompt_b,
+            sampling_policy=policy,
+            aesthetic={"scoring_profile": "legacy"},
+            dimension_schema_key=SPACE_SCHEMA_KEY,
+            dimension_schema_version=ACTIVE_V13_VERSION,
+        )
+    )
+
+    assert payload["resolved_dimension_schema_version"] == ACTIVE_V13_VERSION
+    assert payload["route_decision_snapshot"]["input"] == {
+        "scoring_profile": "legacy"
+    }
+    assert (
+        payload["route_decision_snapshot"]["reason"]
+        == "explicit_category_contract_override"
+    )
+
+
 @pytest.mark.parametrize(
     "tamper",
     ("schema_hash", "definition", "prompt_hash", "resolution_hash"),

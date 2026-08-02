@@ -60,6 +60,7 @@ MIGRATION_NAMES = [
     "add_evaluation_production_runs",
     "persist_worker_readiness",
     "bind_budget_settlement_to_run",
+    "bind_default_production_dimension",
 ]
 
 
@@ -128,7 +129,46 @@ def test_v44_worker_status_forward_migration_preserves_heartbeat(tmp_path) -> No
             )
             assert connection.exec_driver_sql(
                 "SELECT max(version) FROM schema_migrations"
-            ).scalar_one() == 46
+            ).scalar_one() == len(MIGRATION_NAMES)
+    finally:
+        engine.dispose()
+
+
+def test_v47_binds_only_profiles_without_a_dimension_contract(tmp_path) -> None:
+    engine = _engine(tmp_path, "v47-default-production-dimension.db")
+    try:
+        _create_latest_and_run_migrations(engine)
+        with engine.begin() as connection:
+            connection.exec_driver_sql(
+                "UPDATE evaluation_category_profiles SET "
+                "dimension_schema_key=NULL, dimension_schema_version=NULL "
+                "WHERE category_key IN ('space_image','pdf_text')"
+            )
+            connection.exec_driver_sql(
+                "UPDATE evaluation_category_profiles SET "
+                "dimension_schema_key='space_aesthetic', "
+                "dimension_schema_version='1.2.0' "
+                "WHERE category_key='material_image'"
+            )
+            connection.exec_driver_sql(
+                "DELETE FROM schema_migrations WHERE version=47"
+            )
+
+            run_migrations(connection)
+
+            rows = connection.exec_driver_sql(
+                "SELECT category_key, dimension_schema_key, "
+                "dimension_schema_version FROM evaluation_category_profiles "
+                "ORDER BY category_key"
+            ).fetchall()
+            assert rows == [
+                ("material_image", "space_aesthetic", "1.2.0"),
+                ("pdf_text", "space_aesthetic", "1.3.0"),
+                ("space_image", "space_aesthetic", "1.3.0"),
+            ]
+            assert connection.exec_driver_sql(
+                "SELECT name FROM schema_migrations WHERE version=47"
+            ).scalar_one() == "bind_default_production_dimension"
     finally:
         engine.dispose()
 

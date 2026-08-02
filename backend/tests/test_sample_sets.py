@@ -1,13 +1,116 @@
 import json
 
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
 from app.database import Base, get_db
-from app.main import app, current_user
-from app.models import Asset, EvaluationJob, EvaluationResult, User
+from app.main import _add_to_category_golden_set, app, current_user
+from app.models import (
+    Asset,
+    EvaluationJob,
+    EvaluationResult,
+    SampleSet,
+    SampleSetItem,
+    SampleTruthRevision,
+    User,
+)
+
+
+def test_system_golden_set_revises_truth_for_repeated_asset_correction() -> None:
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    db = Session(engine, expire_on_commit=False)
+    try:
+        asset = Asset(
+            original_name="repeat.jpg",
+            stored_name="repeat.jpg",
+            mime_type="image/jpeg",
+            size_bytes=100,
+            sha256="f" * 64,
+            category_key="space_image",
+        )
+        db.add(asset)
+        db.flush()
+        results = []
+        for index in (1, 2):
+            job = EvaluationJob(
+                asset_id=asset.id,
+                category_key="space_image",
+                status="completed",
+                stage="done",
+                progress=100,
+            )
+            db.add(job)
+            db.flush()
+            result = EvaluationResult(
+                asset_id=asset.id,
+                job_id=job.id,
+                precheck_json='{"classification":{"primary_category":"住宅设计"}}',
+                aesthetic_json=None,
+                scoring_json="{}",
+                raw_response_a="{}",
+                score=50 + index,
+                level="L3",
+                confidence=0.9,
+                needs_review=False,
+                model_id="repeat-model",
+                prompt_a_version="repeat-a",
+                prompt_b_version="repeat-b",
+                rubric_version="repeat-rubric",
+                engine_version="repeat-engine",
+            )
+            db.add(result)
+            db.flush()
+            results.append(result)
+
+        first_truth = {"corrected_level": "L3", "marker": "first"}
+        second_truth = {"corrected_level": "L2", "marker": "second"}
+        _add_to_category_golden_set(
+            db, evaluation=results[0], truth=first_truth, actor="reviewer-a"
+        )
+        db.flush()
+        _add_to_category_golden_set(
+            db, evaluation=results[0], truth=first_truth, actor="reviewer-a"
+        )
+        db.flush()
+        _add_to_category_golden_set(
+            db, evaluation=results[1], truth=second_truth, actor="reviewer-b"
+        )
+        db.flush()
+
+        sample_set = db.scalar(
+            select(SampleSet).where(SampleSet.name == "系统黄金集·space_image")
+        )
+        item = db.scalar(
+            select(SampleSetItem).where(SampleSetItem.sample_set_id == sample_set.id)
+        )
+        assert item.source_result_id == results[1].id
+        assert item.truth_revision == 2
+        assert json.loads(item.truth_json)["marker"] == "second"
+        assert db.scalar(
+            select(func.count()).select_from(SampleSetItem).where(
+                SampleSetItem.sample_set_id == sample_set.id
+            )
+        ) == 1
+        revisions = db.scalars(
+            select(SampleTruthRevision)
+            .where(SampleTruthRevision.sample_item_id == item.id)
+            .order_by(SampleTruthRevision.revision)
+        ).all()
+        assert [revision.revision for revision in revisions] == [1, 2]
+        assert [json.loads(revision.truth_json)["marker"] for revision in revisions] == [
+            "first",
+            "second",
+        ]
+    finally:
+        db.close()
+        engine.dispose()
 
 
 def test_sample_set_captures_human_final_level() -> None:

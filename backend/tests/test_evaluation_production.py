@@ -14,6 +14,7 @@ from app.database import Base, get_db
 from app.category_pipeline import default_pipeline
 from app.main import app, current_user
 from app.migrations import run_migrations
+from app.dimension_schema_registry import ACTIVE_V13_VERSION, SPACE_SCHEMA_KEY
 from app.models import (
     Asset,
     AutomationOptimizationRun,
@@ -122,6 +123,13 @@ def _context(
         )
         if include_model:
             db.add(model)
+        profile = db.scalar(
+            select(EvaluationCategoryProfile).where(
+                EvaluationCategoryProfile.category_key == "space_image"
+            )
+        )
+        profile.dimension_schema_key = SPACE_SCHEMA_KEY
+        profile.dimension_schema_version = ACTIVE_V13_VERSION
         db.commit()
 
     def override_db() -> Iterator[Session]:
@@ -483,10 +491,8 @@ def test_reconcile_links_real_final_package_without_approving_or_publishing() ->
         profile.prompt_a_id = fixture["prompt_a"].id
         profile.prompt_b_id = fixture["base_b"].id
         profile.model_config_id = fixture["model"].id
-        # This case exercises production-run reconciliation, not the separate
-        # dimension-candidate calibration gate used by the shared fixture.
-        profile.dimension_schema_key = None
-        profile.dimension_schema_version = None
+        profile.dimension_schema_key = SPACE_SCHEMA_KEY
+        profile.dimension_schema_version = ACTIVE_V13_VERSION
         db.commit()
         created = _create(client, material.id, "production-final-package")
         assert created.status_code == 200, created.text

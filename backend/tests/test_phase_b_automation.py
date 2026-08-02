@@ -1925,6 +1925,7 @@ def test_expired_lease_recovers_once_and_charges_reserved_budget() -> None:
             case_ids_json="[]",
             frozen_input_json="{}",
             estimated_cost_micros=1000,
+            created_at=now,
         )
         db.add(run)
         db.flush()
@@ -1950,6 +1951,64 @@ def test_expired_lease_recovers_once_and_charges_reserved_budget() -> None:
         assert case.status == "failed"
         assert budget.reserved_micros == 0
         assert budget.spent_micros == 1000
+    finally:
+        _close(engine, db)
+
+
+def test_expired_lease_cross_day_settles_original_reservation_budget() -> None:
+    engine, db, _user = _database()
+    try:
+        reserved_at = datetime(2026, 1, 3, 23, 59, tzinfo=timezone.utc)
+        recovered_at = reserved_at + timedelta(minutes=2)
+        _event, case, _duplicate = _feedback(db, event_id="lease-expired-cross-day")
+        run = AutomationOptimizationRun(
+            run_key="expired-run-cross-day",
+            base_prompt_version="prompt-b-v1",
+            policy_revision=1,
+            status="processing",
+            dry_run=False,
+            trigger_reason="case_threshold",
+            case_ids_json="[]",
+            frozen_input_json="{}",
+            estimated_cost_micros=1000,
+            created_at=reserved_at,
+        )
+        db.add(run)
+        db.flush()
+        case.status = "processing"
+        case.automation_run_id = run.id
+        case.lease_owner = "dead-worker"
+        case.lease_token = "expired-token"
+        case.lease_expires_at = recovered_at - timedelta(seconds=1)
+        db.add_all([
+            AutomationBudgetDay(
+                budget_date=reserved_at.date().isoformat(),
+                reserved_micros=1000,
+            ),
+            AutomationBudgetDay(
+                budget_date=recovered_at.date().isoformat(),
+                reserved_micros=2000,
+                spent_micros=100,
+            ),
+        ])
+        db.commit()
+
+        assert recover_expired_leases(db, now=recovered_at) == 1
+        db.commit()
+        assert recover_expired_leases(db, now=recovered_at) == 0
+        db.commit()
+
+        reservation_day = db.get(
+            AutomationBudgetDay, reserved_at.date().isoformat()
+        )
+        recovery_day = db.get(
+            AutomationBudgetDay, recovered_at.date().isoformat()
+        )
+        assert run.budget_settled is True
+        assert reservation_day.reserved_micros == 0
+        assert reservation_day.spent_micros == 1000
+        assert recovery_day.reserved_micros == 2000
+        assert recovery_day.spent_micros == 100
     finally:
         _close(engine, db)
 

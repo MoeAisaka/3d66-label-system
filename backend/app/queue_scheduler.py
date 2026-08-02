@@ -390,6 +390,15 @@ RETRYABLE_ERROR_TYPES = {
     "transient_parse",
 }
 
+DIMENSION_CONTRACT_ERROR_TYPES = {
+    "dimension_contract_incomplete",
+    "dimension_contract_missing",
+    "dimension_contract_ambiguous",
+    "dimension_contract_not_published",
+    "dimension_contract_invalid",
+    "dimension_contract_not_executable",
+}
+
 
 def bounded_retry_after_seconds(value: object) -> float | None:
     """Accept only finite non-negative delay seconds and cap provider input."""
@@ -424,7 +433,11 @@ def classify_technical_failure(
         error_type = "429"
     elif status_code is not None and 500 <= status_code <= 599:
         error_type = "provider5xx"
-    elif explicit_type in RETRYABLE_ERROR_TYPES | {"non_retryable"}:
+    elif explicit_type in (
+        RETRYABLE_ERROR_TYPES
+        | DIMENSION_CONTRACT_ERROR_TYPES
+        | {"non_retryable"}
+    ):
         error_type = str(explicit_type)
     elif isinstance(error, TimeoutError):
         error_type = "timeout"

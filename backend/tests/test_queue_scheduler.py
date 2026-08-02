@@ -21,6 +21,7 @@ from app.main import app, current_user
 from app.models import (
     Asset,
     CircuitBreaker,
+    DimensionSchema,
     EvaluationControl,
     EvaluationJob,
     LoopAttempt,
@@ -29,6 +30,13 @@ from app.models import (
     PromptVersion,
     StrategyBundle,
     User,
+)
+from app.dimension_schema_registry import (
+    ACTIVE_V13_VERSION,
+    SPACE_SCHEMA_KEY,
+    canonical_hash,
+    canonical_json,
+    space_schema_definition_for_version,
 )
 from app.queue_scheduler import (
     DEFAULT_SHARES,
@@ -681,7 +689,23 @@ def test_enqueue_compatibility_manual_canary_queue_status_and_breaker_api() -> N
         max_concurrency=20,
         encrypted_api_key="configured-test-reference",
     )
-    db.add_all([user, asset, prompt_a, prompt_b, model])
+    dimension_definition = space_schema_definition_for_version(
+        ACTIVE_V13_VERSION
+    )
+    dimension_schema = DimensionSchema(
+        schema_key=SPACE_SCHEMA_KEY,
+        version=ACTIVE_V13_VERSION,
+        schema_type="family_pack",
+        family_key="space",
+        display_name="空间现役维度",
+        status="published",
+        definition_json=canonical_json(dimension_definition),
+        canonical_hash=canonical_hash(dimension_definition),
+        created_by="test",
+        published_by="test",
+        published_at=datetime.now(timezone.utc),
+    )
+    db.add_all([user, asset, prompt_a, prompt_b, model, dimension_schema])
     db.commit()
 
     def test_db():

@@ -21,6 +21,7 @@ from app.migrations import run_migrations
 from app.models import (
     Asset,
     AuditEvent,
+    EvaluationCategoryProfile,
     EvaluationJob,
     MaterialPackage,
     ModelConfig,
@@ -333,6 +334,8 @@ def test_admin_can_create_modular_category_and_freeze_v2_job_contract(tmp_path: 
                 "pipeline_config": pipeline,
                 "prompt_a_id": prompt_id,
                 "prompt_b_id": None,
+                "dimension_schema_key": "space_aesthetic",
+                "dimension_schema_version": "1.3.0",
             },
         )
         assert activated.status_code == 200, activated.text
@@ -372,6 +375,15 @@ def test_material_category_requires_and_freezes_its_own_prompt_contract(
             },
         )
         asset_id = uploaded.json()["items"][0]["id"]
+        with sessions() as db:
+            profile = db.scalar(
+                select(EvaluationCategoryProfile).where(
+                    EvaluationCategoryProfile.category_key == "material_image"
+                )
+            )
+            profile.dimension_schema_key = "space_aesthetic"
+            profile.dimension_schema_version = "1.3.0"
+            db.commit()
         missing_prompt = client.post(
             "/api/jobs/enqueue",
             json={"asset_ids": [asset_id], "category_key": "material_image"},

@@ -49,11 +49,11 @@ def _precheck() -> dict[str, Any]:
     }
 
 
-def _aesthetic() -> dict[str, Any]:
+def _aesthetic(*, color_grade: int = 3) -> dict[str, Any]:
     return {
         "dimensions": {
             key: {
-                "grade": 3,
+                "grade": color_grade if key == "color_material" else 3,
                 "evidence": [f"{key} 的隔离验收证据"],
                 "defects": [],
             }
@@ -159,7 +159,12 @@ def _content(payload: dict[str, Any]) -> dict[str, Any] | str:
     if stage == "evaluation_stage_a":
         return _precheck()
     if stage == "evaluation_stage_b":
-        return _aesthetic()
+        # The baseline deliberately over-scores one dimension; the optimizer's
+        # candidate prompt removes that defect so paired regression can prove
+        # an actual behavioral improvement instead of merely replaying output.
+        return _aesthetic(
+            color_grade=3 if "E2E_STAGE_B_CANDIDATE" in _system_prompt(payload) else 5
+        )
     return "连接成功"
 
 

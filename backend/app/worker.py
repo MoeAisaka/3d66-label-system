@@ -78,6 +78,10 @@ from .optimization_automation import (
     optimization_worker_tick,
     touch_automation_worker_status,
 )
+from .production_dimension_contract import (
+    resolve_frozen_dimension_contract,
+    resolve_published_dimension_contract,
+)
 from .scoring import ENGINE_VERSION, calculate_score
 from .schema_adapter import (
     adapt_combined_aesthetic_response,
@@ -664,6 +668,7 @@ async def _evaluate_targeted_loop_job(
 
 
 async def evaluate_job(job_id: int) -> None:
+    production_dimension_contract = None
     with session_scope() as db:
         job = db.get(EvaluationJob, job_id)
         if not job:
@@ -882,9 +887,16 @@ async def evaluate_job(job_id: int) -> None:
             prompt_rubrics.add(prompt_b.rubric_version)
         if prompt_rubrics != {frozen_rubric}:
             raise RuntimeError("任务冻结类目 rubric 与 Prompt 不一致")
-        if category_profile_snapshot.get("dimension_schema_key") is not None:
-            raise RuntimeError(
-                "任务冻结类目维度候选尚未通过生产校准门"
+        production_dimension_contract = resolve_frozen_dimension_contract(
+            category_profile_snapshot,
+            bundle=frozen_bundle,
+        )
+        if production_dimension_contract is None:
+            production_dimension_contract = resolve_published_dimension_contract(
+                db,
+                schema_key=category_profile_snapshot.get("dimension_schema_key"),
+                version=category_profile_snapshot.get("dimension_schema_version"),
+                bundle=frozen_bundle,
             )
     image_path = settings.upload_dir / asset.stored_name
     if not image_path.exists():
@@ -1091,7 +1103,9 @@ async def evaluate_job(job_id: int) -> None:
     risk_review_report = None
     risk_review_raw = None
     dimension_definition = (
-        resolve_frozen_dimension_entry(
+        production_dimension_contract.definition
+        if production_dimension_contract is not None
+        else resolve_frozen_dimension_entry(
             bundle=frozen_bundle,
             aesthetic=aesthetic,
         )["definition"]
@@ -1166,7 +1180,9 @@ async def evaluate_job(job_id: int) -> None:
 
     _set_job(job_id, stage="scoring", progress=86)
     _ensure_job_processing(job_id)
-    if frozen_bundle is not None and (
+    if production_dimension_contract is not None:
+        dimension_definition = production_dimension_contract.definition
+    elif frozen_bundle is not None and (
         frozen_bundle.strategy_schema_version
         == STRATEGY_SCHEMA_VERSION
     ):
@@ -1225,6 +1241,14 @@ async def evaluate_job(job_id: int) -> None:
             prompt_b=prompt_b,
             sampling_policy=sampling_policy,
             aesthetic=aesthetic,
+            dimension_schema_key=(
+                production_dimension_contract.schema_key
+                if production_dimension_contract is not None else None
+            ),
+            dimension_schema_version=(
+                production_dimension_contract.version
+                if production_dimension_contract is not None else None
+            ),
         )
 
         result = EvaluationResult(

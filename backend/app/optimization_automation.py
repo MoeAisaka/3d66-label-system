@@ -887,8 +887,9 @@ def _settle_budget(
     now: datetime,
     reserved: int,
     actual: int,
+    reservation_time: datetime | None = None,
 ) -> None:
-    row = _budget_row(db, now)
+    row = _budget_row(db, reservation_time or now)
     updated = db.execute(
         update(AutomationBudgetDay)
         .where(
@@ -972,12 +973,21 @@ def recover_expired_leases(
         for run in runs:
             claimed_budget = _try_claim_run_budget(db, run_id=run.id)
             if claimed_budget:
-                _settle_budget(
-                    db,
-                    now=current,
-                    reserved=run.estimated_cost_micros,
-                    actual=run.estimated_cost_micros,
-                )
+                try:
+                    _settle_budget(
+                        db,
+                        now=current,
+                        reserved=run.estimated_cost_micros,
+                        actual=run.estimated_cost_micros,
+                        reservation_time=_aware(run.created_at),
+                    )
+                except Exception:
+                    db.execute(
+                        update(AutomationOptimizationRun)
+                        .where(AutomationOptimizationRun.id == run.id)
+                        .values(budget_settled=False)
+                    )
+                    raise
             recovered = db.execute(
                 update(OptimizationCaseQueue)
                 .where(
@@ -1523,6 +1533,7 @@ def consume_optimization_queue_once(
         frozen_input_json=canonical_json(frozen_input),
         estimated_cost_micros=estimated_cost,
         created_by=worker_id,
+        created_at=current,
     )
     db.add(run)
     db.flush()

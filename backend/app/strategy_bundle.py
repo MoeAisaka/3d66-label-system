@@ -1680,6 +1680,8 @@ def build_evaluation_strategy_snapshot(
     prompt_b: PromptVersion | None,
     sampling_policy: SamplingPolicy | None,
     aesthetic: dict[str, Any] | None,
+    dimension_schema_key: str | None = None,
+    dimension_schema_version: str | None = None,
 ) -> str:
     """Resolve one frozen DimensionSchema for a persisted evaluation result."""
     snapshot = json.loads(
@@ -1696,6 +1698,8 @@ def build_evaluation_strategy_snapshot(
     selected = resolve_frozen_dimension_entry(
         bundle=bundle,
         aesthetic=aesthetic,
+        schema_key=dimension_schema_key,
+        version=dimension_schema_version,
     )
     schema = db.scalar(
         select(DimensionSchema).where(
@@ -1724,6 +1728,10 @@ def build_evaluation_strategy_snapshot(
         if isinstance(aesthetic, dict)
         else None
     )
+    explicit_dimension_contract = (
+        dimension_schema_key is not None
+        and dimension_schema_version is not None
+    )
     route_decision = {
         "policy_id": bundle.dimension_route_policy_id,
         "family_key": schema.family_key,
@@ -1733,7 +1741,9 @@ def build_evaluation_strategy_snapshot(
         "dimension_schema_hash": schema.canonical_hash,
         "input": {"scoring_profile": scoring_profile},
         "reason": (
-            "scoring_profile_matches_active_v1_3"
+            "explicit_category_contract_override"
+            if explicit_dimension_contract
+            else "scoring_profile_matches_active_v1_3"
             if schema.version == ACTIVE_V13_VERSION
             else "historical_default_compatibility"
         ),
@@ -1760,6 +1770,8 @@ def resolve_frozen_dimension_entry(
     *,
     bundle: StrategyBundle,
     aesthetic: dict[str, Any] | None,
+    schema_key: str | None = None,
+    version: str | None = None,
 ) -> dict[str, Any]:
     """Resolve one definition only from the bundle's immutable candidate set."""
     schema_version = (
@@ -1786,12 +1798,15 @@ def resolve_frozen_dimension_entry(
     if not isinstance(entries, list):
         raise ValueError("StrategyBundle 缺少冻结维度集合")
 
+    if bool(schema_key) != bool(version):
+        raise ValueError("冻结维度身份必须同时包含 schema_key 和 version")
     scoring_profile = (
         aesthetic.get("scoring_profile")
         if isinstance(aesthetic, dict)
         else None
     )
-    resolved_version = (
+    resolved_schema_key = schema_key or SPACE_SCHEMA_KEY
+    resolved_version = version or (
         ACTIVE_V13_VERSION
         if scoring_profile == "space_aesthetic_v1.3"
         else HISTORICAL_DEFAULT_VERSION
@@ -1801,7 +1816,7 @@ def resolve_frozen_dimension_entry(
             entry
             for entry in entries
             if isinstance(entry, dict)
-            and entry.get("schema_key") == SPACE_SCHEMA_KEY
+            and entry.get("schema_key") == resolved_schema_key
             and entry.get("version") == resolved_version
         ),
         None,

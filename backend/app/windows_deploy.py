@@ -15,10 +15,11 @@ import subprocess
 import sys
 import tempfile
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
-from typing import Callable, Mapping, Sequence
+from typing import Callable, Iterator, Mapping, Sequence
 
 from .migrations.runner import MIGRATIONS
 from .security import (
@@ -289,11 +290,15 @@ def _existing_writable_ancestor(path: Path) -> Path:
     return candidate
 
 
-def _sqlite_connect_readonly(path: Path) -> sqlite3.Connection:
+@contextmanager
+def _sqlite_connect_readonly(path: Path) -> Iterator[sqlite3.Connection]:
     uri = path.resolve(strict=True).as_uri() + "?mode=ro"
     connection = sqlite3.connect(uri, uri=True, timeout=10)
-    connection.execute("PRAGMA busy_timeout=10000")
-    return connection
+    try:
+        connection.execute("PRAGMA busy_timeout=10000")
+        yield connection
+    finally:
+        connection.close()
 
 
 def _integrity_check(connection: sqlite3.Connection) -> None:
@@ -902,6 +907,23 @@ def _replace_images(staged: Path, target: Path) -> None:
         shutil.rmtree(displaced)
 
 
+def _replace_database(staged: Path, target: Path) -> None:
+    """Replace SQLite without relying on Windows overwrite-in-place semantics."""
+    displaced = target.parent / f".app-db-displaced-{uuid.uuid4().hex}"
+    had_target = target.exists()
+    if had_target:
+        _reject_reparse_components(target, "目标数据库")
+        os.replace(target, displaced)
+    try:
+        os.replace(staged, target)
+    except Exception:
+        if had_target and displaced.exists():
+            os.replace(displaced, target)
+        raise
+    if displaced.exists():
+        displaced.unlink()
+
+
 def _apply_staged_restore(staging: Path, data_dir: Path) -> None:
     _reject_reparse_components(data_dir, "DATA_DIR")
     database_target = data_dir / "database" / "app.db"
@@ -910,7 +932,7 @@ def _apply_staged_restore(staging: Path, data_dir: Path) -> None:
     if database_target.exists():
         _reject_reparse_components(database_target, "目标数据库")
     _remove_sqlite_sidecars(database_target)
-    os.replace(staging / "database" / "app.db", database_target)
+    _replace_database(staging / "database" / "app.db", database_target)
     _replace_images(staging / "images", data_dir / "images")
     with _sqlite_connect_readonly(database_target) as connection:
         _validate_supported_database(connection)
@@ -934,7 +956,10 @@ def _restore_rollback(
                 snapshot / "database" / "app.db",
                 rollback_stage / "database" / "app.db",
             )
-            os.replace(rollback_stage / "database" / "app.db", database_target)
+            _replace_database(
+                rollback_stage / "database" / "app.db",
+                database_target,
+            )
         elif database_target.exists():
             _reject_reparse_components(database_target, "目标数据库")
             database_target.unlink()

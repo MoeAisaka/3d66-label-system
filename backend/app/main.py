@@ -56,6 +56,10 @@ from .category_pipeline import (
     validate_pipeline_config,
 )
 from .database import SessionLocal, get_db, init_database
+from .production_dimension_contract import (
+    ProductionDimensionContractError,
+    resolve_published_dimension_contract,
+)
 from .doubao import DoubaoClient
 from .migration import compare_results
 from .models import (
@@ -230,7 +234,11 @@ from .scoring import (
     calculate_corrected_score,
     dimension_schema_from_strategy_snapshot,
 )
-from .dimension_schema_registry import canonical_hash
+from .dimension_schema_registry import (
+    ACTIVE_V13_VERSION,
+    SPACE_SCHEMA_KEY,
+    canonical_hash,
+)
 from .strategy_bundle import (
     build_model_config_snapshot,
     build_strategy_snapshot,
@@ -590,6 +598,8 @@ class EnqueueRequest(BaseModel):
     def validate_prompt_mode(self) -> "EnqueueRequest":
         if self.prompt_id and (self.prompt_a_id or self.prompt_b_id):
             raise ValueError("单提示词模式不能同时选择 A/B 提示词")
+        if (self.prompt_a_id is None) != (self.prompt_b_id is None):
+            raise ValueError("A/B 提示词必须同时选择")
         if self.manual_recheck and len(self.asset_ids) != 1:
             raise ValueError("人工单图复判只能包含一张图片")
         if self.manual_recheck and self.queue_class not in (None, "interactive"):
@@ -2492,6 +2502,8 @@ def _category_profile(
             pipeline_config_json=canonical_json(default_pipeline(category_key)),
             status="active",
             rubric_version="rubric-v2.1",
+            dimension_schema_key=SPACE_SCHEMA_KEY,
+            dimension_schema_version=ACTIVE_V13_VERSION,
             created_by="compatibility-default",
         )
         db.add(profile)
@@ -2549,6 +2561,7 @@ def _category_execution_snapshot(
     prompt_b_id: int | None,
     model_config: ModelConfig,
     pdf_summary_model_config: ModelConfig | None = None,
+    dimension_contract: Any | None = None,
 ) -> str:
     return canonical_json(
         {
@@ -2578,6 +2591,16 @@ def _category_execution_snapshot(
             "rubric_version": profile.rubric_version,
             "dimension_schema_key": profile.dimension_schema_key,
             "dimension_schema_version": profile.dimension_schema_version,
+            "dimension_contract": (
+                {
+                    "schema_id": dimension_contract.schema_id,
+                    "schema_key": dimension_contract.schema_key,
+                    "version": dimension_contract.version,
+                    "canonical_hash": dimension_contract.canonical_hash,
+                    "definition": dimension_contract.definition,
+                }
+                if dimension_contract is not None else None
+            ),
             "profile_updated_at": (
                 profile.updated_at.isoformat()
                 if profile.updated_at is not None
@@ -2654,6 +2677,19 @@ def _apply_category_update(
         category_model = db.get(ModelConfig, payload.model_config_id)
         if category_model is None or not category_model.active:
             raise HTTPException(status_code=422, detail="类目模型配置不存在或未启用")
+    if payload.status == "active":
+        try:
+            resolve_published_dimension_contract(
+                db,
+                schema_key=payload.dimension_schema_key,
+                version=payload.dimension_schema_version,
+                require_configured=True,
+            )
+        except ProductionDimensionContractError as exc:
+            raise HTTPException(
+                status_code=422,
+                detail={"code": exc.code, "message": str(exc)},
+            ) from exc
     profile.display_name = payload.display_name.strip()
     profile.description = payload.description.strip()
     profile.status = payload.status
@@ -3676,11 +3712,18 @@ def _enqueue_jobs(
 ) -> dict[str, Any]:
     profile = _category_profile(db, payload.category_key, require_active=True)
     pipeline = _profile_pipeline(profile)
-    if profile.dimension_schema_key is not None:
+    try:
+        dimension_contract = resolve_published_dimension_contract(
+            db,
+            schema_key=profile.dimension_schema_key,
+            version=profile.dimension_schema_version,
+            require_configured=True,
+        )
+    except ProductionDimensionContractError as exc:
         raise HTTPException(
             status_code=409,
-            detail="该类目绑定的维度候选尚未通过生产校准门",
-        )
+            detail={"code": exc.code, "message": str(exc)},
+        ) from exc
     assets = db.scalars(
         select(Asset).where(
             Asset.id.in_(payload.asset_ids),
@@ -3711,7 +3754,24 @@ def _enqueue_jobs(
             raise HTTPException(status_code=400, detail=f"没有可用的提示词 {stage} 发布版本")
         return prompt
 
+    prompt_mode = pipeline["prompt_mode"]
     explicit_pair = payload.prompt_a_id is not None or payload.prompt_b_id is not None
+    if prompt_mode == "single" and explicit_pair:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "prompt_mode_mismatch",
+                "message": "该类目固定使用单提示词，请选择单提示词版本。",
+            },
+        )
+    if prompt_mode == "ab" and payload.prompt_id is not None:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "prompt_mode_mismatch",
+                "message": "该类目固定使用 A/B 提示词，请同时选择 A 与 B 版本。",
+            },
+        )
     profile_single_id = (
         profile.prompt_a_id
         if not explicit_pair
@@ -3731,10 +3791,30 @@ def _enqueue_jobs(
         if explicit_pair
         else profile.prompt_b_id
     )
-    if pipeline["prompt_mode"] != "follow" and selected_single_id is None and selected_a_id is None:
+    if prompt_mode != "follow" and selected_single_id is None and selected_a_id is None:
         raise HTTPException(
             status_code=409,
             detail="请先为该评测类目绑定专属提示词",
+        )
+    if prompt_mode == "single" and selected_single_id is None:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "prompt_mode_mismatch",
+                "message": "该类目固定使用单提示词，但冻结方案不是单提示词合同。",
+            },
+        )
+    if prompt_mode == "ab" and (
+        selected_single_id is not None
+        or selected_a_id is None
+        or selected_b_id is None
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "prompt_mode_mismatch",
+                "message": "该类目固定使用 A/B 提示词，但冻结方案缺少完整 A/B 合同。",
+            },
         )
     single_prompt = db.get(PromptVersion, selected_single_id) if selected_single_id else None
     if selected_single_id and (
@@ -3792,6 +3872,7 @@ def _enqueue_jobs(
         prompt_b_id=frozen_prompt_b_id,
         model_config=selected_model,
         pdf_summary_model_config=pdf_summary_model,
+        dimension_contract=dimension_contract,
     )
     jobs = []
     queue_class = (
@@ -4787,6 +4868,27 @@ def publish_prompt(
             "evaluation_package_id": published_package.id,
             "duplicate": duplicate,
         }
+    binding_column = (
+        EvaluationCategoryProfile.prompt_a_id
+        if prompt.stage == "A"
+        else EvaluationCategoryProfile.prompt_b_id
+    )
+    active_bindings = int(
+        db.scalar(
+            select(func.count())
+            .select_from(EvaluationCategoryProfile)
+            .where(
+                EvaluationCategoryProfile.status == "active",
+                binding_column == prompt.id,
+            )
+        )
+        or 0
+    )
+    if active_bindings:
+        raise HTTPException(
+            status_code=409,
+            detail="活动类目使用中的提示词必须通过类目评测包执行发布",
+        )
     # Legacy manual publication can make an unbound draft discoverable, but it
     # must not archive versions that remain executable baselines elsewhere.
     prompt.rollback_prompt_id = None
@@ -5449,35 +5551,51 @@ def _add_to_category_golden_set(
     existing = db.scalar(
         select(SampleSetItem).where(
             SampleSetItem.sample_set_id == sample_set.id,
-            SampleSetItem.source_result_id == evaluation.id,
+            SampleSetItem.asset_id == evaluation.asset_id,
         )
     )
-    if existing is not None:
+    if existing is not None and existing.source_result_id == evaluation.id:
         return
     source_payload = _result_payload(evaluation) or {}
     category = (
         (source_payload.get("precheck") or {}).get("classification") or {}
     ).get("primary_category") or "无法判断"
     expected_level = truth.get("corrected_level") or evaluation.level
-    item = SampleSetItem(
-        sample_set_id=sample_set.id,
-        asset_id=evaluation.asset_id,
-        source_result_id=evaluation.id,
-        expected_level=expected_level,
-        expected_category=str(category),
-        truth_json=json.dumps(truth, ensure_ascii=False),
-        truth_updated_by=actor,
-        truth_updated_at=datetime.now(timezone.utc),
-        added_by=actor,
-    )
-    db.add(item)
-    db.flush()
+    truth_json = json.dumps(truth, ensure_ascii=False)
+    if existing is None:
+        item = SampleSetItem(
+            sample_set_id=sample_set.id,
+            asset_id=evaluation.asset_id,
+            source_result_id=evaluation.id,
+            expected_level=expected_level,
+            expected_category=str(category),
+            truth_json=truth_json,
+            truth_revision=1,
+            truth_updated_by=actor,
+            truth_updated_at=datetime.now(timezone.utc),
+            added_by=actor,
+        )
+        db.add(item)
+        db.flush()
+    else:
+        item = existing
+        item.source_result_id = evaluation.id
+        item.expected_level = expected_level
+        item.expected_category = str(category)
+        item.truth_json = truth_json
+        item.truth_revision += 1
+        item.truth_updated_by = actor
+        item.truth_updated_at = datetime.now(timezone.utc)
     db.add(
         SampleTruthRevision(
             sample_item_id=item.id,
-            revision=1,
+            revision=item.truth_revision,
             truth_json=item.truth_json,
-            reason="最终人工纠偏自动沉淀为类目黄金样本",
+            reason=(
+                "最终人工纠偏自动沉淀为类目黄金样本"
+                if item.truth_revision == 1
+                else "同一素材形成新的最终人工真值"
+            ),
             reviewer_name=actor,
         )
     )

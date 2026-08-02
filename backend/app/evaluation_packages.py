@@ -1557,6 +1557,7 @@ def _activate_package_category_baseline(
             EvaluationCategoryProfile.automation_revision == expected_revision,
             EvaluationCategoryProfile.pipeline_revision == expected_pipeline_revision,
             EvaluationCategoryProfile.automation_config_json == profile.automation_config_json,
+            EvaluationCategoryProfile.pipeline_config_json == canonical_json(frozen_pipeline),
         )
         .values(
             prompt_a_id=package.prompt_a_id,

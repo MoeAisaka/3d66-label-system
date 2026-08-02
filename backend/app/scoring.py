@@ -327,6 +327,13 @@ def _compile_dimension_contract(
     }
 
 
+def validate_dimension_scoring_contract(
+    definition: dict[str, Any],
+) -> None:
+    """Fail fast when a registered schema cannot drive this scoring engine."""
+    _compile_dimension_contract(definition)
+
+
 def _status(item: dict[str, Any] | None) -> tuple[str, float]:
     if not isinstance(item, dict):
         return "uncertain", 0.0

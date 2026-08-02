@@ -6287,6 +6287,31 @@ def _migration_046_bind_budget_settlement_to_run(connection: Connection) -> None
         )
 
 
+def _migration_047_bind_default_production_dimension(connection: Connection) -> None:
+    """Make every existing category executable without overriding explicit choices."""
+    tables = {
+        row[0]
+        for row in connection.exec_driver_sql(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )
+    }
+    if not {"evaluation_category_profiles", "dimension_schemas"}.issubset(tables):
+        return
+    available = connection.exec_driver_sql(
+        "SELECT 1 FROM dimension_schemas "
+        "WHERE schema_key='space_aesthetic' AND version='1.3.0' "
+        "AND status='published' LIMIT 1"
+    ).first()
+    if available is None:
+        raise RuntimeError("默认生产维度 space_aesthetic@1.3.0 不存在或未发布")
+    connection.exec_driver_sql(
+        "UPDATE evaluation_category_profiles "
+        "SET dimension_schema_key='space_aesthetic', "
+        "dimension_schema_version='1.3.0', updated_at=CURRENT_TIMESTAMP "
+        "WHERE dimension_schema_key IS NULL AND dimension_schema_version IS NULL"
+    )
+
+
 MIGRATIONS = [
     Migration(1, "add_sample_expected_level", _migration_001_add_sample_expected_level),
     Migration(2, "add_review_corrections", _migration_002_add_review_corrections),
@@ -6473,6 +6498,11 @@ MIGRATIONS = [
         46,
         "bind_budget_settlement_to_run",
         _migration_046_bind_budget_settlement_to_run,
+    ),
+    Migration(
+        47,
+        "bind_default_production_dimension",
+        _migration_047_bind_default_production_dimension,
     ),
 ]
 

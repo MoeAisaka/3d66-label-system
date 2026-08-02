@@ -964,7 +964,7 @@ def test_publish_rejects_pipeline_drift_even_when_prompt_mode_is_unchanged() -> 
         pipeline = json.loads(profile.pipeline_config_json)
         pipeline["prompt_context"]["instruction"] = "changed after package freeze"
         profile.pipeline_config_json = canonical_json(pipeline)
-        profile.pipeline_revision += 1
+        # Simulate an out-of-band edit that incorrectly omitted the revision bump.
         db.commit()
         response = client.post(f"/api/evaluation-packages/{package_id}/publish", json={})
         assert response.status_code == 409
@@ -973,6 +973,91 @@ def test_publish_rejects_pipeline_drift_even_when_prompt_mode_is_unchanged() -> 
         assert db.get(EvaluationPackage, package_id).status == "approved"
     finally:
         _close(fixture["engine"], db)
+
+
+def test_two_approved_packages_cannot_concurrently_promote_the_same_category(
+    tmp_path: Path,
+) -> None:
+    fixture = _fixture(path=tmp_path / "competing-package-publish.db")
+    client = fixture["client"]
+    db = fixture["db"]
+    try:
+        profile = db.scalar(select(EvaluationCategoryProfile).where(
+            EvaluationCategoryProfile.category_key == "space_image"
+        ))
+        assert profile is not None
+        profile.prompt_a_id = fixture["prompt_a"].id
+        profile.prompt_b_id = fixture["base_b"].id
+        profile.model_config_id = fixture["model"].id
+        profile.rubric_version = fixture["candidate_bundle"].rubric_version
+        profile.dimension_schema_key = "space_aesthetic"
+        profile.dimension_schema_version = "1.3.0"
+        db.commit()
+        ids = [
+            client.post("/api/evaluation-packages", json=_create_payload(fixture, key)).json()["id"]
+            for key in ("competing-package-a", "competing-package-b")
+        ]
+        for package_id in ids:
+            assert client.post(
+                f"/api/evaluation-packages/{package_id}/approve", json={"note": "approved"}
+            ).status_code == 200
+        expected_revision = profile.automation_revision + 1
+        thread_user = User(
+            username="package-admin",
+            password_hash="unused",
+            display_name="评测包管理员",
+            is_admin=True,
+            role="admin",
+        )
+        db.close()
+        SessionLocal = sessionmaker(bind=fixture["engine"], expire_on_commit=False)
+
+        def override_db():
+            session = SessionLocal()
+            try:
+                yield session
+            finally:
+                session.close()
+
+        app.dependency_overrides[get_db] = override_db
+        app.dependency_overrides[current_user] = lambda: thread_user
+
+        def publish(package_id: int) -> int:
+            thread_client = TestClient(app)
+            try:
+                return thread_client.post(
+                    f"/api/evaluation-packages/{package_id}/publish", json={}
+                ).status_code
+            finally:
+                thread_client.close()
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            statuses = list(pool.map(publish, ids))
+        assert sorted(statuses) == [200, 409]
+        with SessionLocal() as check:
+            package_statuses = sorted(
+                check.get(EvaluationPackage, package_id).status for package_id in ids
+            )
+            assert package_statuses == ["approved", "published"]
+            current_profile = check.scalar(
+                select(EvaluationCategoryProfile).where(
+                    EvaluationCategoryProfile.category_key == "space_image"
+                )
+            )
+            assert current_profile is not None
+            assert current_profile.automation_revision == expected_revision
+            assert check.scalar(
+                select(func.count())
+                .select_from(AuditEvent)
+                .where(
+                    AuditEvent.action == "published",
+                    AuditEvent.subject_type == "evaluation_package",
+                    AuditEvent.subject_id.in_([str(package_id) for package_id in ids]),
+                )
+            ) == 1
+    finally:
+        app.dependency_overrides.clear()
+        fixture["engine"].dispose()
 
 
 def test_old_paired_approval_cannot_bypass_package_gate() -> None:
