@@ -15,6 +15,7 @@ from app.main import app, current_user
 from app.migrations import run_migrations
 from app.models import (
     Asset,
+    EvaluationCategoryProfile,
     EvaluationJob,
     EvaluationResult,
     HumanReview,
@@ -1113,6 +1114,43 @@ def test_metric_rule_version_cannot_silently_change_thresholds() -> None:
         second = seed.client.post("/api/paired-regressions", json=changed)
         assert second.status_code == 400
         assert "同一指标规则版本" in second.json()["detail"]
+    finally:
+        _close(seed)
+
+
+def test_paired_regression_rejects_bundle_outside_configured_category_contract() -> None:
+    seed = _seed_pair()
+    try:
+        profile = seed.db.scalar(
+            select(EvaluationCategoryProfile).where(
+                EvaluationCategoryProfile.category_key == "space_image"
+            )
+        )
+        assert profile is not None
+        dimension = json.loads(
+            seed.baseline_bundle.dimension_schema_set_snapshot
+        )["schemas"][0]
+        profile.prompt_a_id = seed.prompts["baseline_a"].id
+        profile.prompt_b_id = seed.prompts["baseline_b"].id
+        profile.model_config_id = seed.model.id
+        profile.rubric_version = seed.baseline_bundle.rubric_version
+        profile.dimension_schema_key = dimension["schema_key"]
+        profile.dimension_schema_version = dimension["version"]
+        profile.automation_config_json = json.dumps(
+            {
+                "enabled": True,
+                "baseline_strategy_bundle_id": seed.baseline_bundle.id,
+            }
+        )
+        seed.db.commit()
+
+        response = seed.client.post(
+            "/api/paired-regressions", json=_create_payload(seed)
+        )
+
+        assert response.status_code == 409
+        assert "类目合同不一致" in response.json()["detail"]
+        assert seed.db.scalar(select(PromptRegressionRun.id)) is None
     finally:
         _close(seed)
 

@@ -24,6 +24,57 @@ DIMENSION_KEYS = (
 )
 
 
+def _bind_profile_baseline_contract(
+    *,
+    profile: Any,
+    baseline_bundle: Any,
+    dimension_schema_key: str,
+    dimension_schema_version: str,
+) -> dict[str, Any]:
+    """Bind one category profile to identities frozen by its baseline bundle."""
+    try:
+        dimension_set = json.loads(
+            baseline_bundle.dimension_schema_set_snapshot or "{}"
+        )
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("seed_baseline_dimension_contract_invalid") from exc
+    schemas = (
+        dimension_set.get("schemas")
+        if isinstance(dimension_set, dict)
+        else None
+    )
+    matching_schemas = [
+        item
+        for item in schemas or []
+        if isinstance(item, dict)
+        and item.get("schema_key") == dimension_schema_key
+        and item.get("version") == dimension_schema_version
+    ]
+    if len(matching_schemas) != 1:
+        raise RuntimeError("seed_baseline_dimension_contract_missing")
+
+    try:
+        automation_config = json.loads(profile.automation_config_json or "{}")
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("seed_profile_automation_config_invalid") from exc
+    if not isinstance(automation_config, dict):
+        raise RuntimeError("seed_profile_automation_config_not_object")
+    automation_config["baseline_strategy_bundle_id"] = baseline_bundle.id
+    profile.automation_config_json = json.dumps(
+        automation_config,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    profile.dimension_schema_key = dimension_schema_key
+    profile.dimension_schema_version = dimension_schema_version
+    return {
+        "baseline_strategy_bundle_id": baseline_bundle.id,
+        "dimension_schema_key": dimension_schema_key,
+        "dimension_schema_version": dimension_schema_version,
+    }
+
+
 def _precheck() -> dict[str, Any]:
     return {
         "classification": {
@@ -87,6 +138,10 @@ def main() -> None:
     from sqlalchemy import select
 
     from app.database import init_database, session_scope
+    from app.dimension_schema_registry import (
+        ACTIVE_V13_VERSION,
+        SPACE_SCHEMA_KEY,
+    )
     from app.models import (
         Asset,
         AutomationPolicy,
@@ -114,6 +169,7 @@ def main() -> None:
         build_evaluation_strategy_snapshot,
         get_or_create_bundle,
     )
+    from app.optimization_automation import category_bundle_contract_errors
 
     init_database()
     with session_scope() as db:
@@ -245,6 +301,26 @@ def main() -> None:
             None,
             sampling,
         )
+        baseline_contract = _bind_profile_baseline_contract(
+            profile=profile,
+            baseline_bundle=baseline_bundle,
+            dimension_schema_key=SPACE_SCHEMA_KEY,
+            dimension_schema_version=ACTIVE_V13_VERSION,
+        )
+        db.flush()
+        baseline_contract_errors = category_bundle_contract_errors(
+            db,
+            profile=profile,
+            bundle=baseline_bundle,
+            require_complete=True,
+            require_prompt_b=True,
+            enforce_baseline_id=True,
+        )
+        if baseline_contract_errors:
+            raise RuntimeError(
+                "seed_profile_baseline_contract_mismatch:"
+                + ",".join(baseline_contract_errors)
+            )
         sample_set = SampleSet(
             name="自动化 E2E 三角色黄金集",
             description="真实 Worker 与自动配对回归隔离验收",
@@ -402,6 +478,8 @@ def main() -> None:
                     "prompt_a_id": prompt_a.id,
                     "prompt_b_id": prompt_b.id,
                     "baseline_bundle_id": baseline_bundle.id,
+                    "baseline_contract": baseline_contract,
+                    "baseline_contract_errors": baseline_contract_errors,
                     "sample_set_id": sample_set.id,
                     "source_result_ids": result_ids,
                     "feedback_event_id": event.id,

@@ -36,9 +36,187 @@ from .doubao import response_usage
 from .optimizer import generate_automation_candidates
 from .regression import latest_review_for_result, reviewed_truth_snapshot
 from .strategy_bundle import get_or_create_bundle
+from .strategy_bundle import build_model_config_snapshot
 
 
 logger = logging.getLogger("3d66.automation")
+OPTIMIZER_MODEL_CALLS_PER_RUN = 2
+MATERIALIZE_REGRESSION_SAFETY_SECONDS = 120
+AUTOMATION_CONFIGURATION_BLOCKER_CODES = frozenset(
+    {
+        "optimizer_config_incomplete",
+        "regression_binding_missing",
+        "baseline_category_contract_incomplete",
+        "baseline_category_contract_mismatch",
+        "baseline_strategy_bundle_invalid",
+        "baseline_strategy_bundle_missing",
+        "baseline_strategy_bundle_not_found",
+        "baseline_strategy_bundle_ambiguous",
+        "baseline_strategy_bundle_contract_mismatch",
+    }
+)
+
+
+class AutomationConfigurationBlocker(ValueError):
+    """Stable, actionable reason why one automation cohort cannot run."""
+
+    def __init__(self, code: str, message: str):
+        super().__init__(message)
+        self.code = code
+        self.message = message
+
+
+def _category_contract_definition_errors(
+    db: Session,
+    *,
+    profile: EvaluationCategoryProfile | None,
+    require_prompt_b: bool,
+) -> list[str]:
+    if profile is None:
+        return ["category_profile_missing"]
+    errors: list[str] = []
+    required_refs = {
+        "prompt_a": (profile.prompt_a_id, PromptVersion, "A"),
+        "model_config": (profile.model_config_id, ModelConfig, None),
+    }
+    if require_prompt_b:
+        required_refs["prompt_b"] = (profile.prompt_b_id, PromptVersion, "B")
+    for name, (identity, model_type, expected_stage) in required_refs.items():
+        if identity is None:
+            errors.append(f"{name}_id_missing")
+            continue
+        entity = db.get(model_type, identity)
+        if entity is None:
+            errors.append(f"{name}_missing")
+        elif expected_stage is not None and entity.stage != expected_stage:
+            errors.append(f"{name}_stage_mismatch")
+    if not (profile.rubric_version or "").strip():
+        errors.append("rubric_version_missing")
+    if not profile.dimension_schema_key or not profile.dimension_schema_version:
+        errors.append("dimension_contract_missing")
+    return list(dict.fromkeys(errors))
+
+
+def _resolve_category_baseline_bundle(
+    db: Session,
+    *,
+    profile: EvaluationCategoryProfile | None,
+    base_prompt: PromptVersion,
+    freeze_automatic_binding: bool,
+) -> tuple[StrategyBundle, str]:
+    """Resolve one explicit or uniquely matching full category contract."""
+    if profile is None:
+        raise AutomationConfigurationBlocker(
+            "baseline_category_contract_incomplete",
+            "类目配置不存在；请由管理员先创建并启用类目合同。",
+        )
+    definition_errors = _category_contract_definition_errors(
+        db, profile=profile, require_prompt_b=True
+    )
+    if definition_errors:
+        raise AutomationConfigurationBlocker(
+            "baseline_category_contract_incomplete",
+            "类目基线合同未完整配置 A/B Prompt、模型、Rubric 和维度 Schema；"
+            "请在后台高级设置补齐后重试。",
+        )
+    configured_prompt_b = db.get(PromptVersion, profile.prompt_b_id)
+    if configured_prompt_b is None or configured_prompt_b.version != base_prompt.version:
+        raise AutomationConfigurationBlocker(
+            "baseline_category_contract_mismatch",
+            "待优化案例的 B Prompt 与当前类目合同不一致；"
+            "请先归档旧案例或恢复对应类目版本。",
+        )
+
+    config = _safe_json_object(profile.automation_config_json)
+    baseline_bundle_id = config.get("baseline_strategy_bundle_id")
+    if baseline_bundle_id is not None:
+        if (
+            not isinstance(baseline_bundle_id, int)
+            or isinstance(baseline_bundle_id, bool)
+            or baseline_bundle_id < 1
+        ):
+            raise AutomationConfigurationBlocker(
+                "baseline_strategy_bundle_invalid",
+                "类目显式基线 ID 无效；请由管理员在后台高级设置重新选择。",
+            )
+        baseline = db.get(StrategyBundle, baseline_bundle_id)
+        if baseline is None:
+            raise AutomationConfigurationBlocker(
+                "baseline_strategy_bundle_missing",
+                "类目显式绑定的基线 Bundle 不存在；"
+                "请由管理员在后台高级设置重新选择。",
+            )
+        errors = category_bundle_contract_errors(
+            db,
+            profile=profile,
+            bundle=baseline,
+            require_complete=True,
+            require_prompt_b=True,
+            enforce_baseline_id=True,
+        )
+        if errors or baseline.prompt_b_version != base_prompt.version:
+            raise AutomationConfigurationBlocker(
+                "baseline_strategy_bundle_contract_mismatch",
+                "显式基线 Bundle 与类目 A/B Prompt、模型、Rubric 或维度合同不一致；"
+                "请由管理员在后台高级设置重新选择。",
+            )
+        return baseline, str(config.get("baseline_binding_source") or "explicit_legacy")
+
+    candidates = db.scalars(
+        select(StrategyBundle).where(
+            StrategyBundle.prompt_b_version == base_prompt.version
+        )
+    ).all()
+    matches = [
+        candidate
+        for candidate in candidates
+        if not category_bundle_contract_errors(
+            db,
+            profile=profile,
+            bundle=candidate,
+            require_complete=True,
+            require_prompt_b=True,
+            enforce_baseline_id=False,
+        )
+    ]
+    if not matches:
+        raise AutomationConfigurationBlocker(
+            "baseline_strategy_bundle_not_found",
+            "没有 StrategyBundle 完整匹配当前类目的 A/B Prompt、模型、Rubric 和维度合同；"
+            "请先生成该组合的 Bundle，或由管理员在后台高级设置显式绑定。",
+        )
+    if len(matches) > 1:
+        raise AutomationConfigurationBlocker(
+            "baseline_strategy_bundle_ambiguous",
+            f"当前类目合同匹配到 {len(matches)} 个 StrategyBundle；"
+            "请由管理员在后台高级设置显式选择一个基线。",
+        )
+    baseline = matches[0]
+    if freeze_automatic_binding:
+        profile.automation_config_json = canonical_json(
+            {
+                **config,
+                "baseline_strategy_bundle_id": baseline.id,
+                "baseline_binding_source": "auto_contract",
+            }
+        )
+        profile.automation_revision += 1
+        db.flush()
+    return baseline, "auto_contract"
+
+
+def automation_lifecycle_status(status: str) -> str:
+    """Expose the production state machine while retaining legacy DB values."""
+    return {
+        "planned": "pending",
+        "awaiting_executor": "pending",
+        "processing": "processing",
+        "succeeded": "running",
+        "running": "running",
+        "awaiting_release_review": "awaiting_release_review",
+        "failed": "failed",
+        "cancelled": "cancelled",
+    }.get(status, status)
 
 
 @dataclass(frozen=True)
@@ -89,7 +267,7 @@ class RealOptimizationAdapter:
             or self.config.output_micros_per_million_tokens <= 0
         ):
             raise ValueError("优化模型缺少输入上限或计价配置")
-        calls = 2
+        calls = OPTIMIZER_MODEL_CALLS_PER_RUN
         input_tokens = calls * self.config.max_input_tokens
         output_tokens = calls * self.config.max_tokens
         return _token_cost(
@@ -133,8 +311,25 @@ class RealOptimizationAdapter:
         )
 
     def prepare_regression_binding(
-        self, db: Session, *, base_prompt: PromptVersion, category_key: str = "space_image"
+        self,
+        db: Session,
+        *,
+        base_prompt: PromptVersion,
+        category_key: str = "space_image",
+        freeze_automatic_binding: bool = True,
     ) -> dict[str, Any]:
+        profile = db.scalar(
+            select(EvaluationCategoryProfile).where(
+                EvaluationCategoryProfile.category_key == category_key
+            )
+        )
+        baseline, binding_source = _resolve_category_baseline_bundle(
+            db,
+            profile=profile,
+            base_prompt=base_prompt,
+            freeze_automatic_binding=freeze_automatic_binding,
+        )
+        assert profile is not None
         sample_sets = db.scalars(
             select(SampleSet)
             .where(
@@ -159,23 +354,34 @@ class RealOptimizationAdapter:
                 elif blind is None:
                     blind = item
             if target is not None and stable is not None and blind is not None:
-                baseline = db.scalar(
-                    select(StrategyBundle)
-                    .where(StrategyBundle.prompt_b_version == base_prompt.version)
-                    .order_by(StrategyBundle.id.desc())
-                )
-                if baseline is None:
-                    continue
                 return {
                     "sample_set_id": sample_set.id,
                     "baseline_strategy_bundle_id": baseline.id,
+                    "category_contract": {
+                        "category_key": category_key,
+                        "profile_id": profile.id,
+                        "pipeline_revision": profile.pipeline_revision,
+                        "automation_revision": profile.automation_revision,
+                        "baseline_strategy_bundle_id": baseline.id,
+                        "baseline_binding_source": binding_source,
+                        "prompt_a_id": profile.prompt_a_id,
+                        "prompt_b_id": profile.prompt_b_id,
+                        "model_config_id": profile.model_config_id,
+                        "rubric_version": profile.rubric_version,
+                        "dimension_schema_key": profile.dimension_schema_key,
+                        "dimension_schema_version": profile.dimension_schema_version,
+                    },
                     "samples": [
                         {"sample_item_id": target.id, "role": "target_error"},
                         {"sample_item_id": stable.id, "role": "stable_control"},
                         {"sample_item_id": blind.id, "role": "blind_holdout"},
                     ],
                 }
-        raise ValueError("没有可用于三角色配对回归的锁定黄金样本")
+        raise AutomationConfigurationBlocker(
+            "regression_binding_missing",
+            f"类目 {category_key} 没有可用于三角色配对回归的锁定黄金样本；"
+            "请补齐 target_error、stable_control 和 blind_holdout。",
+        )
 
     def materialize(
         self,
@@ -197,7 +403,49 @@ class RealOptimizationAdapter:
         baseline = db.get(
             StrategyBundle, int(binding["baseline_strategy_bundle_id"])
         )
-        if baseline is None or baseline.prompt_b_version != run.base_prompt_version:
+        category_contract = binding.get("category_contract")
+        if not isinstance(category_contract, dict):
+            raise ValueError("自动优化缺少冻结类目合同")
+        profile = db.scalar(
+            select(EvaluationCategoryProfile).where(
+                EvaluationCategoryProfile.category_key == run.category_key
+            )
+        )
+        frozen_identity = {
+            "prompt_a_id": profile.prompt_a_id if profile is not None else None,
+            "prompt_b_id": profile.prompt_b_id if profile is not None else None,
+            "model_config_id": profile.model_config_id if profile is not None else None,
+            "rubric_version": profile.rubric_version if profile is not None else None,
+            "dimension_schema_key": (
+                profile.dimension_schema_key if profile is not None else None
+            ),
+            "dimension_schema_version": (
+                profile.dimension_schema_version if profile is not None else None
+            ),
+        }
+        if (
+            baseline is None
+            or baseline.prompt_b_version != run.base_prompt_version
+            or category_contract.get("category_key") != run.category_key
+            or profile is None
+            or category_contract.get("profile_id") != profile.id
+            or category_contract.get("pipeline_revision") != profile.pipeline_revision
+            or category_contract.get("automation_revision") != profile.automation_revision
+            or category_contract.get("baseline_strategy_bundle_id") != baseline.id
+            or any(
+                field in category_contract
+                and category_contract[field] != current_value
+                for field, current_value in frozen_identity.items()
+            )
+            or category_bundle_contract_errors(
+                db,
+                profile=profile,
+                bundle=baseline,
+                require_complete=True,
+                require_prompt_b=True,
+                enforce_baseline_id=True,
+            )
+        ):
             raise ValueError("自动优化基线策略已失配")
         prompt_a = db.scalar(
             select(PromptVersion).where(
@@ -205,12 +453,22 @@ class RealOptimizationAdapter:
                 PromptVersion.version == baseline.prompt_a_version,
             )
         )
-        model_config = db.scalar(
+        model_configs = db.scalars(
             select(ModelConfig).where(
                 ModelConfig.model_id == baseline.model_id,
                 ModelConfig.active.is_(True),
             )
-        )
+        ).all()
+        model_matches = []
+        for model in model_configs:
+            try:
+                if build_model_config_snapshot(model) == json.loads(
+                    baseline.model_config_snapshot
+                ):
+                    model_matches.append(model)
+            except json.JSONDecodeError:
+                break
+        model_config = model_matches[0] if len(model_matches) == 1 else None
         if prompt_a is None or model_config is None:
             raise ValueError("自动优化基线配置无法解析")
         policy = (
@@ -259,6 +517,7 @@ class RealOptimizationAdapter:
             )
             if candidate_bundle.model_config_snapshot != baseline.model_config_snapshot:
                 raise ValueError("自动优化期间模型配置已漂移")
+            assert_bundle_pair_category_contract(baseline, candidate_bundle)
             regression = _create_paired_regression(
                 PairedRegressionCreateRequest(
                     name=f"自动优化候选 #{run.id}.{index} 配对回归",
@@ -355,6 +614,149 @@ def _safe_json_object(value: str | None) -> dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
+def _safe_json_list(value: str | None) -> list[Any]:
+    try:
+        parsed = json.loads(value or "[]")
+    except json.JSONDecodeError:
+        return []
+    return parsed if isinstance(parsed, list) else []
+
+
+_BUNDLE_CATEGORY_IDENTITY_FIELDS = (
+    "model_id",
+    "model_config_snapshot",
+    "prompt_a_version",
+    "rubric_version",
+    "engine_version",
+    "sampling_policy_revision",
+    "risk_review_version",
+    "agent_plan_version",
+    "dimension_route_policy_id",
+    "dimension_schema_set_snapshot",
+    "label_field_set_snapshot",
+    "resolved_schema_contract_version",
+    "dimension_route_policy_snapshot",
+    "evaluation_profile_set_snapshot",
+)
+
+
+def assert_bundle_pair_category_contract(
+    baseline: StrategyBundle,
+    candidate: StrategyBundle,
+) -> None:
+    """Require candidate and baseline to differ only by the B prompt."""
+    mismatched = [
+        field
+        for field in _BUNDLE_CATEGORY_IDENTITY_FIELDS
+        if getattr(baseline, field) != getattr(candidate, field)
+    ]
+    if mismatched:
+        raise ValueError(
+            "基线与候选 StrategyBundle 的类目合同不一致："
+            + "、".join(mismatched)
+        )
+
+
+def category_bundle_contract_errors(
+    db: Session,
+    *,
+    profile: EvaluationCategoryProfile | None,
+    bundle: StrategyBundle,
+    require_complete: bool,
+    require_prompt_b: bool,
+    enforce_baseline_id: bool,
+) -> list[str]:
+    """Validate one immutable bundle against the persisted category contract."""
+    if profile is None:
+        return ["category_profile_missing"]
+    errors: list[str] = []
+    if require_complete:
+        errors.extend(
+            _category_contract_definition_errors(
+                db, profile=profile, require_prompt_b=require_prompt_b
+            )
+        )
+    config = _safe_json_object(profile.automation_config_json)
+    baseline_bundle_id = config.get("baseline_strategy_bundle_id")
+    if enforce_baseline_id and baseline_bundle_id is not None:
+        if (
+            not isinstance(baseline_bundle_id, int)
+            or isinstance(baseline_bundle_id, bool)
+            or baseline_bundle_id != bundle.id
+        ):
+            errors.append("baseline_strategy_bundle_mismatch")
+
+    required_refs = {
+        "prompt_a_id": profile.prompt_a_id,
+        "model_config_id": profile.model_config_id,
+    }
+    if require_prompt_b:
+        required_refs["prompt_b_id"] = profile.prompt_b_id
+    explicit_refs = any(value is not None for value in required_refs.values())
+    contract_declared = (
+        require_complete
+        or explicit_refs
+        or baseline_bundle_id is not None
+        or profile.dimension_schema_key is not None
+        or profile.dimension_schema_version is not None
+    )
+    if require_complete or explicit_refs:
+        errors.extend(
+            f"{name}_missing"
+            for name, value in required_refs.items()
+            if value is None
+        )
+
+    prompt_a = db.get(PromptVersion, profile.prompt_a_id) if profile.prompt_a_id else None
+    if prompt_a is not None and (
+        prompt_a.stage != "A" or prompt_a.version != bundle.prompt_a_version
+    ):
+        errors.append("prompt_a_mismatch")
+    if require_prompt_b:
+        prompt_b = db.get(PromptVersion, profile.prompt_b_id) if profile.prompt_b_id else None
+        if prompt_b is not None and (
+            prompt_b.stage != "B" or prompt_b.version != bundle.prompt_b_version
+        ):
+            errors.append("prompt_b_mismatch")
+
+    model = db.get(ModelConfig, profile.model_config_id) if profile.model_config_id else None
+    if model is not None:
+        if model.model_id != bundle.model_id:
+            errors.append("model_id_mismatch")
+        else:
+            try:
+                frozen_model = json.loads(bundle.model_config_snapshot)
+            except json.JSONDecodeError:
+                errors.append("model_snapshot_invalid")
+            else:
+                if frozen_model != build_model_config_snapshot(model):
+                    errors.append("model_snapshot_mismatch")
+    if contract_declared and profile.rubric_version != bundle.rubric_version:
+        errors.append("rubric_version_mismatch")
+
+    schema_key = profile.dimension_schema_key
+    schema_version = profile.dimension_schema_version
+    if bool(schema_key) != bool(schema_version):
+        errors.append("dimension_contract_incomplete")
+    elif require_complete and not schema_key:
+        errors.append("dimension_contract_missing")
+    elif schema_key and schema_version:
+        try:
+            schema_set = json.loads(bundle.dimension_schema_set_snapshot or "")
+        except json.JSONDecodeError:
+            errors.append("dimension_contract_invalid")
+        else:
+            schemas = schema_set.get("schemas") if isinstance(schema_set, dict) else None
+            if not isinstance(schemas, list) or not any(
+                isinstance(item, dict)
+                and item.get("schema_key") == schema_key
+                and item.get("version") == schema_version
+                for item in schemas
+            ):
+                errors.append("dimension_contract_mismatch")
+    return list(dict.fromkeys(errors))
+
+
 def _config_is_ready(config: Any | None) -> bool:
     return (
         config is not None
@@ -364,6 +766,57 @@ def _config_is_ready(config: Any | None) -> bool:
         and int(getattr(config, "max_input_tokens", 0) or 0) > 0
         and int(getattr(config, "max_tokens", 0) or 0) > 0
     )
+
+
+def _execution_lease_seconds(
+    policy: AutomationPolicy,
+    adapter: OptimizationAdapter | None,
+) -> int:
+    return int(_execution_lease_details(policy, adapter)["effective_seconds"])
+
+
+def _execution_lease_details(
+    policy: AutomationPolicy,
+    adapter: OptimizationAdapter | None,
+) -> dict[str, Any]:
+    """Explain the policy floor and optimizer worst-case execution window."""
+    config = getattr(adapter, "config", None)
+    try:
+        timeout_seconds = int(getattr(config, "timeout_seconds", 0) or 0)
+        max_retries = max(0, int(getattr(config, "max_retries", 0) or 0))
+    except (TypeError, ValueError):
+        timeout_seconds = 0
+        max_retries = 0
+    optimizer_timeout_budget = (
+        timeout_seconds * (max_retries + 1) * OPTIMIZER_MODEL_CALLS_PER_RUN
+        if config is not None and timeout_seconds > 0
+        else 0
+    )
+    safety_seconds = (
+        MATERIALIZE_REGRESSION_SAFETY_SECONDS
+        if optimizer_timeout_budget > 0
+        else 0
+    )
+    effective_seconds = max(
+        policy.lease_seconds,
+        optimizer_timeout_budget + safety_seconds,
+    )
+    return {
+        "effective_seconds": effective_seconds,
+        "policy_seconds": policy.lease_seconds,
+        "optimizer_timeout_seconds": timeout_seconds,
+        "optimizer_max_retries": max_retries,
+        "optimizer_call_count": (
+            OPTIMIZER_MODEL_CALLS_PER_RUN if optimizer_timeout_budget > 0 else 0
+        ),
+        "optimizer_timeout_budget_seconds": optimizer_timeout_budget,
+        "materialize_regression_safety_seconds": safety_seconds,
+        "source": (
+            "optimizer_timeout_budget"
+            if effective_seconds > policy.lease_seconds
+            else "policy_minimum"
+        ),
+    }
 
 
 def _legacy_budget_used_today(db: Session, now: datetime) -> int:
@@ -533,6 +986,182 @@ def recover_expired_leases(
     return int(result.rowcount or 0)
 
 
+def _fair_category_order(
+    db: Session,
+    categories: list[str],
+) -> list[str]:
+    """Persistent round-robin order using each category's last planned run."""
+    markers: dict[str, tuple[datetime, int] | None] = {}
+    for category_key in categories:
+        latest_run = db.scalar(
+            select(AutomationOptimizationRun)
+            .where(AutomationOptimizationRun.category_key == category_key)
+            .order_by(
+                AutomationOptimizationRun.id.desc()
+            )
+            .limit(1)
+        )
+        profile = db.scalar(
+            select(EvaluationCategoryProfile).where(
+                EvaluationCategoryProfile.category_key == category_key
+            )
+        )
+        timestamps = [
+            value
+            for value in (
+                _aware(latest_run.created_at) if latest_run is not None else None,
+                _aware(profile.automation_last_triggered_at)
+                if profile is not None
+                else None,
+            )
+            if value is not None
+        ]
+        markers[category_key] = (
+            (max(timestamps), latest_run.id if latest_run is not None else 0)
+            if timestamps
+            else None
+        )
+    minimum = datetime.min.replace(tzinfo=timezone.utc)
+    return sorted(
+        categories,
+        key=lambda category_key: (
+            markers[category_key] is not None,
+            markers[category_key][0]
+            if markers[category_key] is not None
+            else minimum,
+            markers[category_key][1]
+            if markers[category_key] is not None
+            else 0,
+            category_key,
+        ),
+    )
+
+
+def _select_ready_case_cohort(
+    db: Session,
+    *,
+    available: list[OptimizationCaseQueue],
+    policy: AutomationPolicy,
+    now: datetime,
+) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
+    """Select one runnable category/prompt cohort without starving later cohorts."""
+    immediate_severities = set(json.loads(policy.immediate_severities_json or "[]"))
+    categories = _fair_category_order(
+        db,
+        list(dict.fromkeys(case.category_key for case in available)),
+    )
+    skipped: list[dict[str, Any]] = []
+    for category_key in categories:
+        category_cases = [case for case in available if case.category_key == category_key]
+        profile = db.scalar(
+            select(EvaluationCategoryProfile).where(
+                EvaluationCategoryProfile.category_key == category_key
+            )
+        )
+        category_config = _safe_json_object(
+            profile.automation_config_json if profile else "{}"
+        )
+        if category_config.get("enabled") is False:
+            skipped.append(
+                {
+                    "code": "category_disabled",
+                    "category_key": category_key,
+                    "severity": "blocking",
+                    "message": f"类目 {category_key} 的自动优化关闭。",
+                }
+            )
+            continue
+
+        case_threshold = max(
+            1, int(category_config.get("case_threshold", policy.case_threshold))
+        )
+        max_candidates = max(
+            1, int(category_config.get("max_candidates", policy.max_candidates))
+        )
+        trigger_case = next(
+            (case for case in category_cases if case.severity in immediate_severities),
+            None,
+        )
+        prompt_versions = list(dict.fromkeys(case.prompt_version for case in category_cases))
+        prompt_version = trigger_case.prompt_version if trigger_case else None
+        same_prompt: list[OptimizationCaseQueue] = []
+        if prompt_version is not None:
+            same_prompt = [
+                case for case in category_cases if case.prompt_version == prompt_version
+            ]
+        else:
+            for candidate_version in prompt_versions:
+                candidate_cases = [
+                    case
+                    for case in category_cases
+                    if case.prompt_version == candidate_version
+                ]
+                if len(candidate_cases) >= case_threshold:
+                    prompt_version = candidate_version
+                    same_prompt = candidate_cases
+                    break
+        if prompt_version is None:
+            first_version = prompt_versions[0]
+            first_count = sum(
+                case.prompt_version == first_version for case in category_cases
+            )
+            skipped.append(
+                {
+                    "code": "threshold_wait",
+                    "category_key": category_key,
+                    "prompt_version": first_version,
+                    "available": first_count,
+                    "required": case_threshold,
+                    "severity": "waiting",
+                    "message": (
+                        f"类目 {category_key} 的同一提示词版本案例 "
+                        f"{first_count}/{case_threshold}，尚未达到组批门槛。"
+                    ),
+                }
+            )
+            continue
+
+        cooldown_seconds = max(
+            0, int(category_config.get("cooldown_seconds", policy.cooldown_seconds))
+        )
+        last_triggered_at = (
+            profile.automation_last_triggered_at
+            if profile is not None
+            else policy.last_triggered_at
+        )
+        cooldown_until = (
+            _aware(last_triggered_at) + timedelta(seconds=cooldown_seconds)
+            if last_triggered_at is not None
+            else None
+        )
+        if trigger_case is None and cooldown_until is not None and cooldown_until > now:
+            skipped.append(
+                {
+                    "code": "cooldown",
+                    "category_key": category_key,
+                    "severity": "waiting",
+                    "message": f"类目 {category_key} 仍在冷却窗口。",
+                    "cooldown_until": cooldown_until.isoformat(),
+                }
+            )
+            continue
+        return (
+            {
+                "category_key": category_key,
+                "category_cases": category_cases,
+                "category_config": category_config,
+                "profile": profile,
+                "case_threshold": case_threshold,
+                "max_candidates": max_candidates,
+                "trigger_case": trigger_case,
+                "prompt_version": prompt_version,
+                "same_prompt": same_prompt,
+            },
+            skipped,
+        )
+    return None, skipped
+
+
 def consume_optimization_queue_once(
     db: Session,
     *,
@@ -584,68 +1213,92 @@ def consume_optimization_queue_once(
     if not available:
         return {"status": "idle", "recovered_leases": recovered}
 
-    # Select one category cohort per tick. Cases from different pipelines must
-    # never share an optimizer run, even when they use the same prompt version.
-    category_key = available[0].category_key
-    category_cases = [case for case in available if case.category_key == category_key]
-    profile = db.scalar(
-        select(EvaluationCategoryProfile).where(
-            EvaluationCategoryProfile.category_key == category_key
+    # Select one category/prompt cohort per tick. A disabled, under-threshold,
+    # unconfigured, or gold-incomplete category must not starve another category.
+    supplied_adapter = adapter
+    remaining = list(available)
+    skipped_cohorts: list[dict[str, Any]] = []
+    regression_binding: dict[str, Any] | None = None
+    while True:
+        cohort, skipped = _select_ready_case_cohort(
+            db, available=remaining, policy=policy, now=current
         )
-    )
-    category_config = {}
-    if profile is not None:
+        skipped_cohorts.extend(skipped)
+        if cohort is None:
+            reason = skipped_cohorts[0]
+            return {
+                "status": (
+                    "executor_config_blocked"
+                    if reason["code"] in AUTOMATION_CONFIGURATION_BLOCKER_CODES
+                    else reason["code"]
+                ),
+                "reason": reason["code"],
+                "message": reason["message"],
+                **{
+                    key: value
+                    for key, value in reason.items()
+                    if key not in {"code", "message", "severity"}
+                },
+                "skipped_cohorts": skipped_cohorts,
+                "recovered_leases": recovered,
+            }
+        category_key = cohort["category_key"]
+        profile = cohort["profile"]
+        case_threshold = cohort["case_threshold"]
+        max_candidates = cohort["max_candidates"]
+        trigger_case = cohort["trigger_case"]
+        prompt_version = cohort["prompt_version"]
+        same_prompt = cohort["same_prompt"]
+        adapter = supplied_adapter or configured_optimization_adapter(
+            db, category_key=category_key
+        )
+        if policy.dry_run:
+            break
+        if adapter is None:
+            skipped_cohorts.append(
+                {
+                    "code": "optimizer_config_incomplete",
+                    "category_key": category_key,
+                    "severity": "blocking",
+                    "message": f"类目 {category_key} 的优化模型未配置完整。",
+                }
+            )
+            remaining = [case for case in remaining if case.category_key != category_key]
+            continue
         try:
-            category_config = json.loads(profile.automation_config_json or "{}")
-        except json.JSONDecodeError:
-            category_config = {}
-    if category_config.get("enabled") is False:
-        return {"status": "category_disabled", "category_key": category_key, "recovered_leases": recovered}
-    case_threshold = max(1, int(category_config.get("case_threshold", policy.case_threshold)))
-    max_candidates = max(1, int(category_config.get("max_candidates", policy.max_candidates)))
-    if adapter is None:
-        adapter = configured_optimization_adapter(db, category_key=category_key)
-
-    immediate = set(json.loads(policy.immediate_severities_json or "[]"))
-    trigger_case = next(
-        (case for case in category_cases if case.severity in immediate),
-        None,
-    )
-    prompt_version = trigger_case.prompt_version if trigger_case else category_cases[0].prompt_version
-    same_prompt = [
-        case for case in category_cases if case.prompt_version == prompt_version
-    ]
-    if trigger_case is None and len(same_prompt) < case_threshold:
-        return {
-            "status": "threshold_wait",
-            "available": len(same_prompt),
-            "required": case_threshold,
-            "recovered_leases": recovered,
-        }
-    if (
-        trigger_case is None
-        and policy.last_triggered_at is not None
-        and _aware(policy.last_triggered_at)
-        + timedelta(seconds=policy.cooldown_seconds)
-        > current
-    ):
-        return {
-            "status": "cooldown",
-            "cooldown_until": (
-                _aware(policy.last_triggered_at)
-                + timedelta(seconds=policy.cooldown_seconds)
-            ).isoformat(),
-            "recovered_leases": recovered,
-        }
+            if hasattr(adapter, "bind_base_prompt"):
+                adapter.bind_base_prompt(db, version=prompt_version)  # type: ignore[attr-defined]
+            if hasattr(adapter, "prepare_regression_binding"):
+                regression_binding = adapter.prepare_regression_binding(  # type: ignore[attr-defined]
+                    db,
+                    base_prompt=adapter.base_prompt,  # type: ignore[attr-defined]
+                    category_key=category_key,
+                )
+        except AutomationConfigurationBlocker as exc:
+            skipped_cohorts.append(
+                {
+                    "code": exc.code,
+                    "category_key": category_key,
+                    "severity": "blocking",
+                    "message": exc.message,
+                }
+            )
+            remaining = [case for case in remaining if case.category_key != category_key]
+            continue
+        except ValueError:
+            skipped_cohorts.append(
+                {
+                    "code": "regression_binding_missing",
+                    "category_key": category_key,
+                    "severity": "blocking",
+                    "message": f"类目 {category_key} 缺少同类目三角色锁定黄金集。",
+                }
+            )
+            remaining = [case for case in remaining if case.category_key != category_key]
+            continue
+        break
 
     selected = same_prompt[:case_threshold]
-    if not policy.dry_run and adapter is None:
-        return {
-            "status": "executor_config_blocked",
-            "reason": "optimizer_config_incomplete",
-            "category_key": category_key,
-            "recovered_leases": recovered,
-        }
     frozen_cases = [
         {
             "id": case.id,
@@ -664,19 +1317,8 @@ def consume_optimization_queue_once(
         "policy": _policy_payload(policy),
         "cases": frozen_cases,
     }
-    try:
-        if adapter is not None and hasattr(adapter, "bind_base_prompt"):
-            adapter.bind_base_prompt(db, version=prompt_version)  # type: ignore[attr-defined]
-        if adapter is not None and hasattr(adapter, "prepare_regression_binding"):
-            frozen_input["regression_binding"] = adapter.prepare_regression_binding(  # type: ignore[attr-defined]
-                db, base_prompt=adapter.base_prompt, category_key=category_key  # type: ignore[attr-defined]
-            )
-    except ValueError:
-        return {
-            "status": "executor_config_blocked",
-            "reason": "pricing_or_regression_binding_missing",
-            "recovered_leases": recovered,
-        }
+    if regression_binding is not None:
+        frozen_input["regression_binding"] = regression_binding
     try:
         estimated_cost = (
             0
@@ -742,7 +1384,12 @@ def consume_optimization_queue_once(
         }
 
     lease_token = uuid.uuid4().hex
-    lease_until = current + timedelta(seconds=policy.lease_seconds)
+    execution_lease = _execution_lease_details(policy, adapter)
+    execution_lease_seconds = int(execution_lease["effective_seconds"])
+    frozen_input["policy"]["execution_lease_seconds"] = execution_lease_seconds
+    lease_until = current + timedelta(seconds=execution_lease_seconds)
+    execution_lease["expires_at"] = lease_until.isoformat()
+    frozen_input["policy"]["execution_lease"] = execution_lease
     selected_ids = [case.id for case in selected]
     claimed = db.execute(
         update(OptimizationCaseQueue)
@@ -848,6 +1495,8 @@ def consume_optimization_queue_once(
         )
     )
     policy.last_triggered_at = current
+    if profile is not None:
+        profile.automation_last_triggered_at = current
     append_audit_event(
         db,
         category="automation",
@@ -860,12 +1509,15 @@ def consume_optimization_queue_once(
             "trigger_reason": run.trigger_reason,
             "case_ids": selected_ids,
             "estimated_cost_micros": estimated_cost,
+            "execution_lease_seconds": execution_lease_seconds,
+            "execution_lease": execution_lease,
         },
         event_key=f"automation-run-planned:{run.run_key}",
     )
     if policy.dry_run or adapter is None:
         return {
             "status": run.status,
+            "lifecycle_status": automation_lifecycle_status(run.status),
             "run_id": run.id,
             "dry_run": policy.dry_run,
             "case_count": len(selected_ids),
@@ -941,6 +1593,7 @@ def consume_optimization_queue_once(
                 "candidates": result.candidates,
                 "regression": result.regression,
                 **materialized,
+                "execution_lease": execution_lease,
                 "release_requires_human_review": True,
                 "publishes_automatically": False,
             }
@@ -977,13 +1630,16 @@ def consume_optimization_queue_once(
                 "candidate_count": run.candidate_count,
                 "actual_cost_micros": run.actual_cost_micros,
                 "auto_publish": False,
+                "execution_lease": execution_lease,
             },
             event_key=f"automation-run-reviewed:{run.run_key}",
         )
         return {
             "status": run.status,
+            "lifecycle_status": automation_lifecycle_status(run.status),
             "run_id": run.id,
             "candidate_count": run.candidate_count,
+            "execution_lease_seconds": execution_lease_seconds,
         }
     except Exception as exc:
         safe_error, retryable = _safe_executor_error(exc)
@@ -1062,6 +1718,7 @@ def consume_optimization_queue_once(
             "status": "failed",
             "run_id": run.id,
             "retry_at": retry_at.isoformat() if retry_at else None,
+            "recovered_leases": recovered,
         }
 
 
@@ -1212,6 +1869,8 @@ def record_automation_worker_status(
     status: str,
     result: dict[str, Any] | None = None,
     error_message: str = "",
+    readiness: str | None = None,
+    blockers: list[dict[str, Any]] | None = None,
     now: datetime | None = None,
 ) -> AutomationWorkerStatus:
     current = now or _now()
@@ -1222,6 +1881,10 @@ def record_automation_worker_status(
     row.last_seen_at = current
     row.last_tick_at = current
     row.last_status = status[:80]
+    if readiness is not None:
+        row.readiness = readiness[:20]
+    if blockers is not None:
+        row.blockers_json = canonical_json(blockers)
     row.last_error = error_message[:500]
     row.last_result_json = canonical_json(result or {})
     row.consecutive_errors = row.consecutive_errors + 1 if error_message else 0
@@ -1252,6 +1915,18 @@ def automation_worker_snapshot(
 ) -> dict[str, Any]:
     current = now or _now()
     active_cutoff = current - timedelta(seconds=active_seconds)
+    active_lease_owners = {
+        owner
+        for owner in db.scalars(
+            select(OptimizationCaseQueue.lease_owner).where(
+                OptimizationCaseQueue.status == "processing",
+                OptimizationCaseQueue.lease_owner.is_not(None),
+                OptimizationCaseQueue.lease_expires_at.is_not(None),
+                OptimizationCaseQueue.lease_expires_at > current,
+            )
+        ).all()
+        if owner
+    }
     rows = db.scalars(
         select(AutomationWorkerStatus)
         .order_by(
@@ -1264,17 +1939,28 @@ def automation_worker_snapshot(
     active_count = 0
     for row in rows:
         seen_at = _aware(row.last_seen_at)
-        active = seen_at is not None and seen_at >= active_cutoff
+        heartbeat_active = seen_at is not None and seen_at >= active_cutoff
+        lease_active = row.worker_id in active_lease_owners
+        active = heartbeat_active or lease_active
         if active:
             active_count += 1
         workers.append(
             {
                 "worker_id": row.worker_id,
                 "active": active,
+                "active_reason": (
+                    "heartbeat"
+                    if heartbeat_active
+                    else "processing_lease"
+                    if lease_active
+                    else "stale"
+                ),
                 "started_at": row.started_at,
                 "last_seen_at": row.last_seen_at,
                 "last_tick_at": row.last_tick_at,
                 "last_status": row.last_status,
+                "readiness": row.readiness,
+                "blockers": _safe_json_list(row.blockers_json),
                 "last_error": row.last_error,
                 "last_result": _safe_json_object(row.last_result_json),
                 "consecutive_errors": row.consecutive_errors,
@@ -1345,74 +2031,79 @@ def automation_runtime_status(
         "next_prompt_version": None,
         "available_for_prompt": 0,
         "required_for_prompt": policy.case_threshold,
+        "skipped_cohorts": [],
     }
     category_key: str | None = None
     adapter: RealOptimizationAdapter | None = None
     if not available:
         block("queue_empty", "没有达到可组批条件的纠偏案例。", severity="info")
     else:
-        category_key = available[0].category_key
-        category_cases = [case for case in available if case.category_key == category_key]
-        profile = db.scalar(
-            select(EvaluationCategoryProfile).where(
-                EvaluationCategoryProfile.category_key == category_key
-            )
+        cohort, skipped_cohorts = _select_ready_case_cohort(
+            db, available=available, policy=policy, now=current
         )
-        category_config = _safe_json_object(profile.automation_config_json if profile else "{}")
-        if category_config.get("enabled") is False:
-            block("category_disabled", f"类目 {category_key} 的自动优化关闭。")
-        case_threshold = max(1, int(category_config.get("case_threshold", policy.case_threshold)))
-        immediate = set(json.loads(policy.immediate_severities_json or "[]"))
-        trigger_case = next(
-            (case for case in category_cases if case.severity in immediate),
-            None,
-        )
-        prompt_version = (
-            trigger_case.prompt_version if trigger_case else category_cases[0].prompt_version
-        )
-        same_prompt = [
-            case for case in category_cases if case.prompt_version == prompt_version
-        ]
-        queue.update(
-            {
-                "next_category_key": category_key,
-                "next_prompt_version": prompt_version,
-                "available_for_prompt": len(same_prompt),
-                "required_for_prompt": case_threshold,
-            }
-        )
-        if trigger_case is None and len(same_prompt) < case_threshold:
-            block(
-                "threshold_wait",
-                f"同一提示词版本案例 {len(same_prompt)}/{case_threshold}，尚未达到组批门槛。",
-                severity="waiting",
-            )
-        if (
-            trigger_case is None
-            and policy.last_triggered_at is not None
-            and _aware(policy.last_triggered_at)
-            + timedelta(seconds=policy.cooldown_seconds)
-            > current
-        ):
-            block("cooldown", "上一批刚触发完成，仍在冷却窗口。", severity="waiting")
-        adapter = configured_optimization_adapter(db, category_key=category_key)
-        if adapter is None:
-            block(
-                "optimizer_config_incomplete",
-                "优化模型缺少密钥、输入上限或非零计价。",
-                severity="warning" if policy.dry_run else "blocking",
-            )
-        elif not policy.dry_run:
-            try:
-                adapter.bind_base_prompt(db, version=prompt_version)
-                adapter.prepare_regression_binding(
-                    db, base_prompt=adapter.base_prompt, category_key=category_key
+        queue["skipped_cohorts"] = skipped_cohorts
+        if cohort is None:
+            for item in skipped_cohorts:
+                block(item["code"], item["message"], severity=item["severity"])
+            if skipped_cohorts:
+                first = skipped_cohorts[0]
+                category_key = first.get("category_key")
+                queue.update(
+                    {
+                        "next_category_key": first.get("category_key"),
+                        "next_prompt_version": first.get("prompt_version"),
+                        "available_for_prompt": first.get("available", 0),
+                        "required_for_prompt": first.get(
+                            "required", policy.case_threshold
+                        ),
+                    }
                 )
-            except ValueError:
+            cohort = None
+        if cohort is None and category_key is not None:
+            adapter = configured_optimization_adapter(db, category_key=category_key)
+            if adapter is None:
                 block(
-                    "regression_binding_missing",
-                    "缺少同类目三角色锁定黄金集，无法创建发布前配对回归。",
+                    "optimizer_config_incomplete",
+                    "优化模型缺少密钥、输入上限或非零计价。",
+                    severity="warning" if policy.dry_run else "blocking",
                 )
+        if cohort is not None:
+            category_key = cohort["category_key"]
+            case_threshold = cohort["case_threshold"]
+            prompt_version = cohort["prompt_version"]
+            same_prompt = cohort["same_prompt"]
+            queue.update(
+                {
+                    "next_category_key": category_key,
+                    "next_prompt_version": prompt_version,
+                    "available_for_prompt": len(same_prompt),
+                    "required_for_prompt": case_threshold,
+                }
+            )
+        if cohort is not None:
+            adapter = configured_optimization_adapter(db, category_key=category_key)
+            if adapter is None:
+                block(
+                    "optimizer_config_incomplete",
+                    "优化模型缺少密钥、输入上限或非零计价。",
+                    severity="warning" if policy.dry_run else "blocking",
+                )
+            elif not policy.dry_run:
+                try:
+                    adapter.bind_base_prompt(db, version=prompt_version)
+                    adapter.prepare_regression_binding(
+                        db,
+                        base_prompt=adapter.base_prompt,
+                        category_key=category_key,
+                        freeze_automatic_binding=False,
+                    )
+                except AutomationConfigurationBlocker as exc:
+                    block(exc.code, exc.message)
+                except ValueError:
+                    block(
+                        "regression_binding_missing",
+                        "缺少同类目三角色锁定黄金集，无法创建发布前配对回归。",
+                    )
 
     blocking_codes = {
         item["code"]
@@ -1452,11 +2143,25 @@ def optimization_worker_tick(worker_id: str) -> dict[str, Any]:
 
             reconcile_automation_review_states(db)
             result = consume_optimization_queue_once(db, worker_id=worker_id)
+            policy = db.get(AutomationPolicy, 1)
+            if policy is None:
+                policy = AutomationPolicy(id=1)
+                db.add(policy)
+                db.flush()
+            runtime = automation_runtime_status(db, policy)
+            persisted_result = {
+                **result,
+                "readiness": runtime["status"],
+                "blockers": runtime["blockers"],
+                "checked_at": runtime["checked_at"].isoformat(),
+            }
             record_automation_worker_status(
                 db,
                 worker_id=worker_id,
                 status=str(result.get("status", "unknown")),
-                result=result,
+                result=persisted_result,
+                readiness=runtime["status"],
+                blockers=runtime["blockers"],
             )
             return result
     except Exception as exc:
@@ -1481,5 +2186,13 @@ def optimization_worker_tick(worker_id: str) -> dict[str, Any]:
                 status="worker_error",
                 result={"status": "worker_error", "error_message": safe_error},
                 error_message=safe_error,
+                readiness="blocked",
+                blockers=[
+                    {
+                        "code": "worker_error",
+                        "message": "Worker 最近一次检查失败。",
+                        "severity": "blocking",
+                    }
+                ],
             )
         return {"status": "worker_error", "error_message": safe_error}

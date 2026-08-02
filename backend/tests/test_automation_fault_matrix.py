@@ -209,9 +209,60 @@ def test_cross_category_policy_budget_regression_and_candidate_isolation(
 
     with _isolated_backend_imports(), monkeypatch.context() as isolated_patch:
         runner = _load_module(RUNNER, "automation_fault_matrix_cross_category")
-        runner.backend(tmp_path)
+        isolated_backend = runner.backend(tmp_path)
         from app import optimization_automation
         from app.optimizer import AutomationCandidateGeneration
+
+        with isolated_backend.Session() as seeded_db:
+            seeded_profile = seeded_db.scalar(
+                isolated_backend.select(
+                    isolated_backend.m.EvaluationCategoryProfile
+                ).where(
+                    isolated_backend.m.EvaluationCategoryProfile.category_key
+                    == "space_image"
+                )
+            )
+            assert seeded_profile is not None
+            seeded_contract = json.loads(
+                seeded_profile.automation_config_json
+            )
+            baseline_id = seeded_contract.get(
+                "baseline_strategy_bundle_id"
+            )
+            assert isinstance(baseline_id, int)
+            seeded_bundle = seeded_db.get(
+                isolated_backend.m.StrategyBundle, baseline_id
+            )
+            assert seeded_bundle is not None
+            seeded_prompt_a = seeded_db.get(
+                isolated_backend.m.PromptVersion,
+                seeded_profile.prompt_a_id,
+            )
+            seeded_prompt_b = seeded_db.get(
+                isolated_backend.m.PromptVersion,
+                seeded_profile.prompt_b_id,
+            )
+            seeded_model = seeded_db.get(
+                isolated_backend.m.ModelConfig,
+                seeded_profile.model_config_id,
+            )
+            assert seeded_bundle.prompt_a_version == (
+                seeded_prompt_a.version
+            )
+            assert seeded_bundle.prompt_b_version == (
+                seeded_prompt_b.version
+            )
+            assert seeded_bundle.model_id == seeded_model.model_id
+            assert seeded_profile.dimension_schema_key
+            assert seeded_profile.dimension_schema_version
+            assert optimization_automation.category_bundle_contract_errors(
+                seeded_db,
+                profile=seeded_profile,
+                bundle=seeded_bundle,
+                require_complete=True,
+                require_prompt_b=True,
+                enforce_baseline_id=True,
+            ) == []
 
         async def fake_generation(**_kwargs):
             return AutomationCandidateGeneration(

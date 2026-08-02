@@ -212,6 +212,52 @@ def test_category_contracts_keep_pdf_and_material_inputs_isolated(tmp_path: Path
         assert blocked.status_code == 409
 
 
+def test_frontline_reviewer_cannot_select_category_baseline_bundle(tmp_path: Path) -> None:
+    with _api_context(tmp_path) as (client, sessions):
+        with sessions() as db:
+            reviewer = User(
+                username="frontline-reviewer",
+                password_hash="unused",
+                display_name="一线审核员",
+                is_admin=False,
+                role="reviewer",
+            )
+            db.add(reviewer)
+            db.commit()
+            db.refresh(reviewer)
+        app.dependency_overrides[current_user] = lambda: reviewer
+        profile = next(
+            item
+            for item in client.get("/api/evaluation-categories").json()["items"]
+            if item["category_key"] == "space_image"
+        )
+        payload = {
+            key: value
+            for key, value in profile.items()
+            if key
+            not in {
+                "id",
+                "category_key",
+                "pipeline_revision",
+                "automation_revision",
+                "created_by",
+                "created_at",
+                "updated_at",
+            }
+        }
+        payload["automation_config"] = {
+            **payload["automation_config"],
+            "baseline_strategy_bundle_id": 1,
+        }
+
+        response = client.put(
+            "/api/evaluation-categories/space_image", json=payload
+        )
+
+        assert response.status_code == 403
+        assert "仅管理员" in response.json()["detail"]
+
+
 def test_admin_can_create_modular_category_and_freeze_v2_job_contract(tmp_path: Path) -> None:
     with _api_context(tmp_path) as (client, sessions):
         catalog = client.get("/api/evaluation-categories/modules")

@@ -90,8 +90,13 @@ def backend(data_dir: Path) -> SimpleNamespace:
     from sqlalchemy import func, select
     from app import models
     from app.database import SessionLocal
+    from app.dimension_schema_registry import (
+        ACTIVE_V13_VERSION,
+        SPACE_SCHEMA_KEY,
+    )
     from app.optimization_automation import (
         AutomationAdapterResult,
+        category_bundle_contract_errors,
         configured_optimization_adapter,
         consume_optimization_queue_once,
     )
@@ -109,6 +114,9 @@ def backend(data_dir: Path) -> SimpleNamespace:
         engine_version=ENGINE_VERSION,
         build_snapshot=build_evaluation_strategy_snapshot,
         bundle=get_or_create_bundle,
+        category_bundle_contract_errors=category_bundle_contract_errors,
+        dimension_schema_key=SPACE_SCHEMA_KEY,
+        dimension_schema_version=ACTIVE_V13_VERSION,
     )
 
 
@@ -460,7 +468,11 @@ def scenario_duplicate(data_dir: Path, _url: str, state_dir: Path) -> dict[str, 
 def create_material_golden(db: Any, b: SimpleNamespace, data_dir: Path) -> tuple[Any, Any]:
     import hashlib
     from PIL import Image
-    from scripts.integration.automation_e2e_seed import _aesthetic, _precheck
+    from scripts.integration.automation_e2e_seed import (
+        _aesthetic,
+        _bind_profile_baseline_contract,
+        _precheck,
+    )
 
     model = db.get(b.m.ModelConfig, 1)
     optimizer = db.get(b.m.OptimizerConfig, 1)
@@ -517,6 +529,26 @@ def create_material_golden(db: Any, b: SimpleNamespace, data_dir: Path) -> tuple
         db, model, prompt_a, prompt_b, prompt_b.rubric_version,
         b.engine_version, None, sampling,
     )
+    _bind_profile_baseline_contract(
+        profile=profile,
+        baseline_bundle=bundle,
+        dimension_schema_key=b.dimension_schema_key,
+        dimension_schema_version=b.dimension_schema_version,
+    )
+    db.flush()
+    contract_errors = b.category_bundle_contract_errors(
+        db,
+        profile=profile,
+        bundle=bundle,
+        require_complete=True,
+        require_prompt_b=True,
+        enforce_baseline_id=True,
+    )
+    if contract_errors:
+        raise RuntimeError(
+            "fault_matrix_material_baseline_contract_mismatch:"
+            + ",".join(contract_errors)
+        )
     sample_set = b.m.SampleSet(
         name="Fault matrix material golden", description="Category isolation fixture",
         kind="golden", status="locked", category_key="material_image",

@@ -32,7 +32,10 @@ from .models import (
     ReviewPanel,
     User,
 )
-from .optimization_automation import configured_optimization_adapter
+from .optimization_automation import (
+    automation_lifecycle_status,
+    configured_optimization_adapter,
+)
 from .regression import reconcile_automation_review_states
 
 
@@ -491,6 +494,7 @@ def reconcile_production_run(
         select(OptimizationCaseQueue)
         .where(
             OptimizationCaseQueue.source_type == "human_review",
+            OptimizationCaseQueue.category_key == run.category_key,
             OptimizationCaseQueue.evaluation_id.in_(job_facts["result_ids"] or [-1]),
         )
         .order_by(OptimizationCaseQueue.id.asc())
@@ -635,6 +639,29 @@ def reconcile_production_run(
             actor=actor,
             error_code="automation_run_missing",
             error_message="自动改进关联记录缺失",
+            job_ids=job_ids,
+        )
+        db.commit()
+        db.refresh(run)
+        return run
+    if automation.category_key != run.category_key:
+        _persist_facts(
+            db,
+            run,
+            status="failed",
+            stage="optimization",
+            blockers=[
+                _blocker(
+                    "automation_category_mismatch",
+                    "自动改进批次类目冲突",
+                    "关联的自动改进批次属于其他类目，系统已停止继续生产。",
+                    action_label="查看审计",
+                    action_href="/workflow/governance/audit",
+                )
+            ],
+            actor=actor,
+            error_code="automation_category_mismatch",
+            error_message="自动改进批次与生产记录类目不一致",
             job_ids=job_ids,
         )
         db.commit()
@@ -986,6 +1013,7 @@ def production_run_payload(db: Session, run: EvaluationProductionRun) -> dict[st
             {
                 "id": automation.id,
                 "status": automation.status,
+                "lifecycle_status": automation_lifecycle_status(automation.status),
                 "dry_run": automation.dry_run,
                 "href": "/workflow/optimization/automation",
             }

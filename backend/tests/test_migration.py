@@ -58,6 +58,7 @@ MIGRATION_NAMES = [
     "add_automation_worker_status",
     "add_evaluation_packages",
     "add_evaluation_production_runs",
+    "persist_worker_readiness",
 ]
 
 
@@ -69,6 +70,66 @@ def result(level: str, category: str, confidence: float = 0.9) -> dict:
         "needs_review": False,
         "precheck": {"classification": {"primary_category": category}},
     }
+
+
+def test_v44_worker_status_forward_migration_preserves_heartbeat(tmp_path) -> None:
+    engine = _engine(tmp_path, "v44-worker-readiness.db")
+    try:
+        with engine.begin() as connection:
+            connection.exec_driver_sql("""
+                CREATE TABLE automation_worker_statuses (
+                    worker_id VARCHAR(120) PRIMARY KEY,
+                    started_at DATETIME NOT NULL,
+                    last_seen_at DATETIME NOT NULL,
+                    last_tick_at DATETIME,
+                    last_status VARCHAR(80) NOT NULL DEFAULT 'starting',
+                    last_error TEXT NOT NULL DEFAULT '',
+                    last_result_json TEXT NOT NULL DEFAULT '{}',
+                    consecutive_errors INTEGER NOT NULL DEFAULT 0,
+                    updated_at DATETIME NOT NULL
+                )
+            """)
+            connection.exec_driver_sql("""
+                CREATE TABLE schema_migrations (
+                    version INTEGER PRIMARY KEY,
+                    name VARCHAR(200) NOT NULL,
+                    applied_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            for version, name in enumerate(MIGRATION_NAMES[:44], start=1):
+                connection.exec_driver_sql(
+                    "INSERT INTO schema_migrations(version, name) VALUES (?, ?)",
+                    (version, name),
+                )
+            connection.exec_driver_sql("""
+                INSERT INTO automation_worker_statuses (
+                    worker_id, started_at, last_seen_at, last_tick_at,
+                    last_status, last_result_json, updated_at
+                ) VALUES (
+                    'worker-before-v45', '2026-08-02 00:00:00',
+                    '2026-08-02 00:00:10', '2026-08-02 00:00:09',
+                    'threshold_wait', '{"status":"threshold_wait"}',
+                    '2026-08-02 00:00:10'
+                )
+            """)
+
+            run_migrations(connection)
+
+            row = connection.exec_driver_sql("""
+                SELECT worker_id, last_status, readiness, blockers_json
+                FROM automation_worker_statuses
+            """).one()
+            assert tuple(row) == (
+                "worker-before-v45",
+                "threshold_wait",
+                "unknown",
+                "[]",
+            )
+            assert connection.exec_driver_sql(
+                "SELECT max(version) FROM schema_migrations"
+            ).scalar_one() == 45
+    finally:
+        engine.dispose()
 
 
 def test_v40_removes_fixed_category_check_and_preserves_profiles(tmp_path) -> None:

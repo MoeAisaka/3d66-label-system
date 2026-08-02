@@ -6230,6 +6230,31 @@ def _migration_044_add_evaluation_production_runs(connection: Connection) -> Non
         )
 
 
+def _migration_045_persist_worker_readiness(connection: Connection) -> None:
+    """Keep the last completed worker preflight available after restarts."""
+    columns = {
+        row[1]
+        for row in connection.exec_driver_sql(
+            "PRAGMA table_info(automation_worker_statuses)"
+        )
+    }
+    if "readiness" not in columns:
+        connection.exec_driver_sql(
+            "ALTER TABLE automation_worker_statuses "
+            "ADD COLUMN readiness VARCHAR(20) NOT NULL DEFAULT 'unknown'"
+        )
+    if "blockers_json" not in columns:
+        connection.exec_driver_sql(
+            "ALTER TABLE automation_worker_statuses "
+            "ADD COLUMN blockers_json TEXT NOT NULL DEFAULT '[]'"
+        )
+    violations = connection.exec_driver_sql("PRAGMA foreign_key_check").fetchall()
+    if violations:
+        raise RuntimeError(
+            f"v45 Worker readiness 迁移外键校验失败：{violations[:3]}"
+        )
+
+
 MIGRATIONS = [
     Migration(1, "add_sample_expected_level", _migration_001_add_sample_expected_level),
     Migration(2, "add_review_corrections", _migration_002_add_review_corrections),
@@ -6406,6 +6431,11 @@ MIGRATIONS = [
         44,
         "add_evaluation_production_runs",
         _migration_044_add_evaluation_production_runs,
+    ),
+    Migration(
+        45,
+        "persist_worker_readiness",
+        _migration_045_persist_worker_readiness,
     ),
 ]
 

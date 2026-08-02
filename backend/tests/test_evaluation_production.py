@@ -397,7 +397,7 @@ def test_reconcile_uses_job_review_and_automation_facts_and_recovers_from_blocke
 
         with fixture["sessions"]() as db:
             automation = AutomationOptimizationRun(
-                category_key="space_image",
+                category_key="material_image",
                 run_key=f"production-automation:{run_id}",
                 base_prompt_version="production-B-v1",
                 policy_revision=1,
@@ -415,6 +415,16 @@ def test_reconcile_uses_job_review_and_automation_facts_and_recovers_from_blocke
             case.automation_run_id = automation.id
             case.status = "processing"
             db.commit()
+        mismatched = fixture["client"].post(
+            f"/api/evaluation-production-runs/{run_id}/reconcile"
+        )
+        assert mismatched.status_code == 200
+        assert mismatched.json()["status"] == "failed"
+        assert mismatched.json()["error"]["code"] == "automation_category_mismatch"
+
+        with fixture["sessions"]() as db:
+            db.get(AutomationOptimizationRun, automation.id).category_key = "space_image"
+            db.commit()
         recovered = fixture["client"].post(
             f"/api/evaluation-production-runs/{run_id}/reconcile"
         )
@@ -422,6 +432,7 @@ def test_reconcile_uses_job_review_and_automation_facts_and_recovers_from_blocke
         assert recovered.json()["status"] == "optimizing"
         assert recovered.json()["blockers"] == []
         assert recovered.json()["automation_run_id"] == automation.id
+        assert recovered.json()["automation"]["lifecycle_status"] == "processing"
 
 
 def test_reconcile_links_real_final_package_without_approving_or_publishing() -> None:
@@ -469,6 +480,10 @@ def test_reconcile_links_real_final_package_without_approving_or_publishing() ->
             )
             db.add(profile)
         profile.rubric_version = "rubric-package-v1"
+        # This case exercises production-run reconciliation, not the separate
+        # dimension-candidate calibration gate used by the shared fixture.
+        profile.dimension_schema_key = None
+        profile.dimension_schema_version = None
         db.commit()
         created = _create(client, material.id, "production-final-package")
         assert created.status_code == 200, created.text

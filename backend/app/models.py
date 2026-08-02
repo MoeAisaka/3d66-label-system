@@ -2584,6 +2584,8 @@ class AutomationWorkerStatus(Base):
         DateTime(timezone=True), nullable=True
     )
     last_status: Mapped[str] = mapped_column(String(80), default="starting")
+    readiness: Mapped[str] = mapped_column(String(20), default="unknown")
+    blockers_json: Mapped[str] = mapped_column(Text, default="[]")
     last_error: Mapped[str] = mapped_column(Text, default="")
     last_result_json: Mapped[str] = mapped_column(Text, default="{}")
     consecutive_errors: Mapped[int] = mapped_column(Integer, default=0)

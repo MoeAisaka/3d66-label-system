@@ -20,6 +20,7 @@ from .models import (
     DimensionSchema,
     EvaluationCategoryProfile,
     EvaluationPackage,
+    ModelConfig,
     PromptMetricSnapshot,
     PromptRegressionRun,
     PromptVersion,
@@ -29,9 +30,11 @@ from .models import (
     User,
 )
 from .strategy_bundle import (
+    build_model_config_snapshot,
     build_strategy_snapshot,
     safe_strategy_snapshot_payload,
 )
+from .optimization_automation import category_bundle_contract_errors
 
 
 MANIFEST_SCHEMA_VERSION = "evaluation-package-manifest-v1"
@@ -1345,37 +1348,110 @@ def _review_evaluation_package(
     return current, False
 
 
-def _publish_prompt(db: Session, prompt: PromptVersion, *, now: datetime) -> None:
+def _publish_prompt(
+    db: Session,
+    prompt: PromptVersion,
+    *,
+    previous_prompt_id: int | None,
+    now: datetime,
+) -> None:
     if prompt.status == "published":
         return
-    previous = db.scalar(
-        select(PromptVersion)
-        .where(
-            PromptVersion.stage == prompt.stage,
-            PromptVersion.status == "published",
-            PromptVersion.id != prompt.id,
-        )
-        .order_by(PromptVersion.updated_at.desc(), PromptVersion.id.desc())
-        .limit(1)
-    )
-    db.execute(
-        update(PromptVersion)
-        .where(
-            PromptVersion.stage == prompt.stage,
-            PromptVersion.status == "published",
-            PromptVersion.id != prompt.id,
-        )
-        .values(status="archived", updated_at=now)
-    )
     db.execute(
         update(PromptVersion)
         .where(PromptVersion.id == prompt.id)
         .values(
             status="published",
-            rollback_prompt_id=previous.id if previous is not None else None,
+            rollback_prompt_id=(
+                previous_prompt_id
+                if previous_prompt_id is not None and previous_prompt_id != prompt.id
+                else None
+            ),
             updated_at=now,
         )
     )
+
+
+def _activate_package_category_baseline(
+    db: Session,
+    *,
+    package: EvaluationPackage,
+) -> tuple[int | None, int | None]:
+    """Make the human-approved package the category's executable baseline."""
+    profile = db.scalar(
+        select(EvaluationCategoryProfile).where(
+            EvaluationCategoryProfile.category_key == package.category_key
+        )
+    )
+    if profile is None or profile.status != "active":
+        raise HTTPException(status_code=409, detail="评测包所属类目不存在或未启用")
+    bundle = package.candidate_strategy_bundle
+    try:
+        frozen_model = json.loads(bundle.model_config_snapshot)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=409, detail="候选模型快照损坏") from exc
+    model_matches = [
+        model
+        for model in db.scalars(
+            select(ModelConfig).where(
+                ModelConfig.model_id == bundle.model_id,
+                ModelConfig.active.is_(True),
+            )
+        ).all()
+        if build_model_config_snapshot(model) == frozen_model
+    ]
+    if len(model_matches) != 1:
+        raise HTTPException(status_code=409, detail="候选模型配置无法唯一解析")
+    try:
+        automation = json.loads(profile.automation_config_json or "{}")
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=409, detail="类目自动化配置损坏") from exc
+    if not isinstance(automation, dict):
+        raise HTTPException(status_code=409, detail="类目自动化配置不是对象")
+
+    previous_prompt_ids = (profile.prompt_a_id, profile.prompt_b_id)
+    profile.prompt_a_id = package.prompt_a_id
+    profile.prompt_b_id = package.prompt_b_id
+    profile.model_config_id = model_matches[0].id
+    profile.rubric_version = bundle.rubric_version
+    if package.dimension_schema is not None:
+        profile.dimension_schema_key = package.dimension_schema.schema_key
+        profile.dimension_schema_version = package.dimension_schema.version
+    elif not profile.dimension_schema_key or not profile.dimension_schema_version:
+        try:
+            schema_set = json.loads(bundle.dimension_schema_set_snapshot or "{}")
+        except json.JSONDecodeError as exc:
+            raise HTTPException(status_code=409, detail="候选维度合同损坏") from exc
+        schemas = schema_set.get("schemas") if isinstance(schema_set, dict) else None
+        candidates = [
+            item
+            for item in schemas or []
+            if isinstance(item, dict)
+            and isinstance(item.get("schema_key"), str)
+            and isinstance(item.get("version"), str)
+        ]
+        if len(candidates) != 1:
+            raise HTTPException(status_code=409, detail="候选维度合同无法唯一解析")
+        profile.dimension_schema_key = candidates[0]["schema_key"]
+        profile.dimension_schema_version = candidates[0]["version"]
+    profile.automation_config_json = canonical_json(
+        {**automation, "baseline_strategy_bundle_id": bundle.id}
+    )
+    profile.automation_revision += 1
+    errors = category_bundle_contract_errors(
+        db,
+        profile=profile,
+        bundle=bundle,
+        require_complete=True,
+        require_prompt_b=package.prompt_b_id is not None,
+        enforce_baseline_id=True,
+    )
+    if errors:
+        raise HTTPException(
+            status_code=409,
+            detail="评测包与类目执行合同不一致，不能发布：" + "、".join(errors),
+        )
+    return previous_prompt_ids
 
 
 def publish_evaluation_package(
@@ -1418,9 +1494,22 @@ def publish_evaluation_package(
             status_code=409,
             detail="评测包发布已被其他操作更新，请刷新后重试",
         )
-    _publish_prompt(db, package.prompt_a, now=now)
+    previous_prompt_a_id, previous_prompt_b_id = _activate_package_category_baseline(
+        db, package=package
+    )
+    _publish_prompt(
+        db,
+        package.prompt_a,
+        previous_prompt_id=previous_prompt_a_id,
+        now=now,
+    )
     if package.prompt_b is not None:
-        _publish_prompt(db, package.prompt_b, now=now)
+        _publish_prompt(
+            db,
+            package.prompt_b,
+            previous_prompt_id=previous_prompt_b_id,
+            now=now,
+        )
     append_audit_event(
         db,
         category="evaluation_package",

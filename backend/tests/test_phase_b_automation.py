@@ -55,16 +55,20 @@ from app.models import (
     PromptRegressionRun,
     SampleSet,
     SamplingPolicy,
+    StrategyBundle,
     User,
 )
 from app.optimization_automation import (
     AutomationAdapterResult,
+    AutomationConfigurationBlocker,
     DeterministicOptimizationAdapter,
     RealOptimizationAdapter,
     automation_runtime_status,
+    automation_worker_snapshot,
     consume_optimization_queue_once,
     optimization_worker_tick,
     record_automation_worker_status,
+    recover_expired_leases,
     touch_automation_worker_status,
 )
 from app.regression import (
@@ -111,6 +115,7 @@ def _feedback(
     event_id: str,
     severity: str = "P2",
     prompt_version: str = "prompt-b-v1",
+    category_key: str = "space_image",
     occurred_at: datetime | None = None,
 ):
     return ingest_production_feedback(
@@ -122,7 +127,7 @@ def _feedback(
         occurred_at=occurred_at or datetime(2026, 1, 1, tzinfo=timezone.utc),
         payload={
             "production_case_id": f"case-{event_id}",
-            "category_key": "space_image",
+            "category_key": category_key,
             "prompt_version": prompt_version,
             "severity": severity,
             "model_output": {"level": "L4"},
@@ -132,6 +137,80 @@ def _feedback(
         },
         received_by="phase-b-owner",
     )
+
+
+def _category_baseline_stack(
+    db: Session,
+    *,
+    suffix: str,
+    bundle_count: int,
+) -> tuple[
+    ModelConfig,
+    PromptVersion,
+    PromptVersion,
+    EvaluationCategoryProfile,
+    list[StrategyBundle],
+]:
+    model = ModelConfig(name=f"model-{suffix}", model_id=f"model-{suffix}")
+    prompt_a = PromptVersion(
+        stage="A",
+        name=f"A-{suffix}",
+        version=f"a-{suffix}",
+        system_prompt="category contract A system",
+        user_prompt="category contract A user",
+        rubric_version=f"rubric-{suffix}",
+        status="published",
+    )
+    prompt_b = PromptVersion(
+        stage="B",
+        name=f"B-{suffix}",
+        version=f"b-{suffix}",
+        system_prompt="category contract B system",
+        user_prompt="category contract B user",
+        rubric_version=f"rubric-{suffix}",
+        status="published",
+    )
+    sampling = SamplingPolicy()
+    db.add_all([model, prompt_a, prompt_b, sampling])
+    db.flush()
+    bundles = [
+        get_or_create_bundle(
+            db,
+            model,
+            prompt_a,
+            prompt_b,
+            prompt_b.rubric_version,
+            f"engine-{suffix}-{index}",
+            None,
+            sampling,
+        )
+        for index in range(bundle_count)
+    ]
+    db.flush()
+    profile = db.scalar(
+        select(EvaluationCategoryProfile).where(
+            EvaluationCategoryProfile.category_key == "space_image"
+        )
+    )
+    assert profile is not None
+    profile.prompt_a_id = prompt_a.id
+    profile.prompt_b_id = prompt_b.id
+    profile.model_config_id = model.id
+    profile.rubric_version = prompt_b.rubric_version
+    profile.automation_config_json = json.dumps(
+        {"enabled": True, "case_threshold": 1, "max_candidates": 1}
+    )
+    if bundles:
+        dimension = json.loads(
+            bundles[0].dimension_schema_set_snapshot
+        )["schemas"][0]
+        profile.dimension_schema_key = dimension["schema_key"]
+        profile.dimension_schema_version = dimension["version"]
+    else:
+        profile.dimension_schema_key = "dimension.missing"
+        profile.dimension_schema_version = "missing-v1"
+    db.flush()
+    return model, prompt_a, prompt_b, profile, bundles
 
 
 def test_production_feedback_is_idempotent_and_immutable() -> None:
@@ -641,6 +720,188 @@ def test_worker_heartbeat_does_not_overwrite_last_tick_result() -> None:
         _close(engine, db)
 
 
+def test_processing_lease_keeps_worker_active_past_heartbeat_window() -> None:
+    engine, db, _user = _database()
+    try:
+        started_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        policy = AutomationPolicy(id=1, enabled=False, dry_run=True)
+        db.add(policy)
+        _event, case, _duplicate = _feedback(db, event_id="long-model-call")
+        record_automation_worker_status(
+            db,
+            worker_id="worker-long-call",
+            status="processing",
+            result={"status": "processing"},
+            now=started_at,
+        )
+        case.status = "processing"
+        case.lease_owner = "worker-long-call"
+        case.lease_token = "long-call-lease"
+        case.lease_expires_at = started_at + timedelta(minutes=5)
+        db.commit()
+
+        runtime = automation_runtime_status(
+            db,
+            policy,
+            now=started_at + timedelta(seconds=45),
+        )
+
+        assert runtime["worker"]["active_worker_count"] == 1
+        assert runtime["worker"]["workers"][0]["active_reason"] == "processing_lease"
+        assert "worker_not_seen" not in {
+            item["code"] for item in runtime["blockers"]
+        }
+    finally:
+        _close(engine, db)
+
+
+def test_optimizer_timeout_extends_30_second_lease_and_prevents_recovery(
+    tmp_path: Path,
+) -> None:
+    engine = create_engine(
+        f"sqlite:///{tmp_path / 'long-optimizer-lease.db'}",
+        connect_args={"check_same_thread": False},
+    )
+    Base.metadata.create_all(engine)
+    with engine.begin() as connection:
+        run_migrations(connection)
+    started_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    model_started = threading.Event()
+    release_model = threading.Event()
+    worker_result: dict[str, object] = {}
+    worker_errors: list[BaseException] = []
+
+    class LongCallAdapter(RealOptimizationAdapter):
+        def __init__(self) -> None:
+            super().__init__(
+                config=SimpleNamespace(timeout_seconds=120, max_retries=0)
+            )
+
+        def bind_base_prompt(self, db, *, version):
+            del db
+            self.base_prompt = SimpleNamespace(version=version)
+
+        def prepare_regression_binding(
+            self, db, *, base_prompt, category_key, freeze_automatic_binding=True
+        ):
+            del db, base_prompt, category_key, freeze_automatic_binding
+            return {}
+
+        def estimate_cost_micros(self, *, frozen_input):
+            del frozen_input
+            return 1000
+
+        def optimize(self, *, frozen_input, max_candidates):
+            del frozen_input, max_candidates
+            model_started.set()
+            assert release_model.wait(timeout=5)
+            return AutomationAdapterResult(
+                candidates=[{
+                    "system_prompt": "long call candidate",
+                    "user_prompt": "long call user",
+                    "change_note": "lease coverage test",
+                }],
+                regression={},
+                actual_cost_micros=500,
+                input_tokens=10,
+                output_tokens=5,
+                total_tokens=15,
+            )
+
+        def materialize(self, db, *, run, result, worker_id):
+            del db, run, result, worker_id
+            return {"prompt_ids": [], "regression_ids": []}
+
+    with Session(engine, expire_on_commit=False) as seed:
+        seed.add(
+            AutomationPolicy(
+                id=1,
+                enabled=True,
+                dry_run=False,
+                case_threshold=1,
+                daily_budget_micros=10_000,
+                lease_seconds=30,
+            )
+        )
+        _feedback(seed, event_id="long-call-derived-lease")
+        record_automation_worker_status(
+            seed,
+            worker_id="worker-derived-lease",
+            status="processing",
+            result={"status": "processing"},
+            now=started_at,
+        )
+        seed.commit()
+
+    def run_worker() -> None:
+        try:
+            with Session(engine, expire_on_commit=False) as session:
+                worker_result.update(
+                    consume_optimization_queue_once(
+                        session,
+                        worker_id="worker-derived-lease",
+                        adapter=LongCallAdapter(),
+                        now=started_at,
+                    )
+                )
+                session.commit()
+        except BaseException as exc:  # pragma: no cover - asserted below
+            worker_errors.append(exc)
+
+    thread = threading.Thread(target=run_worker)
+    thread.start()
+    assert model_started.wait(timeout=5)
+    logical_now = started_at + timedelta(seconds=45)
+    try:
+        with Session(engine, expire_on_commit=False) as observer:
+            snapshot = automation_worker_snapshot(observer, now=logical_now)
+            recovered = recover_expired_leases(observer, now=logical_now)
+            case = observer.scalar(select(OptimizationCaseQueue))
+            observer.commit()
+
+            assert snapshot["active_worker_count"] == 1
+            assert snapshot["workers"][0]["active_reason"] == "processing_lease"
+            assert recovered == 0
+            assert case.status == "processing"
+            lease_expires_at = case.lease_expires_at.replace(tzinfo=timezone.utc)
+            assert lease_expires_at > started_at + timedelta(seconds=30)
+            assert lease_expires_at >= (
+                started_at + timedelta(seconds=120 + 60)
+            )
+    finally:
+        release_model.set()
+        thread.join(timeout=5)
+        engine.dispose()
+    assert not thread.is_alive()
+    assert worker_errors == []
+    assert worker_result["status"] == "succeeded"
+    with Session(engine, expire_on_commit=False) as session:
+        run = session.scalar(select(AutomationOptimizationRun))
+        frozen_policy = json.loads(run.frozen_input_json)["policy"]
+        frozen_lease = frozen_policy["execution_lease"]
+        assert frozen_policy["execution_lease_seconds"] == 360
+        assert frozen_lease == {
+            "effective_seconds": 360,
+            "expires_at": (started_at + timedelta(seconds=360)).isoformat(),
+            "materialize_regression_safety_seconds": 120,
+            "optimizer_call_count": 2,
+            "optimizer_max_retries": 0,
+            "optimizer_timeout_budget_seconds": 240,
+            "optimizer_timeout_seconds": 120,
+            "policy_seconds": 30,
+            "source": "optimizer_timeout_budget",
+        }
+        assert json.loads(run.result_json)["execution_lease"] == frozen_lease
+        assert worker_result["execution_lease_seconds"] == 360
+        planned_audit = session.scalar(
+            select(AuditEvent).where(
+                AuditEvent.action == "run_planned",
+                AuditEvent.subject_id == run.id,
+            )
+        )
+        assert json.loads(planned_audit.payload_json)["execution_lease"] == frozen_lease
+
+
 def test_worker_tick_records_failure_without_raising(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -677,6 +938,441 @@ def test_worker_tick_records_failure_without_raising(
         assert worker.last_status == "worker_error"
         assert worker.last_error == "automation_executor_failed"
         assert worker.consecutive_errors == 1
+        assert worker.readiness == "blocked"
+        assert json.loads(worker.blockers_json)[0]["code"] == "worker_error"
+    finally:
+        _close(engine, db)
+
+
+def test_worker_tick_persists_last_readiness_and_blockers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine, db, _user = _database()
+
+    @contextmanager
+    def fake_session_scope():
+        try:
+            yield db
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+
+    try:
+        monkeypatch.setattr(optimization_automation, "session_scope", fake_session_scope)
+        monkeypatch.setattr(
+            optimization_automation,
+            "consume_optimization_queue_once",
+            lambda *_args, **_kwargs: {"status": "idle"},
+        )
+
+        assert optimization_worker_tick("worker-readiness") == {"status": "idle"}
+
+        worker = db.get(AutomationWorkerStatus, "worker-readiness")
+        assert worker is not None
+        assert worker.last_tick_at is not None
+        assert worker.readiness == "blocked"
+        assert {item["code"] for item in json.loads(worker.blockers_json)} == {
+            "policy_disabled",
+            "dry_run_enabled",
+            "queue_empty",
+        }
+        persisted = json.loads(worker.last_result_json)
+        assert persisted["readiness"] == "blocked"
+        assert persisted["checked_at"]
+    finally:
+        _close(engine, db)
+
+
+@pytest.mark.parametrize(
+    "space_config",
+    [
+        {"enabled": False, "case_threshold": 1, "max_candidates": 1},
+        {"enabled": True, "case_threshold": 2, "max_candidates": 1},
+    ],
+)
+def test_blocked_earlier_category_does_not_starve_ready_category(
+    space_config: dict[str, object],
+) -> None:
+    engine, db, _user = _database()
+    try:
+        db.add(
+            AutomationPolicy(
+                id=1,
+                enabled=True,
+                dry_run=True,
+                case_threshold=10,
+            )
+        )
+        space_profile = db.scalar(
+            select(EvaluationCategoryProfile).where(
+                EvaluationCategoryProfile.category_key == "space_image"
+            )
+        )
+        assert space_profile is not None
+        space_profile.automation_config_json = json.dumps(space_config)
+        _feedback(db, event_id="disabled-first", category_key="space_image")
+        _feedback(
+            db,
+            event_id="ready-second",
+            category_key="material_image",
+            severity="P0",
+        )
+        db.commit()
+
+        result = consume_optimization_queue_once(db, worker_id="worker-category-fair")
+        db.commit()
+
+        assert result["status"] == "planned"
+        assert result["lifecycle_status"] == "pending"
+        run = db.get(AutomationOptimizationRun, result["run_id"])
+        assert run.category_key == "material_image"
+        pending = db.scalar(
+            select(OptimizationCaseQueue).where(
+                OptimizationCaseQueue.idempotency_key == "production:disabled-first"
+            )
+        )
+        assert pending.status == "pending"
+    finally:
+        _close(engine, db)
+
+
+def test_ready_categories_are_persistently_round_robin_across_ticks() -> None:
+    engine, db, _user = _database()
+    try:
+        db.add(
+            AutomationPolicy(
+                id=1,
+                enabled=True,
+                dry_run=True,
+                case_threshold=1,
+            )
+        )
+        for category_key in ("space_image", "material_image"):
+            profile = db.scalar(
+                select(EvaluationCategoryProfile).where(
+                    EvaluationCategoryProfile.category_key == category_key
+                )
+            )
+            assert profile is not None
+            profile.automation_config_json = json.dumps(
+                {
+                    "enabled": True,
+                    "case_threshold": 1,
+                    "cooldown_seconds": 0,
+                    "max_candidates": 1,
+                }
+            )
+            for index in range(3):
+                _feedback(
+                    db,
+                    event_id=f"round-robin-{category_key}-{index}",
+                    category_key=category_key,
+                )
+        db.commit()
+
+        served: list[str] = []
+        fixed_now = datetime(2026, 1, 5, tzinfo=timezone.utc)
+        for index in range(6):
+            result = consume_optimization_queue_once(
+                db,
+                worker_id="worker-round-robin",
+                now=fixed_now,
+            )
+            db.commit()
+            assert result["status"] == "planned"
+            run = db.get(AutomationOptimizationRun, result["run_id"])
+            served.append(run.category_key)
+
+        assert served[0] != served[1]
+        assert served == [served[index % 2] for index in range(6)]
+        assert served.count("space_image") == 3
+        assert served.count("material_image") == 3
+    finally:
+        _close(engine, db)
+
+
+def test_category_contract_selects_explicit_baseline_not_shared_b_prompt() -> None:
+    engine, db, _user = _database()
+    try:
+        policy = SamplingPolicy(id=1)
+        shared_b = PromptVersion(
+            stage="B",
+            name="shared B",
+            version="shared-b-v1",
+            system_prompt="shared B system",
+            user_prompt="shared B user",
+            rubric_version="R1",
+            status="published",
+        )
+        space_a = PromptVersion(
+            stage="A",
+            name="space A",
+            version="space-a-v1",
+            system_prompt="space A system",
+            user_prompt="space A user",
+            rubric_version="R1",
+            status="published",
+        )
+        material_a = PromptVersion(
+            stage="A",
+            name="material A",
+            version="material-a-v1",
+            system_prompt="material A system",
+            user_prompt="material A user",
+            rubric_version="R1",
+            status="published",
+        )
+        space_model = ModelConfig(name="space model", model_id="space-model")
+        material_model = ModelConfig(
+            name="material model", model_id="material-model"
+        )
+        db.add_all(
+            [policy, shared_b, space_a, material_a, space_model, material_model]
+        )
+        db.flush()
+        space_bundle = get_or_create_bundle(
+            db, space_model, space_a, shared_b, "R1", "E1", None, policy
+        )
+        material_bundle = get_or_create_bundle(
+            db, material_model, material_a, shared_b, "R1", "E1", None, policy
+        )
+        profile = db.scalar(
+            select(EvaluationCategoryProfile).where(
+                EvaluationCategoryProfile.category_key == "space_image"
+            )
+        )
+        assert profile is not None
+        dimension = json.loads(space_bundle.dimension_schema_set_snapshot)["schemas"][0]
+        profile.prompt_a_id = space_a.id
+        profile.prompt_b_id = shared_b.id
+        profile.model_config_id = space_model.id
+        profile.rubric_version = "R1"
+        profile.dimension_schema_key = dimension["schema_key"]
+        profile.dimension_schema_version = dimension["version"]
+        profile.automation_config_json = json.dumps(
+            {
+                "enabled": True,
+                "baseline_strategy_bundle_id": material_bundle.id,
+            }
+        )
+        db.commit()
+        adapter = RealOptimizationAdapter(config=SimpleNamespace())
+
+        with pytest.raises(AutomationConfigurationBlocker) as exc_info:
+            adapter.prepare_regression_binding(
+                db,
+                base_prompt=shared_b,
+                category_key="space_image",
+            )
+        assert (
+            exc_info.value.code
+            == "baseline_strategy_bundle_contract_mismatch"
+        )
+
+        profile.automation_config_json = json.dumps(
+            {
+                "enabled": True,
+                "baseline_strategy_bundle_id": space_bundle.id,
+            }
+        )
+        db.commit()
+        with pytest.raises(ValueError, match="锁定黄金样本"):
+            adapter.prepare_regression_binding(
+                db,
+                base_prompt=shared_b,
+                category_key="space_image",
+            )
+    finally:
+        _close(engine, db)
+
+
+def test_unique_complete_category_contract_auto_resolves_and_freezes_baseline() -> None:
+    engine, db, _user = _database()
+    try:
+        policy = SamplingPolicy(id=1)
+        model = ModelConfig(name="seed model", model_id="seed-model")
+        prompt_a = PromptVersion(
+            stage="A",
+            name="seed A",
+            version="seed-a-v1",
+            system_prompt="seed A system",
+            user_prompt="seed A user",
+            rubric_version="seed-rubric-v1",
+            status="published",
+        )
+        prompt_b = PromptVersion(
+            stage="B",
+            name="seed B",
+            version="seed-b-v1",
+            system_prompt="seed B system",
+            user_prompt="seed B user",
+            rubric_version="seed-rubric-v1",
+            status="published",
+        )
+        db.add_all([policy, model, prompt_a, prompt_b])
+        db.flush()
+        profile = db.scalar(
+            select(EvaluationCategoryProfile).where(
+                EvaluationCategoryProfile.category_key == "space_image"
+            )
+        )
+        assert profile is not None
+        profile.prompt_a_id = prompt_a.id
+        profile.prompt_b_id = prompt_b.id
+        profile.model_config_id = model.id
+        profile.rubric_version = prompt_b.rubric_version
+        profile.automation_config_json = json.dumps(
+            {
+                "enabled": True,
+                "case_threshold": 1,
+                "cooldown_seconds": 0,
+                "max_candidates": 1,
+            }
+        )
+        original_automation_revision = profile.automation_revision
+
+        bundle = get_or_create_bundle(
+            db,
+            model,
+            prompt_a,
+            prompt_b,
+            prompt_b.rubric_version,
+            "seed-engine-v1",
+            None,
+            policy,
+        )
+        db.flush()
+
+        automation = json.loads(profile.automation_config_json)
+        assert "baseline_strategy_bundle_id" not in automation
+        assert profile.automation_revision == original_automation_revision
+        dimension = json.loads(bundle.dimension_schema_set_snapshot)["schemas"][0]
+        profile.dimension_schema_key = dimension["schema_key"]
+        profile.dimension_schema_version = dimension["version"]
+
+        adapter = RealOptimizationAdapter(
+            config=SimpleNamespace(), base_prompt=prompt_b
+        )
+        with pytest.raises(AutomationConfigurationBlocker) as exc_info:
+            adapter.prepare_regression_binding(
+                db, base_prompt=prompt_b, category_key="space_image"
+            )
+
+        assert exc_info.value.code == "regression_binding_missing"
+        automation = json.loads(profile.automation_config_json)
+        assert automation["baseline_strategy_bundle_id"] == bundle.id
+        assert automation["baseline_binding_source"] == "auto_contract"
+        assert profile.automation_revision == original_automation_revision + 1
+    finally:
+        _close(engine, db)
+
+
+def test_zero_matching_baseline_returns_actionable_blocker_without_claiming_case(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine, db, _user = _database()
+    try:
+        _model, _prompt_a, prompt_b, profile, _bundles = _category_baseline_stack(
+            db, suffix="not-found", bundle_count=0
+        )
+        policy = AutomationPolicy(
+            id=1,
+            enabled=True,
+            dry_run=False,
+            case_threshold=1,
+            daily_budget_micros=100_000,
+        )
+        db.add(policy)
+        _feedback(
+            db,
+            event_id="baseline-not-found",
+            prompt_version=prompt_b.version,
+        )
+        db.commit()
+
+        runtime_adapter = RealOptimizationAdapter(config=SimpleNamespace())
+        monkeypatch.setattr(
+            optimization_automation,
+            "configured_optimization_adapter",
+            lambda _db, *, category_key: runtime_adapter,
+        )
+        runtime = automation_runtime_status(db, policy)
+        runtime_blocker = next(
+            item
+            for item in runtime["blockers"]
+            if item["code"] == "baseline_strategy_bundle_not_found"
+        )
+        assert "先生成该组合的 Bundle" in runtime_blocker["message"]
+        assert "baseline_strategy_bundle_id" not in json.loads(
+            profile.automation_config_json
+        )
+
+        result = consume_optimization_queue_once(
+            db,
+            worker_id="worker-baseline-not-found",
+            adapter=RealOptimizationAdapter(config=SimpleNamespace()),
+        )
+
+        assert result["status"] == "executor_config_blocked"
+        assert result["reason"] == "baseline_strategy_bundle_not_found"
+        assert "先生成该组合的 Bundle" in result["message"]
+        assert result["skipped_cohorts"][0]["code"] == result["reason"]
+        case = db.scalar(select(OptimizationCaseQueue))
+        assert case is not None
+        assert case.status == "pending"
+        assert case.attempt_count == 0
+        assert "baseline_strategy_bundle_id" not in json.loads(
+            profile.automation_config_json
+        )
+    finally:
+        _close(engine, db)
+
+
+def test_multiple_matching_baselines_fail_closed_until_admin_disambiguates() -> None:
+    engine, db, _user = _database()
+    try:
+        _model, _prompt_a, prompt_b, profile, bundles = _category_baseline_stack(
+            db, suffix="ambiguous", bundle_count=2
+        )
+        assert len({bundle.id for bundle in bundles}) == 2
+        adapter = RealOptimizationAdapter(
+            config=SimpleNamespace(), base_prompt=prompt_b
+        )
+
+        with pytest.raises(AutomationConfigurationBlocker) as exc_info:
+            adapter.prepare_regression_binding(
+                db, base_prompt=prompt_b, category_key="space_image"
+            )
+
+        assert exc_info.value.code == "baseline_strategy_bundle_ambiguous"
+        assert "后台高级设置显式选择" in exc_info.value.message
+        assert "baseline_strategy_bundle_id" not in json.loads(
+            profile.automation_config_json
+        )
+    finally:
+        _close(engine, db)
+
+
+def test_incomplete_dimension_contract_blocks_automatic_baseline_resolution() -> None:
+    engine, db, _user = _database()
+    try:
+        _model, _prompt_a, prompt_b, profile, _bundles = _category_baseline_stack(
+            db, suffix="incomplete", bundle_count=1
+        )
+        profile.dimension_schema_key = None
+        profile.dimension_schema_version = None
+        adapter = RealOptimizationAdapter(
+            config=SimpleNamespace(), base_prompt=prompt_b
+        )
+
+        with pytest.raises(AutomationConfigurationBlocker) as exc_info:
+            adapter.prepare_regression_binding(
+                db, base_prompt=prompt_b, category_key="space_image"
+            )
+
+        assert exc_info.value.code == "baseline_category_contract_incomplete"
+        assert "A/B Prompt、模型、Rubric 和维度 Schema" in exc_info.value.message
     finally:
         _close(engine, db)
 
@@ -779,6 +1475,7 @@ def test_test_adapter_succeeds_with_usage_and_never_publishes() -> None:
         )
         db.commit()
         assert result["status"] == "succeeded"
+        assert result["lifecycle_status"] == "running"
         run = db.get(AutomationOptimizationRun, result["run_id"])
         evidence = json.loads(run.result_json)
         assert evidence["release_requires_human_review"] is True
@@ -1371,6 +2068,27 @@ def test_real_optimizer_materializes_new_draft_with_three_role_regression(
             risk_review_version="risk-v1",
             sampling_policy=policy,
         )
+        category_profile = db.scalar(
+            select(EvaluationCategoryProfile).where(
+                EvaluationCategoryProfile.category_key == "space_image"
+            )
+        )
+        assert category_profile is not None
+        dimension_entry = json.loads(
+            baseline.dimension_schema_set_snapshot
+        )["schemas"][0]
+        category_profile.prompt_a_id = prompt_a.id
+        category_profile.prompt_b_id = prompt_b.id
+        category_profile.model_config_id = model.id
+        category_profile.rubric_version = baseline.rubric_version
+        category_profile.dimension_schema_key = dimension_entry["schema_key"]
+        category_profile.dimension_schema_version = dimension_entry["version"]
+        category_profile.automation_config_json = json.dumps(
+            {
+                "enabled": True,
+                "baseline_strategy_bundle_id": baseline.id,
+            }
+        )
         run = AutomationOptimizationRun(
             run_key="materialize-run",
             base_prompt_version=prompt_b.version,
@@ -1383,6 +2101,20 @@ def test_real_optimizer_materializes_new_draft_with_three_role_regression(
                 "regression_binding": {
                     "sample_set_id": 9,
                     "baseline_strategy_bundle_id": baseline.id,
+                    "category_contract": {
+                        "category_key": "space_image",
+                        "profile_id": category_profile.id,
+                        "pipeline_revision": category_profile.pipeline_revision,
+                        "automation_revision": category_profile.automation_revision,
+                        "baseline_strategy_bundle_id": baseline.id,
+                        "baseline_binding_source": "explicit_legacy",
+                        "prompt_a_id": prompt_a.id,
+                        "prompt_b_id": prompt_b.id,
+                        "model_config_id": model.id,
+                        "rubric_version": category_profile.rubric_version,
+                        "dimension_schema_key": dimension_entry["schema_key"],
+                        "dimension_schema_version": dimension_entry["version"],
+                    },
                     "samples": [
                         {"sample_item_id": 11, "role": "target_error"},
                         {"sample_item_id": 12, "role": "stable_control"},

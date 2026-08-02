@@ -164,8 +164,11 @@ from .security import (
 from .authz import ROLE_LABELS, ROLE_PERMISSIONS, effective_role, has_permission, require_permission
 from .optimizer import run_prompt_optimization, stage_audit_payload
 from .optimization_automation import (
+    assert_bundle_pair_category_contract,
+    automation_lifecycle_status,
     automation_runtime_status,
     automation_budget_status,
+    category_bundle_contract_errors,
     configured_optimization_adapter,
     consume_optimization_queue_once,
 )
@@ -2640,6 +2643,11 @@ def _apply_category_update(
         prompt = db.get(PromptVersion, prompt_id)
         if prompt is None or prompt.stage != stage:
             raise HTTPException(status_code=422, detail=f"类目 {stage} 提示词必须是有效的 {stage} 阶段版本")
+        if payload.status == "active" and prompt.status != "published":
+            raise HTTPException(
+                status_code=422,
+                detail=f"启用类目只能绑定已通过二审发布的 {stage} 阶段提示词",
+            )
         if prompt.rubric_version != payload.rubric_version.strip():
             raise HTTPException(status_code=422, detail=f"类目 {stage} 提示词与 rubric 版本不一致")
     if payload.model_config_id is not None:
@@ -2663,14 +2671,53 @@ def _apply_category_update(
     profile.dimension_schema_version = payload.dimension_schema_version
     automation = dict(payload.automation_config)
     if automation:
+        # Binding provenance is server-owned. Reviewers and other callers must
+        # not be able to make an automatically resolved baseline look explicit.
+        automation.pop("baseline_binding_source", None)
         if not isinstance(automation.get("enabled", True), bool):
             raise HTTPException(status_code=422, detail="类目自动化 enabled 必须是布尔值")
         for key, low, high in (("case_threshold", 1, 1000), ("cooldown_seconds", 0, 86400), ("max_candidates", 1, 5)):
             value = automation.get(key)
             if value is not None and (not isinstance(value, int) or isinstance(value, bool) or not low <= value <= high):
                 raise HTTPException(status_code=422, detail=f"类目自动化 {key} 超出允许范围")
+        baseline_bundle_id = automation.get("baseline_strategy_bundle_id")
+        if baseline_bundle_id is not None and effective_role(user) != "admin":
+            raise HTTPException(
+                status_code=403,
+                detail="仅系统管理员可在后台高级设置显式选择基线 Bundle",
+            )
+        if baseline_bundle_id is not None and (
+            not isinstance(baseline_bundle_id, int)
+            or isinstance(baseline_bundle_id, bool)
+            or baseline_bundle_id < 1
+        ):
+            raise HTTPException(
+                status_code=422,
+                detail="类目自动化 baseline_strategy_bundle_id 必须是正整数",
+            )
+        if baseline_bundle_id is not None:
+            automation["baseline_binding_source"] = "explicit_admin"
         profile.automation_config_json = canonical_json(automation)
         profile.automation_revision += 1
+        if baseline_bundle_id is not None:
+            baseline_bundle = db.get(StrategyBundle, baseline_bundle_id)
+            errors = (
+                ["baseline_strategy_bundle_missing"]
+                if baseline_bundle is None
+                else category_bundle_contract_errors(
+                    db,
+                    profile=profile,
+                    bundle=baseline_bundle,
+                    require_complete=True,
+                    require_prompt_b=True,
+                    enforce_baseline_id=True,
+                )
+            )
+            if errors:
+                raise HTTPException(
+                    status_code=422,
+                    detail="基线 StrategyBundle 与类目 A/B、模型、Rubric 或维度合同不一致",
+                )
     profile.created_by = profile.created_by or user.username
 
 
@@ -5840,6 +5887,7 @@ def _automation_run_payload(
         "category_key": run.category_key,
         "policy_revision": run.policy_revision,
         "status": run.status,
+        "lifecycle_status": automation_lifecycle_status(run.status),
         "dry_run": run.dry_run,
         "trigger_reason": run.trigger_reason,
         "case_ids": json.loads(run.case_ids_json),
@@ -8656,6 +8704,8 @@ def _ensure_paired_validation_job(
     bundle: StrategyBundle,
     prompt_a: PromptVersion,
     prompt_b: PromptVersion,
+    category_key: str | None = None,
+    category_profile_snapshot_json: str | None = None,
 ) -> EvaluationJob:
     existing = db.scalar(
         select(EvaluationJob).where(
@@ -8665,8 +8715,12 @@ def _ensure_paired_validation_job(
     )
     if existing is not None:
         return existing
+    if category_key is None or category_profile_snapshot_json is None:
+        raise ValueError("新建配对回归评测任务必须冻结类目合同")
     job = EvaluationJob(
         asset_id=item.sample_item.asset_id,
+        category_key=category_key,
+        category_profile_snapshot_json=category_profile_snapshot_json,
         prompt_a_id=prompt_a.id,
         prompt_b_id=prompt_b.id,
         regression_item_id=item.id,
@@ -8740,6 +8794,28 @@ def _strategy_snapshot_for_bundle(
     return matches[0]
 
 
+def _model_config_for_bundle(
+    db: Session, bundle: StrategyBundle
+) -> ModelConfig:
+    try:
+        frozen = json.loads(bundle.model_config_snapshot)
+    except json.JSONDecodeError as exc:
+        raise ValueError("StrategyBundle 模型配置快照损坏") from exc
+    matches = [
+        model
+        for model in db.scalars(
+            select(ModelConfig).where(
+                ModelConfig.model_id == bundle.model_id,
+                ModelConfig.active.is_(True),
+            )
+        ).all()
+        if build_model_config_snapshot(model) == frozen
+    ]
+    if len(matches) != 1:
+        raise ValueError("StrategyBundle 缺少唯一可执行的模型配置")
+    return matches[0]
+
+
 def _create_paired_regression(
     payload: PairedRegressionCreateRequest,
     user: User = Depends(current_user),
@@ -8785,6 +8861,48 @@ def _create_paired_regression(
             status_code=400,
             detail=str(exc),
         ) from exc
+    category_profile = db.scalar(
+        select(EvaluationCategoryProfile).where(
+            EvaluationCategoryProfile.category_key == sample_set.category_key
+        )
+    )
+    category_automation = (
+        json.loads(category_profile.automation_config_json or "{}")
+        if category_profile is not None
+        else {}
+    )
+    if (
+        category_automation.get("baseline_strategy_bundle_id") is not None
+        or candidate_prompt_a.source_automation_run_id is not None
+        or candidate_prompt_b.source_automation_run_id is not None
+    ):
+        try:
+            assert_bundle_pair_category_contract(
+                baseline_bundle, candidate_bundle
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+    baseline_contract_errors = category_bundle_contract_errors(
+        db,
+        profile=category_profile,
+        bundle=baseline_bundle,
+        require_complete=False,
+        require_prompt_b=True,
+        enforce_baseline_id=True,
+    )
+    candidate_contract_errors = category_bundle_contract_errors(
+        db,
+        profile=category_profile,
+        bundle=candidate_bundle,
+        require_complete=False,
+        require_prompt_b=False,
+        enforce_baseline_id=False,
+    )
+    if baseline_contract_errors or candidate_contract_errors:
+        raise HTTPException(
+            status_code=409,
+            detail="StrategyBundle 与黄金集类目合同不一致",
+        )
     if payload.trigger_prompt_id is not None and payload.trigger_prompt_id not in {
         candidate_prompt_a.id,
         candidate_prompt_b.id,
@@ -8808,6 +8926,34 @@ def _create_paired_regression(
         )
     if any(item.asset.category_key != sample_set.category_key for item in items_by_id.values()):
         raise HTTPException(status_code=422, detail="黄金集条目包含其他评测类目素材")
+    if any(
+        item.source_result.job.category_key != sample_set.category_key
+        for item in items_by_id.values()
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail="黄金集来源评测包含其他类目合同",
+        )
+
+    try:
+        baseline_model = _model_config_for_bundle(db, baseline_bundle)
+        candidate_model = _model_config_for_bundle(db, candidate_bundle)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if category_profile is None:
+        raise HTTPException(status_code=409, detail="黄金集类目配置不存在")
+    baseline_category_snapshot = _category_execution_snapshot(
+        category_profile,
+        prompt_a_id=baseline_prompt_a.id,
+        prompt_b_id=baseline_prompt_b.id,
+        model_config=baseline_model,
+    )
+    candidate_category_snapshot = _category_execution_snapshot(
+        category_profile,
+        prompt_a_id=candidate_prompt_a.id,
+        prompt_b_id=candidate_prompt_b.id,
+        model_config=candidate_model,
+    )
 
     frozen: list[dict[str, Any]] = []
     for requested in payload.samples:
@@ -8954,6 +9100,8 @@ def _create_paired_regression(
                         bundle=baseline_bundle,
                         prompt_a=baseline_prompt_a,
                         prompt_b=baseline_prompt_b,
+                        category_key=sample_set.category_key,
+                        category_profile_snapshot_json=baseline_category_snapshot,
                     ).id
                 )
             if candidate is None:
@@ -8963,6 +9111,8 @@ def _create_paired_regression(
                     bundle=candidate_bundle,
                     prompt_a=candidate_prompt_a,
                     prompt_b=candidate_prompt_b,
+                    category_key=sample_set.category_key,
+                    category_profile_snapshot_json=candidate_category_snapshot,
                 )
                 pending_job_ids.append(candidate_job.id)
                 item.job_id = candidate_job.id

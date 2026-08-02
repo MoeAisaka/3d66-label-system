@@ -500,6 +500,7 @@ def _fixture(
         "client": client,
         "user": user,
         "automation": automation,
+        "model": model,
         "regression": regression,
         "sample_set": sample_set,
         "sample_items": sample_items,
@@ -755,9 +756,33 @@ def test_repeated_approval_and_publish_are_idempotent() -> None:
     fixture = _fixture()
     client = fixture["client"]
     try:
+        profile = fixture["db"].scalar(
+            select(EvaluationCategoryProfile).where(
+                EvaluationCategoryProfile.category_key == "space_image"
+            )
+        )
+        assert profile is not None
+        profile.prompt_a_id = fixture["prompt_a"].id
+        profile.prompt_b_id = fixture["base_b"].id
+        profile.model_config_id = fixture["model"].id
+        profile.rubric_version = fixture["candidate_bundle"].rubric_version
+        profile.dimension_schema_key = "space_aesthetic"
+        profile.dimension_schema_version = "1.3.0"
+        revision_before_review = profile.automation_revision
+        other_profile = fixture["db"].scalar(
+            select(EvaluationCategoryProfile).where(
+                EvaluationCategoryProfile.category_key == "material_image"
+            )
+        )
+        assert other_profile is not None
+        other_profile.prompt_b_id = fixture["base_b"].id
+        fixture["db"].commit()
         package_id = client.post(
             "/api/evaluation-packages", json=_create_payload(fixture)
         ).json()["id"]
+        assert json.loads(profile.automation_config_json).get(
+            "baseline_strategy_bundle_id"
+        ) != fixture["candidate_bundle"].id
         approved = client.post(
             f"/api/evaluation-packages/{package_id}/approve",
             json={"note": "证据完整，同意发布"},
@@ -788,6 +813,16 @@ def test_repeated_approval_and_publish_are_idempotent() -> None:
         fixture["db"].expire_all()
         assert fixture["db"].get(PromptVersion, fixture["candidate_prompt"].id).status == "published"
         assert fixture["db"].get(EvaluationPackage, package_id).published_by == fixture["user"].username
+        profile = fixture["db"].get(EvaluationCategoryProfile, profile.id)
+        assert profile is not None
+        automation = json.loads(profile.automation_config_json)
+        assert automation["baseline_strategy_bundle_id"] == fixture["candidate_bundle"].id
+        assert profile.prompt_a_id == fixture["prompt_a"].id
+        assert profile.prompt_b_id == fixture["candidate_prompt"].id
+        assert profile.model_config_id == fixture["model"].id
+        assert profile.automation_revision == revision_before_review + 1
+        assert fixture["db"].get(PromptVersion, fixture["base_b"].id).status == "published"
+        assert fixture["db"].get(EvaluationCategoryProfile, other_profile.id).prompt_b_id == fixture["base_b"].id
     finally:
         _close(fixture["engine"], fixture["db"])
 
@@ -844,6 +879,19 @@ def test_concurrent_approve_and_publish_have_one_audit_effect(tmp_path: Path) ->
     db = fixture["db"]
     client = fixture["client"]
     try:
+        profile = db.scalar(
+            select(EvaluationCategoryProfile).where(
+                EvaluationCategoryProfile.category_key == "space_image"
+            )
+        )
+        assert profile is not None
+        profile.prompt_a_id = fixture["prompt_a"].id
+        profile.prompt_b_id = fixture["base_b"].id
+        profile.model_config_id = fixture["model"].id
+        profile.rubric_version = fixture["candidate_bundle"].rubric_version
+        profile.dimension_schema_key = "space_aesthetic"
+        profile.dimension_schema_version = "1.3.0"
+        db.commit()
         package_id = client.post(
             "/api/evaluation-packages", json=_create_payload(fixture)
         ).json()["id"]
