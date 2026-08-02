@@ -5,8 +5,8 @@
 
 ## 当前交付候选：以最终评测包为主线的审核与自动优化（2026-08-02）
 
-当前分支：`feature/planned-iteration-20260801`，前端收敛提交为 `41a97bf`；后端、
-集成脚本与本节文档正在同一候选中验收，尚未推送 Codeup。
+当前分支：`feature/planned-iteration-20260801`；前端、后端、集成脚本与操作手册已在
+同一候选中完成本地验收，等待最终提交并纯快进推送 Codeup。
 
 已完成：
 
@@ -29,22 +29,36 @@
 
 当前验证：
 
-- 后端排除 Windows 专用部署测试：`633 passed, 1 skipped, 6 warnings`。
+- 后端全量：`688 passed, 1 skipped, 6 warnings`；macOS 部署专项 `23 passed`，
+  Windows 部署合同专项 `30 passed`。
 - 自动化故障矩阵 7 项通过：超时、usage 缺失、优化密钥缺失、预算为零/耗尽、重复
   纠偏、跨类目隔离和并发 Worker。
 - 前端 `npm run lint`、`npm run contract:dimensions`、`npm run build` 通过；保留
   既有入口 chunk 超过 500 kB 警告。
 - Python `compileall`、集成脚本 `py_compile`、`git diff --check` 通过。
+- 当前最终字节使用真实 `app.launcher`、API、Worker 和本地 OpenAI-compatible mock
+  连续完成 3 轮主链：38 次 provider 请求、3 次配对回归均 `passed/pass`、3 个最终包
+  进入二审；拒绝与批准不切换基线，显式发布才将 Bundle `1 → 5`；18 个结果均冻结
+  `space_aesthetic@1.3.0`。
+- Docker 镜像构建、健康检查、API+双 Worker、重启、卷持久化、文件 AEAD 密钥引用和
+  同一套 3 轮真实 E2E 全通过；隔离容器与卷已清理。
+- 桌面 1440×1000 与移动 390×844 对 7 个核心页面各跑 5 轮，共 70 次页面检查；
+  无横向溢出、空白页或登录后控制台错误。真实二审详情验证 10,773 字长内容，移动端
+  `scrollWidth=390`。截图与新版手册见 `docs/user-guide.md`。
+- GIF、PDF、材质图与单提示词/A-B 基础实现的 61 项专项测试通过；入队新增稳定
+  `prompt_mode_mismatch` 门禁，固定 single/ab 类目不能再绕过冻结模式。
+- Windows 10、PowerShell 5.1、Python 3.11.4 的既有实机证据覆盖五脚本解析、
+  install `-Check`、CurrentUser/LocalMachine doctor 九项与 DPAPI 回环。本候选另以
+  30 项 Windows 部署合同测试覆盖只读 SQLite 句柄关闭等修复；公司 Windows 实例
+  尚未部署本候选，因此不把自动化合同测试表述为线上部署通过。
 
-仍待完成（完成前不得宣称正式交付）：
+仍待完成（完成前不得宣称外部环境全部交付）：
 
-- 在固定提交上用 `app.launcher` 同时启动 API 与 Worker，接本地 OpenAI-compatible
-  mock provider，完整主链路连续跑 3 次。
-- PNG、GIF、PDF、材质图，单 Prompt/A-B，多类目隔离和故障恢复场景验收。
-- 桌面与 390px 移动端全页面 5 轮浏览器验收、截图及控制台检查。
-- Mac、Docker、Windows 三环境各 3 次真实全流程；公司 Windows 实例未跑前不能沿用
-  旧版 Windows 证据。
-- 按新界面与真实截图重写钉钉操作手册，随后再快进推送 `main` 和 `windows-deploy`。
+- 公司 Windows 实例部署本候选后，仍需执行真实 API Key 保存、DPAPI 回环、restore、
+  PDF/GIF Worker 与完整评测包主链验收；当前无远程执行通道。
+- 钉钉文档链接当前停在扫码登录页。仓库内新版手册和真实截图已完成，但外部文档
+  尚未写入，不能把本地成稿表述为钉钉已更新。
+- 完成最终只读复审后，再核对 Codeup 远端并快进推送 `main` 与 `windows-deploy`。
 
 长期决策见 [ADR-0030](docs/decisions/0030-package-review-and-category-baseline-promotion.md)。
 
