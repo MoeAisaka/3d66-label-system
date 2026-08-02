@@ -83,9 +83,14 @@ export type DimensionSchemaDefinition = {
   compatibility_revision?: string
   dimensions: DimensionDefinition[]
   aggregation?: {
+    engine_version?: string
     grade_points?: Record<string, number>
     level_thresholds?: Record<string, number>
     score_round_digits?: number
+    collapse_rule?: Record<string, unknown>
+    high_evidence_rule?: Record<string, unknown>
+    top_level_rule?: Record<string, unknown>
+    decision_rule_policy?: Record<string, unknown>
   }
   output_contract?: {
     dimension_output_keys?: string[]
@@ -93,6 +98,11 @@ export type DimensionSchemaDefinition = {
   }
   core_dimension_keys?: string[]
   family_dimension_keys?: string[]
+  risk_review?: {
+    dimension_keys?: string[]
+    [key: string]: unknown
+  }
+  [key: string]: unknown
   prompt_contract?: {
     status?: string
     required_stage?: string
@@ -495,9 +505,23 @@ export type EvaluationCategoryProfile = {
   prompt_a_id: number | null
   prompt_b_id: number | null
   model_config_id: number | null
+  automation_config: Record<string, unknown>
+  automation_revision: number
   rubric_version: string
   dimension_schema_key: string | null
   dimension_schema_version: string | null
+  dimension_management?: {
+    schema_version: string
+    schema_status: string
+    schema_immutable: boolean
+    available_options: Array<{ key: string; label: string; display_order?: number; weight?: number }>
+    selection: {
+      mode: "all" | "selected" | "none"
+      effective_keys: string[]
+      prompt_only: boolean
+    } | null
+    error: { code: string; message: string } | null
+  }
   updated_at: string
 }
 
@@ -742,6 +766,13 @@ export type CategoryPipelineProcessor = {
   config: Record<string, unknown>
 }
 
+export type CategoryDimensionConfig = {
+  enabled: boolean
+  mode: "all" | "selected" | "none"
+  enabled_keys: string[]
+  selected_keys?: string[]
+}
+
 export type CategoryPipelineConfig = {
   schema_version: "category-pipeline-v1"
   input_kind: "image" | "pdf"
@@ -749,7 +780,7 @@ export type CategoryPipelineConfig = {
   processors: CategoryPipelineProcessor[]
   prompt_mode: "follow" | "single" | "ab"
   prompt_context: { instruction: string }
-  dimensions: { enabled: boolean; mode: "all" | "selected"; enabled_keys: string[] }
+  dimensions: CategoryDimensionConfig
   model_nodes: Record<string, boolean>
 }
 

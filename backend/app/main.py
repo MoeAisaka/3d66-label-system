@@ -47,12 +47,17 @@ from sqlalchemy.orm import Session
 from .config import get_settings
 from .category_pipeline import (
     CATEGORY_KEY_PATTERN,
+    DIMENSION_OPTIONS,
     MODEL_NODE_KEYS,
     active_modules,
     allowed_mimes_for_pipeline,
     default_pipeline,
+    dimension_options_from_definition,
+    dimension_selection_from_job_snapshot,
+    dimension_selection_payload,
     legacy_preprocess_to_pipeline,
     pipeline_catalog_payload,
+    project_dimension_definition,
     validate_pipeline_config,
 )
 from .database import SessionLocal, get_db, init_database
@@ -233,6 +238,7 @@ from .scoring import (
     ENGINE_VERSION,
     calculate_corrected_score,
     dimension_schema_from_strategy_snapshot,
+    validate_dimension_scoring_contract,
 )
 from .dimension_schema_registry import (
     ACTIVE_V13_VERSION,
@@ -634,6 +640,24 @@ class EvaluationCategoryProfileUpdate(BaseModel):
 class EvaluationCategoryProfileCreate(EvaluationCategoryProfileUpdate):
     category_key: str = Field(pattern=r"^[a-z][a-z0-9_]{2,39}$")
     status: Literal["draft"] = "draft"
+
+
+class DimensionSchemaWriteRequest(BaseModel):
+    schema_key: str = Field(pattern=r"^[a-z][a-z0-9_.-]{2,79}$")
+    version: str = Field(min_length=1, max_length=64)
+    schema_type: Literal["core", "family_pack", "extension"] = "family_pack"
+    family_key: Literal["space", "product", "graphic", "intent", "common"]
+    display_name: str = Field(min_length=1, max_length=160)
+    definition: dict[str, Any]
+    parent_schema_id: int | None = Field(default=None, ge=1)
+    core_schema_id: int | None = Field(default=None, ge=1)
+
+
+class DimensionSchemaUpdateRequest(BaseModel):
+    display_name: str = Field(min_length=1, max_length=160)
+    definition: dict[str, Any]
+    parent_schema_id: int | None = Field(default=None, ge=1)
+    core_schema_id: int | None = Field(default=None, ge=1)
 
 
 class PromptCreateRequest(BaseModel):
@@ -1471,6 +1495,7 @@ def _evaluation_dimension_schema_payload(
             dimension_contract_for_result(result)
         )
         if identity is not None:
+            selection = identity.get("selection")
             return {
                 "status": "resolved",
                 "schema_id": identity["schema_id"],
@@ -1479,6 +1504,12 @@ def _evaluation_dimension_schema_payload(
                 "canonical_hash": identity["canonical_hash"],
                 "legacy_derived": False,
                 "dimension_keys": list(dimension_keys),
+                "dimension_selection": selection,
+                "dimension_mode": (
+                    selection.get("mode")
+                    if isinstance(selection, dict)
+                    else "all"
+                ),
                 "definition": definition,
                 "error": None,
             }
@@ -1498,6 +1529,8 @@ def _evaluation_dimension_schema_payload(
             "canonical_hash": canonical_hash(definition),
             "legacy_derived": True,
             "dimension_keys": list(dimension_keys),
+            "dimension_selection": None,
+            "dimension_mode": "all",
             "definition": definition,
             "error": None,
         }
@@ -1529,6 +1562,8 @@ def _evaluation_dimension_schema_payload(
             "canonical_hash": None,
             "legacy_derived": False,
             "dimension_keys": display_keys,
+            "dimension_selection": None,
+            "dimension_mode": None,
             "definition": None,
             "error": str(exc),
         }
@@ -2513,7 +2548,11 @@ def _category_profile(
     return profile
 
 
-def _profile_pipeline(profile: EvaluationCategoryProfile) -> dict[str, Any]:
+def _profile_pipeline(
+    profile: EvaluationCategoryProfile,
+    db: Session | None = None,
+    dimension_definition: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
     try:
         raw = json.loads(profile.pipeline_config_json or "{}")
     except json.JSONDecodeError:
@@ -2523,13 +2562,129 @@ def _profile_pipeline(profile: EvaluationCategoryProfile) -> dict[str, Any]:
             profile.category_key,
             json.loads(profile.preprocess_config_json or "{}"),
         )
+    definition_options = dimension_options_from_definition(dimension_definition)
+    allowed_dimension_keys = (
+        [item["key"] for item in definition_options]
+        if definition_options
+        else None
+    )
+    if (
+        db is not None
+        and profile.dimension_schema_key
+        and profile.dimension_schema_version
+    ):
+        schema = db.scalar(
+            select(DimensionSchema).where(
+                DimensionSchema.schema_key == profile.dimension_schema_key,
+                DimensionSchema.version == profile.dimension_schema_version,
+            )
+        )
+        if schema is not None:
+            try:
+                options = dimension_options_from_definition(
+                    json.loads(schema.definition_json)
+                )
+            except json.JSONDecodeError:
+                options = []
+            if options:
+                allowed_dimension_keys = [item["key"] for item in options]
     try:
-        return validate_pipeline_config(raw)
+        return validate_pipeline_config(
+            raw,
+            allowed_dimension_keys=(
+                allowed_dimension_keys
+                if allowed_dimension_keys is not None
+                else [item["key"] for item in DIMENSION_OPTIONS]
+            ),
+        )
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=f"类目流水线配置损坏：{exc}") from None
 
 
-def _category_profile_payload(profile: EvaluationCategoryProfile) -> dict[str, Any]:
+def _category_dimension_management_payload(
+    db: Session,
+    profile: EvaluationCategoryProfile,
+    pipeline: dict[str, Any],
+) -> dict[str, Any]:
+    """Expose one category's editable selection without mutating its schema."""
+
+    schema_status = "unconfigured"
+    schema_immutable = False
+    schema_error: dict[str, str] | None = None
+    options = [dict(item) for item in DIMENSION_OPTIONS]
+    schema_key = profile.dimension_schema_key
+    schema_version = profile.dimension_schema_version
+    schema_hash: str | None = None
+    if schema_key is not None and schema_version is not None:
+        matches = db.scalars(
+            select(DimensionSchema).where(
+                DimensionSchema.schema_key == schema_key,
+                DimensionSchema.version == schema_version,
+            )
+        ).all()
+        if len(matches) != 1:
+            schema_status = "missing" if not matches else "ambiguous"
+            schema_error = {
+                "code": f"dimension_contract_{schema_status}",
+                "message": "类目绑定的维度方案不存在或版本不唯一。",
+            }
+        else:
+            schema = matches[0]
+            schema_status = schema.status
+            schema_immutable = schema.status in {"published", "retired"}
+            try:
+                definition = json.loads(schema.definition_json)
+            except json.JSONDecodeError:
+                definition = None
+            if (
+                not isinstance(definition, dict)
+                or canonical_hash(definition) != schema.canonical_hash
+            ):
+                schema_error = {
+                    "code": "dimension_contract_invalid",
+                    "message": "类目绑定的维度方案内容或校验值损坏。",
+                }
+            else:
+                resolved_options = dimension_options_from_definition(definition)
+                if not resolved_options:
+                    schema_error = {
+                        "code": "dimension_contract_invalid",
+                        "message": "类目绑定的维度方案没有可管理的维度定义。",
+                    }
+                else:
+                    options = resolved_options
+                    schema_hash = schema.canonical_hash
+
+    selection: dict[str, Any] | None
+    try:
+        selection = dimension_selection_payload(
+            pipeline,
+            dimension_options=options,
+            schema_key=schema_key,
+            schema_version=schema_version,
+            schema_hash=schema_hash,
+        )
+    except ValueError as exc:
+        selection = None
+        schema_error = schema_error or {
+            "code": "dimension_selection_invalid",
+            "message": str(exc),
+        }
+    return {
+        "schema_version": "category-dimension-management-v1",
+        "schema_status": schema_status,
+        "schema_immutable": schema_immutable,
+        "available_options": options,
+        "selection": selection,
+        "error": schema_error,
+    }
+
+
+def _category_profile_payload(
+    db: Session,
+    profile: EvaluationCategoryProfile,
+) -> dict[str, Any]:
+    pipeline = _profile_pipeline(profile, db)
     return {
         "id": profile.id,
         "category_key": profile.category_key,
@@ -2538,7 +2693,12 @@ def _category_profile_payload(profile: EvaluationCategoryProfile) -> dict[str, A
         "status": profile.status,
         "allowed_mime_types": json.loads(profile.allowed_mime_types_json or "[]"),
         "preprocess_config": json.loads(profile.preprocess_config_json or "{}"),
-        "pipeline_config": _profile_pipeline(profile),
+        "pipeline_config": pipeline,
+        "dimension_management": _category_dimension_management_payload(
+            db,
+            profile,
+            pipeline,
+        ),
         "pipeline_revision": profile.pipeline_revision,
         "prompt_a_id": profile.prompt_a_id,
         "prompt_b_id": profile.prompt_b_id,
@@ -2563,6 +2723,25 @@ def _category_execution_snapshot(
     pdf_summary_model_config: ModelConfig | None = None,
     dimension_contract: Any | None = None,
 ) -> str:
+    pipeline = _profile_pipeline(
+        profile,
+        dimension_definition=(
+            dimension_contract.definition
+            if dimension_contract is not None else None
+        ),
+    )
+    dimension_options = (
+        dimension_options_from_definition(dimension_contract.definition)
+        if dimension_contract is not None
+        else list(DIMENSION_OPTIONS)
+    )
+    dimension_selection = dimension_selection_payload(
+        pipeline,
+        dimension_options=dimension_options,
+        schema_key=(dimension_contract.schema_key if dimension_contract is not None else None),
+        schema_version=(dimension_contract.version if dimension_contract is not None else None),
+        schema_hash=(dimension_contract.canonical_hash if dimension_contract is not None else None),
+    )
     return canonical_json(
         {
             "schema_version": "evaluation-category-profile-v2",
@@ -2575,7 +2754,7 @@ def _category_execution_snapshot(
             "preprocess_config": json.loads(
                 profile.preprocess_config_json or "{}"
             ),
-            "pipeline_config": _profile_pipeline(profile),
+            "pipeline_config": pipeline,
             "pipeline_revision": profile.pipeline_revision,
             "prompt_a_id": prompt_a_id,
             "prompt_b_id": prompt_b_id,
@@ -2601,6 +2780,7 @@ def _category_execution_snapshot(
                 }
                 if dimension_contract is not None else None
             ),
+            "dimension_selection": dimension_selection,
             "profile_updated_at": (
                 profile.updated_at.isoformat()
                 if profile.updated_at is not None
@@ -2621,7 +2801,7 @@ def list_evaluation_categories(
     profiles = db.scalars(
         select(EvaluationCategoryProfile).order_by(EvaluationCategoryProfile.id.asc())
     ).all()
-    return {"items": [_category_profile_payload(profile) for profile in profiles]}
+    return {"items": [_category_profile_payload(db, profile) for profile in profiles]}
 
 
 @app.get("/api/evaluation-categories/modules")
@@ -2645,7 +2825,26 @@ def _apply_category_update(
             payload.preprocess_config,
         )
     try:
-        pipeline = validate_pipeline_config(candidate)
+        raw_mode = str((candidate.get("dimensions") or {}).get("mode") or "all")
+        dimension_contract = resolve_published_dimension_contract(
+            db,
+            schema_key=payload.dimension_schema_key,
+            version=payload.dimension_schema_version,
+            require_configured=(payload.status == "active" and raw_mode != "none"),
+        )
+        pipeline = validate_pipeline_config(
+            candidate,
+            allowed_dimension_keys=(
+                [item["key"] for item in dimension_options_from_definition(dimension_contract.definition)]
+                if dimension_contract is not None
+                else [item["key"] for item in DIMENSION_OPTIONS]
+            ),
+        )
+    except ProductionDimensionContractError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": exc.code, "message": str(exc)},
+        ) from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from None
     expected_mimes = set(allowed_mimes_for_pipeline(pipeline))
@@ -2654,9 +2853,11 @@ def _apply_category_update(
     if payload.status == "active" and not payload.allowed_mime_types:
         raise HTTPException(status_code=422, detail="启用类目前必须配置输入 MIME")
     prompt_mode = pipeline["prompt_mode"]
-    if payload.status == "active" and prompt_mode == "single" and (payload.prompt_a_id is None or payload.prompt_b_id is not None):
-        raise HTTPException(status_code=422, detail="单提示词模式必须只绑定一个 A 阶段版本")
-    if payload.status == "active" and prompt_mode == "ab" and (payload.prompt_a_id is None or payload.prompt_b_id is None):
+    if prompt_mode == "single" and payload.prompt_b_id is not None:
+        raise HTTPException(status_code=422, detail="单提示词模式不能绑定 B 阶段版本")
+    if prompt_mode == "ab" and (
+        (payload.prompt_a_id is None) != (payload.prompt_b_id is None)
+    ):
         raise HTTPException(status_code=422, detail="A/B 模式必须同时绑定 A、B 阶段版本")
     if prompt_mode == "follow" and (payload.prompt_a_id is not None or payload.prompt_b_id is not None):
         raise HTTPException(status_code=422, detail="跟随任务模式不能冻结类目提示词")
@@ -2677,19 +2878,41 @@ def _apply_category_update(
         category_model = db.get(ModelConfig, payload.model_config_id)
         if category_model is None or not category_model.active:
             raise HTTPException(status_code=422, detail="类目模型配置不存在或未启用")
-    if payload.status == "active":
-        try:
-            resolve_published_dimension_contract(
-                db,
-                schema_key=payload.dimension_schema_key,
-                version=payload.dimension_schema_version,
-                require_configured=True,
-            )
-        except ProductionDimensionContractError as exc:
-            raise HTTPException(
-                status_code=422,
-                detail={"code": exc.code, "message": str(exc)},
-            ) from exc
+    dimension_mode = pipeline["dimensions"]["mode"]
+    if dimension_mode == "none" and prompt_mode != "single":
+        raise HTTPException(
+            status_code=422,
+            detail="关闭维度的仅提示词实验必须使用单提示词模式",
+        )
+    try:
+        dimension_selection_payload(
+            pipeline,
+            dimension_options=(
+                dimension_options_from_definition(dimension_contract.definition)
+                if dimension_contract is not None
+                else DIMENSION_OPTIONS
+            ),
+            schema_key=(
+                dimension_contract.schema_key
+                if dimension_contract is not None else None
+            ),
+            schema_version=(
+                dimension_contract.version
+                if dimension_contract is not None else None
+            ),
+            schema_hash=(
+                dimension_contract.canonical_hash
+                if dimension_contract is not None else None
+            ),
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "dimension_selection_invalid",
+                "message": str(exc),
+            },
+        ) from exc
     profile.display_name = payload.display_name.strip()
     profile.description = payload.description.strip()
     profile.status = payload.status
@@ -2780,7 +3003,7 @@ def create_evaluation_category(
     _apply_category_update(db=db, profile=profile, payload=payload, user=user)
     db.commit()
     db.refresh(profile)
-    return _category_profile_payload(profile)
+    return _category_profile_payload(db, profile)
 
 
 @app.put("/api/evaluation-categories/{category_key}")
@@ -2794,7 +3017,7 @@ def update_evaluation_category(
     _apply_category_update(db=db, profile=profile, payload=payload, user=user)
     db.commit()
     db.refresh(profile)
-    return _category_profile_payload(profile)
+    return _category_profile_payload(db, profile)
 
 
 def _validate_image_bytes(
@@ -2872,7 +3095,7 @@ def _store_package_asset(
         data,
         filename=normalized_name,
         content_type=content_type,
-        pipeline=_profile_pipeline(profile),
+        pipeline=_profile_pipeline(profile, db),
         allowed_mime_types=set(json.loads(profile.allowed_mime_types_json or "[]")),
     )
     digest = hashlib.sha256(data).hexdigest()
@@ -3066,7 +3289,7 @@ async def import_material_package_archive(
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     profile = _category_profile(db, category_key, require_active=True)
-    pipeline = _profile_pipeline(profile)
+    pipeline = _profile_pipeline(profile, db)
     allowed_suffixes = set(pipeline["allowed_suffixes"])
     filename = archive.filename or "archive.zip"
     if Path(filename).suffix.lower() != ".zip":
@@ -3711,18 +3934,48 @@ def _enqueue_jobs(
     commit: bool = True,
 ) -> dict[str, Any]:
     profile = _category_profile(db, payload.category_key, require_active=True)
-    pipeline = _profile_pipeline(profile)
+    pipeline = _profile_pipeline(profile, db)
+    dimension_mode = pipeline["dimensions"]["mode"]
     try:
         dimension_contract = resolve_published_dimension_contract(
             db,
             schema_key=profile.dimension_schema_key,
             version=profile.dimension_schema_version,
-            require_configured=True,
+            require_configured=(dimension_mode != "none"),
         )
     except ProductionDimensionContractError as exc:
         raise HTTPException(
             status_code=409,
             detail={"code": exc.code, "message": str(exc)},
+        ) from exc
+    try:
+        dimension_selection_payload(
+            pipeline,
+            dimension_options=(
+                dimension_options_from_definition(dimension_contract.definition)
+                if dimension_contract is not None
+                else DIMENSION_OPTIONS
+            ),
+            schema_key=(
+                dimension_contract.schema_key
+                if dimension_contract is not None else None
+            ),
+            schema_version=(
+                dimension_contract.version
+                if dimension_contract is not None else None
+            ),
+            schema_hash=(
+                dimension_contract.canonical_hash
+                if dimension_contract is not None else None
+            ),
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "dimension_selection_invalid",
+                "message": str(exc),
+            },
         ) from exc
     assets = db.scalars(
         select(Asset).where(
@@ -5387,15 +5640,25 @@ def _claim_review_panel_revision_or_409(
 
 def _evaluation_aesthetic_and_dimension_schema(
     evaluation: EvaluationResult,
-) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
     aesthetic = (
         json.loads(evaluation.aesthetic_json)
         if evaluation.aesthetic_json
         else None
     )
-    return aesthetic, dimension_schema_from_strategy_snapshot(
+    definition = dimension_schema_from_strategy_snapshot(
         evaluation.strategy_snapshot_json,
         aesthetic=aesthetic,
+    )
+    selection = dimension_selection_from_job_snapshot(
+        evaluation.job.category_profile_snapshot_json
+        if evaluation.job is not None
+        else None
+    )
+    return aesthetic, (
+        project_dimension_definition(definition, selection)
+        if selection is not None
+        else definition
     )
 
 
@@ -8643,6 +8906,28 @@ def _dimension_schema_payload(
     return payload
 
 
+def _validated_dimension_definition(definition: dict[str, Any]) -> tuple[str, str]:
+    if definition.get("format_version") != "dimension-schema-definition-v1":
+        raise HTTPException(status_code=422, detail="维度方案格式版本不受支持")
+    try:
+        validate_dimension_scoring_contract(definition)
+    except (DimensionScoringContractError, TypeError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail=f"维度方案不可执行：{exc}") from exc
+    serialized = canonical_json(definition)
+    return serialized, canonical_hash(definition)
+
+
+def _ensure_dimension_schema_references(
+    db: Session,
+    *,
+    parent_schema_id: int | None,
+    core_schema_id: int | None,
+) -> None:
+    for label, schema_id in (("父版本", parent_schema_id), ("核心版本", core_schema_id)):
+        if schema_id is not None and db.get(DimensionSchema, schema_id) is None:
+            raise HTTPException(status_code=422, detail=f"维度方案{label}不存在")
+
+
 @app.get("/api/dimension-schemas")
 def list_dimension_schemas(
     schema_key: str | None = None,
@@ -8689,6 +8974,177 @@ def get_dimension_schema_version(
     )
     if schema is None:
         raise HTTPException(status_code=404, detail="维度 Schema 版本不存在")
+    return _dimension_schema_payload(schema, include_definition=True)
+
+
+@app.post("/api/dimension-schemas", status_code=201)
+def create_dimension_schema(
+    payload: DimensionSchemaWriteRequest,
+    user: User = Depends(admin_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    definition_json, definition_hash = _validated_dimension_definition(payload.definition)
+    _ensure_dimension_schema_references(
+        db,
+        parent_schema_id=payload.parent_schema_id,
+        core_schema_id=payload.core_schema_id,
+    )
+    schema = DimensionSchema(
+        schema_key=payload.schema_key.strip(),
+        version=payload.version.strip(),
+        schema_type=payload.schema_type,
+        family_key=payload.family_key,
+        display_name=payload.display_name.strip(),
+        status="draft",
+        parent_schema_id=payload.parent_schema_id,
+        core_schema_id=payload.core_schema_id,
+        definition_json=definition_json,
+        canonical_hash=definition_hash,
+        created_by=user.username,
+    )
+    db.add(schema)
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="维度方案版本或内容已经存在") from exc
+    db.refresh(schema)
+    append_audit_event(
+        db,
+        category="dimension_schema",
+        action="created",
+        subject_type="dimension_schema",
+        subject_id=schema.id,
+        actor=user.username,
+        payload={"schema_key": schema.schema_key, "version": schema.version},
+    )
+    db.commit()
+    return _dimension_schema_payload(schema, include_definition=True)
+
+
+@app.put("/api/dimension-schemas/{schema_id}")
+def update_dimension_schema(
+    schema_id: int,
+    payload: DimensionSchemaUpdateRequest,
+    user: User = Depends(admin_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    schema = db.get(DimensionSchema, schema_id)
+    if schema is None:
+        raise HTTPException(status_code=404, detail="维度方案不存在")
+    if schema.status not in {"draft", "candidate"}:
+        raise HTTPException(status_code=409, detail="已发布或停用的维度方案不能原地修改")
+    definition_json, definition_hash = _validated_dimension_definition(payload.definition)
+    _ensure_dimension_schema_references(
+        db,
+        parent_schema_id=payload.parent_schema_id,
+        core_schema_id=payload.core_schema_id,
+    )
+    schema.display_name = payload.display_name.strip()
+    schema.parent_schema_id = payload.parent_schema_id
+    schema.core_schema_id = payload.core_schema_id
+    schema.definition_json = definition_json
+    schema.canonical_hash = definition_hash
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="相同维度方案内容已经存在") from exc
+    db.refresh(schema)
+    append_audit_event(
+        db,
+        category="dimension_schema",
+        action="updated",
+        subject_type="dimension_schema",
+        subject_id=schema.id,
+        actor=user.username,
+        payload={"schema_key": schema.schema_key, "version": schema.version},
+    )
+    db.commit()
+    return _dimension_schema_payload(schema, include_definition=True)
+
+
+@app.delete("/api/dimension-schemas/{schema_id}")
+def delete_dimension_schema(
+    schema_id: int,
+    user: User = Depends(admin_user),
+    db: Session = Depends(get_db),
+) -> dict[str, bool]:
+    schema = db.get(DimensionSchema, schema_id)
+    if schema is None:
+        raise HTTPException(status_code=404, detail="维度方案不存在")
+    if schema.status not in {"draft", "candidate"}:
+        raise HTTPException(status_code=409, detail="已发布或停用的维度方案不能删除")
+    if db.scalar(select(EvaluationCategoryProfile.id).where(
+        EvaluationCategoryProfile.dimension_schema_key == schema.schema_key,
+        EvaluationCategoryProfile.dimension_schema_version == schema.version,
+    )) is not None:
+        raise HTTPException(status_code=409, detail="维度方案仍被类目引用，不能删除")
+    db.delete(schema)
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="维度方案仍被其他版本或运行记录引用") from exc
+    append_audit_event(
+        db,
+        category="dimension_schema",
+        action="deleted",
+        subject_type="dimension_schema",
+        subject_id=schema_id,
+        actor=user.username,
+        payload={"schema_key": schema.schema_key, "version": schema.version},
+    )
+    db.commit()
+    return {"ok": True}
+
+
+@app.post("/api/dimension-schemas/{schema_id}/publish")
+def publish_dimension_schema(
+    schema_id: int,
+    user: User = Depends(admin_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    schema = db.get(DimensionSchema, schema_id)
+    if schema is None:
+        raise HTTPException(status_code=404, detail="维度方案不存在")
+    if schema.status not in {"draft", "candidate"}:
+        raise HTTPException(status_code=409, detail="当前维度方案不能重复发布")
+    definition = json.loads(schema.definition_json)
+    _validated_dimension_definition(definition)
+    release_gate = definition.get("release_gate")
+    if (
+        isinstance(release_gate, dict)
+        and release_gate.get("publishing_blocked") is True
+    ):
+        reasons = release_gate.get("blocked_reasons")
+        message = "；".join(
+            str(item) for item in reasons or [] if str(item).strip()
+        ) or "维度方案尚未满足发布门禁"
+        raise HTTPException(status_code=409, detail=message)
+    prompt_contract = definition.get("prompt_contract")
+    if (
+        isinstance(prompt_contract, dict)
+        and prompt_contract.get("publishing_blocked") is True
+    ):
+        raise HTTPException(status_code=409, detail="维度方案提示词合同尚未满足发布门禁")
+    now = datetime.now(timezone.utc)
+    schema.status = "published"
+    schema.published_by = user.username
+    schema.published_at = now
+    schema.retired_at = None
+    db.commit()
+    db.refresh(schema)
+    append_audit_event(
+        db,
+        category="dimension_schema",
+        action="published",
+        subject_type="dimension_schema",
+        subject_id=schema.id,
+        actor=user.username,
+        payload={"schema_key": schema.schema_key, "version": schema.version},
+    )
+    db.commit()
     return _dimension_schema_payload(schema, include_definition=True)
 
 
@@ -9045,17 +9501,31 @@ def _create_paired_regression(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     if category_profile is None:
         raise HTTPException(status_code=409, detail="黄金集类目配置不存在")
+    try:
+        paired_dimension_contract = resolve_published_dimension_contract(
+            db,
+            schema_key=category_profile.dimension_schema_key,
+            version=category_profile.dimension_schema_version,
+            require_configured=False,
+        )
+    except ProductionDimensionContractError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": exc.code, "message": str(exc)},
+        ) from exc
     baseline_category_snapshot = _category_execution_snapshot(
         category_profile,
         prompt_a_id=baseline_prompt_a.id,
         prompt_b_id=baseline_prompt_b.id,
         model_config=baseline_model,
+        dimension_contract=paired_dimension_contract,
     )
     candidate_category_snapshot = _category_execution_snapshot(
         category_profile,
         prompt_a_id=candidate_prompt_a.id,
         prompt_b_id=candidate_prompt_b.id,
         model_config=candidate_model,
+        dimension_contract=paired_dimension_contract,
     )
 
     frozen: list[dict[str, Any]] = []

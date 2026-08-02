@@ -554,6 +554,9 @@ def test_manifest_is_stable_and_idempotent() -> None:
         assert first.json()["canonical_manifest_hash"] == second.json()["canonical_manifest_hash"]
         manifest = first.json()["canonical_manifest"]
         assert canonical_manifest_hash(manifest) == first.json()["canonical_manifest_hash"]
+        selection = manifest["dimensions"]["category_selection"]
+        assert selection["mode"] == "all"
+        assert len(selection["effective_keys"]) == 8
         assert canonical_json({"b": 2, "a": 1}) == canonical_json({"a": 1, "b": 2})
         drift = client.post(
             "/api/evaluation-packages",
@@ -561,6 +564,43 @@ def test_manifest_is_stable_and_idempotent() -> None:
         )
         assert drift.status_code == 409
         assert "幂等键" in drift.text
+    finally:
+        _close(fixture["engine"], fixture["db"])
+
+
+def test_prompt_only_package_freezes_zero_dimension_selection() -> None:
+    fixture = _fixture(single_prompt=True)
+    client = fixture["client"]
+    db = fixture["db"]
+    try:
+        profile = db.scalar(
+            select(EvaluationCategoryProfile).where(
+                EvaluationCategoryProfile.category_key == "space_image"
+            )
+        )
+        assert profile is not None
+        pipeline = json.loads(profile.pipeline_config_json)
+        pipeline["dimensions"] = {
+            "enabled": False,
+            "mode": "none",
+            "selected_keys": [],
+        }
+        profile.pipeline_config_json = canonical_json(pipeline)
+        profile.pipeline_revision += 1
+        db.commit()
+
+        response = client.post(
+            "/api/evaluation-packages",
+            json=_create_payload(fixture, "prompt-only-package"),
+        )
+        assert response.status_code == 200, response.text
+        selection = response.json()["canonical_manifest"]["dimensions"][
+            "category_selection"
+        ]
+        assert selection["mode"] == "none"
+        assert selection["enabled"] is False
+        assert selection["effective_keys"] == []
+        assert selection["prompt_only"] is True
     finally:
         _close(fixture["engine"], fixture["db"])
 

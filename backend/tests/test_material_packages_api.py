@@ -21,6 +21,7 @@ from app.migrations import run_migrations
 from app.models import (
     Asset,
     AuditEvent,
+    DimensionSchema,
     EvaluationCategoryProfile,
     EvaluationJob,
     MaterialPackage,
@@ -194,6 +195,34 @@ def test_category_contracts_keep_pdf_and_material_inputs_isolated(tmp_path: Path
             item for item in categories.json()["items"]
             if item["category_key"] == "material_image"
         )
+        selected_profile = {
+            key: value
+            for key, value in material_profile.items()
+            if key not in {"id", "category_key", "created_by", "created_at", "updated_at"}
+        }
+        selected_profile["pipeline_config"] = {
+            **selected_profile["pipeline_config"],
+            "dimensions": {
+                "enabled": True,
+                "mode": "selected",
+                "selected_keys": ["composition_viewpoint", "lighting_atmosphere"],
+            },
+        }
+        selected = client.put(
+            "/api/evaluation-categories/material_image",
+            json=selected_profile,
+        )
+        assert selected.status_code == 200, selected.text
+        assert selected.json()["pipeline_config"]["dimensions"] == {
+            "enabled": True,
+            "mode": "selected",
+            "selected_keys": ["composition_viewpoint", "lighting_atmosphere"],
+            "enabled_keys": ["composition_viewpoint", "lighting_atmosphere"],
+        }
+        assert selected.json()["prompt_a_id"] is None
+        assert selected.json()["prompt_b_id"] is None
+
+        material_profile = selected.json()
         retired_profile = {
             key: value
             for key, value in material_profile.items()
@@ -266,6 +295,9 @@ def test_admin_can_create_modular_category_and_freeze_v2_job_contract(tmp_path: 
         assert {item["module"] for item in catalog.json()["processors"]} >= {
             "image.prepare", "document.pdf_extract", "context.material_focus"
         }
+        assert [item["key"] for item in catalog.json()["dimension_modes"]] == [
+            "all", "selected", "none"
+        ]
         pipeline = {
             "schema_version": "category-pipeline-v1",
             "input_kind": "image",
@@ -298,6 +330,10 @@ def test_admin_can_create_modular_category_and_freeze_v2_job_contract(tmp_path: 
         assert created.status_code == 201, created.text
         assert created.json()["category_key"] == "landscape_image"
         assert created.json()["pipeline_revision"] == 1
+        assert created.json()["dimension_management"]["selection"][
+            "effective_keys"
+        ] == ["composition_viewpoint"]
+        assert created.json()["dimension_management"]["schema_status"] == "unconfigured"
 
         invalid = dict(pipeline)
         invalid["processors"] = [{"module": "python.user_plugin", "enabled": True, "config": {}}]
@@ -339,6 +375,11 @@ def test_admin_can_create_modular_category_and_freeze_v2_job_contract(tmp_path: 
             },
         )
         assert activated.status_code == 200, activated.text
+        assert activated.json()["dimension_management"]["schema_status"] == "published"
+        assert activated.json()["dimension_management"]["schema_immutable"] is True
+        assert activated.json()["dimension_management"]["selection"][
+            "source_schema"
+        ]["version"] == "1.3.0"
         uploaded = client.post(
             "/api/assets/upload",
             data={"category_key": "landscape_image"},
@@ -354,9 +395,76 @@ def test_admin_can_create_modular_category_and_freeze_v2_job_contract(tmp_path: 
         with sessions() as db:
             job = db.get(EvaluationJob, queued.json()["job_ids"][0])
             frozen = json.loads(job.category_profile_snapshot_json)
+            frozen_snapshot_json = job.category_profile_snapshot_json
+            schema = db.scalar(
+                select(DimensionSchema).where(
+                    DimensionSchema.schema_key == "space_aesthetic",
+                    DimensionSchema.version == "1.3.0",
+                )
+            )
+            schema_definition_json = schema.definition_json
+            schema_hash = schema.canonical_hash
             assert frozen["schema_version"] == "evaluation-category-profile-v2"
             assert frozen["category_key"] == "landscape_image"
             assert frozen["pipeline_config"]["prompt_context"]["instruction"].startswith("重点检查")
+            assert frozen["dimension_selection"]["mode"] == "selected"
+            assert frozen["dimension_selection"]["effective_keys"] == [
+                "composition_viewpoint"
+            ]
+
+        prompt_only_pipeline = {
+            **activated.json()["pipeline_config"],
+            "dimensions": {
+                "enabled": False,
+                "mode": "none",
+                "selected_keys": [],
+                "enabled_keys": [],
+            },
+        }
+        prompt_only = client.put(
+            "/api/evaluation-categories/landscape_image",
+            json={
+                **activated.json(),
+                "pipeline_config": prompt_only_pipeline,
+            },
+        )
+        assert prompt_only.status_code == 200, prompt_only.text
+        assert prompt_only.json()["dimension_management"]["selection"] == {
+            "schema_version": "category-dimension-selection-v1",
+            "enabled": False,
+            "mode": "none",
+            "selected_keys": [],
+            "effective_keys": [],
+            "prompt_only": True,
+            "source_schema": {
+                "schema_key": "space_aesthetic",
+                "version": "1.3.0",
+                "canonical_hash": schema_hash,
+            },
+        }
+        queued_prompt_only = client.post(
+            "/api/jobs/enqueue",
+            json={"asset_ids": [asset_id], "category_key": "landscape_image"},
+        )
+        assert queued_prompt_only.status_code == 200, queued_prompt_only.text
+        with sessions() as db:
+            old_job = db.get(EvaluationJob, queued.json()["job_ids"][0])
+            new_job = db.get(
+                EvaluationJob,
+                queued_prompt_only.json()["job_ids"][0],
+            )
+            schema = db.scalar(
+                select(DimensionSchema).where(
+                    DimensionSchema.schema_key == "space_aesthetic",
+                    DimensionSchema.version == "1.3.0",
+                )
+            )
+            assert old_job.category_profile_snapshot_json == frozen_snapshot_json
+            assert json.loads(new_job.category_profile_snapshot_json)[
+                "dimension_selection"
+            ]["mode"] == "none"
+            assert schema.definition_json == schema_definition_json
+            assert schema.canonical_hash == schema_hash
 
 
 def test_material_category_requires_and_freezes_its_own_prompt_contract(

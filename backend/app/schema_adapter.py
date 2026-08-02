@@ -7,9 +7,19 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from .category_pipeline import (
+    dimension_selection_from_job_snapshot,
+    project_dimension_definition,
+)
 from .dimension_schema_registry import SPACE_INPUT_DIMENSION_ALIASES
 from .models import EvaluationResult
-from .scoring import ENGINE_VERSION, calculate_score, normalize_dimension_aliases
+from .scoring import (
+    ENGINE_VERSION,
+    calculate_prompt_only_result,
+    calculate_score,
+    dimension_schema_from_strategy_snapshot,
+    normalize_dimension_aliases,
+)
 
 
 QUALITY_RANK = {
@@ -290,7 +300,34 @@ def rescore_stored_results(db: Session) -> int:
         except (TypeError, json.JSONDecodeError):
             continue
         try:
-            scoring = calculate_score(precheck, aesthetic)
+            selection = dimension_selection_from_job_snapshot(
+                result.job.category_profile_snapshot_json
+                if result.job is not None
+                else None
+            )
+            definition = dimension_schema_from_strategy_snapshot(
+                result.strategy_snapshot_json,
+                aesthetic=aesthetic,
+            )
+            projected = (
+                project_dimension_definition(definition, selection)
+                if selection is not None
+                else definition
+            )
+            scoring = (
+                calculate_prompt_only_result(
+                    precheck,
+                    model_payload=precheck,
+                    dimension_selection=selection,
+                )
+                if selection is not None
+                and selection.get("mode") == "none"
+                else calculate_score(
+                    precheck,
+                    aesthetic,
+                    dimension_schema=projected,
+                )
+            )
         except (TypeError, ValueError):
             continue
         result.scoring_json = json.dumps(scoring, ensure_ascii=False)

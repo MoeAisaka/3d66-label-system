@@ -74,6 +74,8 @@ def test_frontend_payload_exposes_non_eight_bound_contract() -> None:
         "canonical_hash": canonical_hash(definition),
         "legacy_derived": False,
         "dimension_keys": ["clarity", "novelty", "utility"],
+        "dimension_selection": None,
+        "dimension_mode": "all",
         "definition": definition,
         "error": None,
     }

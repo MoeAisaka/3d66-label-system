@@ -43,6 +43,7 @@
 | [0028](0028-admin-composable-category-pipelines.md) | Accepted | 管理员可组合的模块化类目流水线 |
 | [0029](0029-unified-label-production-and-consumption-contract.md) | Accepted | 统一标签生产、版本化发布与下游消费合同 |
 | [0030](0030-package-review-and-category-baseline-promotion.md) | Accepted | 评测包二审、显式发布与类目基线原子提升 |
+| [0031](0031-category-dimension-management-and-prompt-only-mode.md) | Accepted | 类目维度管理、不可变版本与仅提示词评测模式 |
 
 ## 新增 ADR 的规则
 

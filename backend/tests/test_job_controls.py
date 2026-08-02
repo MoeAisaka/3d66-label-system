@@ -293,6 +293,151 @@ def test_frozen_category_contract_rejects_mime_and_secret_drift() -> None:
         _frozen_category_contract(job, asset)
 
 
+def test_frozen_category_contract_rejects_dimension_selection_drift() -> None:
+    asset = Asset(
+        id=1,
+        original_name="room.jpg",
+        stored_name="room.jpg",
+        mime_type="image/jpeg",
+        size_bytes=100,
+        sha256="f" * 64,
+    )
+    pipeline = default_pipeline("space_image")
+    pipeline["dimensions"] = {
+        "enabled": True,
+        "mode": "selected",
+        "selected_keys": ["composition_viewpoint"],
+    }
+    profile = EvaluationCategoryProfile(
+        id=1,
+        category_key="space_image",
+        display_name="空间图片",
+        status="active",
+        allowed_mime_types_json='["image/jpeg"]',
+        preprocess_config_json="{}",
+        pipeline_config_json=canonical_json(pipeline),
+        prompt_a_id=11,
+        prompt_b_id=None,
+        rubric_version="rubric-v2.1",
+    )
+    model = ModelConfig(
+        id=21,
+        name="模型",
+        provider="custom-compatible",
+        base_url="https://model.example.test/v1",
+        api_path="/chat/completions",
+        model_id="vision-v1",
+    )
+    snapshot = json.loads(
+        _category_execution_snapshot(
+            profile,
+            prompt_a_id=11,
+            prompt_b_id=None,
+            model_config=model,
+        )
+    )
+    job = EvaluationJob(
+        id=1,
+        asset_id=1,
+        category_key="space_image",
+        prompt_a_id=11,
+        prompt_b_id=None,
+        category_profile_snapshot_json=json.dumps(snapshot),
+    )
+    assert _frozen_category_contract(job, asset)["dimension_selection"][
+        "effective_keys"
+    ] == ["composition_viewpoint"]
+
+    snapshot["dimension_selection"]["effective_keys"] = [
+        "presentation_integrity"
+    ]
+    job.category_profile_snapshot_json = json.dumps(snapshot)
+    with pytest.raises(RuntimeError, match="维度选择与流水线不一致"):
+        _frozen_category_contract(job, asset)
+
+
+def test_frozen_category_contract_accepts_selected_key_from_custom_schema() -> None:
+    definition = json.loads(
+        json.dumps(space_schema_definition_for_version(ACTIVE_V13_VERSION))
+    )
+    old_key = definition["dimensions"][-1]["key"]
+    custom_key = "material_authenticity"
+    definition["dimensions"][-1]["key"] = custom_key
+    definition["dimensions"][-1]["label"] = "材质真实性"
+    definition["output_contract"]["dimension_output_keys"][-1] = custom_key
+    definition["risk_review"]["dimension_keys"][-1] = custom_key
+    definition["core_dimension_keys"] = [
+        custom_key if key == old_key else key
+        for key in definition["core_dimension_keys"]
+    ]
+    definition_hash = canonical_hash(definition)
+    dimension_contract = SimpleNamespace(
+        schema_id=99,
+        schema_key="material.managed",
+        version="1.0.0",
+        canonical_hash=definition_hash,
+        definition=definition,
+    )
+    pipeline = default_pipeline("material_image")
+    pipeline["prompt_mode"] = "single"
+    pipeline["dimensions"] = {
+        "enabled": True,
+        "mode": "selected",
+        "selected_keys": [custom_key],
+    }
+    profile = EvaluationCategoryProfile(
+        id=1,
+        category_key="material_image",
+        display_name="材质图",
+        status="active",
+        allowed_mime_types_json='["image/jpeg"]',
+        preprocess_config_json="{}",
+        pipeline_config_json=canonical_json(pipeline),
+        prompt_a_id=11,
+        prompt_b_id=None,
+        rubric_version="material-v1",
+        dimension_schema_key=dimension_contract.schema_key,
+        dimension_schema_version=dimension_contract.version,
+    )
+    model = ModelConfig(
+        id=21,
+        provider="custom-compatible",
+        base_url="https://model.example.test/v1",
+        api_path="/chat/completions",
+        model_id="vision-v1",
+    )
+    snapshot = json.loads(
+        _category_execution_snapshot(
+            profile,
+            prompt_a_id=11,
+            prompt_b_id=None,
+            model_config=model,
+            dimension_contract=dimension_contract,
+        )
+    )
+    assert snapshot["dimension_selection"]["effective_keys"] == [custom_key]
+    asset = Asset(
+        id=1,
+        original_name="material.jpg",
+        stored_name="material.jpg",
+        mime_type="image/jpeg",
+        size_bytes=100,
+        sha256="a" * 64,
+    )
+    job = EvaluationJob(
+        id=1,
+        asset_id=1,
+        category_key="material_image",
+        prompt_a_id=11,
+        prompt_b_id=None,
+        category_profile_snapshot_json=canonical_json(snapshot),
+    )
+    frozen = _frozen_category_contract(job, asset)
+    assert frozen is not None
+    assert frozen["dimension_selection"]["effective_keys"] == [custom_key]
+    assert frozen["dimension_contract"]["canonical_hash"] == definition_hash
+
+
 def test_worker_uses_frozen_contract_after_live_configuration_is_retired(
     monkeypatch,
     tmp_path,
@@ -759,13 +904,13 @@ def test_production_dimension_contract_rejects_missing_and_invalid_definition() 
         )
         db.add(custom_schema)
         db.commit()
-        with pytest.raises(ProductionDimensionContractError) as unsupported:
-            resolve_published_dimension_contract(
-                db,
-                schema_key=custom_schema.schema_key,
-                version=custom_schema.version,
-            )
-        assert unsupported.value.code == "dimension_contract_not_executable"
+        resolved_custom = resolve_published_dimension_contract(
+            db,
+            schema_key=custom_schema.schema_key,
+            version=custom_schema.version,
+        )
+        assert resolved_custom is not None
+        assert resolved_custom.canonical_hash == custom_schema.canonical_hash
 
         custom_bundle = SimpleNamespace(
             dimension_schema_set_snapshot=json.dumps(
@@ -781,14 +926,14 @@ def test_production_dimension_contract_rejects_missing_and_invalid_definition() 
                 }
             )
         )
-        with pytest.raises(ProductionDimensionContractError) as bundle_bypass:
-            resolve_published_dimension_contract(
-                db,
-                schema_key=custom_schema.schema_key,
-                version=custom_schema.version,
-                bundle=custom_bundle,
-            )
-        assert bundle_bypass.value.code == "dimension_contract_not_executable"
+        resolved_from_bundle = resolve_published_dimension_contract(
+            db,
+            schema_key=custom_schema.schema_key,
+            version=custom_schema.version,
+            bundle=custom_bundle,
+        )
+        assert resolved_from_bundle is not None
+        assert resolved_from_bundle.definition == custom_definition
     finally:
         db.close()
         engine.dispose()

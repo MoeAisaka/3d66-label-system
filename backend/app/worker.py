@@ -21,7 +21,11 @@ from sqlalchemy.exc import IntegrityError
 
 from .config import get_settings
 from .category_pipeline import (
+    DIMENSION_OPTIONS,
     active_modules,
+    dimension_options_from_definition,
+    dimension_selection_payload,
+    project_dimension_definition,
     legacy_preprocess_to_pipeline,
     processor_config,
     validate_pipeline_config,
@@ -49,6 +53,7 @@ from .models import (
     EvaluationControl,
     EvaluationCategoryProfile,
     CATEGORY_PROFILE_DEFAULTS,
+    DimensionSchema,
     EvaluationJob,
     EvaluationResult,
     ModelConfig,
@@ -82,11 +87,15 @@ from .production_dimension_contract import (
     resolve_frozen_dimension_contract,
     resolve_published_dimension_contract,
 )
-from .scoring import ENGINE_VERSION, calculate_score
+from .scoring import (
+    ENGINE_VERSION,
+    calculate_prompt_only_result,
+    calculate_score,
+    normalize_dimension_aliases,
+)
 from .schema_adapter import (
     adapt_combined_aesthetic_response,
     is_combined_aesthetic_response,
-    normalize_aesthetic_dimensions_for_schema,
     normalize_precheck_business_rules,
 )
 from .dimension_schema_registry import (
@@ -206,6 +215,7 @@ def _category_prompt_context(
     document_context: dict[str, object] | None,
     pdf_summary: dict[str, object] | None,
     pipeline_config: dict[str, object] | None = None,
+    include_dimension_rules: bool = True,
 ) -> str:
     pipeline = pipeline_config or legacy_preprocess_to_pipeline(category_key, preprocess_config)
     modules = active_modules(pipeline)
@@ -236,9 +246,75 @@ def _category_prompt_context(
     if instruction:
         parts.append("\n\n类目管理员冻结指令：" + instruction)
     dimensions = pipeline.get("dimensions") or {}
-    if dimensions.get("mode") == "selected" and dimensions.get("enabled_keys"):
-        parts.append("\n\n本类目重点指标：" + "、".join(str(item) for item in dimensions["enabled_keys"]) + "。其他必填维度仍需返回，但不作为类目重点解释。")
+    selected_keys = dimensions.get("selected_keys") or dimensions.get("enabled_keys")
+    if (
+        include_dimension_rules
+        and dimensions.get("mode") == "selected"
+        and selected_keys
+    ):
+        parts.append(
+            "\n\n维度输出覆盖规则：本次只评测并返回 dimensions 中的这些键："
+            + "、".join(str(item) for item in selected_keys)
+            + "。dimensions 对象不得包含其他维度；每个所选维度仍需给出等级和可见证据。"
+        )
+    elif include_dimension_rules and dimensions.get("mode") == "none":
+        parts.append(
+            "\n\n仅提示词评测输出合同：本类目已关闭维度评测，不得返回 dimensions。"
+            "除当前提示词要求的范围、分类、媒介形态、画质、证据和复核信号外，"
+            "必须在 JSON 顶层返回 predicted_level（L1-L5）、predicted_score（0-100）、"
+            "confidence（0-1）和 reason（基于可见证据的中文理由）。"
+            "predicted_score 与 predicted_level 必须匹配：低于40为L1，40-59.99为L2，"
+            "60-74.99为L3，75-89.99为L4，90-100为L5。只输出一个合法 JSON 对象。"
+        )
     return "".join(parts)
+
+
+def _apply_dimension_selection(
+    aesthetic: dict[str, object] | None,
+    *,
+    source_definition: dict[str, object],
+    selection: dict[str, object],
+) -> tuple[dict[str, object] | None, dict[str, object] | None]:
+    """Restrict model output and scoring to the frozen category selection."""
+
+    projected = project_dimension_definition(source_definition, selection)
+    if projected is None:
+        return None, None
+    if aesthetic is None:
+        return None, projected
+    output_contract = source_definition.get("output_contract")
+    source_keys = (
+        output_contract.get("dimension_output_keys")
+        if isinstance(output_contract, dict)
+        else None
+    )
+    if not isinstance(source_keys, list) or not all(
+        isinstance(key, str) and key for key in source_keys
+    ):
+        raise RuntimeError("冻结维度方案输出合同损坏")
+    dimensions = aesthetic.get("dimensions")
+    if not isinstance(dimensions, dict):
+        raise RuntimeError("模型美感结果缺少维度对象")
+    normalized = normalize_dimension_aliases(dimensions, source_keys)
+    unknown = set(normalized) - set(source_keys)
+    if unknown:
+        raise RuntimeError(
+            "模型返回未发布维度：" + "、".join(sorted(unknown))
+        )
+    effective_keys = selection.get("effective_keys")
+    if not isinstance(effective_keys, list):
+        raise RuntimeError("冻结维度选择损坏")
+    missing = [key for key in effective_keys if key not in normalized]
+    if missing:
+        raise RuntimeError(
+            "模型缺少所选维度：" + "、".join(missing)
+        )
+    restricted = dict(aesthetic)
+    restricted["dimensions"] = {
+        key: normalized[key] for key in effective_keys
+    }
+    restricted["dimension_selection"] = dict(selection)
+    return restricted, projected
 
 
 def _frozen_category_contract(
@@ -286,10 +362,49 @@ def _frozen_category_contract(
     if not isinstance(snapshot.get("preprocess_config"), dict):
         raise RuntimeError("任务冻结类目前处理配置损坏")
     if snapshot.get("schema_version") == "evaluation-category-profile-v2":
+        frozen_contract = snapshot.get("dimension_contract")
+        definition = (
+            frozen_contract.get("definition")
+            if isinstance(frozen_contract, dict)
+            else None
+        )
+        options = (
+            dimension_options_from_definition(definition)
+            if definition is not None
+            else list(DIMENSION_OPTIONS)
+        )
         try:
-            snapshot["pipeline_config"] = validate_pipeline_config(snapshot.get("pipeline_config"))
+            snapshot["pipeline_config"] = validate_pipeline_config(
+                snapshot.get("pipeline_config"),
+                allowed_dimension_keys=[item["key"] for item in options],
+            )
         except (TypeError, ValueError) as exc:
             raise RuntimeError("任务冻结类目流水线配置损坏") from exc
+        frozen_selection = snapshot.get("dimension_selection")
+        if frozen_selection is not None:
+            if not isinstance(frozen_selection, dict):
+                raise RuntimeError("任务冻结类目维度选择损坏")
+            try:
+                expected_selection = dimension_selection_payload(
+                    snapshot["pipeline_config"],
+                    dimension_options=options,
+                    schema_key=(
+                        frozen_contract.get("schema_key")
+                        if isinstance(frozen_contract, dict) else None
+                    ),
+                    schema_version=(
+                        frozen_contract.get("version")
+                        if isinstance(frozen_contract, dict) else None
+                    ),
+                    schema_hash=(
+                        frozen_contract.get("canonical_hash")
+                        if isinstance(frozen_contract, dict) else None
+                    ),
+                )
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError("任务冻结类目维度选择损坏") from exc
+            if expected_selection != frozen_selection:
+                raise RuntimeError("任务冻结类目维度选择与流水线不一致")
     rubric_version = snapshot.get("rubric_version")
     if not isinstance(rubric_version, str) or not rubric_version:
         raise RuntimeError("任务冻结类目 rubric 配置损坏")
@@ -727,13 +842,52 @@ async def evaluate_job(job_id: int) -> None:
             category_model_config_id = category_profile.model_config_id
             frozen_category_model = None
             try:
-                category_pipeline_config = validate_pipeline_config(
-                    json.loads(category_profile.pipeline_config_json or "{}")
+                raw_pipeline = json.loads(
+                    category_profile.pipeline_config_json or "{}"
                 )
-            except (json.JSONDecodeError, ValueError):
+            except json.JSONDecodeError as exc:
+                raise RuntimeError("评测类目流水线配置损坏") from exc
+            if raw_pipeline.get("schema_version") != "category-pipeline-v1":
                 category_pipeline_config = legacy_preprocess_to_pipeline(
                     job.category_key, category_preprocess_config
                 )
+            else:
+                allowed_dimension_keys = [
+                    item["key"] for item in DIMENSION_OPTIONS
+                ]
+                if (
+                    category_profile.dimension_schema_key
+                    and category_profile.dimension_schema_version
+                ):
+                    live_schema = db.scalar(
+                        select(DimensionSchema).where(
+                            DimensionSchema.schema_key
+                            == category_profile.dimension_schema_key,
+                            DimensionSchema.version
+                            == category_profile.dimension_schema_version,
+                        )
+                    )
+                    if live_schema is not None:
+                        try:
+                            live_definition = json.loads(
+                                live_schema.definition_json
+                            )
+                        except json.JSONDecodeError as exc:
+                            raise RuntimeError("评测类目维度方案损坏") from exc
+                        live_options = dimension_options_from_definition(
+                            live_definition
+                        )
+                        if live_options:
+                            allowed_dimension_keys = [
+                                item["key"] for item in live_options
+                            ]
+                try:
+                    category_pipeline_config = validate_pipeline_config(
+                        raw_pipeline,
+                        allowed_dimension_keys=allowed_dimension_keys,
+                    )
+                except ValueError as exc:
+                    raise RuntimeError("评测类目流水线配置损坏") from exc
         prompt_a_id = job.prompt_a_id
         prompt_b_id = job.prompt_b_id
         strategy_bundle_id = job.strategy_bundle_id
@@ -872,6 +1026,22 @@ async def evaluate_job(job_id: int) -> None:
             frozen_strategy_snapshot = None
 
     single_mode = prompt_b_id is None
+    if (
+        category_profile_snapshot is not None
+        and category_profile_snapshot.get("schema_version")
+        == "evaluation-category-profile-v2"
+        and category_profile_snapshot.get("dimension_selection") is not None
+    ):
+        dimension_selection = dict(
+            category_profile_snapshot["dimension_selection"]
+        )
+    else:
+        dimension_selection = dimension_selection_payload(
+            category_pipeline_config
+        )
+    dimension_mode = str(dimension_selection["mode"])
+    if dimension_mode == "none" and not single_mode:
+        raise RuntimeError("关闭维度的仅提示词实验必须使用单提示词模式")
     if prompt_a is None:
         prompt_a = (
             _single_prompt_for_job(prompt_a_id)
@@ -941,6 +1111,7 @@ async def evaluate_job(job_id: int) -> None:
         "model_mime_type": model_mime_type,
         "config": category_preprocess_config,
         "pipeline_config": category_pipeline_config,
+        "dimension_selection": dimension_selection,
     }
     if document_context is not None:
         document_text = str(document_context.get("text") or "")
@@ -1021,6 +1192,7 @@ async def evaluate_job(job_id: int) -> None:
         document_context=document_context,
         pdf_summary=pdf_summary,
         pipeline_config=category_pipeline_config,
+        include_dimension_rules=(single_mode or dimension_mode == "none"),
     )
     user_a = prompt_a.user_prompt.replace(
         "{{image_metadata}}", json.dumps(metadata, ensure_ascii=False)
@@ -1049,10 +1221,12 @@ async def evaluate_job(job_id: int) -> None:
     )
     _ensure_job_processing(job_id)
     combined_response = is_combined_aesthetic_response(response_a.parsed)
-    if single_mode and not combined_response:
+    if single_mode and dimension_mode != "none" and not combined_response:
         raise RuntimeError("单提示词必须一次返回分类、画质和八个美感维度的完整结构")
     if combined_response:
         precheck, aesthetic = adapt_combined_aesthetic_response(response_a.parsed)
+        if dimension_mode == "none":
+            aesthetic = None
     else:
         precheck = response_a.parsed
         aesthetic = None
@@ -1061,14 +1235,26 @@ async def evaluate_job(job_id: int) -> None:
 
     response_b = None
     response_b_attempts: list[object] = []
-    if not single_mode and not combined_response and scope_status == "in_scope":
+    if (
+        dimension_mode != "none"
+        and not single_mode
+        and not combined_response
+        and scope_status == "in_scope"
+    ):
         if prompt_b is None:
             prompt_b = _prompt_for_job("B", prompt_b_id)
         _set_job(job_id, stage="aesthetic", progress=48)
         user_b = prompt_b.user_prompt.replace(
             "{{precheck_json}}", json.dumps(precheck, ensure_ascii=False)
         ).replace("{{rubric_version}}", prompt_b.rubric_version)
-        user_b += category_prompt_context
+        user_b += _category_prompt_context(
+            category_key=job.category_key,
+            preprocess_config=category_preprocess_config,
+            document_context=document_context,
+            pdf_summary=pdf_summary,
+            pipeline_config=category_pipeline_config,
+            include_dimension_rules=True,
+        )
         response_b = await client.chat_json(
             prompt_b.system_prompt,
             user_b,
@@ -1079,7 +1265,11 @@ async def evaluate_job(job_id: int) -> None:
         _ensure_job_processing(job_id)
         aesthetic = response_b.parsed
         if (
-            prompt_b.version.endswith("split.3") or "lite" in prompt_b.version
+            dimension_mode == "all"
+            and (
+                prompt_b.version.endswith("split.3")
+                or "lite" in prompt_b.version
+            )
         ) and aesthetic_grade_collapse(aesthetic):
             _set_job(job_id, stage="aesthetic_repair", progress=68)
             repair_user = (
@@ -1102,7 +1292,7 @@ async def evaluate_job(job_id: int) -> None:
 
     risk_review_report = None
     risk_review_raw = None
-    dimension_definition = (
+    source_dimension_definition = (
         production_dimension_contract.definition
         if production_dimension_contract is not None
         else resolve_frozen_dimension_entry(
@@ -1118,14 +1308,23 @@ async def evaluate_job(job_id: int) -> None:
             else None
         )
     )
-    aesthetic = normalize_aesthetic_dimensions_for_schema(
+    aesthetic, dimension_definition = _apply_dimension_selection(
         aesthetic,
-        dimension_definition,
+        source_definition=source_dimension_definition,
+        selection=dimension_selection,
     )
-    preliminary_scoring = calculate_score(
-        precheck,
-        aesthetic,
-        dimension_schema=dimension_definition,
+    preliminary_scoring = (
+        calculate_prompt_only_result(
+            precheck,
+            model_payload=response_a.parsed,
+            dimension_selection=dimension_selection,
+        )
+        if dimension_mode == "none"
+        else calculate_score(
+            precheck,
+            aesthetic,
+            dimension_schema=dimension_definition,
+        )
     )
     trigger_reasons = risk_review_reasons(
         precheck,
@@ -1181,28 +1380,42 @@ async def evaluate_job(job_id: int) -> None:
     _set_job(job_id, stage="scoring", progress=86)
     _ensure_job_processing(job_id)
     if production_dimension_contract is not None:
-        dimension_definition = production_dimension_contract.definition
+        source_dimension_definition = production_dimension_contract.definition
     elif frozen_bundle is not None and (
         frozen_bundle.strategy_schema_version
         == STRATEGY_SCHEMA_VERSION
     ):
-        dimension_definition = resolve_frozen_dimension_entry(
+        source_dimension_definition = resolve_frozen_dimension_entry(
             bundle=frozen_bundle,
             aesthetic=aesthetic,
         )["definition"]
     elif frozen_bundle is None:
-        dimension_definition = (
+        source_dimension_definition = (
             space_schema_definition_for_scoring_profile(
                 aesthetic.get("scoring_profile")
                 if isinstance(aesthetic, dict)
                 else None
             )
         )
-    scoring = calculate_score(
-        precheck,
-        aesthetic,
-        dimension_schema=dimension_definition,
+    projected_definition = project_dimension_definition(
+        source_dimension_definition,
+        dimension_selection,
     )
+    scoring = (
+        calculate_prompt_only_result(
+            precheck,
+            model_payload=response_a.parsed,
+            dimension_selection=dimension_selection,
+        )
+        if dimension_mode == "none"
+        else calculate_score(
+            precheck,
+            aesthetic,
+            dimension_schema=projected_definition,
+        )
+    )
+    scoring["dimension_mode"] = dimension_mode
+    scoring["dimension_selection"] = dimension_selection
     now = datetime.now(timezone.utc)
     with session_scope() as db:
         current_job = db.get(EvaluationJob, job_id)

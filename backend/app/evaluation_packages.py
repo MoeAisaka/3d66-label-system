@@ -13,7 +13,13 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from .audit import append_audit_event
-from .category_pipeline import legacy_preprocess_to_pipeline, validate_pipeline_config
+from .category_pipeline import (
+    DIMENSION_OPTIONS,
+    dimension_options_from_definition,
+    dimension_selection_payload,
+    legacy_preprocess_to_pipeline,
+    validate_pipeline_config,
+)
 from .database import get_db
 from .models import (
     AutomationOptimizationRun,
@@ -47,7 +53,10 @@ COMPLETED_AUTOMATION_STATUSES = frozenset(
 )
 
 
-def _category_pipeline(profile: EvaluationCategoryProfile) -> dict[str, Any]:
+def _category_pipeline(
+    profile: EvaluationCategoryProfile,
+    db: Session | None = None,
+) -> dict[str, Any]:
     try:
         raw = json.loads(profile.pipeline_config_json or "{}")
     except json.JSONDecodeError:
@@ -58,8 +67,31 @@ def _category_pipeline(profile: EvaluationCategoryProfile) -> dict[str, Any]:
         except json.JSONDecodeError:
             legacy = {}
         raw = legacy_preprocess_to_pipeline(profile.category_key, legacy)
+    allowed_dimension_keys = [item["key"] for item in DIMENSION_OPTIONS]
+    if (
+        db is not None
+        and profile.dimension_schema_key
+        and profile.dimension_schema_version
+    ):
+        schema = db.scalar(
+            select(DimensionSchema).where(
+                DimensionSchema.schema_key == profile.dimension_schema_key,
+                DimensionSchema.version == profile.dimension_schema_version,
+            )
+        )
+        if schema is not None:
+            try:
+                definition = json.loads(schema.definition_json)
+            except json.JSONDecodeError:
+                definition = None
+            options = dimension_options_from_definition(definition)
+            if options:
+                allowed_dimension_keys = [item["key"] for item in options]
     try:
-        return validate_pipeline_config(raw)
+        return validate_pipeline_config(
+            raw,
+            allowed_dimension_keys=allowed_dimension_keys,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=f"类目流水线配置损坏：{exc}") from None
 
@@ -566,6 +598,7 @@ def _dimension_snapshot(
     candidate_strategy: dict[str, Any],
     dimension_schema: DimensionSchema | None,
     route_policy: DimensionRoutePolicy | None,
+    category_pipeline: dict[str, Any],
 ) -> dict[str, Any]:
     explicit_schema = None
     if dimension_schema is not None:
@@ -597,6 +630,22 @@ def _dimension_snapshot(
                 label="维度路由策略定义",
             ),
         }
+    explicit_definition = (
+        explicit_schema.get("definition")
+        if isinstance(explicit_schema, dict)
+        else None
+    )
+    category_selection = dimension_selection_payload(
+        category_pipeline,
+        dimension_options=(
+            dimension_options_from_definition(explicit_definition)
+            if isinstance(explicit_definition, dict)
+            else list(DIMENSION_OPTIONS)
+        ) or list(DIMENSION_OPTIONS),
+        schema_key=(dimension_schema.schema_key if dimension_schema else None),
+        schema_version=(dimension_schema.version if dimension_schema else None),
+        schema_hash=(dimension_schema.canonical_hash if dimension_schema else None),
+    )
     return _secret_safe(
         {
             "strategy_schema_version": candidate_strategy.get("schema_version"),
@@ -618,6 +667,7 @@ def _dimension_snapshot(
             "label_field_set": candidate_strategy.get("label_field_set"),
             "explicit_schema": explicit_schema,
             "explicit_route_policy": explicit_route,
+            "category_selection": category_selection,
         }
     )
 
@@ -652,7 +702,7 @@ def _category_snapshot(
                 "baseline_strategy_bundle_id": automation.get(
                     "baseline_strategy_bundle_id"
                 ),
-                "pipeline_config": _category_pipeline(profile),
+                "pipeline_config": _category_pipeline(profile, db),
             },
         }
     )
@@ -888,7 +938,7 @@ def _build_package_material(
     )
     if category_profile is None:
         raise HTTPException(status_code=409, detail="评测包类目配置不存在")
-    pipeline = _category_pipeline(category_profile)
+    pipeline = _category_pipeline(category_profile, db)
     pipeline_mode = pipeline.get("prompt_mode")
     package_mode = "single" if prompt_b is None else "ab"
     if pipeline_mode == "follow":
@@ -952,6 +1002,7 @@ def _build_package_material(
                 candidate_strategy=candidate_strategy,
                 dimension_schema=dimension_schema,
                 route_policy=route_policy,
+                category_pipeline=pipeline,
             ),
             "golden_sample_set": _golden_sample_snapshot(sample_set, regression),
             "strategies": {
@@ -1439,7 +1490,7 @@ def _activate_package_category_baseline(
         raise HTTPException(status_code=409, detail="评测包缺少冻结流水线修订号")
     if not isinstance(frozen_pipeline, dict):
         raise HTTPException(status_code=409, detail="评测包缺少冻结流水线合同")
-    pipeline = _category_pipeline(profile)
+    pipeline = _category_pipeline(profile, db)
     if (
         profile.pipeline_revision != expected_pipeline_revision
         or canonical_json(pipeline) != canonical_json(frozen_pipeline)

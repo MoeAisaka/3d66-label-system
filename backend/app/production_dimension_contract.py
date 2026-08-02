@@ -7,23 +7,12 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .dimension_schema_registry import (
-    ACTIVE_V13_VERSION,
-    HISTORICAL_DEFAULT_VERSION,
-    SPACE_SCHEMA_KEY,
-    canonical_hash,
-)
+from .dimension_schema_registry import canonical_hash
 from .models import DimensionSchema, StrategyBundle
 from .scoring import (
     DimensionScoringContractError,
     validate_dimension_scoring_contract,
 )
-
-
-_V2_EXECUTABLE_DIMENSION_IDENTITIES = {
-    (SPACE_SCHEMA_KEY, HISTORICAL_DEFAULT_VERSION),
-    (SPACE_SCHEMA_KEY, ACTIVE_V13_VERSION),
-}
 
 
 class ProductionDimensionContractError(ValueError):
@@ -110,12 +99,6 @@ def resolve_published_dimension_contract(
             "类目绑定的维度方案与当前评分引擎不兼容，已停止生产执行。",
         ) from exc
 
-    if (schema_key, version) not in _V2_EXECUTABLE_DIMENSION_IDENTITIES:
-        raise ProductionDimensionContractError(
-            "dimension_contract_not_executable",
-            "类目绑定的维度方案尚未接入当前生产 Bundle，已停止生产执行。",
-        )
-
     if bundle is not None:
         try:
             frozen_set = json.loads(bundle.dimension_schema_set_snapshot or "")
@@ -193,11 +176,6 @@ def resolve_frozen_dimension_contract(
             "dimension_contract_not_executable",
             "任务冻结维度合同与当前评分引擎不兼容，已停止生产执行。",
         ) from exc
-    if (schema_key, version) not in _V2_EXECUTABLE_DIMENSION_IDENTITIES:
-        raise ProductionDimensionContractError(
-            "dimension_contract_not_executable",
-            "任务冻结维度合同尚未接入当前生产 Bundle，已停止生产执行。",
-        )
     if bundle is not None:
         try:
             frozen_set = json.loads(bundle.dimension_schema_set_snapshot or "")

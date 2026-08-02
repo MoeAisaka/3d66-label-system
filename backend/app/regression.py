@@ -7,6 +7,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from .category_pipeline import dimension_selection_from_job_snapshot
 from .dimension_schema_registry import canonical_hash
 from .models import (
     EvaluationResult,
@@ -153,22 +154,33 @@ def dimension_contract_for_result(
         aesthetic=aesthetic,
     )
     output_contract = definition.get("output_contract")
-    dimension_keys = (
+    schema_dimension_keys = (
         output_contract.get("dimension_output_keys")
         if isinstance(output_contract, dict)
         else None
     )
     if (
-        not isinstance(dimension_keys, list)
-        or not dimension_keys
-        or len(dimension_keys) != len(set(dimension_keys))
+        not isinstance(schema_dimension_keys, list)
+        or not schema_dimension_keys
+        or len(schema_dimension_keys) != len(set(schema_dimension_keys))
         or not all(
-            isinstance(key, str) and key for key in dimension_keys
+            isinstance(key, str) and key for key in schema_dimension_keys
         )
     ):
         raise DimensionScoringContractError(
             "DimensionSchema 输出维度合同不完整"
         )
+    job = getattr(result, "job", None)
+    selection = dimension_selection_from_job_snapshot(
+        getattr(job, "category_profile_snapshot_json", None)
+    )
+    dimension_keys = list(schema_dimension_keys)
+    if selection is not None:
+        dimension_keys = list(selection["effective_keys"])
+        if set(dimension_keys) - set(schema_dimension_keys):
+            raise DimensionScoringContractError(
+                "结果冻结维度选择超出 DimensionSchema"
+            )
 
     payload = _loads(result.strategy_snapshot_json, {})
     if payload.get("schema_version") != "strategy-bundle-v2":
@@ -199,6 +211,8 @@ def dimension_contract_for_result(
         **identity_fields,
         "definition": definition,
     }
+    if selection is not None:
+        identity["selection"] = selection
     return definition, tuple(dimension_keys), identity
 
 

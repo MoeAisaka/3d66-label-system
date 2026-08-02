@@ -681,6 +681,72 @@ def calculate_score(
     }
 
 
+def calculate_prompt_only_result(
+    precheck: dict[str, Any],
+    *,
+    model_payload: dict[str, Any],
+    dimension_selection: dict[str, Any],
+) -> dict[str, Any]:
+    """Validate and persist one experimental model-direct L1-L5 prediction."""
+
+    if (
+        dimension_selection.get("mode") != "none"
+        or dimension_selection.get("effective_keys") != []
+    ):
+        raise ValueError("仅提示词评分要求冻结 none 维度选择")
+    classification = precheck.get("classification") or {}
+    scope_status = classification.get("scope_status", "out_of_scope")
+    review_reasons = list(precheck.get("review_reasons") or [])
+    level = model_payload.get("predicted_level")
+    score = model_payload.get("predicted_score")
+    confidence = model_payload.get("confidence")
+    reason = model_payload.get("reason")
+    if level not in {"L1", "L2", "L3", "L4", "L5"}:
+        raise ValueError("仅提示词结果 predicted_level 必须是 L1 至 L5")
+    if (
+        not isinstance(score, (int, float))
+        or isinstance(score, bool)
+        or not 0 <= float(score) <= 100
+    ):
+        raise ValueError("仅提示词结果 predicted_score 必须在 0 至 100 之间")
+    if (
+        not isinstance(confidence, (int, float))
+        or isinstance(confidence, bool)
+        or not 0 <= float(confidence) <= 1
+    ):
+        raise ValueError("仅提示词结果 confidence 必须在 0 至 1 之间")
+    if not isinstance(reason, str) or not reason.strip() or len(reason) > 2000:
+        raise ValueError("仅提示词结果 reason 必须是 1 至 2000 字的说明")
+    expected_level = _level_for_score(float(score))
+    if level != expected_level:
+        raise ValueError(
+            f"仅提示词结果等级与分数不一致：{score} 分应为 {expected_level}"
+        )
+    if scope_status not in {"in_scope", "boundary"}:
+        review_reasons.append("范围外素材仍产生了实验预测，需要人工复核")
+    if float(confidence) < 0.7:
+        review_reasons.append("仅提示词预测置信度低于 0.70")
+    return {
+        "engine_version": ENGINE_VERSION,
+        "scoring_mode": "prompt_only",
+        "dimension_mode": "none",
+        "dimension_selection": deepcopy(dimension_selection),
+        "formal": False,
+        "experimental": True,
+        "score": round(float(score), 2),
+        "level": level,
+        "raw_level": level,
+        "raw_score": round(float(score), 2),
+        "dimension_points": {},
+        "caps": [],
+        "confidence": float(confidence),
+        "reason": reason.strip(),
+        "needs_review": bool(precheck.get("needs_review")) or bool(review_reasons),
+        "review_reasons": list(dict.fromkeys(review_reasons)),
+        "not_formal_reason": "类目已关闭维度评测；等级和分数为模型直接预测的实验结果，不是维度评分",
+    }
+
+
 def calculate_corrected_score(
     precheck: dict[str, Any],
     aesthetic: dict[str, Any] | None,
