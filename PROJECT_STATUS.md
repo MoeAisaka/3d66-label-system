@@ -1,7 +1,52 @@
 # 3d66 标签系统｜当前项目状态
 
-> 最后更新：2026-08-01
+> 最后更新：2026-08-02
 > 本文件只记录“现在做到哪里”；长期原则见 `PRODUCT.md` 和 `AGENTS.md`，历史背景见 `CODEX_HANDOFF.md`。
+
+## 当前交付候选：以最终评测包为主线的审核与自动优化（2026-08-02）
+
+当前分支：`feature/planned-iteration-20260801`，前端收敛提交为 `41a97bf`；后端、
+集成脚本与本节文档正在同一候选中验收，尚未推送 Codeup。
+
+已完成：
+
+- 默认导航收敛为“开始评测 → 处理纠偏 → 二审评测包”。模型协议、预算、执行器、
+  Bundle 等复杂选项进入管理员高级设置；素材页不再让一线审核员手工拼装 Prompt 入队。
+- 评测包二审详情完整展示新版 Prompt 全文与版本、Rubric、维度开关/权重/等级锚点、
+  黄金集角色和逐样本真值、回归门槛、基线/候选对照、失败项、阻塞、风险与下一步建议。
+- Worker 持久化心跳、最近检查、readiness、活跃原因和可操作 blocker；未过期的
+  processing lease 视为活跃，长模型调用不再被误报为 Worker 离线。
+- 阻塞类目不会卡住其他队列；同时可运行类目按持久化最近服务时间确定性轮转。测试中
+  同一时间戳连续六次 tick 为 3:3。
+- 自动优化按 A/B Prompt、模型完整快照、Rubric 与维度合同解析并冻结类目基线；
+  零匹配、多匹配、合同不完整、漂移或跨类目均 fail-closed。
+- Bundle 工厂不再隐式绑定类目基线。二审批准不改变现役配置；只有显式发布评测包才
+  在一个事务内提升所属类目的 Prompt、模型、Rubric、维度与 Bundle，并增加修订号。
+- Prompt 发布改为类目级有效：发布空间图新包不会归档材质图仍在使用的 Prompt。
+- 活动类目只允许已发布 Prompt；普通审核员无权设置基线 Bundle，管理员高级设置也
+  必须通过完整合同校验。
+- E2E seed 与故障矩阵写入显式基线和冻结维度合同，避免测试数据绕过生产门禁。
+
+当前验证：
+
+- 后端排除 Windows 专用部署测试：`633 passed, 1 skipped, 6 warnings`。
+- 自动化故障矩阵 7 项通过：超时、usage 缺失、优化密钥缺失、预算为零/耗尽、重复
+  纠偏、跨类目隔离和并发 Worker。
+- 前端 `npm run lint`、`npm run contract:dimensions`、`npm run build` 通过；保留
+  既有入口 chunk 超过 500 kB 警告。
+- Python `compileall`、集成脚本 `py_compile`、`git diff --check` 通过。
+
+仍待完成（完成前不得宣称正式交付）：
+
+- 在固定提交上用 `app.launcher` 同时启动 API 与 Worker，接本地 OpenAI-compatible
+  mock provider，完整主链路连续跑 3 次。
+- PNG、GIF、PDF、材质图，单 Prompt/A-B，多类目隔离和故障恢复场景验收。
+- 桌面与 390px 移动端全页面 5 轮浏览器验收、截图及控制台检查。
+- Mac、Docker、Windows 三环境各 3 次真实全流程；公司 Windows 实例未跑前不能沿用
+  旧版 Windows 证据。
+- 按新界面与真实截图重写钉钉操作手册，随后再快进推送 `main` 和 `windows-deploy`。
+
+长期决策见 [ADR-0030](docs/decisions/0030-package-review-and-category-baseline-promotion.md)。
 
 ## 规划功能迭代候选：多类目流水线、PDF 前处理、材质图与通用模型渠道（2026-08-01）
 
