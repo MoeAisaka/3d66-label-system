@@ -30,7 +30,7 @@
 当前验证：
 
 - 后端全量：`688 passed, 1 skipped, 6 warnings`；macOS 部署专项 `23 passed`，
-  Windows 部署合同专项 `30 passed`。
+  Windows 部署合同专项 `33 passed`。
 - 自动化故障矩阵 7 项通过：超时、usage 缺失、优化密钥缺失、预算为零/耗尽、重复
   纠偏、跨类目隔离和并发 Worker。
 - 前端 `npm run lint`、`npm run contract:dimensions`、`npm run build` 通过；保留
@@ -49,7 +49,7 @@
   `prompt_mode_mismatch` 门禁，固定 single/ab 类目不能再绕过冻结模式。
 - Windows 10、PowerShell 5.1、Python 3.11.4 的既有实机证据覆盖五脚本解析、
   install `-Check`、CurrentUser/LocalMachine doctor 九项与 DPAPI 回环。本候选另以
-  30 项 Windows 部署合同测试覆盖只读 SQLite 句柄关闭等修复；公司 Windows 实例
+  33 项 Windows 部署合同测试覆盖只读 SQLite 句柄关闭等修复；公司 Windows 实例
   尚未部署本候选，因此不把自动化合同测试表述为线上部署通过。
 
 仍待完成（完成前不得宣称外部环境全部交付）：

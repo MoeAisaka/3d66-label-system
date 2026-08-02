@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Iterator
 
 import pytest
 
@@ -17,6 +19,16 @@ FAKE_DPAPI_MACHINE_REFERENCE = (
 FAKE_TOKEN = "f" * 64
 
 
+@contextmanager
+def _sqlite_connection(path: Path) -> Iterator[sqlite3.Connection]:
+    connection = sqlite3.connect(path)
+    try:
+        with connection:
+            yield connection
+    finally:
+        connection.close()
+
+
 def _fake_dpapi_probe() -> str:
     return security.DPAPI_SCOPE_LOCAL_MACHINE
 
@@ -28,7 +40,7 @@ def _make_database(
     include_secrets: bool = True,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(path) as connection:
+    with _sqlite_connection(path) as connection:
         connection.executescript(
             """
             CREATE TABLE schema_migrations (
@@ -117,14 +129,14 @@ def _create_backup(tmp_path: Path, *, marker: str = "backup") -> tuple[Path, Pat
 
 
 def _read_marker(database: Path) -> str:
-    with sqlite3.connect(database) as connection:
+    with _sqlite_connection(database) as connection:
         row = connection.execute("SELECT value FROM test_markers").fetchone()
     assert row is not None
     return str(row[0])
 
 
 def _read_count(database: Path, table: str, where: str = "") -> int:
-    with sqlite3.connect(database) as connection:
+    with _sqlite_connection(database) as connection:
         row = connection.execute(f"SELECT COUNT(*) FROM {table} {where}").fetchone()
     assert row is not None
     return int(row[0])
@@ -334,7 +346,7 @@ def test_doctor_validates_dpapi_references_and_runs_dpapi_probe(tmp_path: Path) 
     assert probe_calls == [True]
     assert "Windows DPAPI current-user 内存回环" in report.checks
 
-    with sqlite3.connect(data_dir / "database" / "app.db") as connection:
+    with _sqlite_connection(data_dir / "database" / "app.db") as connection:
         connection.execute(
             "UPDATE model_configs SET encrypted_api_key='keychain:v1:model-config'"
         )
@@ -356,7 +368,7 @@ def test_doctor_accepts_machine_scope_reference_and_rejects_failed_probe(
 ) -> None:
     repo = _make_repo(tmp_path)
     data_dir = _make_data(tmp_path / "runtime")
-    with sqlite3.connect(data_dir / "database" / "app.db") as connection:
+    with _sqlite_connection(data_dir / "database" / "app.db") as connection:
         connection.execute(
             "UPDATE model_configs SET encrypted_api_key=?",
             (FAKE_DPAPI_MACHINE_REFERENCE,),
