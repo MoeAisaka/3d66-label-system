@@ -1,6 +1,7 @@
 import { useState, type ReactNode } from "react"
 import {
   ArrowsClockwise,
+  ChartLineUp,
   ListChecks,
   List,
   SignOut,
@@ -33,6 +34,16 @@ export const primaryWorkflowDomains = [
       { to: "/workflow/materials/packages", label: "1 导入素材" },
       { to: "/workflow/production-line", label: "2 选择素材包并评测" },
       { to: "/workflow/materials/jobs", label: "评测进度" },
+    ],
+  },
+  {
+    to: "/workflow/optimization/baseline-regression",
+    matches: ["/workflow/optimization/baseline-regression"],
+    index: "B",
+    label: "存量回归",
+    icon: ChartLineUp,
+    tabs: [
+      { to: "/workflow/optimization/baseline-regression", label: "基准回归与处理纠偏" },
     ],
   },
   {
