@@ -5,13 +5,13 @@ import {
   CloudArrowUp,
   FileZip,
   FolderOpen,
-  GearSix,
   ImageSquare,
   Package,
   Square,
   Trash,
 } from "@phosphor-icons/react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
+import { Link } from "react-router-dom"
 import { toast } from "sonner"
 
 import { PageHeader } from "@/components/app-shell"
@@ -19,7 +19,7 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { api, jsonBody } from "@/lib/api"
-import type { Asset, EvaluationCategoryProfile, MaterialPackage, PromptVersion } from "@/lib/types"
+import type { Asset, EvaluationCategoryProfile, MaterialPackage } from "@/lib/types"
 
 type CategoryKey = EvaluationCategoryProfile["category_key"]
 
@@ -56,12 +56,7 @@ export function AssetsPage() {
   const [selected, setSelected] = useState<Set<number>>(new Set())
   const [uploadPackageName, setUploadPackageName] = useState("")
   const [manualPackageName, setManualPackageName] = useState("")
-  const [promptMode, setPromptMode] = useState<"single" | "split" | null>(null)
-  const [promptId, setPromptId] = useState<number | null>(null)
-  const [promptAId, setPromptAId] = useState<number | null>(null)
-  const [promptBId, setPromptBId] = useState<number | null>(null)
   const [packageId, setPackageId] = useState<number | null>(null)
-  const [excludeCurrent, setExcludeCurrent] = useState(false)
   const [uploadedFrom, setUploadedFrom] = useState("")
   const [uploadedTo, setUploadedTo] = useState("")
   const [categoryKey, setCategoryKey] = useState<CategoryKey>("space_image")
@@ -76,30 +71,7 @@ export function AssetsPage() {
     : "image/jpeg,image/png,image/webp,image/gif"
   const isDocumentCategory = selectedCategory?.pipeline_config.input_kind === "pdf"
 
-  const prompts = useQuery({
-    queryKey: ["prompts"],
-    queryFn: () => api<{ items: PromptVersion[] }>("/api/prompts"),
-  })
-  const promptAOptions = prompts.data?.items.filter((item) => item.stage === "A") ?? []
-  const promptBOptions = prompts.data?.items.filter((item) => item.stage === "B") ?? []
-  const allPromptOptions = prompts.data?.items ?? []
-  const effectivePromptMode = promptMode ?? (allPromptOptions.length === 1 ? "single" : "split")
-  const effectivePromptId = promptId
-    ?? allPromptOptions.find((item) => item.status === "published")?.id
-    ?? allPromptOptions[0]?.id
-    ?? null
-  const effectivePromptAId = promptAId
-    ?? promptAOptions.find((item) => item.status === "published")?.id
-    ?? null
-  const effectivePromptBId = promptBId
-    ?? promptBOptions.find((item) => item.status === "published")?.id
-    ?? null
-
-  const strategyParams = new URLSearchParams()
-  if (effectivePromptMode === "single" && effectivePromptId) strategyParams.set("prompt_id", String(effectivePromptId))
-  if (effectivePromptMode === "split" && effectivePromptAId) strategyParams.set("prompt_a_id", String(effectivePromptAId))
-  if (effectivePromptMode === "split" && effectivePromptBId) strategyParams.set("prompt_b_id", String(effectivePromptBId))
-  const packageParams = new URLSearchParams(strategyParams)
+  const packageParams = new URLSearchParams()
   packageParams.set("category_key", categoryKey)
   packageParams.set("limit", "500")
   if (uploadedFrom) packageParams.set("created_from", `${uploadedFrom}T00:00:00Z`)
@@ -109,11 +81,10 @@ export function AssetsPage() {
     queryFn: () => api<{ items: MaterialPackage[] }>(`/api/material-packages?${packageParams.toString()}`),
   })
 
-  const assetsParams = new URLSearchParams(strategyParams)
+  const assetsParams = new URLSearchParams()
   assetsParams.set("limit", "1000")
   assetsParams.set("category_key", categoryKey)
   if (packageId) assetsParams.set("package_id", String(packageId))
-  if (excludeCurrent) assetsParams.set("exclude_evaluated_current", "true")
   const assets = useQuery({
     queryKey: ["assets", assetsParams.toString()],
     queryFn: () => api<{ items: Asset[]; total: number }>(`/api/assets?${assetsParams.toString()}`),
@@ -243,30 +214,6 @@ export function AssetsPage() {
     onError: (error) => toast.error(error.message),
   })
 
-  const enqueue = useMutation({
-    mutationFn: () =>
-      api<{ job_ids: number[] }>("/api/jobs/enqueue", {
-        method: "POST",
-        ...jsonBody({
-          asset_ids: Array.from(selected),
-          prompt_id: effectivePromptMode === "single" ? effectivePromptId : null,
-          prompt_a_id: effectivePromptMode === "split" ? effectivePromptAId : null,
-          prompt_b_id: effectivePromptMode === "split" ? effectivePromptBId : null,
-          category_key: categoryKey,
-        }),
-      }),
-    onSuccess: async (data) => {
-      setSelected(new Set())
-      await Promise.all([
-        queryClient.invalidateQueries({ queryKey: ["assets"] }),
-        queryClient.invalidateQueries({ queryKey: ["jobs"] }),
-        queryClient.invalidateQueries({ queryKey: ["dashboard"] }),
-      ])
-      toast.success(`已创建 ${data.job_ids.length} 个评测任务`)
-    },
-    onError: (error) => toast.error(error.message),
-  })
-
   const allSelected = useMemo(
     () => Boolean(assets.data?.items.length)
       && Boolean(assets.data?.items.every((item) => selected.has(item.id))),
@@ -292,8 +239,8 @@ export function AssetsPage() {
   return (
     <>
       <PageHeader
-        index="04.1"
-        title="资产库"
+        index="01.1"
+        title="导入与整理素材"
         description="上传、整理和查找素材都在这里完成。一次批量、一个文件夹或一个 ZIP 自动汇总为一个可追溯素材包。"
       />
       <div className="mx-auto max-w-[1540px] px-5 py-7 md:px-8 lg:px-10 lg:py-10">
@@ -494,41 +441,10 @@ export function AssetsPage() {
               </Button>
             </div>
 
-            <details className="mt-4 border-y border-[var(--line)] bg-white">
-              <summary className="flex cursor-pointer items-center gap-2 px-4 py-3 text-sm font-bold">
-                <GearSix />管理员高级评测入口
-              </summary>
-              <div className="border-t border-[var(--line)] bg-[#fafbf8] px-4 pb-4 pt-1">
-                <p className="mt-3 text-xs leading-5 text-[var(--muted)]">一线审核请前往“评测包生产线”，系统会自动使用类目冻结方案。这里保留手动版本实验能力。</p>
-                <div className="mt-4 flex flex-wrap items-center gap-2">
-                  <span className="mr-2 text-xs font-semibold">评测方式</span>
-                  <button type="button" onClick={() => setPromptMode("single")} className={`rounded-[4px] border px-3 py-2 text-xs font-semibold ${effectivePromptMode === "single" ? "border-[#7f991b] bg-[#eff8c7]" : "border-[var(--line-strong)] bg-white"}`}>单提示词</button>
-                  <button type="button" onClick={() => setPromptMode("split")} className={`rounded-[4px] border px-3 py-2 text-xs font-semibold ${effectivePromptMode === "split" ? "border-[#7f991b] bg-[#eff8c7]" : "border-[var(--line-strong)] bg-white"}`}>A/B 两阶段</button>
-                  <label className="ml-auto flex h-9 cursor-pointer items-center gap-2 border border-[var(--line-strong)] bg-white px-3 text-xs font-semibold">
-                    <input type="checkbox" className="size-4 accent-[#9dbb1c]" checked={excludeCurrent} onChange={(event) => { setExcludeCurrent(event.target.checked); setSelected(new Set()) }} />
-                    排除当前策略已完成
-                  </label>
-                </div>
-
-                <div className={`mt-4 grid gap-4 lg:items-end ${effectivePromptMode === "single" ? "lg:grid-cols-[minmax(300px,1fr)_auto]" : "lg:grid-cols-[minmax(220px,1fr)_minmax(220px,1fr)_auto]"}`}>
-                  {effectivePromptMode === "single" ? (
-                    <PromptSelect label="完整评测提示词（一次调用）" value={effectivePromptId} options={allPromptOptions} onChange={setPromptId} />
-                  ) : (
-                    <>
-                      <PromptSelect label="分类与画质提示词（A）" value={effectivePromptAId} options={promptAOptions} onChange={setPromptAId} />
-                      <PromptSelect label="美感评测提示词（B）" value={effectivePromptBId} options={promptBOptions} onChange={setPromptBId} />
-                    </>
-                  )}
-                  <Button
-                    className="lg:min-w-40"
-                    disabled={!selected.size || (effectivePromptMode === "single" ? !effectivePromptId : !effectivePromptAId || !effectivePromptBId) || enqueue.isPending}
-                    onClick={() => enqueue.mutate()}
-                  >
-                    开始评测 {selected.size ? `(${selected.size})` : ""}<ArrowRight weight="bold" />
-                  </Button>
-                </div>
-              </div>
-            </details>
+            <div className="mt-4 flex flex-wrap items-center justify-between gap-3 border-y border-[var(--line)] bg-white px-4 py-4">
+              <div><p className="text-sm font-bold">素材准备好后，前往下一步选择素材包与类目</p><p className="mt-1 text-xs leading-5 text-[var(--muted)]">生产线会自动使用管理员维护的冻结方案；这里不再逐次选择模型或提示词。</p></div>
+              <Button asChild><Link to="/workflow/production-line">去开始评测<ArrowRight weight="bold" /></Link></Button>
+            </div>
           </div>
 
           <div className="overflow-x-auto border-y border-[var(--line-strong)] bg-white">
@@ -609,28 +525,6 @@ export function AssetsPage() {
         </section>
       </div>
     </>
-  )
-}
-
-function PromptSelect({
-  label,
-  value,
-  options,
-  onChange,
-}: {
-  label: string
-  value: number | null
-  options: PromptVersion[]
-  onChange: (value: number) => void
-}) {
-  return (
-    <label className="block min-w-0">
-      <span className="mb-2 block text-xs font-semibold">{label}</span>
-      <select className="h-11 w-full rounded-[4px] border border-[var(--line-strong)] bg-white px-3 text-sm" value={value ?? ""} onChange={(event) => onChange(Number(event.target.value))}>
-        {!options.length && <option value="">暂无可用版本</option>}
-        {options.map((prompt) => <option key={prompt.id} value={prompt.id}>{prompt.version} · {prompt.name} · {prompt.status === "published" ? "已发布" : prompt.status === "draft" ? "草稿" : "已归档"}</option>)}
-      </select>
-    </label>
   )
 }
 

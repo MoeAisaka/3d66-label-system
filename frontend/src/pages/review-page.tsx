@@ -184,7 +184,7 @@ export function ReviewPage({ user }: { user: User }) {
   return (
     <>
       <PageHeader
-        index="04"
+        index="02"
         title={pageMeta.title}
         description={reviewView ? pageMeta.description : `在原图旁核对模型证据并完成${reviewStageMeta[reviewStage ?? "initial"].label}；每轮记录独立留档。`}
         actions={

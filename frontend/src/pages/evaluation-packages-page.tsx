@@ -13,7 +13,9 @@ import {
   LockKey,
   Package,
   Play,
+  Prohibit,
   ShieldCheck,
+  ShieldWarning,
   WarningCircle,
   XCircle,
 } from "@phosphor-icons/react"
@@ -164,6 +166,8 @@ export function EvaluationPackagePipelinePage({ user }: { user: User }) {
         )}
         {runs.error && <OperatorErrorPanel error={toOperatorError(runs.error)} onRetry={() => runs.refetch()} />}
 
+        <OperatorJourney current={journeyStep(focusedRun, Boolean((materialPackages.data?.items ?? []).length))} />
+
         <section className="grid gap-px border-y border-[var(--line-strong)] bg-[var(--line)] lg:grid-cols-[minmax(0,1.4fr)_minmax(300px,0.6fr)]">
           <div className="bg-white px-5 py-6 md:px-6">
             <div className="flex flex-wrap items-start justify-between gap-4">
@@ -235,7 +239,7 @@ export function EvaluationPackageReviewListPage() {
   const history = items.filter((item) => ["approved", "rejected", "published", "archived"].includes(item.status))
   return (
     <>
-      <PageHeader index="03.1" title="二审评测包" description="这里只展示已经冻结的最终评测包；生产中的任务不会伪装成二审对象。" actions={<Button variant="secondary" onClick={() => packages.refetch()}><ArrowClockwise />刷新队列</Button>} />
+      <PageHeader index="03.1" title="二审评测包" description="这里只展示已经冻结的最终评测包。按变更、维度、黄金集、回归失败项和风险顺序完成一次整体判断。" actions={<Button variant="secondary" onClick={() => packages.refetch()}><ArrowClockwise />刷新队列</Button>} />
       <div className="mx-auto max-w-[1540px] px-5 py-8 md:px-8 lg:px-10">
         <div className="mb-6 grid gap-px border-y border-[var(--line-strong)] bg-[var(--line)] sm:grid-cols-3"><QueueMetric label="等待二审" value={pending.length} active={!showHistory} onClick={() => setShowHistory(false)} /><QueueMetric label="已有结论" value={history.length} active={showHistory} onClick={() => setShowHistory(true)} /><div className="bg-[#f7fadf] px-5 py-4"><p className="text-xs font-semibold text-[var(--muted)]">发布门禁</p><p className="mt-2 text-sm font-semibold">批准与发布始终是两个动作</p></div></div>
         {packages.error ? <OperatorErrorPanel error={toOperatorError(packages.error)} onRetry={() => packages.refetch()} /> : <EvaluationPackageRows items={showHistory ? history : pending} loading={packages.isLoading} />}
@@ -281,18 +285,15 @@ export function EvaluationPackageDetailPage() {
         {actionError && <OperatorErrorPanel error={actionError} onRetry={() => detail.refetch()} onClose={() => setActionError(null)} />}
         <section className="grid gap-px border-y border-[var(--line-strong)] bg-[var(--line)] sm:grid-cols-2 lg:grid-cols-4"><Metric label="状态" value={status.label} /><Metric label="评测模式" value={item.prompts.mode === "single" ? "单次完整评测" : "A/B 两段评测"} /><Metric label="黄金样本" value={String(item.golden_sample_set.item_count)} /><Metric label="回归结果" value={regressionLabel(item.regression.recommendation)} /></section>
 
-        <section className="grid gap-px border-y border-[var(--line-strong)] bg-[var(--line)] lg:grid-cols-2">
-          <div className="bg-[#f7fadf] px-5 py-6"><div className="flex items-center gap-2"><Lightbulb weight="fill" /><h2 className="text-sm font-bold">AI 建议</h2></div><Badge className="mt-4" tone={item.ai.recommendation === "pass" ? "success" : item.ai.recommendation === "fail" ? "danger" : "warning"}>{regressionLabel(item.ai.recommendation)}</Badge><p className="mt-3 text-sm leading-6">{item.ai.change_summary || item.change_summary || "没有补充变更说明"}</p><p className="mt-4 text-xs text-[var(--muted)]">AI 不会自动批准或发布。</p></div>
-          <div className="bg-white px-5 py-6"><h2 className="font-editorial text-2xl font-bold">冻结身份</h2><p className="mt-3 text-sm leading-6 text-[var(--muted)]">清单校验通过：{item.manifest_hash_valid ? "是" : "否"}</p><p className="font-data mt-3 break-all text-xs">{item.canonical_manifest_hash}</p></div>
-        </section>
+        <ReviewDecisionBrief item={item} />
 
         <section><SectionHeading title="完整提示词" description="展示最终包冻结的完整 A/B 或单提示词内容，不展示内部编号。" /><div className="space-y-5"><PromptSnapshot title={item.prompts.mode === "single" ? "单次完整评测" : "A 阶段 · 分类与画质"} prompt={item.prompts.a} />{item.prompts.b && <PromptSnapshot title="B 阶段 · 美感维度" prompt={item.prompts.b} />}</div></section>
 
-        <ManifestSection title="维度方案" description="冻结的维度定义、路由与评测配置。"><EvidenceObject value={item.dimensions} /></ManifestSection>
+        <DimensionPlan item={item} />
 
-        <section><SectionHeading title="黄金样本集" description={`${item.golden_sample_set.name} · 可判断 ${item.golden_sample_set.judgable_item_count}/${item.golden_sample_set.item_count}`} /><div className="divide-y divide-[var(--line)] border-y border-[var(--line-strong)] bg-white">{item.golden_sample_set.items.map((sample) => <div key={sample.sample_item_id} className="grid gap-4 px-5 py-4 sm:grid-cols-[72px_minmax(0,1fr)_auto] sm:items-center"><img src={sample.image_url} alt="" className="size-16 border border-[var(--line)] object-cover" /><div className="min-w-0"><p className="file-name truncate text-sm">{sample.asset_name}</p><p className="mt-1 text-xs text-[var(--muted)]">人工真值 {sample.expected_level || "未记录"} · {sample.role || "未分组"}</p></div><details><summary className="cursor-pointer text-xs font-bold">查看真值</summary><div className="mt-3 max-w-xl"><EvidenceObject value={sample.truth} compact /></div></details></div>)}</div></section>
+        <GoldenSampleEvidence item={item} />
 
-        <ManifestSection title="回归证据" description={`${item.regression.completed}/${item.regression.total} 已完成 · ${regressionLabel(item.regression.recommendation)}`}><div className="grid gap-px bg-[var(--line)] sm:grid-cols-3"><Metric label="通过" value={String(item.regression.passed)} /><Metric label="失败" value={String(item.regression.failed)} /><Metric label="状态" value={item.regression.status} /></div><EvidenceObject value={{ metrics: item.regression.metrics, summary: item.regression.summary, metric_rules: item.regression.metric_rules, items: item.regression.items }} /></ManifestSection>
+        <RegressionEvidence item={item} />
 
         <ManifestSection title="自动改进记录" description="候选来源、关联回归和不可自动发布声明。">{item.automation ? <EvidenceObject value={hideInternalPromptIds(item.automation)} /> : <MissingEvidence text="本评测包未关联自动改进运行。" />}</ManifestSection>
         <ManifestSection title="指标快照" description="回归指标、摘要与版本指标快照。"><EvidenceObject value={item.metrics} /></ManifestSection>
@@ -308,8 +309,261 @@ export function EvaluationPackageDetailPage() {
   )
 }
 
+const operatorJourneySteps = [
+  { label: "导入素材", note: "生成可追溯素材包", to: "/workflow/materials/packages" },
+  { label: "选择素材包与类目", note: "确认本次评测来源", to: "/workflow/production-line" },
+  { label: "开始评测", note: "系统自动运行并留痕", to: "/workflow/production-line" },
+  { label: "处理纠偏", note: "只处理需要人工判断的结果", to: "/workflow/review/low-confidence" },
+  { label: "二审评测包", note: "整体判断冻结方案与证据", to: "/workflow/releases/packages" },
+] as const
+
+function journeyStep(run: EvaluationProductionRun | undefined, hasMaterials: boolean) {
+  if (!hasMaterials) return 1
+  if (!run) return 2
+  if (["awaiting_review", "approved", "rejected", "published", "archived"].includes(run.status)) return 5
+  if (run.status === "first_review" || run.current_stage.includes("review")) return 4
+  return 3
+}
+
+function OperatorJourney({ current }: { current: number }) {
+  return (
+    <section aria-label="一线审核主流程">
+      <SectionHeading title="本次工作到哪一步" description="默认只沿这条主线推进；模型、预算、协议和执行器由管理员在高级设置中维护。" />
+      <ol className="grid overflow-hidden border-y border-[var(--line-strong)] bg-[var(--line)] sm:grid-cols-2 lg:grid-cols-5">
+        {operatorJourneySteps.map((step, index) => {
+          const number = index + 1
+          const completed = number < current
+          const active = number === current
+          return (
+            <li key={step.label} className={`min-w-0 border-b border-r border-[var(--line)] lg:border-b-0 ${active ? "bg-[#f7fadf]" : "bg-white"}`}>
+              <Link className="block min-h-28 px-4 py-4 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-primary" to={step.to}>
+                <div className="flex items-center gap-2">
+                  <span className={`font-data flex size-7 shrink-0 items-center justify-center border text-xs font-bold ${completed ? "border-[#7ca08a] bg-[#edf7f0] text-[#245b3b]" : active ? "border-[#8da91e] bg-primary" : "border-[var(--line-strong)] text-[var(--muted)]"}`}>
+                    {completed ? <Check weight="bold" /> : number}
+                  </span>
+                  <p className="text-sm font-bold">{step.label}</p>
+                </div>
+                <p className="mt-3 text-xs leading-5 text-[var(--muted)]">{step.note}</p>
+              </Link>
+            </li>
+          )
+        })}
+      </ol>
+    </section>
+  )
+}
+
+function ReviewDecisionBrief({ item }: { item: EvaluationPackageDetail }) {
+  const blockers: string[] = []
+  const risks: string[] = []
+  if (!item.manifest_hash_valid) blockers.push("冻结清单校验未通过，不能据此作出发布决定")
+  if (!item.regression.terminal || item.regression.completed < item.regression.total) blockers.push(`黄金集回归尚未完成（${item.regression.completed}/${item.regression.total}）`)
+  if (!item.golden_sample_set.item_count) blockers.push("评测包没有冻结黄金样本")
+  if (item.regression.recommendation === "fail") risks.push("回归门禁建议拒绝，必须逐项检查失败样本")
+  if (item.regression.failed > 0) risks.push(`${item.regression.failed} 个样本未通过回归对照`)
+  if (item.golden_sample_set.judgable_item_count < item.golden_sample_set.item_count) risks.push(`${item.golden_sample_set.item_count - item.golden_sample_set.judgable_item_count} 个黄金样本缺少可判断真值`)
+  if (!item.prompts.a.change_note?.trim() && !item.prompts.b?.change_note?.trim() && !item.change_summary.trim()) risks.push("提示词版本没有填写明确的变更说明")
+
+  const nextStep = blockers.length
+    ? "先处理阻塞项，不要批准。刷新后确认冻结证据完整。"
+    : item.regression.recommendation === "fail" || item.regression.failed > 0
+      ? "先查看下方失败项和基线—候选差异；无法解释或不可接受时拒绝本包。"
+      : item.status === "approved"
+        ? "本包已通过二审；如确认要进入正式标签，再单独执行发布。"
+        : "依次核对提示词变更、维度开关、黄金集组成和逐样本对照，再填写二审决定。"
+
+  return (
+    <section>
+      <SectionHeading title="二审判断摘要" description="先看阻塞和风险，再展开完整证据。AI 只给下一步建议，不替你作决定。" />
+      <div className="grid gap-px border-y border-[var(--line-strong)] bg-[var(--line)] lg:grid-cols-3">
+        <div className="min-w-0 bg-[#f7fadf] px-5 py-5">
+          <div className="flex items-center gap-2"><Lightbulb weight="fill" /><h3 className="text-sm font-bold">AI 下一步建议</h3></div>
+          <p className="mt-3 text-sm font-semibold leading-6">{nextStep}</p>
+          {(item.ai.change_summary || item.change_summary) && <p className="mt-3 border-t border-[#dfe7b8] pt-3 text-xs leading-5 text-[#596047]">变更摘要：{item.ai.change_summary || item.change_summary}</p>}
+        </div>
+        <div className={`min-w-0 px-5 py-5 ${blockers.length ? "bg-[#fff5f3]" : "bg-white"}`}>
+          <div className="flex items-center gap-2"><Prohibit /><h3 className="text-sm font-bold">阻塞</h3><Badge tone={blockers.length ? "danger" : "success"}>{blockers.length ? `${blockers.length} 项` : "无"}</Badge></div>
+          {blockers.length ? <ul className="mt-3 space-y-2 text-xs leading-5">{blockers.map((text) => <li key={text}>· {text}</li>)}</ul> : <p className="mt-3 text-xs leading-5 text-[var(--muted)]">冻结清单和回归完成度满足二审前置条件。</p>}
+        </div>
+        <div className={`min-w-0 px-5 py-5 ${risks.length ? "bg-[#fff9e9]" : "bg-white"}`}>
+          <div className="flex items-center gap-2"><ShieldWarning /><h3 className="text-sm font-bold">风险</h3><Badge tone={risks.length ? "warning" : "success"}>{risks.length ? `${risks.length} 项` : "低"}</Badge></div>
+          {risks.length ? <ul className="mt-3 space-y-2 text-xs leading-5">{risks.map((text) => <li key={text}>· {text}</li>)}</ul> : <p className="mt-3 text-xs leading-5 text-[var(--muted)]">当前未发现由冻结证据直接暴露的风险项。</p>}
+        </div>
+      </div>
+    </section>
+  )
+}
+
+type JsonRecord = Record<string, unknown>
+
+function asRecord(value: unknown): JsonRecord | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value) ? value as JsonRecord : null
+}
+
+function asRecordArray(value: unknown) {
+  return Array.isArray(value) ? value.map(asRecord).filter((item): item is JsonRecord => Boolean(item)) : []
+}
+
+function findDimensionDefinition(value: unknown, depth = 0): JsonRecord | null {
+  if (depth > 5) return null
+  const record = asRecord(value)
+  if (!record) return null
+  if (asRecordArray(record.dimensions).length) return record
+  for (const child of Object.values(record)) {
+    const found = findDimensionDefinition(child, depth + 1)
+    if (found) return found
+  }
+  return null
+}
+
+function DimensionPlan({ item }: { item: EvaluationPackageDetail }) {
+  const dimensions = asRecord(item.dimensions) ?? {}
+  const explicitSchema = asRecord(dimensions.explicit_schema)
+  const definition = findDimensionDefinition(explicitSchema?.definition) ?? findDimensionDefinition(dimensions)
+  const rows = asRecordArray(definition?.dimensions)
+  const profile = asRecord(item.category.profile)
+  const pipeline = asRecord(profile?.pipeline_config)
+  const switchConfig = asRecord(pipeline?.dimensions)
+  const enabled = switchConfig?.enabled !== false
+  const mode = switchConfig?.mode === "selected" ? "仅重点维度" : "全部维度"
+  const route = asRecord(dimensions.explicit_route_policy)
+  const schemaVersion = String(explicitSchema?.version ?? profile?.dimension_schema_version ?? dimensions.resolved_schema_contract_version ?? "未记录")
+  const routeVersion = String(route?.version ?? "跟随冻结方案")
+  return (
+    <section>
+      <SectionHeading title="维度规则与开关" description="二审查看本包真正冻结的规则，不受管理员之后修改影响。" />
+      <div className="border-y border-[var(--line-strong)] bg-white">
+        <div className="grid gap-px bg-[var(--line)] sm:grid-cols-2 lg:grid-cols-4">
+          <Metric label="维度开关" value={enabled ? "已启用" : "已关闭"} />
+          <Metric label="评测范围" value={mode} />
+          <Metric label="维度版本" value={schemaVersion} />
+          <Metric label="路由版本" value={routeVersion} />
+        </div>
+        {rows.length ? (
+          <div className="divide-y divide-[var(--line)]">
+            {rows.map((dimension, index) => {
+              const anchors = asRecord(dimension.anchors)
+              const weight = typeof dimension.weight === "number" ? `${Math.round(dimension.weight * 100)}%` : "未设权重"
+              return (
+                <div key={String(dimension.key ?? index)} className="grid gap-3 px-5 py-4 md:grid-cols-[minmax(180px,0.8fr)_110px_minmax(0,1.4fr)] md:items-start">
+                  <div><p className="text-sm font-bold">{String(dimension.label ?? dimension.key ?? `维度 ${index + 1}`)}</p><p className="font-data mt-1 break-all text-[11px] text-[var(--muted)]">{String(dimension.key ?? "")}</p></div>
+                  <div className="flex flex-wrap gap-2"><Badge tone={dimension.required === false ? "neutral" : "success"}>{dimension.required === false ? "可选" : "必评"}</Badge><Badge>{weight}</Badge></div>
+                  <p className="text-xs leading-5 text-[var(--muted)]">中位标准：{String(anchors?.["3"] ?? "未记录等级锚点")}</p>
+                </div>
+              )
+            })}
+          </div>
+        ) : <MissingEvidence text="本包保留了维度身份，但未提供可逐项展示的冻结定义。" />}
+        <details className="border-t border-[var(--line)]"><summary className="cursor-pointer px-5 py-4 text-xs font-bold">查看维度冻结原始记录</summary><div className="border-t border-[var(--line)] p-5"><EvidenceObject value={item.dimensions} /></div></details>
+      </div>
+    </section>
+  )
+}
+
+function GoldenSampleEvidence({ item }: { item: EvaluationPackageDetail }) {
+  const roles = item.golden_sample_set.items.reduce<Record<string, number>>((counts, sample) => {
+    const key = sample.role || "unassigned"
+    counts[key] = (counts[key] ?? 0) + 1
+    return counts
+  }, {})
+  return (
+    <section>
+      <SectionHeading title="黄金集组成与样本" description={`${item.golden_sample_set.name} · ${item.golden_sample_set.item_count} 个样本 · 可判断 ${item.golden_sample_set.judgable_item_count}/${item.golden_sample_set.item_count}`} />
+      <div className="mb-4 flex flex-wrap gap-2">{Object.entries(roles).map(([role, count]) => <Badge key={role}>{roleLabel(role)} {count}</Badge>)}</div>
+      <div className="divide-y divide-[var(--line)] border-y border-[var(--line-strong)] bg-white">
+        {item.golden_sample_set.items.map((sample) => <div key={sample.sample_item_id} className="grid min-w-0 gap-4 px-5 py-4 sm:grid-cols-[72px_minmax(0,1fr)] lg:grid-cols-[72px_minmax(0,1fr)_minmax(220px,0.6fr)] lg:items-center"><img src={sample.image_url} alt={sample.asset_name} className="size-16 border border-[var(--line)] bg-white object-cover" /><div className="min-w-0"><p className="file-name break-all text-sm">{sample.asset_name}</p><p className="mt-1 text-xs text-[var(--muted)]">人工真值 {sample.expected_level || "未记录"} · {roleLabel(sample.role || "unassigned")} · 真值修订 {sample.truth_revision}</p></div><details className="min-w-0 sm:col-start-2 lg:col-start-auto"><summary className="cursor-pointer text-xs font-bold">查看样本真值详情</summary><div className="mt-3 max-w-full"><EvidenceObject value={sample.truth} compact /></div></details></div>)}
+      </div>
+    </section>
+  )
+}
+
+function RegressionEvidence({ item }: { item: EvaluationPackageDetail }) {
+  const summary = asRecord(item.regression.summary)
+  const rules = asRecord(item.regression.metric_rules)
+  const thresholds = asRecord(rules?.thresholds)
+  const gates = asRecordArray(summary?.gate_checks)
+  const sortedItems = [...item.regression.items].sort((left, right) => Number(right.passed === false) - Number(left.passed === false))
+  return (
+    <section>
+      <SectionHeading title="回归规则、对照与失败项" description={`${item.regression.completed}/${item.regression.total} 已完成 · ${regressionLabel(item.regression.recommendation)} · 规则版本 ${item.regression.metric_rules_version || "未记录"}`} />
+      <div className="border-y border-[var(--line-strong)] bg-white">
+        <div className="grid gap-px bg-[var(--line)] sm:grid-cols-2 lg:grid-cols-4"><Metric label="通过" value={String(item.regression.passed)} /><Metric label="失败" value={String(item.regression.failed)} /><Metric label="门槛" value={formatThreshold(item.regression.threshold)} /><Metric label="运行状态" value={regressionStatusLabel(item.regression.status)} /></div>
+        <div className="grid gap-px border-t border-[var(--line)] bg-[var(--line)] lg:grid-cols-2">
+          <div className="min-w-0 bg-white px-5 py-5"><h3 className="text-sm font-bold">指标门槛</h3>{thresholds && Object.keys(thresholds).length ? <dl className="mt-3 space-y-2">{Object.entries(thresholds).map(([key, value]) => <div key={key} className="grid gap-1 text-xs sm:grid-cols-[minmax(0,1fr)_auto]"><dt className="break-words text-[var(--muted)]">{humanizeEvidenceKey(key)}</dt><dd className="font-data font-bold">{formatEvidenceValue(value)}</dd></div>)}</dl> : <p className="mt-3 text-xs text-[var(--muted)]">没有单独记录指标门槛。</p>}</div>
+          <div className="min-w-0 bg-white px-5 py-5"><h3 className="text-sm font-bold">门禁检查</h3>{gates.length ? <div className="mt-3 space-y-2">{gates.map((gate, index) => <div key={`${String(gate.gate)}-${index}`} className="flex min-w-0 items-start justify-between gap-3 text-xs"><span className="min-w-0 break-words text-[var(--muted)]">{humanizeEvidenceKey(String(gate.gate ?? `检查 ${index + 1}`))}</span><Badge tone={gate.passed === true ? "success" : "danger"}>{gate.passed === true ? "通过" : "失败"}</Badge></div>)}</div> : <p className="mt-3 text-xs text-[var(--muted)]">没有逐条门禁结果。</p>}</div>
+        </div>
+        <div className="border-t border-[var(--line)] px-5 py-4"><div className="flex flex-wrap items-baseline justify-between gap-2"><h3 className="text-sm font-bold">逐样本回归对照</h3><p className="text-xs text-[var(--muted)]">失败项优先排列；基线是旧方案，候选是本次新方案。</p></div></div>
+        <div className="divide-y divide-[var(--line)]">
+          {sortedItems.length ? sortedItems.map((entry, index) => <RegressionItemRow key={String(entry.id ?? index)} entry={entry} />) : <MissingEvidence text="本次回归没有冻结逐样本对照。" />}
+        </div>
+        <details className="border-t border-[var(--line)]"><summary className="cursor-pointer px-5 py-4 text-xs font-bold">查看完整冻结回归记录</summary><div className="border-t border-[var(--line)] p-5"><EvidenceObject value={{ metrics: item.regression.metrics, summary: item.regression.summary, metric_rules: item.regression.metric_rules, items: item.regression.items }} /></div></details>
+      </div>
+    </section>
+  )
+}
+
+function RegressionItemRow({ entry }: { entry: JsonRecord }) {
+  const comparison = asRecord(entry.comparison)
+  const diffs = Array.isArray(comparison?.diffs) ? comparison.diffs : []
+  const failed = entry.passed === false || entry.status === "error"
+  return (
+    <div className={`grid min-w-0 gap-4 px-5 py-4 sm:grid-cols-[72px_minmax(0,1fr)] lg:grid-cols-[72px_minmax(180px,0.7fr)_minmax(0,1fr)_auto] lg:items-center ${failed ? "bg-[#fff8f2]" : "bg-white"}`}>
+      {typeof entry.image_url === "string" ? <img src={entry.image_url} alt={String(entry.asset_name ?? "回归样本")} className="size-16 border border-[var(--line)] bg-white object-cover" /> : <div className="flex size-16 items-center justify-center border border-[var(--line)] bg-[#fafbf8]"><Images /></div>}
+      <div className="min-w-0"><p className="file-name break-all text-sm">{String(entry.asset_name ?? `样本 ${entry.sample_item_id ?? ""}`)}</p><p className="mt-1 text-xs text-[var(--muted)]">{roleLabel(String(entry.sample_role ?? "unassigned"))}</p></div>
+      <div className="min-w-0 text-xs leading-5"><p><span className="text-[var(--muted)]">基线：</span>{extractResultLevel(entry.baseline_result)}</p><p><span className="text-[var(--muted)]">候选：</span>{extractResultLevel(entry.candidate_result)}</p><p className="mt-1 break-words text-[var(--muted)]">差异：{diffs.length ? diffs.map(formatDiff).join("；") : "没有记录字段差异"}</p></div>
+      <Badge tone={failed ? "danger" : entry.passed === true ? "success" : "warning"}>{failed ? "失败项" : entry.passed === true ? "通过" : "待完成"}</Badge>
+    </div>
+  )
+}
+
+function roleLabel(role: string) {
+  return ({ target_error: "目标错例", stable_control: "稳定对照", blind_holdout: "盲测样本", unassigned: "未分组" } as Record<string, string>)[role] ?? role
+}
+
+function extractResultLevel(value: unknown) {
+  const record = asRecord(value)
+  const fields = asRecord(record?.fields)
+  return String(fields?.level ?? record?.level ?? "未记录等级")
+}
+
+function formatDiff(value: unknown) {
+  const record = asRecord(value)
+  if (!record) return formatEvidenceValue(value)
+  const field = humanizeEvidenceKey(String(record.field ?? "字段"))
+  return `${field}：${formatEvidenceValue(record.change ?? record.value ?? "有变化")}`
+}
+
+function humanizeEvidenceKey(value: string) {
+  const known: Record<string, string> = {
+    all: "全部门禁",
+    level_consistency_max_drop: "等级一致率最大允许下降",
+    release_gate_passed: "发布门禁",
+    target_error_recovery: "目标错例修复",
+    critical_regressions: "关键字段退化",
+    new_severe_errors: "新增严重错误",
+  }
+  return known[value] ?? value.replaceAll("_", " ")
+}
+
+function formatEvidenceValue(value: unknown) {
+  if (value === true) return "是"
+  if (value === false) return "否"
+  if (value == null) return "未记录"
+  if (typeof value === "number") return Number.isInteger(value) ? String(value) : value.toFixed(3).replace(/0+$/, "").replace(/\.$/, "")
+  if (typeof value === "string") return value
+  return JSON.stringify(value)
+}
+
+function formatThreshold(value: number) {
+  return value >= 0 && value <= 1 ? `${Math.round(value * 100)}%` : String(value)
+}
+
+function regressionStatusLabel(value: string) {
+  return ({ passed: "已通过", regressed: "已完成未通过", waiting_results: "等待结果", running: "正在运行", failed: "运行失败" } as Record<string, string>)[value] ?? value
+}
+
 function PromptSnapshot({ title, prompt }: { title: string; prompt: EvaluationPackageDetail["prompts"]["a"] }) {
-  return <article className="border-y border-[var(--line-strong)] bg-white"><div className="flex flex-wrap items-start justify-between gap-3 border-b border-[var(--line)] px-5 py-4"><div><p className="text-xs text-[var(--muted)]">{title}</p><h3 className="mt-1 text-lg font-bold">{prompt.name}</h3></div><Badge tone="active">{prompt.version}</Badge></div><div className="grid gap-px bg-[var(--line)] lg:grid-cols-2"><PromptBlock label="系统指令" value={prompt.system_prompt} /><PromptBlock label="用户指令" value={prompt.user_prompt} /></div></article>
+  return <article className="border-y border-[var(--line-strong)] bg-white"><div className="flex flex-wrap items-start justify-between gap-3 border-b border-[var(--line)] px-5 py-4"><div><p className="text-xs text-[var(--muted)]">{title}</p><h3 className="mt-1 text-lg font-bold">{prompt.name}</h3><p className="mt-2 text-xs leading-5 text-[var(--muted)]">本版变更：{prompt.change_note?.trim() || "该版本没有单独填写变更说明"}</p></div><div className="flex flex-wrap gap-2"><Badge tone="active">版本 {prompt.version}</Badge><Badge>规则 {prompt.rubric_version}</Badge></div></div><div className="grid gap-px bg-[var(--line)] lg:grid-cols-2"><PromptBlock label="系统指令全文" value={prompt.system_prompt} /><PromptBlock label="用户指令全文" value={prompt.user_prompt} /></div></article>
 }
 
 function PromptBlock({ label, value }: { label: string; value: string }) {

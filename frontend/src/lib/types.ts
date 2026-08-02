@@ -654,6 +654,8 @@ export type EvaluationPackagePromptSnapshot = {
   rubric_version: string
   system_prompt: string
   user_prompt: string
+  change_note?: string
+  canonical_hash?: string
 }
 
 export type EvaluationPackagePrompts = {

@@ -1,7 +1,6 @@
 import { useState, type ReactNode } from "react"
 import {
   ArrowsClockwise,
-  Images,
   ListChecks,
   List,
   SignOut,
@@ -17,76 +16,79 @@ import { api } from "@/lib/api"
 import type { User } from "@/lib/types"
 import { cn } from "@/lib/utils"
 
-export const workflowDomains = [
+export const primaryWorkflowDomains = [
   {
     to: "/workflow/production-line",
-    matches: ["/workflow/production-line", "/workflow/materials/jobs"],
+    matches: [
+      "/workflow/production-line",
+      "/workflow/materials/packages",
+      "/workflow/materials/assets",
+      "/workflow/materials/jobs",
+      "/assets",
+    ],
     index: "01",
-    label: "评测包生产线",
+    label: "开始评测",
     icon: ArrowsClockwise,
     tabs: [
-      { to: "/workflow/production-line", label: "流程总览" },
+      { to: "/workflow/materials/packages", label: "1 导入素材" },
+      { to: "/workflow/production-line", label: "2 选择素材包并评测" },
       { to: "/workflow/materials/jobs", label: "评测进度" },
     ],
   },
   {
     to: "/workflow/review/low-confidence",
-    matches: ["/workflow/review", "/legacy/review"],
+    matches: [
+      "/workflow/review/low-confidence",
+      "/workflow/review/consensus",
+      "/workflow/review/adjudication",
+      "/workflow/review/completed",
+      "/legacy/review",
+    ],
     index: "02",
-    label: "一审",
+    label: "处理纠偏",
     icon: ListChecks,
     tabs: [
-      { to: "/workflow/review/low-confidence", label: "待一审" },
+      { to: "/workflow/review/low-confidence", label: "待处理纠偏" },
       { to: "/workflow/review/consensus", label: "会审进度" },
       { to: "/workflow/review/adjudication", label: "主审处理" },
       { to: "/workflow/review/completed", label: "已完成" },
-      { to: "/workflow/review/model-evaluation", label: "全部评测结果" },
     ],
   },
   {
     to: "/workflow/releases/packages",
-    matches: ["/workflow/releases"],
+    matches: ["/workflow/releases/packages"],
     index: "03",
-    label: "二审与发布",
+    label: "二审评测包",
     icon: SquaresFour,
     tabs: [
       { to: "/workflow/releases/packages", label: "待二审评测包" },
-      { to: "/workflow/releases/decisions", label: "正式标签发布" },
-      { to: "/workflow/releases/metrics", label: "版本指标" },
-      { to: "/workflow/releases/history", label: "发布历史" },
     ],
   },
-  {
-    to: "/workflow/materials/packages",
-    matches: ["/workflow/materials/packages", "/workflow/materials/assets", "/assets", "/legacy/sample-sets"],
-    index: "04",
-    label: "资产库",
-    icon: Images,
-    tabs: [
-      { to: "/workflow/materials/packages", label: "素材包与素材" },
-      { to: "/legacy/sample-sets", label: "黄金样本集" },
-    ],
-  },
+] as const
+
+const advancedWorkflowDomain =
   {
     to: "/workflow/governance",
     matches: [
       "/workflow/governance",
       "/workflow/optimization",
       "/workflow/models",
+      "/workflow/releases/decisions",
+      "/workflow/releases/metrics",
+      "/workflow/releases/history",
+      "/workflow/review/model-evaluation",
+      "/legacy/sample-sets",
       "/legacy/historical-corrections",
     ],
-    index: "05",
-    label: "系统管理",
+    index: "A",
+    label: "高级设置",
     icon: SlidersHorizontal,
     tabs: [
-      { to: "/workflow/governance", label: "管理首页" },
-      { to: "/workflow/optimization/dimensions", label: "类目与维度" },
-      { to: "/workflow/optimization/candidates", label: "提示词管理" },
-      { to: "/workflow/governance/model-config", label: "模型配置" },
-      { to: "/workflow/governance/users", label: "账号与权限" },
+      { to: "/workflow/governance", label: "高级设置首页" },
     ],
-  },
-] as const
+  } as const
+
+export const workflowDomains = [...primaryWorkflowDomains, advancedWorkflowDomain] as const
 
 function domainMatches(pathname: string, matches: readonly string[]) {
   return matches.some((match) => pathname.startsWith(match))
@@ -159,7 +161,7 @@ export function AppShell({ user }: { user: User }) {
             <p className="mt-2 text-xs text-[var(--muted)]">图片分类与美感评测</p>
           </div>
           <nav className="min-h-0 flex-1 overflow-y-auto py-3" aria-label="主导航">
-            {workflowDomains.map((item) => {
+            {primaryWorkflowDomains.map((item) => {
               const Icon = item.icon
               return (
                 <NavLink
@@ -189,6 +191,22 @@ export function AppShell({ user }: { user: User }) {
               )
             })}
           </nav>
+          <div className="border-t border-[var(--line)] px-3 py-3">
+            <NavLink
+              to={advancedWorkflowDomain.to}
+              onClick={() => setOpen(false)}
+              className={cn(
+                "flex min-h-11 items-center gap-3 px-2 text-sm font-semibold transition-colors",
+                domainMatches(location.pathname, advancedWorkflowDomain.matches)
+                  ? "bg-[#f7f9f3] text-foreground"
+                  : "text-[#646a62] hover:bg-[#f8f9f6] hover:text-foreground",
+              )}
+            >
+              <SlidersHorizontal size={18} />
+              <span className="min-w-0 flex-1">高级设置</span>
+              <span className="font-data text-[0.65rem] text-[#858c81]">A</span>
+            </NavLink>
+          </div>
           <div className="border-t border-[var(--line)] p-4">
             <div className="mb-3 flex items-center gap-3">
               <div className="flex size-9 items-center justify-center rounded-[4px] bg-[#eef1eb] text-xs font-bold">
@@ -226,7 +244,7 @@ export function AppShell({ user }: { user: User }) {
                 className={({ isActive }) =>
                   cn(
                     "flex shrink-0 items-center border-r border-[var(--line)] px-5 py-3 text-xs font-bold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-primary",
-                    isActive
+                    isActive || active.to === advancedWorkflowDomain.to
                       ? "bg-primary text-primary-foreground"
                       : "text-[#555b53] hover:bg-[#f7f9f3] hover:text-foreground",
                   )

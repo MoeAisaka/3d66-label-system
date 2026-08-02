@@ -29,7 +29,7 @@ const managementGroups = [
     icon: Brain,
     entries: [
       { to: "/workflow/optimization/cases", label: "纠偏案例池", note: "查看人工纠偏和生产回流的可追溯案例" },
-      { to: "/workflow/optimization/automation", label: "自动优化控制", note: "管理员查看组批、运行和恢复设置" },
+      { to: "/workflow/optimization/automation", label: "预算、协议与执行器", note: "管理员维护组批预算、运行协议、执行器和失败恢复参数" },
       { to: "/workflow/optimization/paired-regression", label: "配对回归", note: "比较候选与当前版本的冻结小样本证据" },
       { to: "/workflow/optimization/baseline-regression", label: "基准回归", note: "使用冻结基准集检查准确率和逐张偏差" },
       { to: "/workflow/optimization/feedback", label: "生产案例回流", note: "查看外部系统回流的最终纠偏事件" },
@@ -56,14 +56,26 @@ const managementGroups = [
       { to: "/legacy/historical-corrections", label: "历史纠偏导入", note: "预览历史资料，不直接形成黄金真值" },
     ],
   },
+  {
+    title: "发布与历史证据",
+    description: "二审之后的正式发布、版本指标和历史记录集中在这里，不占用一线审核主导航。",
+    icon: Database,
+    entries: [
+      { to: "/workflow/releases/decisions", label: "正式标签发布", note: "对已通过二审的评测包执行独立发布决定" },
+      { to: "/workflow/releases/metrics", label: "版本指标", note: "查看正式版本的质量与运行指标" },
+      { to: "/workflow/releases/history", label: "发布历史", note: "追溯每次发布、回滚和人工决定" },
+      { to: "/workflow/review/model-evaluation", label: "全部评测结果", note: "面向诊断人员查看非默认的完整运行明细" },
+      { to: "/legacy/sample-sets", label: "黄金样本集管理", note: "维护锁定真值和回归样本组成" },
+    ],
+  },
 ] as const
 
 export function SystemManagementPage({ user }: { user: User }) {
   return (
     <>
       <PageHeader
-        index="05.1"
-        title="系统管理"
+        index="A.1"
+        title="高级设置"
         description="一线审核流程之外的配置、实验和追溯能力集中在这里。生产线默认跟随已确认的类目方案，只有管理员需要进入这些入口。"
         actions={<Badge tone={user.is_admin ? "success" : "neutral"}>{user.is_admin ? "管理员权限" : "只读查看"}</Badge>}
       />
