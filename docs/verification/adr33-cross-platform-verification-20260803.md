@@ -26,19 +26,23 @@
 | 密钥后端 | Linux/Docker 走 `file-aead`（`API_KEY_MASTER_KEY_FILE`，compose 已配），与 macOS Keychain / Windows DPAPI 三路隔离，互不串读 |
 | `.dockerignore` | 正确排除 `backend/tests`、`.venv`、`node_modules`、`*.db`（生产镜像不带测试与本地态） |
 
-## 三、Windows（DPAPI 密钥 + LOCALAPPDATA 数据目录 + 部署生命周期）
+## 三、Windows（实机验证 · 局域网 13600K 机 192.168.50.143，Windows 10.0.26200，Python 3.14）
 
-无 Windows 物理机，按代码与测试覆盖确认（新代码不触碰 Windows 专属路径）：
+2026-08-03 经 Owner 授权，通过 SSH（`13600k` 主机，user moeaisaka）在真 Windows 机器上实测（从局域网 git hub 克隆 `c2a0816` + py3.14 venv 安装全部依赖）：
 
-| 面 | 覆盖 |
+| 操作 | 结果 |
 |---|---|
-| 密钥后端 DPAPI（current-user / local-machine 两 scope） | `security.py` 分支 + probe，测试覆盖；`unprotect_secret` 跨平台密文互斥校验（macOS 引用不能在 Win 读，反之亦然） |
-| 数据目录 | `windows_deploy.default_windows_data_dir` 读 `LOCALAPPDATA`，缺失 fail-closed |
-| 部署生命周期 | `doctor / create_backup / validate_backup / restore_backup / main` 均有测试；reparse-point（junction/symlink）拒绝、仓库外备份、data 外备份等安全校验通过 |
-| 新模块对 Windows 的影响 | 无（纯函数、无平台调用），Windows 部署路径不受本次改动影响 |
-| 部署/deploy + security 测试子集 | 83 passed, 1 skipped（含 Windows 分支的可跨平台部分） |
+| 依赖安装（fastapi/sqlalchemy/httpx/pytest/PIL/fitz/pypdf/cryptography/pytesseract） | `ALL_DEPS_OK` |
+| 新模块单测（红线+合同+聚合器） | **73 passed**（10s） |
+| Windows 部署 + security 测试（test_windows_deploy + test_security） | **60 passed, 1 skipped** |
+| **DPAPI 真实往返** `probe_windows_dpapi` | `DPAPI_SCOPE=current-user` |
+| **DPAPI protect/unprotect 实密往返** | `ROUNDTRIP_OK=True`，引用前缀 `dpapi:v1:` |
+| **应用实机启动** | uvicorn `Application startup complete`，`/api/health` 返回 **200 `{"status":"ok"}`** |
+| **migration 51 在 Windows 应用** | `max(schema_migrations.version)=51` |
+| **并发默认生效** | `model_configs.max_concurrency=8` |
+| 全量 pytest | 789 passed；10 failed 均为 **macOS/Linux 专属测试**（Unix 权限 0o700、file-aead 文件后端）在 Windows 上不适用而非真实回归；Windows 自己的生产路径（windows_deploy/security）全部通过 |
 
-> Windows 专属的 DPAPI 加解密真机往返（`probe_windows_dpapi`）只能在 Windows 上跑；本次未改该路径，历史公司 Windows 生产（windows-deploy 分支）已部署验证过。建议合并前在公司 Windows 机跑一次 `python -m app.windows_deploy doctor` 做最终确认。
+> 说明：10 个失败用例集中在 `test_macos_deploy.py`（断言 Unix `0o700` 文件权限，Windows 返回 511）与 `test_docker_secret_storage.py`（Linux file-aead）。这些测试未加平台 skip 标记，在非对应平台失败属预期；与本次新增代码无关，也不影响 Windows 生产。新增纯函数模块在 Windows 全部通过。
 
 ## 四、操作与可能性枚举（本次交付面）
 
@@ -76,8 +80,8 @@
 - **未接生产 worker 执行路径**：聚合器是独立可回归引擎，尚未替换 `scoring.py`/worker 的现有评分。
 - **未做 L 方向全局翻转迁移**：`scoring.py` 仍 L5=最优；已发布标签/消费接口未动（ADR-0033 第五节要求独立分支 + `level_semantics_version` + 历史发布不原地改写 + 独立回归门禁）。
 - **未做前端类目配置 UI + A/B/维度边界说明**。
-- Windows 真机 DPAPI 往返与公司 Windows 部署 doctor 建议合并前跑一次。
+- Windows 真机 DPAPI 往返与应用启动已在局域网 13600K 机实测通过（见第三节）。
 
 ## 结论
 
-本次交付（并发 8 + Phase 1/2 确定性底座）在 **Mac 与 Docker/Linux 实测通过**，Windows 路径按测试覆盖与代码隔离确认不受影响。全部改动向后兼容、可回归、未触碰生产评分与已发布数据。可推 codeup 特性分支。
+本次交付（并发 8 + Phase 1/2 确定性底座）在 **Mac、Docker/Linux 与 Windows 三平台均实测通过**（Windows 为局域网 13600K 真机：73 新模块测试 + 60 部署/security + DPAPI 实密往返 + 应用 health 200 + migration 51 + mc=8）。全部改动向后兼容、可回归、未触碰生产评分与已发布数据。可推 codeup 特性分支。
