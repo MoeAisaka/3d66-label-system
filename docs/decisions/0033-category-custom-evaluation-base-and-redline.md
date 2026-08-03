@@ -53,6 +53,11 @@
   - **共性维度**：跨子类目共享（对应现有 schema 的 `core_dimension_keys`）。
   - **特有维度**：每子类目自定义。
   - v3 合同的每个子类目因此需要**两个维度引用**（common_dimension_schema_ref + specific_dimension_schema_ref）而非单一 `dimension_schema_ref`；两组维度合并后的权重和=1，共同占满该子类目的 `dimension_max`。（待 Phase 3.6 扩合同与桥）
+
+**维度可自由增删与开关（2026-08-03 Owner 补充）**：共性维度与特有维度**都可自由增删、开关，数量不强制固定，两组都可为 0**。实现铁律（Phase 3.6 已实现）：
+- 非空组的 `group_weight` 在**非空组之间重归一化**并平分 `dimension_max`（沿用 ADR-0028 `renormalize_selected_to_one`）；一个空组**不保留任何分额**，绝不把空组的分数当白送分泄露给成统。
+- 两组都为 0 → **仅提示词模式**（`dimensions_enabled=False`）：不产维度分，`deductions` 为空；对齐 ADR-0031 仅提示词模式（否则应路由到仅提示词评分合同，不得默认白送满分）。
+- 非空组必须携正 `group_weight`；空组的 `group_weight` 忽略。grade→deduction 数学不变。
 - 固定通用维度（媒介降权/高分压分）仍属 `common_modifiers`，与“共性维度”是两回事：前者是服务端确定性规则，后者是调用B 打分的维度。
 
 #### 两条流水线只差数据源（Owner 铁律）

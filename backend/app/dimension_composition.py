@@ -70,19 +70,27 @@ def _is_number(value: Any) -> bool:
 def _group_dimension_keys(group_name: str, schema_definition: Any) -> list[str]:
     """Extract a group's dimension keys for the overlap check, fail-closed.
 
-    Only the structure needed to read keys is validated here; the reused bridge
-    performs the full per-group schema/weight/grade validation when it runs.
+    A group may legally be **empty** (zero dimensions): 共性维度 and 特有维度 can
+    each be freely reduced to 0.  An empty group contributes no dimensions and,
+    critically, reserves no ``dimension_max`` slice (its weight is dropped and
+    the remaining non-empty groups renormalize).  Only the structure needed to
+    read keys is validated here; the reused bridge performs the full per-group
+    schema/weight/grade validation when it runs on a non-empty group.
     """
+    if schema_definition is None:
+        return []
     if not isinstance(schema_definition, dict):
         raise DimensionCompositionError(
             f"{group_name}.schema_not_object",
-            f"{group_name}.schema_definition 必须是对象",
+            f"{group_name}.schema_definition 必须是对象或缺省",
         )
     dimensions = schema_definition.get("dimensions")
-    if not isinstance(dimensions, list) or not dimensions:
+    if dimensions is None:
+        return []
+    if not isinstance(dimensions, list):
         raise DimensionCompositionError(
-            f"{group_name}.schema_dimensions_missing",
-            f"{group_name}.schema_definition.dimensions 必须是非空数组",
+            f"{group_name}.schema_dimensions_invalid",
+            f"{group_name}.schema_definition.dimensions 必须是数组",
         )
     keys: list[str] = []
     for dimension in dimensions:
@@ -130,29 +138,49 @@ def validate_subcategory_dimensions(config: Any) -> None:
             "dimension_max_invalid", "dimension_max 必须是 >=0 的数值"
         )
 
-    weight_sum = 0.0
     group_keys: dict[str, list[str]] = {}
+    non_empty_weight_sum = 0.0
+    non_empty_count = 0
     for group_name in _GROUP_KEYS:
         group = config.get(group_name)
+        # A group may be entirely absent or present-but-empty; both mean
+        # "0 dimensions" (共性/特有维度 can each be freely reduced to 0).
+        if group is None:
+            group_keys[group_name] = []
+            continue
         if not isinstance(group, dict):
             raise DimensionCompositionError(
-                f"{group_name}.missing", f"{group_name} 必须是对象"
+                f"{group_name}.invalid", f"{group_name} 必须是对象或缺省"
             )
+        keys = _group_dimension_keys(group_name, group.get("schema_definition"))
+        group_keys[group_name] = keys
         group_weight = group.get("group_weight")
-        if not _is_number(group_weight) or group_weight < 0:
+        if keys:
+            # A non-empty group must carry a positive share; an empty group's
+            # group_weight (if any) is ignored and reserves no dimension_max.
+            if not _is_number(group_weight) or group_weight <= 0:
+                raise DimensionCompositionError(
+                    f"{group_name}.group_weight_invalid",
+                    f"非空的 {group_name} 的 group_weight 必须是 >0 的数值",
+                )
+            non_empty_weight_sum += float(group_weight)
+            non_empty_count += 1
+        elif group_weight is not None and (
+            not _is_number(group_weight) or group_weight < 0
+        ):
             raise DimensionCompositionError(
                 f"{group_name}.group_weight_invalid",
-                f"{group_name}.group_weight 必须是 >=0 的数值",
+                f"{group_name}.group_weight 必须是 >=0 的数值或缺省",
             )
-        weight_sum += float(group_weight)
-        group_keys[group_name] = _group_dimension_keys(
-            group_name, group.get("schema_definition")
-        )
 
-    if abs(weight_sum - 1.0) > _WEIGHT_SUM_TOLERANCE:
+    # Both groups empty → prompt-only (no dimension scoring); weights irrelevant.
+    # One or two non-empty groups → their weights renormalize among themselves
+    # and split dimension_max (ADR-0028 renormalize_selected_to_one precedent),
+    # so an empty group never leaks its slice as free points.
+    if non_empty_count > 0 and non_empty_weight_sum <= 0:
         raise DimensionCompositionError(
             "group_weights_not_normalized",
-            f"两组 group_weight 求和必须=1（实际 {weight_sum}）",
+            "非空维度组的 group_weight 之和必须 >0",
         )
 
     common_keys = set(group_keys["common_group"])
@@ -169,19 +197,18 @@ def _bridge_group(
     group_name: str,
     group: dict[str, Any],
     grades: Any,
-    dimension_max: float,
+    effective_max: float,
 ) -> dict[str, Any]:
-    """Run the reused grade bridge for one group, re-tagging bridge failures.
+    """Run the reused grade bridge for one non-empty group.
 
-    ``effective_max = group_weight * dimension_max``.  Any
-    ``DimensionGradeBridgeError`` is re-raised as ``DimensionCompositionError``
+    ``effective_max`` is the group's renormalized slice of ``dimension_max``.
+    Any ``DimensionGradeBridgeError`` is re-raised as ``DimensionCompositionError``
     with the group name prefixed onto the original bridge code.
     """
     if not isinstance(grades, dict):
         raise DimensionCompositionError(
             f"{group_name}.grades_invalid", f"{group_name} 的 grades 必须是对象"
         )
-    effective_max = float(group["group_weight"]) * float(dimension_max)
     try:
         return grades_to_deductions(
             dimension_grades=grades,
@@ -194,45 +221,87 @@ def _bridge_group(
         ) from exc
 
 
+def _group_is_empty(group: Any) -> bool:
+    """True when a group is absent or carries zero dimensions."""
+    if not isinstance(group, dict):
+        return True
+    schema = group.get("schema_definition")
+    if not isinstance(schema, dict):
+        return True
+    dimensions = schema.get("dimensions")
+    return not isinstance(dimensions, list) or not dimensions
+
+
 def compose_deductions(
     *,
     config: dict,
-    common_grades: dict[str, int],
-    specific_grades: dict[str, int],
+    common_grades: dict[str, int] | None = None,
+    specific_grades: dict[str, int] | None = None,
 ) -> dict:
     """Merge a subcategory's common + specific dimension grades into deductions.
 
     Pure function, deterministic: no IO/network/DB/model, same input → same
-    output.  Validates ``config`` (``subcategory-dimensions-v1``), splits
-    ``dimension_max`` between the two groups by ``group_weight``
-    (``effective_max = group_weight * dimension_max``), runs the reused
-    ``grades_to_deductions`` bridge once per group with its own schema, grades
-    and effective_max, then merges the two non-overlapping ``deductions`` maps.
+    output.  Validates ``config`` (``subcategory-dimensions-v1``).
+
+    共性维度 and 特有维度 can each be freely reduced to **0**:
+    - Both groups empty → **prompt-only** (``dimensions_enabled=False``): no
+      dimension scoring, ``deductions`` is empty, and the aggregator receives an
+      empty deduction map (the dimension block is awarded in full only because
+      the operator explicitly disabled dimensions — this mirrors ADR-0031's
+      prompt-only mode; callers that must not award free points should route to
+      the prompt-only scoring contract instead).
+    - One or two non-empty groups → their ``group_weight``s **renormalize among
+      themselves** and split ``dimension_max`` (ADR-0028
+      ``renormalize_selected_to_one`` precedent), so an empty group never leaks
+      its slice as free points.
 
     Returns ``{"composition_version", "sub_category_key", "dimension_max",
-    "deductions", "common", "specific", "evidence"}`` where ``deductions`` is the
-    merged per-dimension deduction map.  The dict is shaped so it can be passed
-    straight to ``aggregate_category_evaluation`` as the ``dimension_result``
-    (it carries both ``deductions`` and an ``evidence`` dict).
+    "dimensions_enabled", "deductions", "common", "specific", "evidence"}``.  The
+    dict is shaped so it can be passed straight to
+    ``aggregate_category_evaluation`` as the ``dimension_result``.
     """
     validate_subcategory_dimensions(config)
 
     dimension_max = float(config["dimension_max"])
-    common_group = config["common_group"]
-    specific_group = config["specific_group"]
+    common_group = config.get("common_group")
+    specific_group = config.get("specific_group")
+    common_empty = _group_is_empty(common_group)
+    specific_empty = _group_is_empty(specific_group)
 
-    common_bridge = _bridge_group(
-        "common", common_group, common_grades, dimension_max
+    # Renormalize non-empty group weights among themselves, then split max.
+    non_empty = [
+        (name, grp)
+        for name, grp, empty in (
+            ("common", common_group, common_empty),
+            ("specific", specific_group, specific_empty),
+        )
+        if not empty
+    ]
+    weight_total = sum(float(grp["group_weight"]) for _, grp in non_empty)
+    effective_max = {
+        name: (float(grp["group_weight"]) / weight_total) * dimension_max
+        for name, grp in non_empty
+    } if weight_total > 0 else {}
+
+    common_bridge = (
+        None
+        if common_empty
+        else _bridge_group(
+            "common", common_group, common_grades or {}, effective_max["common"]
+        )
     )
-    specific_bridge = _bridge_group(
-        "specific", specific_group, specific_grades, dimension_max
+    specific_bridge = (
+        None
+        if specific_empty
+        else _bridge_group(
+            "specific", specific_group, specific_grades or {}, effective_max["specific"]
+        )
     )
 
     merged: dict[str, float] = {}
-    for group_name, bridge in (
-        ("common", common_bridge),
-        ("specific", specific_bridge),
-    ):
+    for bridge in (common_bridge, specific_bridge):
+        if bridge is None:
+            continue
         for key, deduction in bridge["deductions"].items():
             if key in merged:
                 # Defensive: validate_subcategory_dimensions already guarantees
@@ -243,27 +312,26 @@ def compose_deductions(
                 )
             merged[key] = deduction
 
-    evidence = {
-        "common": {
-            "group_weight": float(common_group["group_weight"]),
-            "effective_max": common_bridge["dimension_max"],
-            "deductions": dict(common_bridge["deductions"]),
-            "evidence": common_bridge["evidence"],
-        },
-        "specific": {
-            "group_weight": float(specific_group["group_weight"]),
-            "effective_max": specific_bridge["dimension_max"],
-            "deductions": dict(specific_bridge["deductions"]),
-            "evidence": specific_bridge["evidence"],
-        },
-    }
+    def _group_evidence(bridge: dict[str, Any] | None) -> dict[str, Any]:
+        if bridge is None:
+            return {"enabled": False, "effective_max": 0.0, "deductions": {}, "evidence": {}}
+        return {
+            "enabled": True,
+            "effective_max": bridge["dimension_max"],
+            "deductions": dict(bridge["deductions"]),
+            "evidence": bridge["evidence"],
+        }
 
     return {
         "composition_version": COMPOSITION_VERSION,
         "sub_category_key": config["sub_category_key"],
         "dimension_max": dimension_max,
+        "dimensions_enabled": not (common_empty and specific_empty),
         "deductions": merged,
         "common": common_bridge,
         "specific": specific_bridge,
-        "evidence": evidence,
+        "evidence": {
+            "common": _group_evidence(common_bridge),
+            "specific": _group_evidence(specific_bridge),
+        },
     }

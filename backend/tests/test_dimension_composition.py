@@ -230,17 +230,22 @@ def test_key_overlap_fails_closed_in_validate() -> None:
     assert excinfo.value.code == "dimension_key_overlap"
 
 
-# --- Fail-closed: group_weights do not sum to 1. ---
+# --- group_weights need not sum to 1: non-empty groups renormalize. ---
 
 
-def test_group_weights_not_normalized_fails_closed() -> None:
-    with pytest.raises(DimensionCompositionError) as excinfo:
-        compose_deductions(
-            config=_config(common_weight=0.4, specific_weight=0.5),
-            common_grades={"c_a": 5, "c_b": 5},
-            specific_grades={"s_a": 5, "s_b": 5},
-        )
-    assert excinfo.value.code == "group_weights_not_normalized"
+def test_group_weights_renormalize_among_nonempty_groups() -> None:
+    # 0.4 + 0.5 does not sum to 1, but both groups are non-empty so their
+    # weights renormalize among themselves (0.4/0.9, 0.5/0.9) and split max.
+    result = compose_deductions(
+        config=_config(common_weight=0.4, specific_weight=0.5),
+        common_grades={"c_a": 1, "c_b": 1},
+        specific_grades={"s_a": 1, "s_b": 1},
+    )
+    # All grade 1 → whole (renormalized) dimension block deducted == dimension_max.
+    assert sum(result["deductions"].values()) == pytest.approx(60.0)
+    # common slice = 0.4/0.9 * 60 = 26.6667; specific = 0.5/0.9 * 60 = 33.3333.
+    assert result["common"]["dimension_max"] == pytest.approx(60 * 0.4 / 0.9)
+    assert result["specific"]["dimension_max"] == pytest.approx(60 * 0.5 / 0.9)
 
 
 @pytest.mark.parametrize("group_weight", [-0.1, "0.4", None, True])
@@ -267,12 +272,74 @@ def test_format_version_invalid_fails_closed() -> None:
     assert excinfo.value.code == "format_version_invalid"
 
 
-def test_missing_group_fails_closed() -> None:
+def test_missing_group_is_treated_as_empty() -> None:
+    # An absent group now means "0 dimensions in that group", not an error.
     config = _config()
     del config["specific_group"]
+    assert validate_subcategory_dimensions(config) is None
+    result = compose_deductions(
+        config=config,
+        common_grades={"c_a": 1, "c_b": 1},
+    )
+    # Only the common group scores; it renormalizes to the full dimension_max.
+    assert result["dimensions_enabled"] is True
+    assert result["specific"] is None
+    assert sum(result["deductions"].values()) == pytest.approx(60.0)
+
+
+# --- Empty groups: 共性/特有 can each be 0; both 0 == prompt-only. ---
+
+
+def _empty_group(group_weight: float = 0.0) -> dict:
+    return {"group_weight": group_weight, "schema_definition": {"dimensions": []}}
+
+
+def test_only_common_group_renormalizes_to_full_max() -> None:
+    config = _config()
+    config["specific_group"] = _empty_group()
+    result = compose_deductions(
+        config=config,
+        common_grades={"c_a": 1, "c_b": 1},
+    )
+    assert result["dimensions_enabled"] is True
+    assert result["specific"] is None
+    # common renormalizes to the entire dimension_max (60); all grade 1 → 60.
+    assert result["common"]["dimension_max"] == pytest.approx(60.0)
+    assert sum(result["deductions"].values()) == pytest.approx(60.0)
+
+
+def test_only_specific_group_renormalizes_to_full_max() -> None:
+    config = _config()
+    config["common_group"] = _empty_group()
+    result = compose_deductions(
+        config=config,
+        specific_grades={"s_a": 5, "s_b": 5},
+    )
+    assert result["dimensions_enabled"] is True
+    assert result["common"] is None
+    assert result["specific"]["dimension_max"] == pytest.approx(60.0)
+    # all grade 5 → no deduction.
+    assert sum(result["deductions"].values()) == 0.0
+
+
+def test_both_groups_empty_is_prompt_only() -> None:
+    config = _config()
+    config["common_group"] = _empty_group()
+    config["specific_group"] = _empty_group()
+    assert validate_subcategory_dimensions(config) is None
+    result = compose_deductions(config=config)
+    assert result["dimensions_enabled"] is False
+    assert result["deductions"] == {}
+    assert result["common"] is None and result["specific"] is None
+
+
+def test_nonempty_group_zero_weight_fails_closed() -> None:
+    # A non-empty group must carry a positive share.
+    config = _config()
+    config["common_group"]["group_weight"] = 0
     with pytest.raises(DimensionCompositionError) as excinfo:
         validate_subcategory_dimensions(config)
-    assert excinfo.value.code == "specific_group.missing"
+    assert excinfo.value.code == "common_group.group_weight_invalid"
 
 
 # --- Fail-closed via the reused bridge (re-tagged with group prefix). ---
