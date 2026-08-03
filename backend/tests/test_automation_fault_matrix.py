@@ -125,6 +125,32 @@ def test_mock_server_records_usage_contract_without_secrets(tmp_path: Path) -> N
     assert state.timeout_seconds == 1.25
 
 
+def test_mock_server_supports_pdf_summary_and_prompt_only_contracts() -> None:
+    mock = _load_module(MOCK_SERVER, "fault_matrix_mock_category_contracts")
+    pdf_request = {
+        "messages": [
+            {"role": "system", "content": "你是 3d66 方案 PDF 的多模态前处理器。"}
+        ]
+    }
+    material_request = {
+        "messages": [
+            {"role": "system", "content": "你是材质图单提示词评测器。"}
+        ]
+    }
+
+    assert mock._stage(pdf_request) == "pdf_summary"
+    pdf_summary = mock._content(pdf_request)
+    assert pdf_summary["confidence"] == pytest.approx(0.94)
+    assert pdf_summary["key_points"]
+    assert "predicted_level" not in pdf_summary
+
+    assert mock._stage(material_request) == "evaluation_prompt_only"
+    material_result = mock._content(material_request)
+    assert material_result["predicted_level"] == "L4"
+    assert material_result["predicted_score"] == 82
+    assert "dimensions" not in material_result
+
+
 def test_runner_declares_exact_fault_matrix_and_stable_record_contract() -> None:
     runner = _load_module(RUNNER, "automation_fault_matrix_contract")
     assert set(runner.SCENARIOS) == SCENARIOS
@@ -289,7 +315,7 @@ def test_cross_category_policy_budget_regression_and_candidate_isolation(
             state_dir,
         )
 
-    assert result["pass"] is True
+    assert result["pass"] is True, json.dumps(result, ensure_ascii=False, indent=2)
     assert result["observed"]["case_counts"] == {
         "space_image": 1,
         "material_image": 2,

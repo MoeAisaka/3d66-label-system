@@ -83,8 +83,8 @@ export function BaselineRegressionPage() {
     queryFn: () => baselineRegressionApi.listPackages(selectedCategoryKey),
   })
   const prompts = useQuery({
-    queryKey: ["prompts"],
-    queryFn: baselineRegressionApi.listPrompts,
+    queryKey: ["prompts", selectedCategoryKey],
+    queryFn: () => baselineRegressionApi.listPrompts(selectedCategoryKey),
   })
   const baselineSets = useQuery({
     queryKey: ["baseline-sets", selectedCategoryKey],
@@ -121,12 +121,6 @@ export function BaselineRegressionPage() {
     ),
     [prompts.data?.items],
   )
-  const publishedPromptA = promptAOptions.find(
-    (prompt) => prompt.status === "published",
-  )
-  const publishedPromptB = promptBOptions.find(
-    (prompt) => prompt.status === "published",
-  )
   const activeCategories = useMemo(
     () => (categories.data?.items ?? []).filter((category) => category.status === "active"),
     [categories.data?.items],
@@ -134,11 +128,17 @@ export function BaselineRegressionPage() {
   const selectedCategory = activeCategories.find(
     (category) => category.category_key === selectedCategoryKey,
   )
+  const publishedPromptA = promptAOptions.find(
+    (prompt) => prompt.id === selectedCategory?.prompt_a_id,
+  )
+  const publishedPromptB = promptBOptions.find(
+    (prompt) => prompt.id === selectedCategory?.prompt_b_id,
+  )
   const selectableDimensionSchemas = useMemo(
     () => (dimensionSchemas.data?.items ?? []).filter((schema) => (
       schema.status === "published"
-      && (!selectedCategory?.dimension_schema_key
-        || schema.schema_key === selectedCategory.dimension_schema_key)
+      && selectedCategory?.dimension_schema_key
+      && schema.schema_key === selectedCategory.dimension_schema_key
     )),
     [dimensionSchemas.data?.items, selectedCategory?.dimension_schema_key],
   )

@@ -490,6 +490,7 @@ class RealOptimizationAdapter:
             ) is not None:
                 raise ValueError("自动候选版本已存在")
             candidate = PromptVersion(
+                category_key=run.category_key,
                 stage="B",
                 name=f"自动优化候选 #{run.id}.{index}",
                 version=version,
@@ -1323,6 +1324,17 @@ def consume_optimization_queue_once(
         try:
             if hasattr(adapter, "bind_base_prompt"):
                 adapter.bind_base_prompt(db, version=prompt_version)  # type: ignore[attr-defined]
+                base_prompt_category = getattr(  # type: ignore[attr-defined]
+                    adapter.base_prompt, "category_key", None
+                )
+                if (
+                    base_prompt_category is not None
+                    and base_prompt_category != category_key
+                ):
+                    raise AutomationConfigurationBlocker(
+                        "cross_category_prompt",
+                        f"类目 {category_key} 的自动优化基础提示词属于其他类目。",
+                    )
             if hasattr(adapter, "prepare_regression_binding"):
                 regression_binding = adapter.prepare_regression_binding(  # type: ignore[attr-defined]
                     db,

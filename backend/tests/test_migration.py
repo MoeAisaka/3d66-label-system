@@ -62,6 +62,7 @@ MIGRATION_NAMES = [
     "bind_budget_settlement_to_run",
     "bind_default_production_dimension",
     "add_baseline_stock_pipeline",
+    "isolate_prompt_categories",
 ]
 
 
@@ -239,6 +240,121 @@ def test_v48_freezes_baseline_category_and_adds_correction_state(tmp_path) -> No
                     "UPDATE baseline_regression_runs "
                     "SET execution_snapshot_json='{\"changed\":true}' WHERE id=1"
                 )
+            assert connection.exec_driver_sql(
+                "PRAGMA foreign_key_check"
+            ).all() == []
+    finally:
+        engine.dispose()
+
+
+def test_v49_backfills_prompt_owners_and_closes_inherited_space_dimensions(
+    tmp_path,
+) -> None:
+    engine = _engine(tmp_path, "v49-prompt-category.db")
+    try:
+        _create_latest_and_run_migrations(engine)
+        with Session(engine) as db:
+            pdf_prompt = models.PromptVersion(
+                stage="A",
+                name="PDF 单提示词",
+                version="migration-pdf-v1",
+                system_prompt="evaluate the complete pdf document",
+                user_prompt="evaluate this pdf",
+                rubric_version="rubric-v2.1",
+                status="published",
+            )
+            material_prompt = models.PromptVersion(
+                stage="A",
+                name="材质单提示词",
+                version="migration-material-v1",
+                system_prompt="evaluate the complete material image",
+                user_prompt="evaluate this material",
+                rubric_version="rubric-v2.1",
+                status="published",
+            )
+            shared_prompt = models.PromptVersion(
+                stage="B",
+                name="共享旧提示词",
+                version="migration-shared-v1",
+                system_prompt="legacy shared prompt contract",
+                user_prompt="evaluate shared input",
+                rubric_version="rubric-v2.1",
+                status="published",
+            )
+            db.add_all([pdf_prompt, material_prompt, shared_prompt])
+            db.commit()
+            ids = (pdf_prompt.id, material_prompt.id, shared_prompt.id)
+
+        with engine.begin() as connection:
+            all_dimensions = json.dumps(
+                {
+                    "schema_version": "category-pipeline-v1",
+                    "prompt_mode": "single",
+                    "dimensions": {
+                        "enabled": True,
+                        "mode": "all",
+                        "enabled_keys": [],
+                    },
+                }
+            )
+            connection.exec_driver_sql(
+                "UPDATE evaluation_category_profiles SET prompt_a_id=?, "
+                "prompt_b_id=?, pipeline_config_json=?, pipeline_revision=1, "
+                "created_by='system', dimension_schema_key='space_aesthetic', "
+                "dimension_schema_version='1.3.0' WHERE category_key='pdf_text'",
+                (ids[0], ids[2], all_dimensions),
+            )
+            connection.exec_driver_sql(
+                "UPDATE evaluation_category_profiles SET prompt_a_id=?, "
+                "prompt_b_id=?, pipeline_config_json=?, pipeline_revision=1, "
+                "created_by='system', dimension_schema_key='space_aesthetic', "
+                "dimension_schema_version='1.3.0' WHERE category_key='material_image'",
+                (ids[1], ids[2], all_dimensions),
+            )
+            connection.exec_driver_sql(
+                "UPDATE evaluation_category_profiles SET prompt_b_id=? "
+                "WHERE category_key='space_image'",
+                (ids[2],),
+            )
+            connection.exec_driver_sql(
+                "UPDATE prompt_versions SET category_key='space_image'"
+            )
+            connection.exec_driver_sql(
+                "DELETE FROM schema_migrations WHERE version=49"
+            )
+
+            run_migrations(connection)
+
+            prompt_rows = connection.exec_driver_sql(
+                "SELECT id, category_key FROM prompt_versions "
+                "WHERE id IN (?,?,?) ORDER BY id",
+                ids,
+            ).fetchall()
+            assert prompt_rows == [
+                (ids[0], "pdf_text"),
+                (ids[1], "material_image"),
+                (ids[2], "space_image"),
+            ]
+            profile_rows = connection.exec_driver_sql(
+                "SELECT category_key, dimension_schema_key, "
+                "dimension_schema_version, pipeline_config_json "
+                "FROM evaluation_category_profiles "
+                "WHERE category_key IN ('pdf_text','material_image') "
+                "ORDER BY category_key"
+            ).fetchall()
+            assert len(profile_rows) == 2
+            for row in profile_rows:
+                assert row[1:3] == (None, None)
+                pipeline = json.loads(row[3])
+                assert pipeline["prompt_mode"] == "single"
+                assert pipeline["dimensions"] == {
+                    "enabled": False,
+                    "mode": "none",
+                    "enabled_keys": [],
+                }
+            assert connection.exec_driver_sql(
+                "SELECT name FROM schema_migrations WHERE version=49"
+            ).scalar_one() == "isolate_prompt_categories"
             assert connection.exec_driver_sql(
                 "PRAGMA foreign_key_check"
             ).all() == []

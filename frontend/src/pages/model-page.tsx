@@ -381,7 +381,7 @@ export function ModelPage() {
               {(categoryProfiles.data?.items ?? []).map((profile) => {
                 const draft = categoryDrafts[profile.category_key]
                 if (!draft) return null
-                const categoryPrompts = (prompts.data?.items ?? []).filter((item) => item.status === "published" && item.rubric_version === draft.rubric_version)
+                const categoryPrompts = (prompts.data?.items ?? []).filter((item) => item.category_key === draft.category_key && item.status === "published" && item.rubric_version === draft.rubric_version)
                 const promptReady = draft.prompt_mode === "follow"
                   ? true
                   : draft.prompt_a_id !== null && (draft.prompt_mode === "single" || draft.prompt_b_id !== null)

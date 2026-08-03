@@ -195,6 +195,14 @@ def test_category_contracts_keep_pdf_and_material_inputs_isolated(tmp_path: Path
             item for item in categories.json()["items"]
             if item["category_key"] == "material_image"
         )
+        assert material_profile["pipeline_config"]["dimensions"] == {
+            "enabled": False,
+            "mode": "none",
+            "selected_keys": [],
+            "enabled_keys": [],
+        }
+        assert material_profile["dimension_schema_key"] is None
+        assert material_profile["dimension_schema_version"] is None
         selected_profile = {
             key: value
             for key, value in material_profile.items()
@@ -212,17 +220,8 @@ def test_category_contracts_keep_pdf_and_material_inputs_isolated(tmp_path: Path
             "/api/evaluation-categories/material_image",
             json=selected_profile,
         )
-        assert selected.status_code == 200, selected.text
-        assert selected.json()["pipeline_config"]["dimensions"] == {
-            "enabled": True,
-            "mode": "selected",
-            "selected_keys": ["composition_viewpoint", "lighting_atmosphere"],
-            "enabled_keys": ["composition_viewpoint", "lighting_atmosphere"],
-        }
-        assert selected.json()["prompt_a_id"] is None
-        assert selected.json()["prompt_b_id"] is None
-
-        material_profile = selected.json()
+        assert selected.status_code == 422, selected.text
+        assert selected.json()["detail"]["code"] == "dimension_contract_incomplete"
         retired_profile = {
             key: value
             for key, value in material_profile.items()
@@ -240,6 +239,70 @@ def test_category_contracts_keep_pdf_and_material_inputs_isolated(tmp_path: Path
             files={"files": ("blocked.png", _image_bytes((3, 2, 1), format_name="PNG"), "image/png")},
         )
         assert blocked.status_code == 409
+
+
+def test_prompt_catalog_and_category_binding_are_server_isolated(tmp_path: Path) -> None:
+    with _api_context(tmp_path) as (client, sessions):
+        with sessions() as db:
+            material_prompt = PromptVersion(
+                category_key="material_image",
+                stage="A",
+                name="材质专属提示词",
+                version="material-catalog-v1",
+                system_prompt="return a complete material evaluation result",
+                user_prompt="evaluate material input",
+                rubric_version="rubric-v2.1",
+                status="published",
+            )
+            pdf_prompt = PromptVersion(
+                category_key="pdf_text",
+                stage="A",
+                name="PDF 专属提示词",
+                version="pdf-catalog-v1",
+                system_prompt="return a complete pdf evaluation result",
+                user_prompt="evaluate pdf input",
+                rubric_version="rubric-v2.1",
+                status="published",
+            )
+            db.add_all([material_prompt, pdf_prompt])
+            db.commit()
+            material_prompt_id = material_prompt.id
+            pdf_prompt_id = pdf_prompt.id
+
+        material_catalog = client.get(
+            "/api/prompts?category_key=material_image"
+        )
+        assert material_catalog.status_code == 200
+        assert [item["id"] for item in material_catalog.json()["items"]] == [
+            material_prompt_id
+        ]
+        assert material_catalog.json()["items"][0]["category_key"] == "material_image"
+
+        material_profile = next(
+            item
+            for item in client.get("/api/evaluation-categories").json()["items"]
+            if item["category_key"] == "material_image"
+        )
+        payload = {
+            key: value
+            for key, value in material_profile.items()
+            if key
+            not in {
+                "id",
+                "category_key",
+                "pipeline_revision",
+                "automation_revision",
+                "created_by",
+                "created_at",
+                "updated_at",
+            }
+        }
+        payload["prompt_a_id"] = pdf_prompt_id
+        rejected = client.put(
+            "/api/evaluation-categories/material_image", json=payload
+        )
+        assert rejected.status_code == 422
+        assert "其他评测类目" in rejected.json()["detail"]
 
 
 def test_frontline_reviewer_cannot_select_category_baseline_bundle(tmp_path: Path) -> None:
@@ -346,6 +409,7 @@ def test_admin_can_create_modular_category_and_freeze_v2_job_contract(tmp_path: 
 
         with sessions() as db:
             prompt = PromptVersion(
+                category_key="landscape_image",
                 stage="A", name="景观单提示词", version="landscape-a1",
                 system_prompt="return a complete structured evaluation result",
                 user_prompt="evaluate {{image_metadata}} with all required fields",
@@ -501,6 +565,7 @@ def test_material_category_requires_and_freezes_its_own_prompt_contract(
 
         with sessions() as db:
             material_prompt = PromptVersion(
+                category_key="material_image",
                 stage="A",
                 name="材质图单提示词",
                 version="material-single-v1",
@@ -552,8 +617,8 @@ def test_material_category_requires_and_freezes_its_own_prompt_contract(
                 "prompt_id": wrong_prompt.id,
             },
         )
-        assert mismatch.status_code == 409
-        assert "rubric" in mismatch.json()["detail"]
+        assert mismatch.status_code == 400
+        assert "提示词" in mismatch.json()["detail"]
 
         queued = client.post(
             "/api/jobs/enqueue",

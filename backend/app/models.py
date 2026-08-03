@@ -209,6 +209,9 @@ class PromptVersion(Base):
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    category_key: Mapped[str] = mapped_column(
+        String(40), default="space_image", server_default="space_image", index=True
+    )
     stage: Mapped[str] = mapped_column(String(10), index=True)
     name: Mapped[str] = mapped_column(String(120))
     version: Mapped[str] = mapped_column(String(40), index=True)

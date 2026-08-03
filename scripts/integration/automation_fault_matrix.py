@@ -481,6 +481,7 @@ def create_material_golden(db: Any, b: SimpleNamespace, data_dir: Path) -> tuple
         b.m.EvaluationCategoryProfile.category_key == "material_image"
     ))
     prompt_a = b.m.PromptVersion(
+        category_key="material_image",
         stage="A", name="Fault matrix material A", version="fault-material-a-v1",
         system_prompt="E2E_STAGE_A：材质类目预检。",
         user_prompt="评测素材 {{image_metadata}}。",
@@ -488,6 +489,7 @@ def create_material_golden(db: Any, b: SimpleNamespace, data_dir: Path) -> tuple
         source="integration_test", created_by="automation-fault-matrix",
     )
     prompt_b = b.m.PromptVersion(
+        category_key="material_image",
         stage="B", name="Fault matrix material B", version="fault-material-b-v1",
         system_prompt="E2E_STAGE_B：材质类目美感评测。",
         user_prompt="根据 {{precheck_json}} 评测，规则 {{rubric_version}}。",
@@ -686,6 +688,7 @@ def scenario_cross_category(data_dir: Path, _url: str, state_dir: Path) -> dict[
             candidate_details[run.category_key] = [
                 {
                     "source_run_id": item.source_automation_run_id,
+                    "category_key": item.category_key,
                     "source": item.source,
                     "status": item.status,
                     "rubric_version": item.rubric_version,
@@ -730,6 +733,7 @@ def scenario_cross_category(data_dir: Path, _url: str, state_dir: Path) -> dict[
             len(candidate_details[run.category_key]) == 1
             and candidate_details[run.category_key][0] == {
                 "source_run_id": run.id,
+                "category_key": run.category_key,
                 "source": "optimizer",
                 "status": "draft",
                 "rubric_version": rubric_versions[run.category_key],

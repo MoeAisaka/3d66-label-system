@@ -459,15 +459,23 @@ def aesthetic_grade_collapse(aesthetic: dict[str, object] | None) -> bool:
     return max(Counter(grades).values(), default=0) >= 6
 
 
-def _prompt_for_job(stage: str, prompt_id: int | None) -> PromptVersion:
+def _prompt_for_job(
+    stage: str, prompt_id: int | None, category_key: str
+) -> PromptVersion:
     with session_scope() as db:
         prompt = db.get(PromptVersion, prompt_id) if prompt_id else None
-        if prompt is not None and prompt.stage != stage:
+        if prompt is not None and (
+            prompt.stage != stage or prompt.category_key != category_key
+        ):
             prompt = None
         if prompt is None:
             prompt = db.scalar(
                 select(PromptVersion)
-                .where(PromptVersion.stage == stage, PromptVersion.status == "published")
+                .where(
+                    PromptVersion.category_key == category_key,
+                    PromptVersion.stage == stage,
+                    PromptVersion.status == "published",
+                )
                 .order_by(PromptVersion.created_at.desc())
             )
         if not prompt:
@@ -475,10 +483,12 @@ def _prompt_for_job(stage: str, prompt_id: int | None) -> PromptVersion:
         return prompt
 
 
-def _single_prompt_for_job(prompt_id: int | None) -> PromptVersion:
+def _single_prompt_for_job(
+    prompt_id: int | None, category_key: str
+) -> PromptVersion:
     with session_scope() as db:
         prompt = db.get(PromptVersion, prompt_id) if prompt_id else None
-        if not prompt:
+        if not prompt or prompt.stage != "A" or prompt.category_key != category_key:
             raise RuntimeError("单提示词版本不存在")
         return prompt
 
@@ -952,6 +962,7 @@ async def evaluate_job(job_id: int) -> None:
             if (
                 prompt_a is None
                 or prompt_a.stage != "A"
+                or prompt_a.category_key != job.category_key
                 or prompt_a.version != frozen_bundle.prompt_a_version
                 or (
                     frozen_bundle.prompt_b_version is None
@@ -962,6 +973,7 @@ async def evaluate_job(job_id: int) -> None:
                     and (
                         prompt_b is None
                         or prompt_b.stage != "B"
+                        or prompt_b.category_key != job.category_key
                         or prompt_b.version
                         != frozen_bundle.prompt_b_version
                     )
@@ -1044,12 +1056,12 @@ async def evaluate_job(job_id: int) -> None:
         raise RuntimeError("关闭维度的仅提示词实验必须使用单提示词模式")
     if prompt_a is None:
         prompt_a = (
-            _single_prompt_for_job(prompt_a_id)
+            _single_prompt_for_job(prompt_a_id, job.category_key)
             if single_mode
-            else _prompt_for_job("A", prompt_a_id)
+            else _prompt_for_job("A", prompt_a_id, job.category_key)
         )
     if not single_mode and prompt_b is None:
-        prompt_b = _prompt_for_job("B", prompt_b_id)
+        prompt_b = _prompt_for_job("B", prompt_b_id, job.category_key)
     if category_profile_snapshot is not None:
         frozen_rubric = category_profile_snapshot["rubric_version"]
         prompt_rubrics = {prompt_a.rubric_version}
@@ -1242,7 +1254,7 @@ async def evaluate_job(job_id: int) -> None:
         and scope_status == "in_scope"
     ):
         if prompt_b is None:
-            prompt_b = _prompt_for_job("B", prompt_b_id)
+            prompt_b = _prompt_for_job("B", prompt_b_id, job.category_key)
         _set_job(job_id, stage="aesthetic", progress=48)
         user_b = prompt_b.user_prompt.replace(
             "{{precheck_json}}", json.dumps(precheck, ensure_ascii=False)

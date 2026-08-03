@@ -665,6 +665,9 @@ class DimensionSchemaUpdateRequest(BaseModel):
 
 
 class PromptCreateRequest(BaseModel):
+    category_key: str = Field(
+        default="space_image", pattern=r"^[a-z][a-z0-9_]{2,39}$"
+    )
     stage: str = Field(pattern="^[AB]$")
     name: str = Field(min_length=1, max_length=120)
     version: str = Field(min_length=1, max_length=40)
@@ -2554,8 +2557,12 @@ def _category_profile(
             pipeline_config_json=canonical_json(default_pipeline(category_key)),
             status="active",
             rubric_version="rubric-v2.1",
-            dimension_schema_key=SPACE_SCHEMA_KEY,
-            dimension_schema_version=ACTIVE_V13_VERSION,
+            dimension_schema_key=(
+                SPACE_SCHEMA_KEY if category_key == "space_image" else None
+            ),
+            dimension_schema_version=(
+                ACTIVE_V13_VERSION if category_key == "space_image" else None
+            ),
             created_by="compatibility-default",
         )
         db.add(profile)
@@ -2902,6 +2909,11 @@ def _apply_category_update(
         prompt = db.get(PromptVersion, prompt_id)
         if prompt is None or prompt.stage != stage:
             raise HTTPException(status_code=422, detail=f"类目 {stage} 提示词必须是有效的 {stage} 阶段版本")
+        if prompt.category_key != profile.category_key:
+            raise HTTPException(
+                status_code=422,
+                detail=f"类目 {stage} 提示词属于其他评测类目",
+            )
         if payload.status == "active" and prompt.status != "published":
             raise HTTPException(
                 status_code=422,
@@ -4029,12 +4041,20 @@ def _enqueue_jobs(
     def selected_prompt(stage: str, prompt_id: int | None) -> PromptVersion:
         if prompt_id is not None:
             prompt = db.get(PromptVersion, prompt_id)
-            if not prompt or prompt.stage != stage:
+            if (
+                not prompt
+                or prompt.stage != stage
+                or prompt.category_key != payload.category_key
+            ):
                 raise HTTPException(status_code=400, detail=f"提示词 {stage} 版本无效")
             return prompt
         prompt = db.scalar(
             select(PromptVersion)
-            .where(PromptVersion.stage == stage, PromptVersion.status == "published")
+            .where(
+                PromptVersion.category_key == payload.category_key,
+                PromptVersion.stage == stage,
+                PromptVersion.status == "published",
+            )
             .order_by(PromptVersion.created_at.desc())
             .limit(1)
         )
@@ -4106,7 +4126,9 @@ def _enqueue_jobs(
         )
     single_prompt = db.get(PromptVersion, selected_single_id) if selected_single_id else None
     if selected_single_id and (
-        single_prompt is None or single_prompt.stage != "A"
+        single_prompt is None
+        or single_prompt.stage != "A"
+        or single_prompt.category_key != payload.category_key
     ):
         raise HTTPException(status_code=400, detail="单提示词版本无效")
     prompt_a = None if single_prompt else selected_prompt("A", selected_a_id)
@@ -4783,13 +4805,19 @@ async def preview_historical_corrections(
 
 @app.get("/api/prompts")
 def list_prompts(
+    category_key: str | None = None,
     _user: User = Depends(current_user), db: Session = Depends(get_db)
 ) -> dict[str, Any]:
-    prompts = db.scalars(select(PromptVersion).order_by(PromptVersion.created_at.desc())).all()
+    statement = select(PromptVersion)
+    if category_key is not None:
+        _category_profile(db, category_key)
+        statement = statement.where(PromptVersion.category_key == category_key)
+    prompts = db.scalars(statement.order_by(PromptVersion.created_at.desc())).all()
     return {
         "items": [
             {
                 "id": prompt.id,
+                "category_key": prompt.category_key,
                 "stage": prompt.stage,
                 "name": prompt.name,
                 "version": prompt.version,
@@ -4820,7 +4848,7 @@ def _prompt_version_metrics(
 ) -> dict[str, Any]:
     statement = select(EvaluationResult).join(
         EvaluationJob, EvaluationJob.id == EvaluationResult.job_id
-    )
+    ).where(EvaluationJob.category_key == prompt.category_key)
     if prompt.stage == "A":
         statement = statement.where(
             EvaluationResult.prompt_a_version == prompt.version
@@ -5096,6 +5124,7 @@ def create_prompt(
     user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ) -> dict[str, int]:
+    _category_profile(db, payload.category_key)
     exists = db.scalar(select(PromptVersion).where(PromptVersion.version == payload.version))
     if exists:
         raise HTTPException(status_code=409, detail="提示词版本号已存在")
@@ -5279,6 +5308,7 @@ def _optimization_payload(run: PromptOptimizationRun) -> dict[str, Any]:
     return {
         "id": run.id,
         "base_prompt_id": run.base_prompt_id,
+        "category_key": run.base_prompt.category_key,
         "base_prompt_version": run.base_prompt.version,
         "sample_set_id": run.sample_set_id,
         "sample_set_name": run.sample_set.name,
@@ -5415,6 +5445,7 @@ def materialize_prompt_optimization_and_validate(
             raise HTTPException(status_code=409, detail="基线抽样策略无法解析")
 
     candidate = existing or PromptVersion(
+        category_key=run.base_prompt.category_key,
         stage="B",
         name=payload.name or f"{run.base_prompt.name} 优化候选 #{run.id}",
         version=payload.version,
@@ -5485,6 +5516,8 @@ def create_prompt_optimization(
         raise HTTPException(status_code=404, detail="提示词或样本集不存在")
     if prompt.stage != "B":
         raise HTTPException(status_code=400, detail="样本驱动优化目前用于调用 B 的美感维度提示词")
+    if prompt.category_key != sample_set.category_key:
+        raise HTTPException(status_code=409, detail="提示词与样本集属于不同评测类目")
     if not config or not config.encrypted_api_key:
         raise HTTPException(status_code=400, detail="请先在模型配置中填写提示词诊断模型 API Key")
     if not sample_set.items:
@@ -7682,9 +7715,12 @@ def _create_regression_runs(
     sample_set_id: int | None = None,
     threshold: float = 0.9,
 ) -> list[int]:
+    if prompt_a.category_key != prompt_b.category_key:
+        raise HTTPException(status_code=409, detail="回归提示词 A/B 属于不同评测类目")
     query = select(SampleSet).where(
         SampleSet.kind == "golden",
         SampleSet.status == "locked",
+        SampleSet.category_key == prompt_a.category_key,
     )
     if sample_set_id is not None:
         query = query.where(SampleSet.id == sample_set_id)
@@ -7717,6 +7753,7 @@ def _create_regression_runs(
             db.flush()
             job = EvaluationJob(
                 asset_id=sample_item.asset_id,
+                category_key=sample_set.category_key,
                 prompt_a_id=prompt_a.id,
                 prompt_b_id=prompt_b.id,
                 regression_item_id=regression_item.id,
@@ -7850,11 +7887,16 @@ def _baseline_set_summary(baseline_set: BaselineSet) -> dict[str, Any]:
 
 @app.get("/api/baseline-sets")
 def list_baseline_sets(
+    category_key: str | None = None,
     _user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
+    statement = select(BaselineSet)
+    if category_key is not None:
+        _category_profile(db, category_key)
+        statement = statement.where(BaselineSet.category_key == category_key)
     sets = db.scalars(
-        select(BaselineSet).order_by(
+        statement.order_by(
             BaselineSet.created_at.desc(), BaselineSet.id.desc()
         )
     ).all()
@@ -8119,16 +8161,27 @@ def create_baseline_run(
         .order_by(ModelConfig.id.asc())
         .limit(1)
     )
-    single_prompt_mode = request.prompt_id is not None
+    pipeline = _profile_pipeline(profile, db)
+    explicit_pair = request.prompt_a_id is not None
+    single_prompt_mode = request.prompt_id is not None or (
+        not explicit_pair and pipeline["prompt_mode"] == "single"
+    )
     if single_prompt_mode:
-        prompt_a = db.get(PromptVersion, request.prompt_id)
+        selected_prompt_id = request.prompt_id or profile.prompt_a_id
+        prompt_a = (
+            db.get(PromptVersion, selected_prompt_id)
+            if selected_prompt_id is not None
+            else None
+        )
         if prompt_a is None:
-            raise HTTPException(status_code=404, detail="所选单提示词版本不存在")
+            raise HTTPException(status_code=409, detail="该类目尚未绑定可用的单提示词版本")
         if prompt_a.stage != "A":
             raise HTTPException(
                 status_code=422,
                 detail="单提示词模式只能选择阶段为 A 的提示词版本",
             )
+        if prompt_a.category_key != baseline_set.category_key:
+            raise HTTPException(status_code=422, detail="所选单提示词属于其他流水线类目")
         prompt_b = None
     elif request.prompt_a_id is not None:
         assert request.prompt_b_id is not None
@@ -8149,31 +8202,48 @@ def create_baseline_run(
                 status_code=422,
                 detail="所选提示词阶段不匹配：A 选择器只能选 A，B 选择器只能选 B",
             )
+        if (
+            prompt_a.category_key != baseline_set.category_key
+            or prompt_b.category_key != baseline_set.category_key
+        ):
+            raise HTTPException(status_code=422, detail="所选提示词包含其他流水线类目版本")
     else:
-        prompt_a = db.scalar(
-            select(PromptVersion)
-            .where(
-                PromptVersion.stage == "A",
-                PromptVersion.status == "published",
-            )
-            .order_by(
-                PromptVersion.created_at.desc(),
-                PromptVersion.id.desc(),
-            )
-            .limit(1)
+        prompt_a = (
+            db.get(PromptVersion, profile.prompt_a_id)
+            if profile.prompt_a_id is not None
+            else None
         )
-        prompt_b = db.scalar(
-            select(PromptVersion)
-            .where(
-                PromptVersion.stage == "B",
-                PromptVersion.status == "published",
-            )
-            .order_by(
-                PromptVersion.created_at.desc(),
-                PromptVersion.id.desc(),
-            )
-            .limit(1)
+        prompt_b = (
+            db.get(PromptVersion, profile.prompt_b_id)
+            if profile.prompt_b_id is not None
+            else None
         )
+        if prompt_a is None or prompt_b is None:
+            prompt_a = db.scalar(
+                select(PromptVersion)
+                .where(
+                    PromptVersion.category_key == baseline_set.category_key,
+                    PromptVersion.stage == "A",
+                    PromptVersion.status == "published",
+                )
+                .order_by(PromptVersion.created_at.desc(), PromptVersion.id.desc())
+                .limit(1)
+            )
+            prompt_b = db.scalar(
+                select(PromptVersion)
+                .where(
+                    PromptVersion.category_key == baseline_set.category_key,
+                    PromptVersion.stage == "B",
+                    PromptVersion.status == "published",
+                )
+                .order_by(PromptVersion.created_at.desc(), PromptVersion.id.desc())
+                .limit(1)
+            )
+        if (
+            (prompt_a is not None and prompt_a.category_key != baseline_set.category_key)
+            or (prompt_b is not None and prompt_b.category_key != baseline_set.category_key)
+        ):
+            raise HTTPException(status_code=409, detail="类目当前发布提示词归属不一致")
     if model_config is None or prompt_a is None or (
         prompt_b is None and not single_prompt_mode
     ):
@@ -8208,6 +8278,11 @@ def create_baseline_run(
     )
     if request.dimension_schema_id is not None and dimension_schema is None:
         raise HTTPException(status_code=404, detail="维度版本不存在")
+    if dimension_schema is not None and (
+        profile.dimension_schema_key is None
+        or dimension_schema.schema_key != profile.dimension_schema_key
+    ):
+        raise HTTPException(status_code=422, detail="维度版本不属于当前流水线类目")
     schema_key = (
         dimension_schema.schema_key if dimension_schema is not None else profile.dimension_schema_key
     )
@@ -10313,18 +10388,36 @@ def create_prompt_regression(
     user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
+    sample_set = (
+        db.get(SampleSet, payload.sample_set_id)
+        if payload.sample_set_id is not None
+        else None
+    )
+    if payload.sample_set_id is not None and sample_set is None:
+        raise HTTPException(status_code=404, detail="黄金样本集不存在")
+    category_key = sample_set.category_key if sample_set is not None else "space_image"
     prompt_a = db.get(PromptVersion, payload.prompt_a_id) if payload.prompt_a_id else db.scalar(
         select(PromptVersion)
-        .where(PromptVersion.stage == "A", PromptVersion.status == "published")
+        .where(
+            PromptVersion.category_key == category_key,
+            PromptVersion.stage == "A",
+            PromptVersion.status == "published",
+        )
         .order_by(PromptVersion.created_at.desc())
     )
     prompt_b = db.get(PromptVersion, payload.prompt_b_id) if payload.prompt_b_id else db.scalar(
         select(PromptVersion)
-        .where(PromptVersion.stage == "B", PromptVersion.status == "published")
+        .where(
+            PromptVersion.category_key == category_key,
+            PromptVersion.stage == "B",
+            PromptVersion.status == "published",
+        )
         .order_by(PromptVersion.created_at.desc())
     )
     if not prompt_a or prompt_a.stage != "A" or not prompt_b or prompt_b.stage != "B":
         raise HTTPException(status_code=400, detail="请选择有效的 A、B 提示词版本")
+    if prompt_a.category_key != category_key or prompt_b.category_key != category_key:
+        raise HTTPException(status_code=409, detail="提示词与黄金样本集属于不同评测类目")
     run_ids = _create_regression_runs(
         db,
         prompt_a=prompt_a,

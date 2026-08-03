@@ -119,12 +119,16 @@ def test_material_prompt_context_is_explicit_and_can_be_disabled() -> None:
     )
     assert "纹理尺度" in enabled
     assert "接缝" in enabled
-    assert worker._category_prompt_context(
+    disabled = worker._category_prompt_context(
         category_key="material_image",
         preprocess_config={"material_focus": False},
         document_context=None,
         pdf_summary=None,
-    ) == ""
+    )
+    assert "纹理尺度" not in disabled
+    assert "接缝" not in disabled
+    assert "仅提示词评测输出合同" in disabled
+    assert "不得返回 dimensions" in disabled
 
 
 def test_pdf_summary_validation_rejects_scores_and_invalid_confidence() -> None:
@@ -177,6 +181,7 @@ def test_pdf_worker_summarizes_before_single_prompt_evaluation(
         sha256="e" * 64,
     )
     prompt = PromptVersion(
+        category_key="pdf_text",
         stage="A",
         name="PDF 单提示词",
         version="pdf-single-v1",
@@ -251,10 +256,19 @@ def test_pdf_worker_summarizes_before_single_prompt_evaluation(
                     raw_text="{}",
                     raw_payload={},
                 )
+            parsed = _precheck_payload()
+            parsed.update(
+                {
+                    "predicted_level": "L3",
+                    "predicted_score": 68,
+                    "confidence": 0.86,
+                    "reason": "方案正文与页图信息完整，整体达到普通可用水平。",
+                }
+            )
             return DoubaoResponse(
-                parsed=_combined_payload(),
+                parsed=parsed,
                 raw_text="{}",
-                raw_payload=_combined_payload(),
+                raw_payload=parsed,
             )
 
     monkeypatch.setattr(worker, "session_scope", test_scope)
@@ -286,21 +300,22 @@ def test_pdf_worker_summarizes_before_single_prompt_evaluation(
         completed_job = db.get(EvaluationJob, job.id)
         result = db.query(EvaluationResult).filter_by(job_id=job.id).one()
         preprocess = json.loads(result.preprocess_json)
-        aesthetic = json.loads(result.aesthetic_json)
+        aesthetic = json.loads(result.aesthetic_json) if result.aesthetic_json else None
+        scoring = json.loads(result.scoring_json)
         raw_response_a = json.loads(result.raw_response_a)
         assert completed_job.status == "completed"
         assert result.level in {"L1", "L2", "L3", "L4", "L5"}
         assert preprocess["category_key"] == "pdf_text"
         assert preprocess["multimodal_summary"]["status"] == "completed"
         assert preprocess["multimodal_summary"]["model_id"] == "vision-v1"
-        assert "spatial_design_coherence" not in aesthetic["dimensions"]
-        assert aesthetic["dimensions"]["spatial_design_furnishing"]["grade"] == 3
-        assert "detail_finish" not in aesthetic["dimensions"]
-        assert aesthetic["dimensions"]["detail_completion"]["grade"] == 3
-        assert "contemporary_relevance" not in aesthetic["dimensions"]
-        assert aesthetic["dimensions"]["inspiration_reference"]["grade"] == 3
-        assert "spatial_design_coherence" in raw_response_a["dimensions"]
-        assert "spatial_design_furnishing" not in raw_response_a["dimensions"]
+        assert aesthetic is None
+        assert scoring["scoring_mode"] == "prompt_only"
+        assert scoring["dimension_mode"] == "none"
+        assert scoring["formal"] is False
+        assert scoring["experimental"] is True
+        assert scoring["dimension_points"] == {}
+        assert "dimensions" not in raw_response_a
+        assert "不得返回 dimensions" in calls[1][1]
     finally:
         db.close()
         engine.dispose()

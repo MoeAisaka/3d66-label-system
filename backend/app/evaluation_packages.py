@@ -897,6 +897,12 @@ def _build_package_material(
             else None
         ),
     )
+    if any(
+        prompt.category_key != category_key
+        for prompt in (prompt_a, prompt_b)
+        if prompt is not None
+    ):
+        raise HTTPException(status_code=409, detail="评测包候选提示词属于其他评测类目")
     source_automation_ids = {
         prompt.source_automation_run_id
         for prompt in (prompt_a, prompt_b)

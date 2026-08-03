@@ -11,6 +11,7 @@ import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
 import { api, jsonBody } from "@/lib/api"
 import type {
+  EvaluationCategoryProfile,
   OptimizerConfig,
   PromptOptimizationRun,
   PromptVersion,
@@ -30,9 +31,14 @@ const regressionRoleNames: Record<RegressionRole, string> = {
 
 export function PromptCandidatesPage() {
   const queryClient = useQueryClient()
+  const categories = useQuery({
+    queryKey: ["evaluation-categories"],
+    queryFn: () => api<{ items: EvaluationCategoryProfile[] }>("/api/evaluation-categories"),
+  })
+  const [selectedCategoryKey, setSelectedCategoryKey] = useState("space_image")
   const prompts = useQuery({
-    queryKey: ["prompts"],
-    queryFn: () => api<{ items: PromptVersion[] }>("/api/prompts"),
+    queryKey: ["prompts", selectedCategoryKey],
+    queryFn: () => api<{ items: PromptVersion[] }>(`/api/prompts?category_key=${encodeURIComponent(selectedCategoryKey)}`),
   })
   const sampleSets = useQuery({ queryKey: ["sample-sets"], queryFn: () => api<{ items: SampleSetSummary[] }>("/api/sample-sets") })
   const optimizerConfig = useQuery({ queryKey: ["optimizer-config"], queryFn: () => api<OptimizerConfig>("/api/optimizer-config") })
@@ -61,6 +67,20 @@ export function PromptCandidatesPage() {
   const [baselineBundleId, setBaselineBundleId] = useState<number | null>(null)
   const [metricRulesVersion, setMetricRulesVersion] = useState("paired-metric-rules-v1")
   const [roleAssignments, setRoleAssignments] = useState<Record<number, RegressionRole | "">>({})
+  const activeCategories = (categories.data?.items ?? []).filter((item) => item.status === "active")
+  const filteredSampleSets = (sampleSets.data?.items ?? []).filter(
+    (item) => item.category_key === selectedCategoryKey,
+  )
+  const categoryOptimizations = (optimizations.data?.items ?? []).filter(
+    (item) => item.category_key === selectedCategoryKey,
+  )
+
+  useEffect(() => {
+    if (!activeCategories.length) return
+    if (!activeCategories.some((item) => item.category_key === selectedCategoryKey)) {
+      setSelectedCategoryKey(activeCategories[0].category_key)
+    }
+  }, [activeCategories, selectedCategoryKey])
 
   useEffect(() => {
     if (!selected) return
@@ -75,6 +95,7 @@ export function PromptCandidatesPage() {
       api<{ id: number }>("/api/prompts", {
         method: "POST",
         ...jsonBody({
+          category_key: selectedCategoryKey,
           stage: selected?.stage,
           name: selected?.name,
           version,
@@ -125,9 +146,9 @@ export function PromptCandidatesPage() {
   })
 
   const latestOptimization =
-    optimizations.data?.items.find((item) => item.id === selected?.source_optimization_run_id) ??
-    optimizations.data?.items.find((item) => item.base_prompt_id === selected?.id) ??
-    optimizations.data?.items[0]
+    categoryOptimizations.find((item) => item.id === selected?.source_optimization_run_id) ??
+    categoryOptimizations.find((item) => item.base_prompt_id === selected?.id) ??
+    categoryOptimizations[0]
   const optimizationSampleSet = useQuery({
     queryKey: ["sample-set", latestOptimization?.sample_set_id],
     queryFn: () => api<SampleSetDetail>(`/api/sample-sets/${latestOptimization?.sample_set_id}`),
@@ -222,6 +243,20 @@ export function PromptCandidatesPage() {
         description="使用人工纠偏样本生成和编辑候选；本页负责候选物化与回归交接，配对证据和人工结论在下一流水线节点处理。"
         actions={
           <>
+            <select
+              aria-label="提示词流水线类目"
+              className="h-10 rounded-[4px] border border-[var(--line-strong)] bg-white px-3 text-sm"
+              value={selectedCategoryKey}
+              onChange={(event) => {
+                setSelectedCategoryKey(event.target.value)
+                setSelectedId(null)
+                setSampleSetId(null)
+              }}
+            >
+              {activeCategories.map((category) => (
+                <option key={category.category_key} value={category.category_key}>{category.display_name}</option>
+              ))}
+            </select>
             <Button variant="secondary" onClick={() => prompts.refetch()}><ArrowClockwise />刷新</Button>
             <Button onClick={() => create.mutate()} disabled={!selected || !version || create.isPending}><Plus />另存草稿</Button>
           </>
@@ -259,7 +294,7 @@ export function PromptCandidatesPage() {
                   <div className="flex items-center gap-2"><Sparkle size={20} weight="fill" /><h3 className="font-semibold">从人工校验样本生成候选提示词</h3></div>
                   <p className="mt-2 max-w-[72ch] text-xs leading-5 text-[var(--muted)]">提示词诊断模型会读取样本中的维度纠错、原因和图片，保留一部分图片作为盲测，不会直接改动当前提示词。</p>
                 </div>
-                <label><span className="mb-2 block text-xs font-semibold">选择校验样本集</span><select className="h-11 w-full rounded-[4px] border border-[var(--line-strong)] bg-white px-3 text-sm" value={sampleSetId ?? ""} onChange={(event) => setSampleSetId(event.target.value ? Number(event.target.value) : null)}><option value="">请选择样本集</option>{sampleSets.data?.items.map((set) => <option key={set.id} value={set.id}>{set.name} · {set.item_count}张</option>)}</select></label>
+                <label><span className="mb-2 block text-xs font-semibold">选择校验样本集</span><select className="h-11 w-full rounded-[4px] border border-[var(--line-strong)] bg-white px-3 text-sm" value={sampleSetId ?? ""} onChange={(event) => setSampleSetId(event.target.value ? Number(event.target.value) : null)}><option value="">请选择样本集</option>{filteredSampleSets.map((set) => <option key={set.id} value={set.id}>{set.name} · {set.item_count}张</option>)}</select></label>
                 <Button onClick={() => startOptimization.mutate()} disabled={!sampleSetId || selected.stage !== "B" || !optimizerConfig.data?.has_api_key || Boolean(activeOptimization) || startOptimization.isPending}>{activeOptimization ? "诊断模型正在分析" : "生成候选提示词"}<MagicWand /></Button>
               </div>
               {!optimizerConfig.data?.has_api_key && <div className="flex items-start gap-2 border-t border-[var(--line)] bg-[#fff9ef] px-5 py-3 text-xs leading-5 text-[#7d4308]"><WarningCircle className="mt-0.5 shrink-0" />请先到“模型配置”填写提示词诊断模型 API Key。网页端登录权限不能直接供网站调用。</div>}

@@ -631,6 +631,7 @@ def test_category_dimension_snapshot_and_isolated_correction_retry(
         active=True,
     )
     prompt = PromptVersion(
+        category_key="material_image",
         stage="A",
         name="材质单提示词",
         version="material-single-v1",

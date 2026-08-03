@@ -135,7 +135,7 @@ DEFAULT_PIPELINES: dict[str, dict[str, Any]] = {
         ],
         "prompt_mode": "single",
         "prompt_context": {"instruction": "基于文档正文、页图与总结评测，不要把页眉页脚当成主体。"},
-        "dimensions": {"enabled": True, "mode": "all", "enabled_keys": []},
+        "dimensions": {"enabled": False, "mode": "none", "enabled_keys": []},
         "model_nodes": {"evaluation_main": True, "pdf_summary": True, "optimization": True, "benchmark": True, "diagnostic": True},
     },
     "material_image": {
@@ -145,7 +145,7 @@ DEFAULT_PIPELINES: dict[str, dict[str, Any]] = {
         "processors": [_processor("image.prepare"), _processor("image.animated_contact_sheet"), _processor("context.material_focus")],
         "prompt_mode": "single",
         "prompt_context": {"instruction": ""},
-        "dimensions": {"enabled": True, "mode": "all", "enabled_keys": []},
+        "dimensions": {"enabled": False, "mode": "none", "enabled_keys": []},
         "model_nodes": {"evaluation_main": True, "pdf_summary": False, "optimization": True, "benchmark": True, "diagnostic": True},
     },
 }

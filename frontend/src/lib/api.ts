@@ -157,11 +157,7 @@ export const baselineRegressionApi = {
     const params = new URLSearchParams()
     if (categoryKey) params.set("category_key", categoryKey)
     const query = params.size ? `?${params.toString()}` : ""
-    return api<{ items: BaselineSetSummary[] }>(`/api/baseline-sets${query}`).then((result) => ({
-      items: categoryKey
-        ? result.items.filter((item) => item.category_key === categoryKey)
-        : result.items,
-    }))
+    return api<{ items: BaselineSetSummary[] }>(`/api/baseline-sets${query}`)
   },
   getSet: (setId: number) => api<BaselineSetDetail>(`/api/baseline-sets/${setId}`),
   createSet: (payload: {
@@ -180,7 +176,12 @@ export const baselineRegressionApi = {
     method: "POST",
     ...jsonBody(payload),
   }),
-  listPrompts: () => api<{ items: PromptVersion[] }>("/api/prompts"),
+  listPrompts: (categoryKey?: string) => {
+    const query = categoryKey
+      ? `?${new URLSearchParams({ category_key: categoryKey }).toString()}`
+      : ""
+    return api<{ items: PromptVersion[] }>(`/api/prompts${query}`)
+  },
   createRun: (setId: number, payload: {
     prompt_id?: number
     prompt_a_id?: number

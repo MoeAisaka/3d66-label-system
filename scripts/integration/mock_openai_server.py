@@ -127,6 +127,8 @@ def _system_prompt(payload: dict[str, Any]) -> str:
 
 def _stage(payload: dict[str, Any]) -> str:
     system_prompt = _system_prompt(payload)
+    if "多模态前处理器" in system_prompt:
+        return "pdf_summary"
     if "纠偏诊断专家" in system_prompt:
         return "optimizer_diagnostic"
     if "提示词优化专家" in system_prompt:
@@ -135,11 +137,22 @@ def _stage(payload: dict[str, Any]) -> str:
         return "evaluation_stage_a"
     if "E2E_STAGE_B" in system_prompt:
         return "evaluation_stage_b"
+    if "单提示词评测器" in system_prompt:
+        return "evaluation_prompt_only"
     return "connection_test"
 
 
 def _content(payload: dict[str, Any]) -> dict[str, Any] | str:
     stage = _stage(payload)
+    if stage == "pdf_summary":
+        return {
+            "document_type": "3D 空间设计方案",
+            "summary": "方案描述住宅空间的材质、照明和动线设计。",
+            "key_points": ["空间布局", "材质说明", "照明方案"],
+            "visual_findings": ["页图包含空间效果图与材质说明"],
+            "risks": [],
+            "confidence": 0.94,
+        }
     if stage == "optimizer_diagnostic":
         return {
             "summary": "目标错例被高估，候选应收紧普通素材的等级锚点。",
@@ -165,6 +178,22 @@ def _content(payload: dict[str, Any]) -> dict[str, Any] | str:
         return _aesthetic(
             color_grade=3 if "E2E_STAGE_B_CANDIDATE" in _system_prompt(payload) else 5
         )
+    if stage == "evaluation_prompt_only":
+        result = _precheck()
+        is_material = "材质图" in _system_prompt(payload)
+        result.update(
+            {
+                "predicted_level": "L4" if is_material else "L3",
+                "predicted_score": 82 if is_material else 68,
+                "confidence": 0.91,
+                "reason": (
+                    "材质纹理与接缝关系可辨，存在明显表现瑕疵。"
+                    if is_material
+                    else "方案正文、页图与总结信息完整，整体达到普通可用水平。"
+                ),
+            }
+        )
+        return result
     return "连接成功"
 
 

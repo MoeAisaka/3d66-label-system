@@ -233,7 +233,7 @@ export function SampleSetsPage() {
             </> : <div className="flex min-h-80 items-center justify-center border-y border-[var(--line)] bg-white text-sm text-[var(--muted)]">创建或选择一个样本集后开始维护</div>}
           </main>
         </div>
-      </> : <RegressionWorkspace runs={regressions.data?.items ?? []} selectedId={selectedRunId} setSelectedId={setSelectedRunId} detail={regressionDetail.data} prompts={prompts.data?.items ?? []} />}
+      </> : <RegressionWorkspace runs={regressions.data?.items ?? []} selectedId={selectedRunId} setSelectedId={setSelectedRunId} detail={regressionDetail.data} prompts={(prompts.data?.items ?? []).filter((prompt) => prompt.category_key === detail.data?.summary.category_key)} />}
     </div>
   </>
 }

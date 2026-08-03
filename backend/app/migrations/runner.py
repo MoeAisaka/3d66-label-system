@@ -6412,6 +6412,86 @@ def _migration_048_add_baseline_stock_pipeline(connection: Connection) -> None:
         raise RuntimeError(f"v48 基准存量流水线迁移外键校验失败：{violations[:3]}")
 
 
+def _migration_049_isolate_prompt_categories(connection: Connection) -> None:
+    """Make prompt ownership explicit and remove inherited space dimensions."""
+    tables = {
+        row[0]
+        for row in connection.exec_driver_sql(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )
+    }
+    if "prompt_versions" not in tables:
+        return
+    prompt_columns = {
+        row[1]
+        for row in connection.exec_driver_sql("PRAGMA table_info(prompt_versions)")
+    }
+    if "category_key" not in prompt_columns:
+        connection.exec_driver_sql(
+            "ALTER TABLE prompt_versions ADD COLUMN category_key "
+            "VARCHAR(40) NOT NULL DEFAULT 'space_image'"
+        )
+    connection.exec_driver_sql(
+        "CREATE INDEX IF NOT EXISTS ix_prompt_versions_category_key "
+        "ON prompt_versions(category_key)"
+    )
+    if "evaluation_category_profiles" in tables:
+        references = connection.exec_driver_sql(
+            "SELECT category_key, prompt_a_id, prompt_b_id "
+            "FROM evaluation_category_profiles"
+        ).fetchall()
+        owners: dict[int, set[str]] = {}
+        for category_key, prompt_a_id, prompt_b_id in references:
+            for prompt_id in (prompt_a_id, prompt_b_id):
+                if prompt_id is not None:
+                    owners.setdefault(int(prompt_id), set()).add(str(category_key))
+        for prompt_id, categories in owners.items():
+            if len(categories) == 1:
+                connection.exec_driver_sql(
+                    "UPDATE prompt_versions SET category_key=? WHERE id=?",
+                    (next(iter(categories)), prompt_id),
+                )
+
+        profiles = connection.exec_driver_sql(
+            "SELECT id, pipeline_config_json FROM evaluation_category_profiles "
+            "WHERE category_key IN ('pdf_text','material_image') "
+            "AND created_by='system' AND pipeline_revision=1 "
+            "AND dimension_schema_key='space_aesthetic' "
+            "AND dimension_schema_version='1.3.0'"
+        ).fetchall()
+        for profile_id, raw_pipeline in profiles:
+            try:
+                pipeline = json.loads(raw_pipeline or "{}")
+            except (TypeError, json.JSONDecodeError):
+                continue
+            if not isinstance(pipeline, dict):
+                continue
+            pipeline["prompt_mode"] = "single"
+            pipeline["dimensions"] = {
+                "enabled": False,
+                "mode": "none",
+                "enabled_keys": [],
+            }
+            connection.exec_driver_sql(
+                "UPDATE evaluation_category_profiles SET "
+                "pipeline_config_json=?, dimension_schema_key=NULL, "
+                "dimension_schema_version=NULL, updated_at=CURRENT_TIMESTAMP "
+                "WHERE id=?",
+                (
+                    json.dumps(
+                        pipeline,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ),
+                    profile_id,
+                ),
+            )
+    violations = connection.exec_driver_sql("PRAGMA foreign_key_check").fetchall()
+    if violations:
+        raise RuntimeError(f"v49 提示词类目隔离迁移外键校验失败：{violations[:3]}")
+
+
 MIGRATIONS = [
     Migration(1, "add_sample_expected_level", _migration_001_add_sample_expected_level),
     Migration(2, "add_review_corrections", _migration_002_add_review_corrections),
@@ -6608,6 +6688,11 @@ MIGRATIONS = [
         48,
         "add_baseline_stock_pipeline",
         _migration_048_add_baseline_stock_pipeline,
+    ),
+    Migration(
+        49,
+        "isolate_prompt_categories",
+        _migration_049_isolate_prompt_categories,
     ),
 ]
 

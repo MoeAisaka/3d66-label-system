@@ -985,6 +985,7 @@ export type ReviewWorkflowPolicy = {
 
 export type PromptVersion = {
   id: number
+  category_key: string
   stage: "A" | "B"
   name: string
   version: string
@@ -1292,6 +1293,7 @@ export type IntegrationStatus = {
 
 export type PromptOptimizationRun = {
   id: number
+  category_key: string
   base_prompt_id: number
   base_prompt_version: string
   sample_set_id: number
@@ -1359,6 +1361,7 @@ export type HistoricalCorrectionPreview = {
 
 export type SampleSetSummary = {
   id: number
+  category_key: string
   name: string
   description: string
   kind: "golden" | "test"
