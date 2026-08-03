@@ -79,8 +79,9 @@ def validate_redline_policy(policy: Any) -> None:
     rules = policy.get("rules")
     if not isinstance(rules, list):
         raise RedlinePolicyError("rules_not_list", "红线 rules 必须是数组")
-    if enabled and not rules:
-        raise RedlinePolicyError("rules_empty", "启用红线时 rules 不能为空")
+    # Redline rules can be freely added/removed/toggled with no fixed count.
+    # An enabled redline stage with zero (or all-disabled) rules is legal: it
+    # simply never hits — parallel to the dimensions relaxation.
 
     seen_keys: set[str] = set()
     for rule in rules:
@@ -93,6 +94,12 @@ def validate_redline_policy(policy: Any) -> None:
         if key in seen_keys:
             raise RedlinePolicyError("rule_key_duplicate", f"红线规则 key 重复：{key}")
         seen_keys.add(key)
+
+        rule_enabled = rule.get("enabled", True)
+        if not isinstance(rule_enabled, bool):
+            raise RedlinePolicyError(
+                "rule_enabled_invalid", f"红线规则 {key} 的 enabled 必须是布尔值"
+            )
 
         if rule.get("signal") != _SUPPORTED_SIGNAL:
             raise RedlinePolicyError(
@@ -124,11 +131,12 @@ def evaluate_redlines(precheck: Any, *, policy: dict) -> dict:
     """Deterministically decide whether a precheck payload hits any redline.
 
     Validates ``policy`` first (fail-closed).  When the policy is disabled the
-    function short-circuits to a non-eliminating result.  Matching reads only
-    ``precheck["production_fields"]["reason"]`` (missing / non-list -> empty).
-    A rule matches when its ``match_any`` intersects the reason list; if that
-    rule carries ``exemptions`` and any exemption text also appears in the
-    reason list, the rule is exempted and does not count as a hit.
+    function short-circuits to a non-eliminating result.  Individual rules may
+    be toggled off via a per-rule ``enabled: false`` and are skipped.  Matching
+    reads only ``precheck["production_fields"]["reason"]`` (missing / non-list ->
+    empty).  A rule matches when its ``match_any`` intersects the reason list;
+    if that rule carries ``exemptions`` and any exemption text also appears in
+    the reason list, the rule is exempted and does not count as a hit.
 
     Output is a fixed-shape, JSON-serializable, input-stable dict.
     """
@@ -146,6 +154,8 @@ def evaluate_redlines(precheck: Any, *, policy: dict) -> dict:
 
     hit_rules: list[str] = []
     for rule in policy["rules"]:
+        if not rule.get("enabled", True):
+            continue
         if not reasons.intersection(rule["match_any"]):
             continue
         exemptions = rule.get("exemptions", [])

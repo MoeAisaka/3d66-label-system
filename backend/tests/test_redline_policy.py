@@ -151,12 +151,14 @@ def test_unsupported_signal_fails_closed() -> None:
     assert excinfo.value.code == "signal_unsupported"
 
 
-def test_empty_rules_with_enabled_true_fails_closed() -> None:
+def test_empty_rules_with_enabled_true_is_valid_and_never_hits() -> None:
+    # Redline rules can be freely reduced to zero; an enabled stage with no
+    # rules is legal and simply never eliminates anything.
     policy = _inspiration_policy()
     policy["rules"] = []
-    with pytest.raises(RedlinePolicyError) as excinfo:
-        validate_redline_policy(policy)
-    assert excinfo.value.code == "rules_empty"
+    assert validate_redline_policy(policy) is None
+    result = evaluate_redlines(_precheck(["是截图"]), policy=policy)
+    assert result == {"hit": False, "hit_rules": [], "hard_reject": False}
 
 
 def test_empty_rules_allowed_when_disabled() -> None:
@@ -164,6 +166,43 @@ def test_empty_rules_allowed_when_disabled() -> None:
     policy["enabled"] = False
     policy["rules"] = []
     assert validate_redline_policy(policy) is None
+
+
+def test_per_rule_disable_skips_that_rule() -> None:
+    # A rule can be kept but toggled off via enabled=false; it must not hit.
+    policy = _inspiration_policy()
+    policy["rules"][0]["enabled"] = False  # disable screenshot
+    disabled = evaluate_redlines(_precheck(["是截图"]), policy=policy)
+    assert disabled == {"hit": False, "hit_rules": [], "hard_reject": False}
+    # Other rules still fire; disabling one does not affect the rest.
+    other = evaluate_redlines(_precheck(["是截图", "有二维码"]), policy=policy)
+    assert other["hit"] is True
+    assert other["hit_rules"] == ["qr_code"]
+
+
+def test_all_rules_disabled_never_hits() -> None:
+    policy = _inspiration_policy()
+    for rule in policy["rules"]:
+        rule["enabled"] = False
+    assert validate_redline_policy(policy) is None
+    result = evaluate_redlines(_precheck(["是截图", "有二维码"]), policy=policy)
+    assert result == {"hit": False, "hit_rules": [], "hard_reject": False}
+
+
+def test_explicit_enabled_true_rule_still_hits() -> None:
+    policy = _inspiration_policy()
+    policy["rules"][0]["enabled"] = True
+    result = evaluate_redlines(_precheck(["是截图"]), policy=policy)
+    assert result["hit"] is True
+    assert result["hit_rules"] == ["screenshot"]
+
+
+def test_non_bool_rule_enabled_fails_closed() -> None:
+    policy = _inspiration_policy()
+    policy["rules"][0]["enabled"] = "yes"
+    with pytest.raises(RedlinePolicyError) as excinfo:
+        validate_redline_policy(policy)
+    assert excinfo.value.code == "rule_enabled_invalid"
 
 
 def test_duplicate_rule_key_fails_closed() -> None:
