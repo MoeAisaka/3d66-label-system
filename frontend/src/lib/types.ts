@@ -290,13 +290,15 @@ export type Asset = {
 export type BaselineLevel = "L1" | "L2" | "L3" | "L4" | "L5"
 
 export type BaselineLevelMetrics = {
-  schema_version: "baseline-level-metrics-v1"
+  schema_version: "baseline-level-metrics-v1" | "baseline-level-metrics-v2"
   levels: BaselineLevel[]
   total: number
   completed: number
   pending: number
   denominator: number
   valid_predictions: number
+  unscored?: number
+  manual_required?: number
   failed: number
   exact_hits: number
   adjacent_hits: number
@@ -359,6 +361,7 @@ export type BaselineRegressionRun = {
     schema_version: "baseline-run-selection-v1" | "baseline-run-selection-v2"
     category_key?: string | null
     prompt_mode?: "single" | "dual" | "ab" | null
+    execution_mode?: "freeform" | "structured"
     prompt_a: BaselinePromptSelection | null
     prompt_b: BaselinePromptSelection | null
     dimension: BaselineDimensionSelection
@@ -466,6 +469,13 @@ export type BaselineRegressionItem = {
     prompt_b?: string | null
     rubric?: string | null
     engine?: string | null
+  }
+  interpretation?: {
+    status: "scored" | "manual_required"
+    execution_mode?: "freeform" | "structured"
+    raw_text_a?: string | null
+    raw_text_b?: string | null
+    message?: string
   }
   status: "queued" | "completed" | "failed"
   deviation: boolean

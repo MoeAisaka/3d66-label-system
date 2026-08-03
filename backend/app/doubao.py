@@ -414,6 +414,77 @@ class DoubaoClient:
             raise last_error
         raise DoubaoError("模型调用失败")
 
+    async def chat_text(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        image_path: Path | None = None,
+        mime_type: str | None = None,
+        *,
+        max_attempts: int | None = None,
+        output_budget: int | None = None,
+        reasoning_effort: str | None = None,
+    ) -> DoubaoResponse:
+        """Call the model without imposing a JSON response contract.
+
+        Transport/provider failures retain the normal retry policy.  Arbitrary
+        text is a successful response and is therefore never retried merely
+        because it is not JSON.  ``parsed`` is populated opportunistically for
+        backward-compatible scoring when the text is a JSON object.
+        """
+
+        content: str | list[dict[str, Any]]
+        if image_path:
+            content = [
+                {"type": "text", "text": user_prompt},
+                {
+                    "type": "image_url",
+                    "image_url": {"url": _image_data_url(image_path, mime_type)},
+                },
+            ]
+        else:
+            content = user_prompt
+        payload = self._protocol_payload(system_prompt, content)
+        actual_budget, actual_reasoning_effort = self._generation_options(
+            payload,
+            output_budget=output_budget,
+            reasoning_effort=reasoning_effort,
+            structured_output=False,
+        )
+
+        last_error: Exception | None = None
+        attempts = self._attempts(max_attempts)
+        for attempt in range(attempts):
+            try:
+                upstream = await self._post(payload)
+                raw, status_code, request_id = self._unpack_upstream(upstream)
+                raw_text = _extract_message_text(raw)
+                try:
+                    parsed = parse_json_text(raw_text)
+                except DoubaoError:
+                    parsed = {}
+                usage = response_usage(raw)
+                return DoubaoResponse(
+                    parsed=parsed,
+                    raw_text=raw_text,
+                    raw_payload=raw,
+                    upstream_status_code=status_code,
+                    request_correlation_id=request_id,
+                    attempt_count=attempt + 1,
+                    output_budget=actual_budget,
+                    reasoning_effort=actual_reasoning_effort,
+                    input_tokens=usage[0] if usage else None,
+                    output_tokens=usage[1] if usage else None,
+                    total_tokens=usage[2] if usage else None,
+                )
+            except Exception as exc:
+                if isinstance(exc, DoubaoError):
+                    exc.attempt_count = attempt + 1
+                last_error = exc
+        if last_error is not None:
+            raise last_error
+        raise DoubaoError("模型调用失败")
+
     async def chat_json_images(
         self,
         system_prompt: str,

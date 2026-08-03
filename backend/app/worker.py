@@ -84,6 +84,7 @@ from .optimization_automation import (
     touch_automation_worker_status,
 )
 from .production_dimension_contract import (
+    ProductionDimensionContractError,
     resolve_frozen_dimension_contract,
     resolve_published_dimension_contract,
 )
@@ -216,6 +217,7 @@ def _category_prompt_context(
     pdf_summary: dict[str, object] | None,
     pipeline_config: dict[str, object] | None = None,
     include_dimension_rules: bool = True,
+    freeform: bool = False,
 ) -> str:
     pipeline = pipeline_config or legacy_preprocess_to_pipeline(category_key, preprocess_config)
     modules = active_modules(pipeline)
@@ -226,7 +228,7 @@ def _category_prompt_context(
         if "document.multimodal_summary" in modules and pdf_summary is None:
             raise RuntimeError("PDF 多模态总结未完成")
         parts.append(
-            "\n\nPDF 类目冻结上下文：\n"
+            "\n\ndocument_context:\n"
             + json.dumps(
                 {
                     "document_text": document_context.get("text") or "",
@@ -234,16 +236,20 @@ def _category_prompt_context(
                 },
                 ensure_ascii=False,
             )
-            + "\n请基于文档正文、页图与总结执行当前类目规则，不要把页眉页脚当成评测主体。"
+            + (
+                ""
+                if freeform
+                else "\n请基于文档正文、页图与总结执行当前类目规则，不要把页眉页脚当成评测主体。"
+            )
         )
-    if "context.material_focus" in modules and processor_config(pipeline, "context.material_focus").get("enabled", True):
+    if not freeform and "context.material_focus" in modules and processor_config(pipeline, "context.material_focus").get("enabled", True):
         parts.append(
             "\n\n材质图类目专项规则：优先检查纹理尺度与连续性、反光和粗糙度是否真实、"
             "接缝/收口/拼接关系、工艺瑕疵、重复贴图与拉伸，以及图片是否足以支持材质判断。"
             "所有结论必须引用图中可见证据；看不清时明确降低置信度并要求人工复核。"
         )
     instruction = str((pipeline.get("prompt_context") or {}).get("instruction") or "").strip()
-    if instruction:
+    if instruction and not freeform:
         parts.append("\n\n类目管理员冻结指令：" + instruction)
     dimensions = pipeline.get("dimensions") or {}
     selected_keys = dimensions.get("selected_keys") or dimensions.get("enabled_keys")
@@ -1047,6 +1053,13 @@ async def evaluate_job(job_id: int) -> None:
             frozen_strategy_snapshot = None
 
     single_mode = prompt_b_id is None
+    baseline_execution_mode = (
+        str(category_profile_snapshot.get("execution_mode") or "structured")
+        if job.baseline_regression_item_id is not None
+        and category_profile_snapshot is not None
+        else "structured"
+    )
+    freeform_mode = baseline_execution_mode == "freeform"
     if (
         category_profile_snapshot is not None
         and category_profile_snapshot.get("schema_version")
@@ -1061,7 +1074,7 @@ async def evaluate_job(job_id: int) -> None:
             category_pipeline_config
         )
     dimension_mode = str(dimension_selection["mode"])
-    if dimension_mode == "none" and not single_mode:
+    if dimension_mode == "none" and not single_mode and not freeform_mode:
         raise RuntimeError("关闭维度的仅提示词实验必须使用单提示词模式")
     if prompt_a is None:
         prompt_a = (
@@ -1071,24 +1084,32 @@ async def evaluate_job(job_id: int) -> None:
         )
     if not single_mode and prompt_b is None:
         prompt_b = _prompt_for_job("B", prompt_b_id, job.category_key)
+    freeform_dimension_contract_unavailable = False
     if category_profile_snapshot is not None:
         frozen_rubric = category_profile_snapshot["rubric_version"]
         prompt_rubrics = {prompt_a.rubric_version}
         if prompt_b is not None:
             prompt_rubrics.add(prompt_b.rubric_version)
-        if prompt_rubrics != {frozen_rubric}:
+        if not freeform_mode and prompt_rubrics != {frozen_rubric}:
             raise RuntimeError("任务冻结类目 rubric 与 Prompt 不一致")
-        production_dimension_contract = resolve_frozen_dimension_contract(
-            category_profile_snapshot,
-            bundle=frozen_bundle,
-        )
-        if production_dimension_contract is None:
-            production_dimension_contract = resolve_published_dimension_contract(
-                db,
-                schema_key=category_profile_snapshot.get("dimension_schema_key"),
-                version=category_profile_snapshot.get("dimension_schema_version"),
-                bundle=frozen_bundle,
-            )
+        if not (freeform_mode and dimension_mode == "none"):
+            try:
+                production_dimension_contract = resolve_frozen_dimension_contract(
+                    category_profile_snapshot,
+                    bundle=frozen_bundle,
+                )
+                if production_dimension_contract is None:
+                    production_dimension_contract = resolve_published_dimension_contract(
+                        db,
+                        schema_key=category_profile_snapshot.get("dimension_schema_key"),
+                        version=category_profile_snapshot.get("dimension_schema_version"),
+                        bundle=frozen_bundle,
+                    )
+            except ProductionDimensionContractError:
+                if not freeform_mode:
+                    raise
+                production_dimension_contract = None
+                freeform_dimension_contract_unavailable = True
     image_path = settings.upload_dir / asset.stored_name
     if not image_path.exists():
         raise RuntimeError("原始素材文件不存在")
@@ -1213,7 +1234,10 @@ async def evaluate_job(job_id: int) -> None:
         document_context=document_context,
         pdf_summary=pdf_summary,
         pipeline_config=category_pipeline_config,
-        include_dimension_rules=(single_mode or dimension_mode == "none"),
+        include_dimension_rules=(
+            not freeform_mode and (single_mode or dimension_mode == "none")
+        ),
+        freeform=freeform_mode,
     )
     user_a = prompt_a.user_prompt.replace(
         "{{image_metadata}}", json.dumps(metadata, ensure_ascii=False)
@@ -1234,15 +1258,29 @@ async def evaluate_job(job_id: int) -> None:
             model_mime_type=model_mime_type,
         )
         return
-    response_a = await client.chat_json(
-        prompt_a.system_prompt,
-        user_a,
-        image_path=model_image_path,
-        mime_type=model_mime_type,
+    response_a = await (
+        client.chat_text(
+            prompt_a.system_prompt,
+            user_a,
+            image_path=model_image_path,
+            mime_type=model_mime_type,
+        )
+        if freeform_mode
+        else client.chat_json(
+            prompt_a.system_prompt,
+            user_a,
+            image_path=model_image_path,
+            mime_type=model_mime_type,
+        )
     )
     _ensure_job_processing(job_id)
     combined_response = is_combined_aesthetic_response(response_a.parsed)
-    if single_mode and dimension_mode != "none" and not combined_response:
+    if (
+        not freeform_mode
+        and single_mode
+        and dimension_mode != "none"
+        and not combined_response
+    ):
         raise RuntimeError("单提示词必须一次返回分类、画质和八个美感维度的完整结构")
     if combined_response:
         precheck, aesthetic = adapt_combined_aesthetic_response(response_a.parsed)
@@ -1251,41 +1289,72 @@ async def evaluate_job(job_id: int) -> None:
     else:
         precheck = response_a.parsed
         aesthetic = None
-    precheck = normalize_precheck_business_rules(precheck)
-    scope_status = (precheck.get("classification") or {}).get("scope_status")
+    try:
+        precheck = normalize_precheck_business_rules(precheck)
+    except (AttributeError, TypeError, ValueError):
+        if not freeform_mode:
+            raise
+        precheck = response_a.parsed
+    classification = precheck.get("classification")
+    scope_status = (
+        classification.get("scope_status")
+        if isinstance(classification, dict)
+        else None
+    )
 
     response_b = None
     response_b_attempts: list[object] = []
-    if (
-        dimension_mode != "none"
-        and not single_mode
-        and not combined_response
-        and scope_status == "in_scope"
+    if not single_mode and (
+        freeform_mode
+        or (
+            dimension_mode != "none"
+            and not combined_response
+            and scope_status == "in_scope"
+        )
     ):
         if prompt_b is None:
             prompt_b = _prompt_for_job("B", prompt_b_id, job.category_key)
         _set_job(job_id, stage="aesthetic", progress=48)
-        user_b = prompt_b.user_prompt.replace(
-            "{{precheck_json}}", json.dumps(precheck, ensure_ascii=False)
-        ).replace("{{rubric_version}}", prompt_b.rubric_version)
+        previous_output = (
+            response_a.raw_text
+            if freeform_mode
+            else json.dumps(precheck, ensure_ascii=False)
+        )
+        user_b = (
+            prompt_b.user_prompt.replace("{{precheck_json}}", previous_output)
+            .replace("{{previous_output}}", response_a.raw_text)
+            .replace("{{rubric_version}}", prompt_b.rubric_version)
+        )
         user_b += _category_prompt_context(
             category_key=job.category_key,
             preprocess_config=category_preprocess_config,
             document_context=document_context,
             pdf_summary=pdf_summary,
             pipeline_config=category_pipeline_config,
-            include_dimension_rules=True,
+            include_dimension_rules=not freeform_mode,
+            freeform=freeform_mode,
         )
-        response_b = await client.chat_json(
-            prompt_b.system_prompt,
-            user_b,
-            image_path=model_image_path,
-            mime_type=model_mime_type,
+        response_b = await (
+            client.chat_text(
+                prompt_b.system_prompt,
+                user_b,
+                image_path=model_image_path,
+                mime_type=model_mime_type,
+            )
+            if freeform_mode
+            else client.chat_json(
+                prompt_b.system_prompt,
+                user_b,
+                image_path=model_image_path,
+                mime_type=model_mime_type,
+            )
         )
         response_b_attempts.append(response_b.raw_payload)
         _ensure_job_processing(job_id)
         aesthetic = response_b.parsed
         if (
+            not freeform_mode
+            and
             dimension_mode == "all"
             and (
                 prompt_b.version.endswith("split.3")
@@ -1311,43 +1380,105 @@ async def evaluate_job(job_id: int) -> None:
             _ensure_job_processing(job_id)
             aesthetic = response_b.parsed
 
+    freeform_dimensions = (
+        aesthetic.get("dimensions") if isinstance(aesthetic, dict) else None
+    )
+    required_dimension_keys = set(dimension_selection.get("effective_keys") or [])
+    prompt_only_fields = {
+        "predicted_level",
+        "predicted_score",
+        "confidence",
+        "reason",
+    }
+    freeform_interpretable = bool(
+        (
+            combined_response
+            or (
+                dimension_mode == "none"
+                and prompt_only_fields.issubset(response_a.parsed)
+            )
+        )
+        if single_mode
+        else (
+            isinstance(precheck.get("classification"), dict)
+            and (precheck.get("classification") or {}).get("scope_status")
+            in {"in_scope", "boundary", "out_of_scope"}
+            and isinstance(aesthetic, dict)
+            and isinstance(freeform_dimensions, dict)
+            and required_dimension_keys.issubset(freeform_dimensions)
+        )
+    )
+    freeform_unscored = freeform_mode and (
+        not freeform_interpretable or freeform_dimension_contract_unavailable
+    )
+
     risk_review_report = None
     risk_review_raw = None
+    aesthetic_for_definition = None if freeform_unscored else aesthetic
     source_dimension_definition = (
         production_dimension_contract.definition
         if production_dimension_contract is not None
         else resolve_frozen_dimension_entry(
             bundle=frozen_bundle,
-            aesthetic=aesthetic,
+            aesthetic=aesthetic_for_definition,
         )["definition"]
         if frozen_bundle is not None
         and frozen_bundle.strategy_schema_version
         == STRATEGY_SCHEMA_VERSION
+        and not freeform_unscored
         else space_schema_definition_for_scoring_profile(
-            aesthetic.get("scoring_profile")
-            if isinstance(aesthetic, dict)
+            aesthetic_for_definition.get("scoring_profile")
+            if isinstance(aesthetic_for_definition, dict)
             else None
         )
     )
-    aesthetic, dimension_definition = _apply_dimension_selection(
-        aesthetic,
-        source_definition=source_dimension_definition,
-        selection=dimension_selection,
-    )
-    preliminary_scoring = (
-        calculate_prompt_only_result(
-            precheck,
-            model_payload=response_a.parsed,
-            dimension_selection=dimension_selection,
+    manual_scoring = {
+        "score": None,
+        "level": None,
+        "confidence": None,
+        "needs_review": False,
+        "caps": [],
+        "review_reasons": [],
+        "interpretation_status": "manual_required",
+    }
+    try:
+        if freeform_unscored:
+            aesthetic = None
+            dimension_definition = project_dimension_definition(
+                source_dimension_definition,
+                dimension_selection,
+            )
+            preliminary_scoring = dict(manual_scoring)
+        else:
+            aesthetic, dimension_definition = _apply_dimension_selection(
+                aesthetic,
+                source_definition=source_dimension_definition,
+                selection=dimension_selection,
+            )
+            preliminary_scoring = (
+                calculate_prompt_only_result(
+                    precheck,
+                    model_payload=response_a.parsed,
+                    dimension_selection=dimension_selection,
+                )
+                if dimension_mode == "none"
+                else calculate_score(
+                    precheck,
+                    aesthetic,
+                    dimension_schema=dimension_definition,
+                )
+            )
+    except (KeyError, TypeError, ValueError):
+        if not freeform_mode:
+            raise
+        freeform_unscored = True
+        aesthetic = None
+        dimension_definition = project_dimension_definition(
+            source_dimension_definition,
+            dimension_selection,
         )
-        if dimension_mode == "none"
-        else calculate_score(
-            precheck,
-            aesthetic,
-            dimension_schema=dimension_definition,
-        )
-    )
-    trigger_reasons = risk_review_reasons(
+        preliminary_scoring = dict(manual_scoring)
+    trigger_reasons = [] if freeform_unscored else risk_review_reasons(
         precheck,
         aesthetic,
         preliminary_scoring,
@@ -1405,7 +1536,7 @@ async def evaluate_job(job_id: int) -> None:
     elif frozen_bundle is not None and (
         frozen_bundle.strategy_schema_version
         == STRATEGY_SCHEMA_VERSION
-    ):
+    ) and not freeform_unscored:
         source_dimension_definition = resolve_frozen_dimension_entry(
             bundle=frozen_bundle,
             aesthetic=aesthetic,
@@ -1422,7 +1553,20 @@ async def evaluate_job(job_id: int) -> None:
         source_dimension_definition,
         dimension_selection,
     )
-    scoring = (
+    scoring = ({
+        "engine_version": ENGINE_VERSION,
+        "scoring_mode": "freeform_manual",
+        "formal": False,
+        "experimental": True,
+        "score": None,
+        "level": None,
+        "confidence": None,
+        "needs_review": False,
+        "caps": [],
+        "review_reasons": [],
+        "interpretation_status": "manual_required",
+        "not_formal_reason": "自由提示词输出未匹配结构化评分合同，需要人工判读",
+    } if freeform_unscored else (
         calculate_prompt_only_result(
             precheck,
             model_payload=response_a.parsed,
@@ -1434,7 +1578,7 @@ async def evaluate_job(job_id: int) -> None:
             aesthetic,
             dimension_schema=projected_definition,
         )
-    )
+    ))
     scoring["dimension_mode"] = dimension_mode
     scoring["dimension_selection"] = dimension_selection
     now = datetime.now(timezone.utc)
@@ -1496,12 +1640,31 @@ async def evaluate_job(job_id: int) -> None:
             precheck_json=json.dumps(precheck, ensure_ascii=False),
             aesthetic_json=json.dumps(aesthetic, ensure_ascii=False) if aesthetic else None,
             scoring_json=json.dumps(scoring, ensure_ascii=False),
-            raw_response_a=json.dumps(response_a.raw_payload, ensure_ascii=False),
+            raw_response_a=json.dumps(
+                {
+                    "provider_payload": response_a.raw_payload,
+                    "raw_text": response_a.raw_text,
+                }
+                if freeform_mode
+                else response_a.raw_payload,
+                ensure_ascii=False,
+            ),
             raw_response_b=(
                 json.dumps(
-                    response_b_attempts[0]
-                    if len(response_b_attempts) == 1
-                    else {"attempts": response_b_attempts},
+                    {
+                        "provider_payload": (
+                            response_b_attempts[0]
+                            if len(response_b_attempts) == 1
+                            else {"attempts": response_b_attempts}
+                        ),
+                        "raw_text": response_b.raw_text,
+                    }
+                    if freeform_mode
+                    else (
+                        response_b_attempts[0]
+                        if len(response_b_attempts) == 1
+                        else {"attempts": response_b_attempts}
+                    ),
                     ensure_ascii=False,
                 )
                 if response_b
@@ -1531,7 +1694,7 @@ async def evaluate_job(job_id: int) -> None:
         )
         db.add(result)
         db.flush()
-        if is_baseline_regression and (
+        if is_baseline_regression and not freeform_mode and (
             result.level not in {"L1", "L2", "L3", "L4", "L5"}
             or not isinstance(result.score, (int, float))
             or isinstance(result.score, bool)

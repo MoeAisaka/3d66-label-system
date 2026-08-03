@@ -83,6 +83,12 @@ def _json_object(value: str | None) -> dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
+def _raw_text(value: str | None) -> str | None:
+    payload = _json_object(value)
+    raw_text = payload.get("raw_text")
+    return raw_text if isinstance(raw_text, str) else None
+
+
 def filename_level_suggestion(filename: str) -> dict[str, Any]:
     """Suggest one baseline level from explicit filename tokens.
 
@@ -273,6 +279,15 @@ def result_snapshot(result: EvaluationResult) -> dict[str, Any]:
     dimension_selection = dimension_selection_from_job_snapshot(
         job.category_profile_snapshot_json if job is not None else None
     )
+    execution_snapshot = _json_object(
+        job.category_profile_snapshot_json if job is not None else None
+    )
+    execution_mode = str(execution_snapshot.get("execution_mode") or "structured")
+    scored = (
+        predicted_level in LEVELS
+        and isinstance(result.score, (int, float))
+        and not isinstance(result.score, bool)
+    )
     return {
         "schema_version": "baseline-result-v3",
         "evaluation_id": result.id,
@@ -282,6 +297,12 @@ def result_snapshot(result: EvaluationResult) -> dict[str, Any]:
             job.category_key if job is not None else result.asset.category_key
         ),
         "dimension_selection": dimension_selection,
+        "execution_mode": execution_mode,
+        "interpretation": {
+            "status": "scored" if scored else "manual_required",
+            "raw_text_a": _raw_text(result.raw_response_a),
+            "raw_text_b": _raw_text(result.raw_response_b),
+        },
         "predicted_level": predicted_level,
         "authoritative_score": result.score,
         "cap_reasons": scoring.get("caps")
@@ -318,6 +339,8 @@ def compute_level_metrics(items: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
     completed_count = 0
     valid_predictions = 0
     failed_count = 0
+    unscored_count = 0
+    manual_required_count = 0
     deviations = 0
 
     for item in rows:
@@ -328,8 +351,13 @@ def compute_level_metrics(items: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
         expected = str(item.get("expected_level") or "")
         actual_value = item.get("predicted_level")
         actual = str(actual_value) if actual_value is not None else ""
-        if status == "failed" or expected not in LEVELS or actual not in LEVELS:
+        if status == "failed":
             failed_count += 1
+            continue
+        manual_required = bool(item.get("manual_required"))
+        if expected not in LEVELS or actual not in LEVELS:
+            unscored_count += 1
+            manual_required_count += 1 if manual_required or actual not in LEVELS else 0
             continue
         valid_predictions += 1
         matrix[expected][actual] += 1
@@ -341,10 +369,10 @@ def compute_level_metrics(items: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
         if delta <= 1:
             adjacent_hits += 1
 
-    denominator = completed_count
+    denominator = valid_predictions
     total = len(rows)
     return {
-        "schema_version": "baseline-level-metrics-v1",
+        "schema_version": "baseline-level-metrics-v2",
         "levels": list(LEVELS),
         "total": total,
         "completed": completed_count,
@@ -352,6 +380,8 @@ def compute_level_metrics(items: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
         "denominator": denominator,
         "valid_predictions": valid_predictions,
         "failed": failed_count,
+        "unscored": unscored_count,
+        "manual_required": manual_required_count,
         "exact_hits": exact_hits,
         "adjacent_hits": adjacent_hits,
         "deviations": deviations,
@@ -367,6 +397,10 @@ def _item_metric_payload(item: BaselineRegressionItem) -> dict[str, Any]:
         "status": item.status,
         "expected_level": item.expected_level,
         "predicted_level": snapshot.get("predicted_level"),
+        "manual_required": (
+            (snapshot.get("interpretation") or {}).get("status")
+            == "manual_required"
+        ),
     }
 
 
@@ -415,7 +449,9 @@ def complete_baseline_item(
         or isinstance(result.score, bool)
     ):
         invalid_reasons.append("no_authoritative_score")
-    if invalid_reasons:
+    run_execution = _json_object(item.run.execution_snapshot_json)
+    execution_mode = str(run_execution.get("execution_mode") or "structured")
+    if invalid_reasons and execution_mode == "structured":
         item.evaluation_id = result.id
         item.job_id = result.job_id
         item.result_snapshot_json = canonical_json(result_snapshot(result))
@@ -431,7 +467,6 @@ def complete_baseline_item(
             job.finished_at = item.finished_at
         refresh_baseline_run(item.run)
         return
-    run_execution = _json_object(item.run.execution_snapshot_json)
     frozen_selection = run_execution.get("dimension_selection")
     if frozen_selection is not None:
         if result.job is None or result.job.category_key != item.run.category_key:

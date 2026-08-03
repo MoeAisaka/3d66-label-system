@@ -137,7 +137,7 @@ export function PromptCandidatesPage() {
         name: stageFilter === "A" ? "新提示词 A" : "新提示词 B",
         version: `prompt-${Date.now()}`,
         system_prompt: systemPrompt.trim() || "你是一个严格遵循输出合同的评测助手。",
-        user_prompt: userPrompt.trim() || "请按当前类目规则完成评测并输出合法 JSON。",
+        user_prompt: userPrompt.trim() || "请根据图片完成本次实验评测，并给出你的判断与理由。",
         rubric_version: "rubric-v2.1",
         change_note: changeNote,
         source: "manual",
@@ -313,8 +313,8 @@ export function PromptCandidatesPage() {
     <>
       <PageHeader
         index="03.4"
-        title="候选提示词"
-        description="使用人工纠偏样本生成和编辑候选；本页负责候选物化与回归交接，配对证据和人工结论在下一流水线节点处理。"
+        title="提示词管理器"
+        description="按类目、流水线路径和调用 A/B 管理提示词。提示词内容与输出格式完全自由；是否自动转成等级或维度，由基准回归运行时的结果判定方式决定。"
         actions={
           <>
             <select
@@ -455,7 +455,11 @@ export function PromptCandidatesPage() {
               <div className="flex items-end"><Button className="w-full" onClick={() => aiRevise.mutate()} disabled={!aiInstruction || aiRevise.isPending}>{aiRevise.isPending ? "AI 正在生成草案" : "生成修改草案"}<MagicWand /></Button></div>
             </section>
 
-            <div className="mt-8 grid gap-7 2xl:grid-cols-2">
+            <div className="mt-8 border-l-2 border-primary bg-[#f8faed] px-4 py-3 text-xs leading-5">
+              <strong>提示词不受固定输出协议约束。</strong> 可以要求自然语言、任意 JSON、自定义维度或完全不同的评测方法。选择“自由实验”运行基准回归时，即使没有 L1–L5、范围字段或八维，任务也会正常完成并保留原始回答。
+            </div>
+
+            <div className="mt-5 grid gap-7 2xl:grid-cols-2">
               <label className="block"><span className="mb-2 flex items-center justify-between text-sm font-semibold"><span>System Prompt</span><span className="font-data text-xs font-normal text-[var(--muted)]">{systemPrompt.length} 字符</span></span><Textarea className="min-h-[520px] font-mono text-[0.78rem] leading-6" value={systemPrompt} onChange={(event) => setSystemPrompt(event.target.value)} /></label>
               <label className="block"><span className="mb-2 flex items-center justify-between text-sm font-semibold"><span>User Prompt</span><span className="font-data text-xs font-normal text-[var(--muted)]">{userPrompt.length} 字符</span></span><Textarea className="min-h-[520px] font-mono text-[0.78rem] leading-6" value={userPrompt} onChange={(event) => setUserPrompt(event.target.value)} /></label>
             </div>

@@ -131,6 +131,21 @@ def test_material_prompt_context_is_explicit_and_can_be_disabled() -> None:
     assert "不得返回 dimensions" in disabled
 
 
+def test_freeform_prompt_context_does_not_inject_behavior_rules() -> None:
+    pipeline = default_pipeline("material_image")
+    pipeline["prompt_context"] = {"instruction": "必须输出管理员指定格式"}
+    context = worker._category_prompt_context(
+        category_key="material_image",
+        preprocess_config={"material_focus": True},
+        document_context=None,
+        pdf_summary=None,
+        pipeline_config=pipeline,
+        include_dimension_rules=False,
+        freeform=True,
+    )
+    assert context == ""
+
+
 def test_pdf_summary_validation_rejects_scores_and_invalid_confidence() -> None:
     summary = worker._validated_pdf_summary(
         {

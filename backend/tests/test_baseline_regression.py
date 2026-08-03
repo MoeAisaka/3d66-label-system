@@ -1,5 +1,9 @@
+import asyncio
 import json
 import importlib
+from contextlib import contextmanager
+from datetime import datetime, timezone
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
@@ -7,6 +11,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
+from app import worker
 from app.baseline_regression import (
     complete_baseline_item,
     compute_level_metrics,
@@ -17,6 +22,13 @@ from app.baseline_regression import (
 from app.audit import canonical_json
 from app.category_pipeline import default_pipeline
 from app.database import Base, get_db
+from app.dimension_schema_registry import (
+    ACTIVE_V13_VERSION,
+    SPACE_SCHEMA_KEY,
+    canonical_hash,
+    space_schema_definition_for_version,
+)
+from app.doubao import DoubaoResponse
 from app.main import app, current_user
 from app.models import (
     Asset,
@@ -26,6 +38,7 @@ from app.models import (
     EvaluationJob,
     EvaluationCategoryProfile,
     EvaluationResult,
+    DimensionSchema,
     MaterialPackage,
     MaterialPackageItem,
     ModelConfig,
@@ -56,8 +69,9 @@ def test_level_metrics_cover_boundaries_failures_and_stable_matrix() -> None:
             {"status": "queued", "expected_level": "L3", "predicted_level": None},
         ]
     )
-    assert metrics["exact_accuracy"] == 1 / 5
-    assert metrics["adjacent_accuracy"] == 3 / 5
+    assert metrics["exact_accuracy"] == 1 / 4
+    assert metrics["adjacent_accuracy"] == 3 / 4
+    assert metrics["denominator"] == 4
     assert metrics["valid_predictions"] == 4
     assert metrics["failed"] == 1
     assert metrics["pending"] == 1
@@ -211,7 +225,10 @@ def test_baseline_api_freezes_truth_reports_and_enqueues_idempotently() -> None:
         assert historical["status"] == "unavailable_historical"
         assert historical["message"] == "历史结果未冻结评测理由"
 
-        invalid_run_response = client.post(f"/api/baseline-sets/{set_id}/runs")
+        invalid_run_response = client.post(
+            f"/api/baseline-sets/{set_id}/runs",
+            json={"execution_mode": "structured"},
+        )
         assert invalid_run_response.status_code == 200
         invalid_run = db.get(BaselineRegressionRun, invalid_run_response.json()["id"])
         invalid_item = invalid_run.items[0]
@@ -246,6 +263,56 @@ def test_baseline_api_freezes_truth_reports_and_enqueues_idempotently() -> None:
         assert "missing_level" in invalid_item.error_message
         assert "no_authoritative_score" in invalid_item.error_message
         assert invalid_run.status == "failed"
+
+        freeform_response = client.post(f"/api/baseline-sets/{set_id}/runs")
+        assert freeform_response.status_code == 200
+        freeform_run = db.get(
+            BaselineRegressionRun, freeform_response.json()["id"]
+        )
+        assert freeform_response.json()["selection"]["execution_mode"] == "freeform"
+        freeform_item = freeform_run.items[0]
+        freeform_job = db.get(EvaluationJob, freeform_item.job_id)
+        freeform_result = EvaluationResult(
+            asset_id=asset.id,
+            job_id=freeform_job.id,
+            strategy_bundle_id=freeform_run.strategy_bundle_id,
+            strategy_snapshot_json=freeform_run.strategy_snapshot_json,
+            precheck_json="{}",
+            aesthetic_json=None,
+            scoring_json=json.dumps({"interpretation_status": "manual_required"}),
+            raw_response_a=json.dumps(
+                {"provider_payload": {"id": "provider-1"}, "raw_text": "自然语言结论"}
+            ),
+            raw_response_b=None,
+            score=None,
+            level=None,
+            confidence=None,
+            needs_review=False,
+            model_id=freeform_run.strategy_bundle.model_id,
+            prompt_a_version="A1",
+            prompt_b_version="B1",
+            rubric_version="R1",
+            engine_version=freeform_run.strategy_bundle.engine_version,
+            risk_review_version=freeform_run.strategy_bundle.risk_review_version,
+        )
+        db.add(freeform_result)
+        db.flush()
+        complete_baseline_item(
+            db, item_id=freeform_item.id, result=freeform_result
+        )
+        db.commit()
+        assert freeform_item.status == "completed"
+        detail = client.get(
+            f"/api/baseline-regressions/{freeform_run.id}"
+        ).json()
+        assert detail["summary"]["metrics"]["unscored"] == 1
+        assert detail["summary"]["metrics"]["manual_required"] == 1
+        assert detail["summary"]["metrics"]["denominator"] == 0
+        assert detail["items"][0]["interpretation"] == {
+            "status": "manual_required",
+            "raw_text_a": "自然语言结论",
+            "raw_text_b": None,
+        }
         db.refresh(asset)
         assert asset.status == "uploaded"
     finally:
@@ -432,7 +499,9 @@ def test_package_baseline_prefills_filename_level_and_accepts_manual_override() 
         engine.dispose()
 
 
-def test_baseline_run_can_freeze_manual_prompt_pair_and_reserves_dimension_choice() -> None:
+def test_baseline_run_can_freeze_manual_prompt_pair_and_reserves_dimension_choice(
+    monkeypatch, tmp_path
+) -> None:
     engine = create_engine(
         "sqlite://",
         connect_args={"check_same_thread": False},
@@ -459,6 +528,7 @@ def test_baseline_run_can_freeze_manual_prompt_pair_and_reserves_dimension_choic
         base_url="https://example.test",
         api_path="/chat",
         model_id="model",
+        encrypted_api_key="test-reference",
         active=True,
     )
     published_a = PromptVersion(
@@ -493,7 +563,7 @@ def test_baseline_run_can_freeze_manual_prompt_pair_and_reserves_dimension_choic
         name="候选 B",
         version="B-draft",
         system_prompt="draft system b",
-        user_prompt="draft user b",
+        user_prompt="B sees {{previous_output}} / {{precheck_json}}",
         rubric_version="R2",
         status="draft",
     )
@@ -507,6 +577,20 @@ def test_baseline_run_can_freeze_manual_prompt_pair_and_reserves_dimension_choic
         pipeline_scope="full_pipeline",
         status="draft",
     )
+    dimension_definition = space_schema_definition_for_version(ACTIVE_V13_VERSION)
+    dimension_schema = DimensionSchema(
+        schema_key=SPACE_SCHEMA_KEY,
+        version=ACTIVE_V13_VERSION,
+        schema_type="family_pack",
+        family_key="space",
+        display_name="空间现役维度",
+        status="published",
+        definition_json=canonical_json(dimension_definition),
+        canonical_hash=canonical_hash(dimension_definition),
+        created_by="test",
+        published_by="test",
+        published_at=datetime.now(timezone.utc),
+    )
     db.add_all(
         [
             user,
@@ -517,6 +601,7 @@ def test_baseline_run_can_freeze_manual_prompt_pair_and_reserves_dimension_choic
             draft_a,
             draft_b,
             full_only,
+            dimension_schema,
         ]
     )
     db.commit()
@@ -583,7 +668,7 @@ def test_baseline_run_can_freeze_manual_prompt_pair_and_reserves_dimension_choic
 
         reserved_dimension = client.post(
             f"/api/baseline-sets/{set_id}/runs",
-            json={"dimension_schema_id": 1},
+            json={"dimension_schema_id": 99991},
         )
         assert reserved_dimension.status_code == 404
         assert "维度版本不存在" in reserved_dimension.text
@@ -611,6 +696,7 @@ def test_baseline_run_can_freeze_manual_prompt_pair_and_reserves_dimension_choic
             json={
                 "prompt_a_id": draft_a.id,
                 "prompt_b_id": draft_b.id,
+                "dimension_mode": "none",
             },
         )
         assert response.status_code == 200
@@ -619,8 +705,8 @@ def test_baseline_run_can_freeze_manual_prompt_pair_and_reserves_dimension_choic
         assert payload["selection"]["prompt_a"]["version"] == "A-draft"
         assert payload["selection"]["prompt_b"]["id"] == draft_b.id
         assert payload["selection"]["prompt_b"]["version"] == "B-draft"
-        assert payload["selection"]["dimension"]["mode"] == "all"
-        assert payload["selection"]["dimension"]["effective_keys"]
+        assert payload["selection"]["dimension"]["mode"] == "none"
+        assert payload["selection"]["dimension"]["effective_keys"] == []
         assert (
             payload["selection"]["dimension"]["manual_selection_supported"]
             is True
@@ -632,6 +718,60 @@ def test_baseline_run_can_freeze_manual_prompt_pair_and_reserves_dimension_choic
         assert job is not None
         assert job.prompt_a_id == draft_a.id
         assert job.prompt_b_id == draft_b.id
+        job.status = "processing"
+        db.commit()
+
+        source_path = tmp_path / asset.stored_name
+        source_path.write_bytes(b"freeform-image")
+        calls: list[str] = []
+
+        class FakeClient:
+            def __init__(self, _config) -> None:
+                pass
+
+            async def chat_text(self, _system_prompt, user_prompt, **_kwargs):
+                calls.append(user_prompt)
+                raw_text = (
+                    "A 自由结论"
+                    if len(calls) == 1
+                    else "B 自由结论，已参考 A 自由结论"
+                )
+                return DoubaoResponse(
+                    parsed={},
+                    raw_text=raw_text,
+                    raw_payload={"provider_id": f"call-{len(calls)}"},
+                )
+
+        @contextmanager
+        def test_scope():
+            try:
+                yield db
+                db.commit()
+            except Exception:
+                db.rollback()
+                raise
+
+        monkeypatch.setattr(worker, "session_scope", test_scope)
+        monkeypatch.setattr(worker, "settings", SimpleNamespace(upload_dir=tmp_path))
+        monkeypatch.setattr(worker, "DoubaoClient", FakeClient)
+        monkeypatch.setattr(
+            worker,
+            "prepare_model_image",
+            lambda *_args, **_kwargs: (source_path, "image/jpeg"),
+        )
+        asyncio.run(worker.evaluate_job(job.id))
+        db.expire_all()
+        completed_job = db.get(EvaluationJob, job.id)
+        completed_item = db.get(BaselineRegressionItem, run.items[0].id)
+        result = db.query(EvaluationResult).filter_by(job_id=job.id).one()
+        scoring = json.loads(result.scoring_json)
+        assert completed_job.status == "completed"
+        assert completed_item.status == "completed"
+        assert result.level is None
+        assert result.score is None
+        assert scoring["interpretation_status"] == "manual_required"
+        assert len(calls) == 2
+        assert "A 自由结论" in calls[1]
 
         detail = client.get(
             f"/api/baseline-regressions/{run.id}"
@@ -641,6 +781,11 @@ def test_baseline_run_can_freeze_manual_prompt_pair_and_reserves_dimension_choic
             detail.json()["summary"]["selection"]["prompt_b"]["version"]
             == "B-draft"
         )
+        assert detail.json()["items"][0]["interpretation"] == {
+            "status": "manual_required",
+            "raw_text_a": "A 自由结论",
+            "raw_text_b": "B 自由结论，已参考 A 自由结论",
+        }
         set_detail = client.get(f"/api/baseline-sets/{set_id}")
         assert (
             set_detail.json()["runs"][0]["selection"]["prompt_a"]["version"]

@@ -60,6 +60,7 @@ export function BaselineRegressionPage() {
   const [promptSelectionMode, setPromptSelectionMode] = useState<"published" | "manual" | "single">("published")
   const [selectedPromptAId, setSelectedPromptAId] = useState(0)
   const [selectedPromptBId, setSelectedPromptBId] = useState(0)
+  const [executionMode, setExecutionMode] = useState<"freeform" | "structured">("freeform")
   const [dimensionChoice, setDimensionChoice] = useState<DimensionChoice>("category_default")
 
   const categories = useQuery({
@@ -328,6 +329,7 @@ export function BaselineRegressionPage() {
       return baselineRegressionApi.createRun(selectedSetId, {
         ...promptPayload,
         ...dimensionPayload,
+        execution_mode: executionMode,
       })
     },
     onSuccess: async (run) => {
@@ -730,7 +732,7 @@ export function BaselineRegressionPage() {
                     <p className="mt-2 text-sm text-[var(--muted)]">{selectedSet.data.summary.description}</p>
                   )}
                 </div>
-                <div className="mt-5 grid gap-3 border-y border-[var(--line)] bg-[#fafbf8] px-4 py-4 min-[1280px]:grid-cols-[minmax(0,150px)_minmax(0,1fr)_minmax(0,1fr)] min-[1280px]:items-end min-[1750px]:grid-cols-[minmax(0,150px)_minmax(0,1fr)_minmax(0,1fr)_minmax(0,1fr)_auto]">
+                <div className="mt-5 grid gap-3 border-y border-[var(--line)] bg-[#fafbf8] px-4 py-4 min-[1280px]:grid-cols-3 min-[1280px]:items-end min-[1750px]:grid-cols-[minmax(0,150px)_minmax(0,170px)_minmax(0,1fr)_minmax(0,1fr)_minmax(0,1fr)_auto]">
                   <label>
                     <span className="mb-2 block text-xs font-semibold">提示词取值方式</span>
                     <select
@@ -743,6 +745,17 @@ export function BaselineRegressionPage() {
                       <option value="published">当前发布版本</option>
                       <option value="manual">手动选择版本</option>
                       <option value="single">单提示词（一次调用）</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span className="mb-2 block text-xs font-semibold">结果判定方式</span>
+                    <select
+                      className="h-11 w-full rounded-[4px] border border-[var(--line-strong)] bg-white px-3 text-sm"
+                      value={executionMode}
+                      onChange={(event) => setExecutionMode(event.target.value as "freeform" | "structured")}
+                    >
+                      <option value="freeform">自由实验（默认）</option>
+                      <option value="structured">标准评分合同</option>
                     </select>
                   </label>
                   <PromptSelect
@@ -762,7 +775,7 @@ export function BaselineRegressionPage() {
                     onChange={setSelectedPromptBId}
                   />
                   <label>
-                    <span className="mb-2 block text-xs font-semibold">维度版本</span>
+                    <span className="mb-2 block text-xs font-semibold">维度版本{executionMode === "freeform" ? "（可选）" : ""}</span>
                     <select
                       className="h-11 w-full rounded-[4px] border border-[var(--line-strong)] bg-white px-3 text-sm"
                       value={dimensionChoice}
@@ -774,7 +787,11 @@ export function BaselineRegressionPage() {
                           {schema.display_name} · {schema.version}（已发布）
                         </option>
                       ))}
-                      <option value="none">关闭维度 · 仅提示词评级</option>
+                      <option value="none">
+                        {executionMode === "freeform"
+                          ? "关闭维度 · 仅保留模型原始结果"
+                          : "关闭维度 · 仅提示词评级"}
+                      </option>
                     </select>
                   </label>
                   <Button
@@ -794,6 +811,10 @@ export function BaselineRegressionPage() {
                   </Button>
                 </div>
                 <p className="mt-2 text-xs leading-5 text-[var(--muted)]">
+                  {executionMode === "freeform"
+                    ? "自由实验不会要求固定 JSON、范围字段或八维输出；系统完整保留原始回答，能安全识别时自动计分，否则进入人工判断，不算运行失败。"
+                    : "标准评分合同沿用现有结构化协议；缺少范围、等级、分数或所选维度时会按合同失败。"}
+                  {" "}
                   {promptSelectionMode === "single"
                     ? "本轮只调用所选单提示词一次，B 位保持为空；不会改变线上发布指针。"
                     : promptSelectionMode === "manual"
@@ -960,7 +981,7 @@ function RegressionResults({
   const metrics = run.metrics
   return (
     <>
-      <section className="mt-6 grid gap-px border-y border-[var(--line)] bg-[var(--line)] md:grid-cols-3">
+      <section className="mt-6 grid gap-px border-y border-[var(--line)] bg-[var(--line)] md:grid-cols-2 xl:grid-cols-4">
         <SelectionFact
           label="本轮调用 A"
           value={run.selection.prompt_a
@@ -978,6 +999,10 @@ function RegressionResults({
         <SelectionFact
           label="本轮维度版本"
           value={dimensionSelectionName(run.selection.dimension)}
+        />
+        <SelectionFact
+          label="结果判定方式"
+          value={run.selection.execution_mode === "structured" ? "标准评分合同" : "自由实验 · 无结构也可完成"}
         />
       </section>
       <div
@@ -1007,10 +1032,11 @@ function RegressionResults({
 
       {activeView === "results" ? (
         <>
-      <section className="mt-6 grid gap-px border-y border-[var(--line)] bg-[var(--line)] sm:grid-cols-2 xl:grid-cols-4">
+      <section className="mt-6 grid gap-px border-y border-[var(--line)] bg-[var(--line)] sm:grid-cols-2 xl:grid-cols-5">
         <Metric label="总体准确率" value={percent(metrics.exact_accuracy)} />
         <Metric label="相邻等级准确率" value={percent(metrics.adjacent_accuracy)} />
         <Metric label="运行进度" value={`${metrics.completed}/${metrics.total}`} />
+        <Metric label="已评分 / 待人工" value={`${metrics.valid_predictions} / ${metrics.unscored ?? metrics.manual_required ?? 0}`} />
         <Metric label="偏差 / 失败" value={`${metrics.deviations} / ${metrics.failed}`} />
       </section>
 
@@ -1171,6 +1197,8 @@ function RegressionResults({
                             <Badge tone="danger"><WarningCircle />失败</Badge>
                           ) : item.status === "queued" ? (
                             <Badge tone="active">等待预测</Badge>
+                          ) : item.interpretation?.status === "manual_required" ? (
+                            <Badge tone="warning">已完成 · 待人工判断</Badge>
                           ) : (
                             <Badge tone={item.deviation ? "danger" : "success"}>
                               预测 {item.predicted_level ?? "—"} / 期望 {item.expected_level}
@@ -1608,6 +1636,7 @@ function ReportFact({ label, value }: { label: string; value: string }) {
 
 function LevelExplanation({ item }: { item: BaselineRegressionItem }) {
   const explanation = item.level_explanation
+  const interpretation = item.interpretation
   const labels = Object.fromEntries(
     item.evaluation?.dimension_schema.definition?.dimensions.map((dimension) => [
       dimension.key,
@@ -1640,10 +1669,27 @@ function LevelExplanation({ item }: { item: BaselineRegressionItem }) {
   }))
   return (
     <div className="border-t border-[var(--line)] px-4 py-4">
-      <p className="text-sm font-semibold">
-        服务端结论：{explanation.predicted_level ?? "未形成等级"} ·
-        {" "}{explanation.authoritative_score ?? "无有效分数"} 分
-      </p>
+      {interpretation?.status === "manual_required" ? (
+        <div className="border-l-2 border-[#c98a1f] bg-[#fff9ea] px-3 py-2 text-xs leading-5 text-[#7d4308]">
+          <strong>自由输出已正常完成，等待人工判断。</strong>
+          {interpretation.message ? ` ${interpretation.message}` : " 本次未形成可安全比较的 L1–L5 等级，因此不进入自动准确率分母。"}
+        </div>
+      ) : (
+        <p className="text-sm font-semibold">
+          服务端结论：{explanation.predicted_level ?? "未形成等级"} ·
+          {" "}{explanation.authoritative_score ?? "无有效分数"} 分
+        </p>
+      )}
+      {(interpretation?.raw_text_a || interpretation?.raw_text_b) && (
+        <div className="mt-4 grid gap-3 lg:grid-cols-2">
+          {interpretation.raw_text_a && (
+            <RawModelOutput label="调用 A 原始输出" value={interpretation.raw_text_a} />
+          )}
+          {interpretation.raw_text_b && (
+            <RawModelOutput label="调用 B 原始输出" value={interpretation.raw_text_b} />
+          )}
+        </div>
+      )}
       {explanation.status === "out_of_scope" && (
         <p className="mt-2 text-xs text-[#8d2924]">素材超出评测范围，未形成正式美感等级。</p>
       )}
@@ -1717,6 +1763,9 @@ function LevelExplanation({ item }: { item: BaselineRegressionItem }) {
 }
 
 function levelExplanationSummary(item: BaselineRegressionItem) {
+  if (item.interpretation?.status === "manual_required") {
+    return "自由输出已完整保存；未强制转换为八维或等级，等待人工判断"
+  }
   const explanation = item.level_explanation
   if (explanation.status === "unavailable_historical") {
     return explanation.message ?? "历史结果未冻结评测理由"
@@ -1735,6 +1784,15 @@ function levelExplanationSummary(item: BaselineRegressionItem) {
     : weakEvidence
       ? `主要短板：${weakEvidence}`
       : `服务端按 ${explanation.authoritative_score ?? "—"} 分判定为 ${explanation.predicted_level ?? "未定级"}`
+}
+
+function RawModelOutput({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="min-w-0 border-y border-[var(--line)] bg-white px-3 py-3">
+      <p className="text-xs font-bold text-[var(--muted)]">{label}</p>
+      <pre className="font-data mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-words text-xs leading-5 text-foreground">{value}</pre>
+    </div>
+  )
 }
 
 function baselineErrorMessage(error: string) {

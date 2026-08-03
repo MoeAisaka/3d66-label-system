@@ -887,6 +887,7 @@ class BaselineRunCreateRequest(BaseModel):
     prompt_b_id: int | None = Field(default=None, ge=1)
     dimension_schema_id: int | None = Field(default=None, ge=1)
     dimension_mode: Literal["category_default", "all", "none"] = "category_default"
+    execution_mode: Literal["freeform", "structured"] = "freeform"
 
     @model_validator(mode="after")
     def validate_prompt_pair(self) -> "BaselineRunCreateRequest":
@@ -8122,6 +8123,7 @@ def _baseline_run_selection(
         return {
             "schema_version": "baseline-run-selection-v2",
             "category_key": execution.get("category_key"),
+            "execution_mode": execution.get("execution_mode", "structured"),
             "prompt_mode": (execution.get("pipeline_config") or {}).get("prompt_mode"),
             "prompt_a": prompt_identity("A"),
             "prompt_b": prompt_identity("B"),
@@ -8150,6 +8152,7 @@ def _baseline_run_selection(
     ]
     return {
         "schema_version": "baseline-run-selection-v1",
+        "execution_mode": execution.get("execution_mode", "structured"),
         "prompt_a": prompt_identity("A"),
         "prompt_b": prompt_identity("B"),
         "dimension": {
@@ -8600,12 +8603,16 @@ def create_baseline_run(
     prompt_rubrics = {prompt_a.rubric_version}
     if prompt_b is not None:
         prompt_rubrics.add(prompt_b.rubric_version)
-    if len(prompt_rubrics) != 1:
+    if request.execution_mode == "structured" and len(prompt_rubrics) != 1:
         raise HTTPException(
             status_code=409,
             detail="基准回归所选提示词的 rubric 版本不一致",
         )
-    if request.dimension_mode == "none" and not single_prompt_mode:
+    if (
+        request.execution_mode == "structured"
+        and request.dimension_mode == "none"
+        and not single_prompt_mode
+    ):
         raise HTTPException(
             status_code=409,
             detail={
@@ -8696,9 +8703,12 @@ def create_baseline_run(
             if request.dimension_mode in {"all", "none"}
             else None
         ),
-        rubric_version_override=next(iter(prompt_rubrics)),
+        rubric_version_override=(
+            prompt_b.rubric_version if prompt_b is not None else prompt_a.rubric_version
+        ),
     )
     execution_payload = json.loads(execution_snapshot)
+    execution_payload["execution_mode"] = request.execution_mode
     execution_payload["selection_explicit"] = bool(
         request.dimension_schema_id is not None
         or request.dimension_mode != "category_default"
@@ -8781,6 +8791,7 @@ def create_baseline_run(
             "prompt_a_id": prompt_a.id,
             "prompt_b_id": prompt_b.id if prompt_b is not None else None,
             "prompt_mode": "single" if single_prompt_mode else "ab",
+            "execution_mode": request.execution_mode,
             "category_key": baseline_set.category_key,
             "dimension_selection_mode": json.loads(execution_snapshot)["dimension_selection"]["mode"],
             "dimension_schema_id": dimension_contract.schema_id if dimension_contract else None,
@@ -8898,6 +8909,18 @@ def baseline_run_detail(
                 "confidence": snapshot.get("confidence"),
                 "needs_review": snapshot.get("needs_review"),
                 "versions": snapshot.get("versions") or {},
+                "execution_mode": snapshot.get("execution_mode", "structured"),
+                "interpretation": snapshot.get("interpretation") or {
+                    "status": (
+                        "scored"
+                        if actual in BASELINE_LEVELS
+                        and isinstance(snapshot.get("authoritative_score"), (int, float))
+                        and not isinstance(snapshot.get("authoritative_score"), bool)
+                        else "manual_required"
+                    ),
+                    "raw_text_a": None,
+                    "raw_text_b": None,
+                },
                 "status": item.status,
                 "deviation": deviation,
                 "error_message": item.error_message,
