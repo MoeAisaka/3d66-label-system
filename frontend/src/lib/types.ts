@@ -251,10 +251,10 @@ export type Evaluation = {
 }
 
 export type ReviewCorrection = {
-  target_type: "dimension"
+  target_type: "dimension" | "key_field"
   field_key: string
-  model_value: number | string | null
-  human_value: number | string | null
+  model_value: unknown
+  human_value: unknown
   reason_codes: string[]
   note: string
 }
@@ -412,6 +412,7 @@ export type BaselineSetItem = {
 export type BaselineSetDetail = {
   summary: BaselineSetSummary
   items: BaselineSetItem[]
+  pagination: { offset: number; limit: number; total: number }
   runs: BaselineRegressionRun[]
 }
 
@@ -503,6 +504,7 @@ export type BaselineRegressionDetail = {
     previous: { total: number; valid_predictions: number; failed: number } | null
   }
   filter: { deviations_only: boolean }
+  pagination: { offset: number; limit: number; total: number }
   items: BaselineRegressionItem[]
 }
 

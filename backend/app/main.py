@@ -193,7 +193,11 @@ from .evaluation_packages import (
 )
 from .evaluation_production import build_evaluation_production_router
 from .seed import seed_defaults
-from .schema_adapter import repair_combined_aesthetic_results, rescore_stored_results
+from .schema_adapter import (
+    repair_combined_aesthetic_results,
+    rescore_stored_results,
+    validate_production_correction,
+)
 from .regression import (
     SAMPLE_ROLES,
     complete_paired_regression_item,
@@ -708,8 +712,8 @@ class PromptAiReviseRequest(BaseModel):
 class ReviewCorrection(BaseModel):
     target_type: str = Field(pattern="^(dimension|key_field)$")
     field_key: str = Field(min_length=1, max_length=80)
-    model_value: int | str | None = None
-    human_value: int | str | None = None
+    model_value: Any = None
+    human_value: Any = None
     reason_codes: list[str] = Field(min_length=1, max_length=8)
     note: str = Field(default="", max_length=1000)
 
@@ -724,6 +728,8 @@ class ReviewCorrection(BaseModel):
             raise ValueError("关键字段不在允许纠偏的字段清单中")
         elif self.human_value == self.model_value:
             raise ValueError("人工关键字段值必须与模型值不同")
+        else:
+            validate_production_correction(self.field_key, self.human_value)
         return self
 
 
@@ -3888,14 +3894,28 @@ def list_assets(
         statement = statement.where(Asset.created_at >= created_from)
     if created_to is not None:
         statement = statement.where(Asset.created_at <= created_to)
-    assets = db.scalars(
-        statement.order_by(Asset.created_at.desc(), Asset.id.desc())
-    ).unique().all()
+    ordered_statement = statement.order_by(Asset.created_at.desc(), Asset.id.desc())
+    if exclude_evaluated_current:
+        assets = db.scalars(ordered_statement).unique().all()
+        total = None
+    else:
+        id_statement = statement.with_only_columns(Asset.id).distinct()
+        total = db.scalar(
+            select(func.count()).select_from(id_statement.subquery())
+        ) or 0
+        assets = db.scalars(
+            ordered_statement
+            .offset(max(0, offset))
+            .limit(min(1000, max(1, limit)))
+        ).unique().all()
     package_names: dict[int, str] = {}
-    if package_id is not None:
+    if package_id is not None and assets:
         package_items = db.scalars(
             select(MaterialPackageItem)
-            .where(MaterialPackageItem.package_id == package_id)
+            .where(
+                MaterialPackageItem.package_id == package_id,
+                MaterialPackageItem.asset_id.in_([asset.id for asset in assets]),
+            )
             .order_by(MaterialPackageItem.position.asc())
         ).all()
         for package_item in package_items:
@@ -3923,6 +3943,8 @@ def list_assets(
                 "evaluation_status": evaluation_status,
             }
         )
+    if total is not None:
+        return {"items": payloads, "total": total}
     total = len(payloads)
     return {
         "items": payloads[max(0, offset):max(0, offset) + min(1000, limit)],
@@ -6073,21 +6095,26 @@ def _finalize_review_panel(
     corrected_score = None
     corrected_level = None
     if decision == "corrected":
-        aesthetic, dimension_schema = (
-            _evaluation_aesthetic_and_dimension_schema(evaluation)
-        )
-        recalculated = calculate_corrected_score(
-            json.loads(evaluation.precheck_json),
-            aesthetic,
-            [
-                correction
-                for correction in corrections
-                if correction.get("target_type") == "dimension"
-            ],
-            dimension_schema=dimension_schema,
-        )
-        corrected_score = recalculated.get("score")
-        corrected_level = recalculated.get("level")
+        dimension_corrections = [
+            correction
+            for correction in corrections
+            if correction.get("target_type") == "dimension"
+        ]
+        if dimension_corrections:
+            aesthetic, dimension_schema = (
+                _evaluation_aesthetic_and_dimension_schema(evaluation)
+            )
+            recalculated = calculate_corrected_score(
+                json.loads(evaluation.precheck_json),
+                aesthetic,
+                dimension_corrections,
+                dimension_schema=dimension_schema,
+            )
+            corrected_score = recalculated.get("score")
+            corrected_level = recalculated.get("level")
+        else:
+            corrected_score = evaluation.score
+            corrected_level = evaluation.level
         if corrected_score is None or corrected_level is None:
             raise HTTPException(
                 status_code=400, detail="初审共识无法计算正式等级"
@@ -6374,19 +6401,27 @@ def submit_review_panel_vote(
     correction_data = [item.model_dump() for item in payload.corrections]
     if payload.decision == "corrected":
         try:
-            aesthetic, dimension_schema = (
-                _evaluation_aesthetic_and_dimension_schema(evaluation)
-            )
-            recalculated = calculate_corrected_score(
-                json.loads(evaluation.precheck_json),
-                aesthetic,
-                correction_data,
-                dimension_schema=dimension_schema,
-            )
+            dimension_corrections = [
+                item for item in correction_data
+                if item.get("target_type") == "dimension"
+            ]
+            if dimension_corrections:
+                aesthetic, dimension_schema = (
+                    _evaluation_aesthetic_and_dimension_schema(evaluation)
+                )
+                recalculated = calculate_corrected_score(
+                    json.loads(evaluation.precheck_json),
+                    aesthetic,
+                    dimension_corrections,
+                    dimension_schema=dimension_schema,
+                )
+                corrected_score = recalculated.get("score")
+                corrected_level = recalculated.get("level")
+            else:
+                corrected_score = evaluation.score
+                corrected_level = evaluation.level
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        corrected_score = recalculated.get("score")
-        corrected_level = recalculated.get("level")
     else:
         corrected_score = None
         corrected_level = None
@@ -7872,19 +7907,27 @@ def create_review(
     corrected_level = None
     if payload.decision == "corrected":
         try:
-            aesthetic, dimension_schema = (
-                _evaluation_aesthetic_and_dimension_schema(evaluation)
-            )
-            recalculated = calculate_corrected_score(
-                json.loads(evaluation.precheck_json),
-                aesthetic,
-                correction_data,
-                dimension_schema=dimension_schema,
-            )
+            dimension_corrections = [
+                item for item in correction_data
+                if item.get("target_type") == "dimension"
+            ]
+            if dimension_corrections:
+                aesthetic, dimension_schema = (
+                    _evaluation_aesthetic_and_dimension_schema(evaluation)
+                )
+                recalculated = calculate_corrected_score(
+                    json.loads(evaluation.precheck_json),
+                    aesthetic,
+                    dimension_corrections,
+                    dimension_schema=dimension_schema,
+                )
+                corrected_score = recalculated.get("score")
+                corrected_level = recalculated.get("level")
+            else:
+                corrected_score = evaluation.score
+                corrected_level = evaluation.level
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        corrected_score = recalculated.get("score")
-        corrected_level = recalculated.get("level")
         if corrected_score is None or corrected_level is None:
             raise HTTPException(status_code=400, detail="当前结果无法自动计算正式等级")
     current_answer = _review_standard_answer(
@@ -8192,7 +8235,11 @@ def _baseline_run_summary(run: BaselineRegressionRun) -> dict[str, Any]:
     }
 
 
-def _baseline_set_summary(baseline_set: BaselineSet) -> dict[str, Any]:
+def _baseline_set_summary(
+    baseline_set: BaselineSet,
+    *,
+    item_count: int | None = None,
+) -> dict[str, Any]:
     latest_run = baseline_set.runs[-1] if baseline_set.runs else None
     return {
         "id": baseline_set.id,
@@ -8201,7 +8248,7 @@ def _baseline_set_summary(baseline_set: BaselineSet) -> dict[str, Any]:
         "description": baseline_set.description,
         "default_expected_level": baseline_set.default_expected_level,
         "fingerprint": baseline_set.fingerprint,
-        "item_count": len(baseline_set.items),
+        "item_count": len(baseline_set.items) if item_count is None else item_count,
         "run_count": len(baseline_set.runs),
         "latest_run": _baseline_run_summary(latest_run) if latest_run else None,
         "frozen": True,
@@ -8225,7 +8272,24 @@ def list_baseline_sets(
             BaselineSet.created_at.desc(), BaselineSet.id.desc()
         )
     ).all()
-    return {"items": [_baseline_set_summary(item) for item in sets]}
+    set_ids = [item.id for item in sets]
+    item_counts = {
+        baseline_set_id: count
+        for baseline_set_id, count in db.execute(
+            select(
+                BaselineSetItem.baseline_set_id,
+                func.count(BaselineSetItem.id),
+            )
+            .where(BaselineSetItem.baseline_set_id.in_(set_ids))
+            .group_by(BaselineSetItem.baseline_set_id)
+        ).all()
+    } if set_ids else {}
+    return {
+        "items": [
+            _baseline_set_summary(item, item_count=item_counts.get(item.id, 0))
+            for item in sets
+        ]
+    }
 
 
 @app.post("/api/baseline-sets")
@@ -8241,6 +8305,7 @@ def create_baseline_set(
 
     requested_items = list(payload.items)
     expected_sources: dict[int, tuple[str, dict[str, Any]]] = {}
+    source_names: dict[tuple[int, int], str] = {}
     if payload.source_package_id is not None:
         source_package = db.get(MaterialPackage, payload.source_package_id)
         if source_package is None:
@@ -8256,6 +8321,9 @@ def create_baseline_set(
             ):
                 continue
             seen_asset_ids.add(package_item.asset_id)
+            source_names[(source_package.id, package_item.asset_id)] = (
+                package_item.original_name
+            )
             suggestion = filename_level_suggestion(package_item.original_name)
             override = payload.expected_level_overrides.get(
                 package_item.asset_id
@@ -8312,26 +8380,38 @@ def create_baseline_set(
         )
     if any(asset.category_key != payload.category_key for asset in assets):
         raise HTTPException(status_code=409, detail="基准集不允许混入其他流水线类目素材")
+    manual_source_pairs = {
+        (item.source_package_id, item.asset_id)
+        for item in requested_items
+        if item.source_package_id is not None
+    } - set(source_names)
+    if manual_source_pairs:
+        source_package_ids = {pair[0] for pair in manual_source_pairs}
+        source_asset_ids = {pair[1] for pair in manual_source_pairs}
+        for package_item in db.scalars(
+            select(MaterialPackageItem).where(
+                MaterialPackageItem.package_id.in_(source_package_ids),
+                MaterialPackageItem.asset_id.in_(source_asset_ids),
+            )
+        ).all():
+            source_names.setdefault(
+                (package_item.package_id, package_item.asset_id),
+                package_item.original_name,
+            )
     frozen_items: list[dict[str, Any]] = []
     for requested in requested_items:
         asset = assets_by_id[requested.asset_id]
         source_name = asset.original_name
         if requested.source_package_id is not None:
-            package_item = db.scalar(
-                select(MaterialPackageItem)
-                .where(
-                    MaterialPackageItem.package_id
-                    == requested.source_package_id,
-                    MaterialPackageItem.asset_id == asset.id,
-                )
-                .limit(1)
+            source_name = source_names.get(
+                (requested.source_package_id, asset.id),
+                "",
             )
-            if package_item is None:
+            if not source_name:
                 raise HTTPException(
                     status_code=400,
                     detail=f"素材 #{asset.id} 不属于所选素材包",
                 )
-            source_name = package_item.original_name
         suggestion = filename_level_suggestion(source_name)
         level_source, frozen_suggestion = expected_sources.get(
             asset.id,
@@ -8424,20 +8504,39 @@ def create_baseline_set(
     )
     db.commit()
     db.refresh(baseline_set)
-    return _baseline_set_summary(baseline_set)
+    return _baseline_set_summary(baseline_set, item_count=len(frozen_items))
 
 
 @app.get("/api/baseline-sets/{baseline_set_id}")
 def baseline_set_detail(
     baseline_set_id: int,
+    include_items: bool = True,
+    limit: int = 1000,
+    offset: int = 0,
     _user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     baseline_set = db.get(BaselineSet, baseline_set_id)
     if baseline_set is None:
         raise HTTPException(status_code=404, detail="基准集不存在")
+    item_total = db.scalar(
+        select(func.count(BaselineSetItem.id)).where(
+            BaselineSetItem.baseline_set_id == baseline_set.id
+        )
+    ) or 0
+    frozen_items = (
+        db.scalars(
+            select(BaselineSetItem)
+            .where(BaselineSetItem.baseline_set_id == baseline_set.id)
+            .order_by(BaselineSetItem.id.asc())
+            .offset(max(0, offset))
+            .limit(min(1000, max(1, limit)))
+        ).all()
+        if include_items
+        else []
+    )
     return {
-        "summary": _baseline_set_summary(baseline_set),
+        "summary": _baseline_set_summary(baseline_set, item_count=item_total),
         "items": [
             {
                 "id": item.id,
@@ -8448,8 +8547,13 @@ def baseline_set_detail(
                 "image_url": f"/api/assets/{item.asset_id}/file",
                 "frozen": True,
             }
-            for item in baseline_set.items
+            for item in frozen_items
         ],
+        "pagination": {
+            "offset": max(0, offset),
+            "limit": min(1000, max(1, limit)),
+            "total": item_total,
+        },
         "runs": [
             _baseline_run_summary(run)
             for run in reversed(baseline_set.runs)
@@ -8749,18 +8853,20 @@ def create_baseline_run(
     db.add(run)
     db.flush()
     batch_key = f"baseline:{run.id}:{uuid.uuid4().hex}"
-    job_ids: list[int] = []
-    for frozen_item in baseline_set.items:
-        run_item = BaselineRegressionItem(
+    run_items = [
+        BaselineRegressionItem(
             run_id=run.id,
             baseline_set_item_id=frozen_item.id,
             asset_id=frozen_item.asset_id,
             expected_level=frozen_item.expected_level,
             status="queued",
         )
-        db.add(run_item)
-        db.flush()
-        job = EvaluationJob(
+        for frozen_item in baseline_set.items
+    ]
+    db.add_all(run_items)
+    db.flush()
+    jobs = [
+        EvaluationJob(
             asset_id=frozen_item.asset_id,
             category_key=baseline_set.category_key,
             category_profile_snapshot_json=execution_snapshot,
@@ -8772,10 +8878,13 @@ def create_baseline_run(
             origin_queue_class="validation",
             batch_key=batch_key,
         )
-        db.add(job)
-        db.flush()
+        for frozen_item, run_item in zip(baseline_set.items, run_items, strict=True)
+    ]
+    db.add_all(jobs)
+    db.flush()
+    for run_item, job in zip(run_items, jobs, strict=True):
         run_item.job_id = job.id
-        job_ids.append(job.id)
+    job_ids = [job.id for job in jobs]
     append_audit_event(
         db,
         category="baseline_regression",
@@ -8827,24 +8936,43 @@ def list_baseline_runs(
 def baseline_run_detail(
     run_id: int,
     deviations_only: bool = False,
+    limit: int = 200,
+    offset: int = 0,
     _user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     run = db.get(BaselineRegressionRun, run_id)
     if run is None:
         raise HTTPException(status_code=404, detail="基准回归 run 不存在")
+    page_limit = min(1000, max(1, limit))
+    page_offset = max(0, offset)
+    if deviations_only:
+        run_items = run.items
+        item_total = None
+    else:
+        item_total = db.scalar(
+            select(func.count(BaselineRegressionItem.id)).where(
+                BaselineRegressionItem.run_id == run.id
+            )
+        ) or 0
+        run_items = db.scalars(
+            select(BaselineRegressionItem)
+            .where(BaselineRegressionItem.run_id == run.id)
+            .order_by(BaselineRegressionItem.id.asc())
+            .offset(page_offset)
+            .limit(page_limit)
+        ).all()
+    run_item_ids = [item.id for item in run_items]
     queue_cases = {
         case.baseline_regression_item_id: case
         for case in db.scalars(
             select(OptimizationCaseQueue).where(
-                OptimizationCaseQueue.baseline_regression_item_id.in_(
-                    [item.id for item in run.items]
-                )
+                OptimizationCaseQueue.baseline_regression_item_id.in_(run_item_ids)
             )
-        ).all()
+        ).all() if run_item_ids
     }
     item_payloads: list[dict[str, Any]] = []
-    for item in run.items:
+    for item in run_items:
         snapshot = json.loads(item.result_snapshot_json or "{}")
         actual = snapshot.get("predicted_level")
         deviation = actual in BASELINE_LEVELS and actual != item.expected_level
@@ -8941,14 +9069,30 @@ def baseline_run_detail(
         if run.previous_run_id is not None
         else None
     )
+    if deviations_only:
+        item_total = len(item_payloads)
+        item_payloads = item_payloads[page_offset:page_offset + page_limit]
+    baseline_item_count = db.scalar(
+        select(func.count(BaselineSetItem.id)).where(
+            BaselineSetItem.baseline_set_id == run.baseline_set_id
+        )
+    ) or 0
     return {
         "summary": _baseline_run_summary(run),
-        "baseline_set": _baseline_set_summary(run.baseline_set),
+        "baseline_set": _baseline_set_summary(
+            run.baseline_set,
+            item_count=baseline_item_count,
+        ),
         "strategy": safe_strategy_snapshot_payload(
             run.strategy_snapshot_json
         ),
         "comparison": run_comparison(run, previous),
         "filter": {"deviations_only": deviations_only},
+        "pagination": {
+            "offset": page_offset,
+            "limit": page_limit,
+            "total": item_total,
+        },
         "items": item_payloads,
     }
 

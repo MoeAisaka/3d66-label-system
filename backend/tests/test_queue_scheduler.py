@@ -9,7 +9,7 @@ from email.utils import format_datetime
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine, func, select
+from sqlalchemy import create_engine, event, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -1066,6 +1066,71 @@ def test_open_breaker_preserves_queued_job_and_claims_other_batch(
         assert blocked.status == "queued"
         assert available.status == "processing"
     finally:
+        db.close()
+        engine.dispose()
+
+
+def test_claim_large_queue_uses_bounded_candidate_select(monkeypatch) -> None:
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    db = Session(engine, expire_on_commit=False)
+    asset = Asset(
+        original_name="large-queue.jpg",
+        stored_name="large-queue.jpg",
+        mime_type="image/jpeg",
+        size_bytes=10,
+        sha256="8" * 64,
+    )
+    model = ModelConfig(encrypted_api_key="not-used-by-claim", max_concurrency=10)
+    db.add_all([asset, model])
+    db.flush()
+    db.bulk_save_objects([
+        EvaluationJob(
+            asset_id=asset.id,
+            queue_class="production_batch",
+            origin_queue_class="production_batch",
+        )
+        for _ in range(10_000)
+    ])
+    db.commit()
+
+    queued_selects: list[str] = []
+
+    def capture_statement(_conn, _cursor, statement, _parameters, _context, _many):
+        normalized = statement.lower()
+        if (
+            normalized.lstrip().startswith("select")
+            and "from evaluation_jobs" in normalized
+            and "evaluation_jobs.status" in normalized
+        ):
+            queued_selects.append(normalized)
+
+    event.listen(engine, "before_cursor_execute", capture_statement)
+
+    @contextmanager
+    def test_scope():
+        try:
+            yield db
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+
+    monkeypatch.setattr(worker, "session_scope", test_scope)
+    try:
+        assert worker.claim_next_job() is not None
+        candidate_selects = [
+            statement for statement in queued_selects
+            if "order by evaluation_jobs.created_at" in statement
+        ]
+        assert candidate_selects
+        assert all(" limit " in statement for statement in candidate_selects)
+    finally:
+        event.remove(engine, "before_cursor_execute", capture_statement)
         db.close()
         engine.dispose()
 

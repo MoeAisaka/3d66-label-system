@@ -1,8 +1,11 @@
+import pytest
+
 from app.schema_adapter import (
     adapt_combined_aesthetic_response,
     is_combined_aesthetic_response,
     normalize_aesthetic_dimensions_for_schema,
     normalize_precheck_business_rules,
+    normalize_production_fields,
 )
 from app.dimension_schema_registry import space_schema_definition_for_scoring_profile
 from app.scoring import calculate_score
@@ -153,3 +156,59 @@ def test_rendering_with_watermark_is_not_professional_or_normal() -> None:
     assert normalized["image_quality"]["quality_severity"] == "slight"
     assert normalized["image_quality"]["render_fidelity"] == "acceptable"
     assert normalized["media_form"]["professional_photography"]["status"] == "no"
+
+
+def test_production_fields_contract_normalizes_legacy_top_level_payload() -> None:
+    payload = {
+        "title": "现代客厅",
+        "seotitle": "现代简约客厅空间设计效果图",
+        "category": "住宅空间，客厅",
+        "style": "现代简约",
+        "tags": ["客厅", "现代", "简约", "木饰面", "客厅"],
+        "cons": "电视墙留白偏多，视觉重心略散。",
+        "design": "以横向线条和暖木材质组织开放客厅。",
+        "score": 82,
+        "reason": [],
+        "image_defects": "",
+        "trait": "3D数字效果图",
+        "image_quality": {"quality_severity": "normal"},
+        "media_form": {
+            "rendering": {
+                "status": "yes",
+                "confidence": 0.98,
+                "evidence": ["材质和灯光呈现为数字渲染"],
+            }
+        },
+    }
+
+    normalized = normalize_production_fields(payload, required=True)
+
+    assert normalized["production_fields"]["tags"] == [
+        "客厅", "现代", "简约", "木饰面"
+    ]
+    assert normalized["production_fields"]["score"] == 82
+
+
+def test_production_fields_contract_rejects_missing_tags_and_invalid_media() -> None:
+    payload = {
+        "production_fields": {
+            "title": "客厅",
+            "seotitle": "客厅效果图",
+            "category": "住宅空间，客厅",
+            "style": "现代",
+            "tags": ["客厅", "现代", "简约"],
+            "cons": "可见缺点",
+            "design": "可见设计",
+            "score": 80,
+            "reason": [],
+            "image_defects": "",
+            "trait": "3D数字效果图",
+        },
+        "image_quality": {"quality_severity": "normal"},
+        "media_form": {
+            "rendering": {"status": "maybe", "confidence": 2, "evidence": []}
+        },
+    }
+
+    with pytest.raises(ValueError, match="至少包含 4 个"):
+        normalize_production_fields(payload, required=True)

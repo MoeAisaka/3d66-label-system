@@ -344,7 +344,7 @@ export function ReviewPage({ user }: { user: User }) {
                     <Button variant="secondary" onClick={() => review.mutate({ decision: "rejected", corrected_level: null, reviewNote: note.trim() })} disabled={review.isPending}>退回复核</Button>
                     <Button onClick={() => review.mutate({ decision: "approved", corrected_level: null, reviewNote: note.trim() })} disabled={review.isPending}><Check weight="bold" />确认结果</Button>
                   </div></div>}
-                  <ReviewCorrectionForm key={`${evaluation.id}-${evaluation.review_revision}`} dimensions={dimensions} dimensionSchema={evaluation.dimension_schema} scoring={scoring ?? {}} pending={review.isPending} editable={evaluation.review_stage !== "completed"} onSubmit={({ note: correctionNote, corrections }) => {
+                  <ReviewCorrectionForm key={`${evaluation.id}-${evaluation.review_revision}`} dimensions={dimensions} precheck={evaluation.precheck ?? {}} dimensionSchema={evaluation.dimension_schema} scoring={scoring ?? {}} pending={review.isPending} editable={evaluation.review_stage !== "completed"} onSubmit={({ note: correctionNote, corrections }) => {
                     review.mutate({ decision: "corrected", corrected_level: null, reviewNote: correctionNote, corrections })
                   }} />
                 </div>

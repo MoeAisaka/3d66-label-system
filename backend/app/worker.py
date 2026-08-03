@@ -16,7 +16,7 @@ from email.utils import parsedate_to_datetime
 from pathlib import Path
 from types import SimpleNamespace
 
-from sqlalchemy import func, select, text, update
+from sqlalchemy import func, or_, select, text, update
 from sqlalchemy.exc import IntegrityError
 
 from .config import get_settings
@@ -98,6 +98,7 @@ from .schema_adapter import (
     adapt_combined_aesthetic_response,
     is_combined_aesthetic_response,
     normalize_precheck_business_rules,
+    normalize_production_fields,
 )
 from .dimension_schema_registry import (
     space_schema_definition_for_scoring_profile,
@@ -143,6 +144,7 @@ def _new_worker_id() -> str:
 
 
 WORKER_ID = _new_worker_id()
+CLAIM_CANDIDATE_PAGE_SIZE = 64
 
 
 class JobInterrupted(RuntimeError):
@@ -154,6 +156,23 @@ PDF_SUMMARY_SYSTEM_PROMPT = """你是 3d66 方案 PDF 的多模态前处理器�
 只输出 JSON 对象，字段固定为：document_type、summary、key_points、visual_findings、risks、confidence。
 summary 是 1 至 1200 字的中文摘要；key_points、visual_findings、risks 均为字符串数组；
 confidence 是 0 至 1 的数字。不得评分、不得输出 L1-L5，也不得臆造页图和文本中不存在的信息。"""
+
+PRODUCTION_FIELDS_PROMPT_CONTRACT = """
+
+生产消费字段合同：请在 JSON 顶层增加 production_fields 对象，且完整返回：
+- title：10字内专业标题；seotitle：28字内中文SEO标题。
+- category：格式为“一级分类名称，二级分类名称”；无法判断写“其它，无法判断”。
+- style：只写可见风格；无法判断写“无法判断”。
+- tags：至少4个主要标签的字符串数组。
+- cons：犀利但必须基于图中可见证据的缺点点评。
+- design：设计理念或画面意图；无法判断时明确写“无法判断”，不得编造。
+- score：0-100整数，仅为调用A初步参考分，不代表最终L1-L5结论。
+- reason：字符串数组，只能选“是截图”“有大面积文字说明”“是多拼图”“有二维码”“是随手拍”“是颠倒图”；未命中返回[]。
+- image_defects：有水印返回“有水印”，否则返回空字符串。
+- trait：只能选“AI图”“实景照片”“3D数字效果图”“其它”。
+同时 image_quality.quality_severity 只能选 normal/slight/moderate/severe/unusable/uncertain；
+media_form 下每一项都必须包含 status（yes/no/uncertain）、confidence（0-1）和 evidence（可见证据字符串数组）。
+"""
 
 
 def _pdf_summary_user_prompt(document_context: dict[str, object]) -> str:
@@ -543,6 +562,65 @@ def _reset_expired_circuit_breakers(db, now: datetime) -> None:
         breaker.updated_at = now
 
 
+def _eligible_queue_heads(
+    db,
+    *,
+    now: datetime,
+    configured_model: object | None,
+    open_breakers: set[tuple[str, str]],
+) -> tuple[list[EvaluationJob], object | None]:
+    """Find the oldest dispatchable job in each queue without loading the backlog."""
+    queue_heads: list[EvaluationJob] = []
+    resolved_model = configured_model
+    for queue_class in QUEUE_CLASSES:
+        offset = 0
+        while True:
+            queue_filter = (
+                or_(
+                    EvaluationJob.queue_class == "production_batch",
+                    EvaluationJob.queue_class.is_(None),
+                )
+                if queue_class == "production_batch"
+                else EvaluationJob.queue_class == queue_class
+            )
+            candidates = db.scalars(
+                select(EvaluationJob)
+                .where(
+                    EvaluationJob.status == "queued",
+                    (
+                        EvaluationJob.retry_after_at.is_(None)
+                        | (EvaluationJob.retry_after_at <= now)
+                    ),
+                    queue_filter,
+                )
+                .order_by(EvaluationJob.created_at.asc(), EvaluationJob.id.asc())
+                .offset(offset)
+                .limit(CLAIM_CANDIDATE_PAGE_SIZE)
+            ).all()
+            if not candidates:
+                break
+            for job in candidates:
+                if _is_job_breaker_open(job, open_breakers):
+                    continue
+                if resolved_model is None:
+                    candidate_model = job_primary_model(db, job)
+                    if candidate_model is not None and model_has_credentials(candidate_model):
+                        resolved_model = candidate_model
+                if resolved_model is not None and job_has_required_credentials(
+                    db,
+                    job,
+                    fallback_model=resolved_model,
+                ):
+                    queue_heads.append(job)
+                    break
+            if queue_heads and queue_heads[-1].queue_class in {queue_class, None}:
+                break
+            offset += len(candidates)
+            if len(candidates) < CLAIM_CANDIDATE_PAGE_SIZE:
+                break
+    return queue_heads, resolved_model
+
+
 def claim_next_job() -> int | None:
     with session_scope() as db:
         if db.get_bind().dialect.name == "sqlite":
@@ -552,33 +630,6 @@ def claim_next_job() -> int | None:
             return None
         configured_model = default_evaluation_model(db)
         now = datetime.now(timezone.utc)
-        queued_jobs = db.scalars(
-            select(EvaluationJob)
-            .where(
-                EvaluationJob.status == "queued",
-                (
-                    EvaluationJob.retry_after_at.is_(None)
-                    | (EvaluationJob.retry_after_at <= now)
-                ),
-            )
-            .order_by(EvaluationJob.created_at.asc(), EvaluationJob.id.asc())
-        ).all()
-        if not queued_jobs:
-            return None
-        if configured_model is None:
-            configured_model = next(
-                (
-                    model
-                    for job in queued_jobs
-                    if (
-                        (model := job_primary_model(db, job)) is not None
-                        and model_has_credentials(model)
-                    )
-                ),
-                None,
-            )
-        if configured_model is None:
-            return None
         _reset_expired_circuit_breakers(db, now)
         open_breakers = set(
             db.execute(
@@ -588,17 +639,15 @@ def claim_next_job() -> int | None:
                 ).where(CircuitBreaker.state == "open")
             ).all()
         )
-        eligible_jobs = [
-            job
-            for job in queued_jobs
-            if not _is_job_breaker_open(job, open_breakers)
-            and job_has_required_credentials(
-                db,
-                job,
-                fallback_model=configured_model,
-            )
-        ]
+        eligible_jobs, configured_model = _eligible_queue_heads(
+            db,
+            now=now,
+            configured_model=configured_model,
+            open_breakers=open_breakers,
+        )
         if not eligible_jobs:
+            return None
+        if configured_model is None:
             return None
         running = {queue: 0 for queue in QUEUE_CLASSES}
         for queue_class, count in db.execute(
@@ -1242,6 +1291,8 @@ async def evaluate_job(job_id: int) -> None:
     user_a = prompt_a.user_prompt.replace(
         "{{image_metadata}}", json.dumps(metadata, ensure_ascii=False)
     ) + category_prompt_context
+    if job.baseline_regression_item_id is not None and not freeform_mode:
+        user_a += PRODUCTION_FIELDS_PROMPT_CONTRACT
     if single_mode:
         _set_job(job_id, stage="single", progress=20)
     if loop_attempt is not None and loop_attempt.business_round in (2, 3):
@@ -1291,6 +1342,12 @@ async def evaluate_job(job_id: int) -> None:
         aesthetic = None
     try:
         precheck = normalize_precheck_business_rules(precheck)
+        precheck = normalize_production_fields(
+            precheck,
+            required=(
+                job.baseline_regression_item_id is not None and not freeform_mode
+            ),
+        )
     except (AttributeError, TypeError, ValueError):
         if not freeform_mode:
             raise

@@ -24,12 +24,63 @@ const reasons = [
   ["ignored_furnishing", "忽略家具与软装问题"],
   ["boundary_unclear", "等级边界理解错误"],
   ["invalid_evidence", "使用了不可靠证据"],
+  ["wrong_visible_attribute", "可见属性判断错误"],
+  ["enum_mismatch", "枚举选择错误"],
+  ["unsupported_inference", "存在无依据推断"],
+  ["missing_evidence", "缺少可见证据"],
 ] as const
 
 type Draft = { humanGrade: number; reasons: string[]; note: string }
+type KeyFieldDraft = { rawValue: string; reasons: string[]; note: string }
+type KeyFieldKind = "text" | "number" | "json"
+const keyFieldConfigs: Array<{
+  path: string
+  label: string
+  kind: KeyFieldKind
+  hint: string
+}> = [
+  { path: "production_fields.title", label: "专业标题", kind: "text", hint: "10字内" },
+  { path: "production_fields.seotitle", label: "SEO标题", kind: "text", hint: "28字内" },
+  { path: "production_fields.category", label: "一二级分类", kind: "text", hint: "一级分类，二级分类" },
+  { path: "production_fields.style", label: "可见风格", kind: "text", hint: "无法判断时写“无法判断”" },
+  { path: "production_fields.tags", label: "主要标签", kind: "json", hint: "至少4个字符串的 JSON 数组" },
+  { path: "production_fields.cons", label: "缺点点评", kind: "text", hint: "只依据可见证据" },
+  { path: "production_fields.design", label: "设计理念", kind: "text", hint: "无法判断时不得编造" },
+  { path: "production_fields.score", label: "调用A初步分", kind: "number", hint: "0-100整数，不是最终等级" },
+  { path: "production_fields.reason", label: "过滤原因", kind: "json", hint: "允许枚举的 JSON 数组" },
+  { path: "production_fields.image_defects", label: "图片缺陷", kind: "text", hint: "仅空字符串或“有水印”" },
+  { path: "production_fields.trait", label: "素材特征", kind: "text", hint: "AI图/实景照片/3D数字效果图/其它" },
+  { path: "image_quality.quality_severity", label: "画质严重度", kind: "text", hint: "normal/slight/moderate/severe/unusable/uncertain" },
+  { path: "media_form", label: "媒介形态明细", kind: "json", hint: "每项包含 status、confidence、evidence" },
+]
+
+function valueAtPath(source: Record<string, any>, path: string): unknown {
+  return path.split(".").reduce<unknown>((value, key) => (
+    value && typeof value === "object" && !Array.isArray(value)
+      ? (value as Record<string, unknown>)[key]
+      : undefined
+  ), source)
+}
+
+function editableValue(value: unknown, kind: KeyFieldKind): string {
+  if (value === undefined || value === null) return ""
+  if (kind === "json") return JSON.stringify(value, null, 2)
+  return String(value)
+}
+
+function parsedValue(rawValue: string, kind: KeyFieldKind): unknown {
+  if (kind === "json") return JSON.parse(rawValue)
+  if (kind === "number") {
+    const value = Number(rawValue)
+    if (!Number.isInteger(value)) throw new Error("必须填写整数")
+    return value
+  }
+  return rawValue.trim()
+}
 
 export function ReviewCorrectionForm({
   dimensions,
+  precheck,
   dimensionSchema,
   scoring,
   pending,
@@ -37,6 +88,7 @@ export function ReviewCorrectionForm({
   onSubmit,
 }: {
   dimensions: Record<string, any>
+  precheck: Record<string, any>
   dimensionSchema: EvaluationDimensionSchema
   scoring: Record<string, any>
   pending: boolean
@@ -52,6 +104,7 @@ export function ReviewCorrectionForm({
     [dimensionSchema],
   )
   const [drafts, setDrafts] = useState<Record<string, Draft>>({})
+  const [keyFieldDrafts, setKeyFieldDrafts] = useState<Record<string, KeyFieldDraft>>({})
   const [overallNote, setOverallNote] = useState("")
   const [error, setError] = useState("")
 
@@ -62,6 +115,20 @@ export function ReviewCorrectionForm({
         return draft && draft.humanGrade !== Number(dimensions[key]?.grade || 0)
       }),
     [dimensionKeys, drafts, dimensions],
+  )
+  const availableKeyFields = useMemo(
+    () => keyFieldConfigs.filter((config) => valueAtPath(precheck, config.path) !== undefined),
+    [precheck],
+  )
+  const changedKeyFields = useMemo(
+    () => availableKeyFields.filter((config) => {
+      const draft = keyFieldDrafts[config.path]
+      return draft && draft.rawValue !== editableValue(
+        valueAtPath(precheck, config.path),
+        config.kind,
+      )
+    }),
+    [availableKeyFields, keyFieldDrafts, precheck],
   )
 
   const preview = useMemo(() => {
@@ -110,9 +177,37 @@ export function ReviewCorrectionForm({
     })
   }
 
+  function updateKeyFieldDraft(
+    path: string,
+    kind: KeyFieldKind,
+    patch: Partial<KeyFieldDraft>,
+  ) {
+    setError("")
+    setKeyFieldDrafts((current) => ({
+      ...current,
+      [path]: {
+        ...(current[path] ?? {
+          rawValue: editableValue(valueAtPath(precheck, path), kind),
+          reasons: [],
+          note: "",
+        }),
+        ...patch,
+      },
+    }))
+  }
+
+  function toggleKeyFieldReason(path: string, kind: KeyFieldKind, reason: string) {
+    const current = keyFieldDrafts[path]?.reasons ?? []
+    updateKeyFieldDraft(path, kind, {
+      reasons: current.includes(reason)
+        ? current.filter((item) => item !== reason)
+        : [...current, reason],
+    })
+  }
+
   function submit() {
-    if (!changedKeys.length) {
-      setError("请至少修改一个维度分数")
+    if (!changedKeys.length && !changedKeyFields.length) {
+      setError("请至少修改一个维度或生产字段")
       return
     }
     for (const key of changedKeys) {
@@ -122,7 +217,28 @@ export function ReviewCorrectionForm({
         return
       }
     }
-    const corrections: ReviewCorrection[] = changedKeys.map((key) => ({
+    for (const config of changedKeyFields) {
+      if (!keyFieldDrafts[config.path]?.reasons.length) {
+        setError(`请为${config.label}选择至少一个错误原因`)
+        document.getElementById(`key-field-${config.path}`)?.scrollIntoView({ behavior: "smooth", block: "center" })
+        return
+      }
+    }
+    let keyCorrections: ReviewCorrection[]
+    try {
+      keyCorrections = changedKeyFields.map((config) => ({
+        target_type: "key_field",
+        field_key: config.path,
+        model_value: valueAtPath(precheck, config.path),
+        human_value: parsedValue(keyFieldDrafts[config.path].rawValue, config.kind),
+        reason_codes: keyFieldDrafts[config.path].reasons,
+        note: keyFieldDrafts[config.path].note.trim(),
+      }))
+    } catch (parseError) {
+      setError(parseError instanceof Error ? parseError.message : "生产字段格式无效")
+      return
+    }
+    const dimensionCorrections: ReviewCorrection[] = changedKeys.map((key) => ({
       target_type: "dimension",
       field_key: key,
       model_value: Number(dimensions[key]?.grade || 0),
@@ -130,7 +246,7 @@ export function ReviewCorrectionForm({
       reason_codes: drafts[key].reasons,
       note: drafts[key].note.trim(),
     }))
-    const summary = changedKeys
+    const dimensionSummary = changedKeys
       .map((key) => {
         const draft = drafts[key]
         const reasonText = draft.reasons
@@ -141,10 +257,16 @@ export function ReviewCorrectionForm({
         }`
       })
       .join("；")
-    onSubmit({ corrections, note: [summary, overallNote.trim()].filter(Boolean).join("；") })
+    const keyFieldSummary = changedKeyFields
+      .map((config) => `${config.label}已人工修正`)
+      .join("；")
+    onSubmit({
+      corrections: [...dimensionCorrections, ...keyCorrections],
+      note: [dimensionSummary, keyFieldSummary, overallNote.trim()].filter(Boolean).join("；"),
+    })
   }
 
-  if (!dimensionKeys.length || !preview) {
+  if ((!dimensionKeys.length || !preview) && !availableKeyFields.length) {
     return (
       <section
         aria-label="维度合同异常"
@@ -283,6 +405,50 @@ export function ReviewCorrectionForm({
         })}
       </div>
 
+      {availableKeyFields.length > 0 && (
+        <div className="border-b border-[var(--line)]">
+          <div className="bg-[#fafbf8] px-5 py-4">
+            <p className="text-sm font-semibold">生产消费字段</p>
+            <p className="mt-1 text-xs text-[var(--muted)]">搜索推荐等下游直接消费；修改会进入人工真值与正式标签快照。</p>
+          </div>
+          {availableKeyFields.map((config) => {
+            const modelValue = valueAtPath(precheck, config.path)
+            const draft = keyFieldDrafts[config.path]
+            const currentValue = draft?.rawValue ?? editableValue(modelValue, config.kind)
+            const changed = changedKeyFields.some((item) => item.path === config.path)
+            return (
+              <details id={`key-field-${config.path}`} key={config.path} className={changed ? "bg-[#fbfdeb]" : "bg-white"}>
+                <summary className="flex cursor-pointer items-center justify-between gap-3 border-t border-[var(--line)] px-5 py-4">
+                  <div><p className="text-sm font-semibold">{config.label}</p><p className="mt-1 text-[0.68rem] text-[var(--muted)]">{config.hint}</p></div>
+                  {changed ? <Badge tone="active">已修改</Badge> : <Badge>模型值</Badge>}
+                </summary>
+                <div className="px-5 pb-5">
+                  <Textarea
+                    value={currentValue}
+                    disabled={!editable}
+                    rows={config.kind === "json" ? 6 : 2}
+                    onChange={(event) => updateKeyFieldDraft(config.path, config.kind, { rawValue: event.target.value })}
+                  />
+                  {editable && changed && (
+                    <div className="mt-3 border-l-2 border-[#a2bd2a] pl-3">
+                      <p className="text-xs font-semibold">纠偏原因（至少一项）</p>
+                      <div className="mt-2 flex flex-wrap gap-1.5">
+                        {reasons.slice(-4).map(([value, label]) => (
+                          <button key={value} type="button" aria-pressed={draft?.reasons.includes(value)} onClick={() => toggleKeyFieldReason(config.path, config.kind, value)} className={`rounded-[4px] border px-2.5 py-1.5 text-[0.72rem] ${draft?.reasons.includes(value) ? "border-[#7f991b] bg-[#eff8c7]" : "border-[var(--line)] bg-white"}`}>
+                            {label}
+                          </button>
+                        ))}
+                      </div>
+                      <Textarea className="mt-3 min-h-16 bg-white" value={draft?.note ?? ""} onChange={(event) => updateKeyFieldDraft(config.path, config.kind, { note: event.target.value })} placeholder="补充可见证据，可选" rows={2} />
+                    </div>
+                  )}
+                </div>
+              </details>
+            )
+          })}
+        </div>
+      )}
+
       {(scoring?.caps?.length ?? 0) > 0 && (
         <div className="border-b border-[var(--line)] bg-[#fff9ef] px-5 py-4">
           <p className="flex items-center gap-2 text-sm font-semibold text-[#7d4308]">
@@ -296,15 +462,19 @@ export function ReviewCorrectionForm({
         </div>
       )}
 
-      {editable && changedKeys.length > 0 && (
+      {editable && (changedKeys.length > 0 || changedKeyFields.length > 0) && (
         <div className="sticky bottom-0 z-10 border-t border-[var(--line-strong)] bg-white/98 px-5 py-4 shadow-[0_-6px_18px_rgba(28,33,24,0.06)] backdrop-blur-sm">
           <div className="grid gap-3 sm:grid-cols-[auto_auto_minmax(0,1fr)] sm:items-center">
             <div>
-              <p className="font-data text-2xl font-semibold">{preview.score.toFixed(1)}</p>
+              <p className="font-data text-2xl font-semibold">
+                {preview?.score.toFixed(1) ?? scoring?.score ?? "—"}
+              </p>
               <p className="text-[0.68rem] text-[var(--muted)]">自动重算总分</p>
             </div>
             <div className="border-l border-[var(--line)] pl-4">
-              <p className="font-data text-2xl font-semibold">{preview.level}</p>
+              <p className="font-data text-2xl font-semibold">
+                {preview?.level ?? scoring?.level ?? "—"}
+              </p>
               <p className="text-[0.68rem] text-[var(--muted)]">自动重算等级</p>
             </div>
             <div className="sm:pl-3">
@@ -318,7 +488,7 @@ export function ReviewCorrectionForm({
             </div>
           </div>
           <p className="mt-2 text-[0.68rem] leading-5 text-[var(--muted)]">
-            已修改 {changedKeys.length} 个维度；最终结果由服务端评分引擎重算，不能手工填写。
+            已修改 {changedKeys.length} 个维度、{changedKeyFields.length} 个生产字段；最终等级只由服务端评分引擎计算。
           </p>
           {error && (
             <p role="alert" className="mt-2 flex items-start gap-2 text-xs leading-5 text-[#8d2924]">
@@ -328,7 +498,7 @@ export function ReviewCorrectionForm({
           )}
           <Button className="mt-3 w-full" onClick={submit} disabled={pending}>
             <Check weight="bold" />
-            {pending ? "正在保存人工纠偏" : `提交 ${changedKeys.length} 处纠偏`}
+            {pending ? "正在保存人工纠偏" : `提交 ${changedKeys.length + changedKeyFields.length} 处纠偏`}
           </Button>
         </div>
       )}

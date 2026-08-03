@@ -44,6 +44,8 @@
 | [0029](0029-unified-label-production-and-consumption-contract.md) | Accepted | 统一标签生产、版本化发布与下游消费合同 |
 | [0030](0030-package-review-and-category-baseline-promotion.md) | Accepted | 评测包二审、显式发布与类目基线原子提升 |
 | [0031](0031-category-dimension-management-and-prompt-only-mode.md) | Accepted | 类目维度管理、不可变版本与仅提示词评测模式 |
+| [0032](0032-production-fields-and-large-baseline-throughput.md) | Accepted | 生产消费字段闭环与 10000 张基准回归吞吐合同 |
+| [0033](0033-category-custom-evaluation-base-and-redline.md) | Proposed | 按类目自定义评测底座（红线+分类+维度）与 L 等级方向校正 |
 
 ## 新增 ADR 的规则
 

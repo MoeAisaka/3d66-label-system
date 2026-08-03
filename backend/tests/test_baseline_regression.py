@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
@@ -35,6 +35,7 @@ from app.models import (
     BaselineCorrectionRun,
     BaselineRegressionItem,
     BaselineRegressionRun,
+    BaselineSetItem,
     EvaluationJob,
     EvaluationCategoryProfile,
     EvaluationResult,
@@ -315,6 +316,120 @@ def test_baseline_api_freezes_truth_reports_and_enqueues_idempotently() -> None:
         }
         db.refresh(asset)
         assert asset.status == "uploaded"
+    finally:
+        app.dependency_overrides.clear()
+        db.close()
+        engine.dispose()
+
+
+def test_baseline_whole_package_supports_10000_items_and_jobs() -> None:
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    db = Session(engine, expire_on_commit=False)
+    user = User(username="bulk-tester", password_hash="unused", display_name="批量测试员")
+    model = ModelConfig(
+        name="bulk-model",
+        provider="doubao",
+        base_url="https://example.test",
+        api_path="/chat",
+        model_id="bulk-model",
+        active=True,
+    )
+    prompt_a = PromptVersion(
+        stage="A", name="批量A", version="bulk-A", system_prompt="system a",
+        user_prompt="user a", rubric_version="R1", status="published",
+    )
+    prompt_b = PromptVersion(
+        stage="B", name="批量B", version="bulk-B", system_prompt="system b",
+        user_prompt="user b", rubric_version="R1", status="published",
+    )
+    db.add_all([user, model, prompt_a, prompt_b])
+    db.flush()
+    db.bulk_save_objects([
+        Asset(
+            original_name=f"bulk-{index:05d}-L2.jpg",
+            stored_name=f"bulk-{index:05d}.jpg",
+            mime_type="image/jpeg",
+            size_bytes=10,
+            sha256=f"{index:064x}",
+            status="uploaded",
+        )
+        for index in range(10_000)
+    ])
+    db.commit()
+    asset_ids = db.scalars(select(Asset.id).order_by(Asset.id.asc())).all()
+    package = MaterialPackage(
+        package_key="baseline-bulk-10000",
+        name="一万张基准包",
+        source="manual_upload",
+        category_key="space_image",
+        created_by=user.username,
+    )
+    db.add(package)
+    db.flush()
+    db.bulk_save_objects([
+        MaterialPackageItem(
+            package_id=package.id,
+            asset_id=asset_id,
+            original_name=f"bulk-{index:05d}-L2.jpg",
+            position=index,
+        )
+        for index, asset_id in enumerate(asset_ids)
+    ])
+    db.commit()
+
+    app.dependency_overrides[get_db] = lambda: (yield db)
+    app.dependency_overrides[current_user] = lambda: user
+    client = TestClient(app)
+    try:
+        created = client.post(
+            "/api/baseline-sets",
+            json={
+                "name": "一万张容量验收",
+                "default_expected_level": "L1",
+                "source_package_id": package.id,
+            },
+        )
+        assert created.status_code == 200
+        assert created.json()["item_count"] == 10_000
+        baseline_set_id = created.json()["id"]
+        assert db.scalar(
+            select(func.count()).select_from(BaselineSetItem).where(
+                BaselineSetItem.baseline_set_id == baseline_set_id
+            )
+        ) == 10_000
+
+        run = client.post(f"/api/baseline-sets/{baseline_set_id}/runs")
+        assert run.status_code == 200
+        assert run.json()["total"] == 10_000
+        assert len(run.json()["job_ids"]) == 10_000
+        assert db.scalar(
+            select(func.count()).select_from(EvaluationJob).where(
+                EvaluationJob.baseline_regression_item_id.is_not(None)
+            )
+        ) == 10_000
+
+        compact_set = client.get(
+            f"/api/baseline-sets/{baseline_set_id}?include_items=false"
+        )
+        assert compact_set.status_code == 200
+        assert compact_set.json()["summary"]["item_count"] == 10_000
+        assert compact_set.json()["items"] == []
+
+        run_detail = client.get(
+            f"/api/baseline-regressions/{run.json()['id']}?limit=200&offset=200"
+        )
+        assert run_detail.status_code == 200
+        assert len(run_detail.json()["items"]) == 200
+        assert run_detail.json()["pagination"] == {
+            "offset": 200,
+            "limit": 200,
+            "total": 10_000,
+        }
     finally:
         app.dependency_overrides.clear()
         db.close()

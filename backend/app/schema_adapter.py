@@ -30,6 +30,174 @@ QUALITY_RANK = {
     "unusable": 4,
     "uncertain": 1,
 }
+PRODUCTION_REASON_VALUES = {
+    "是截图",
+    "有大面积文字说明",
+    "是多拼图",
+    "有二维码",
+    "是随手拍",
+    "是颠倒图",
+}
+PRODUCTION_TRAIT_VALUES = {"AI图", "实景照片", "3D数字效果图", "其它"}
+QUALITY_SEVERITY_VALUES = {
+    "normal",
+    "slight",
+    "moderate",
+    "severe",
+    "unusable",
+    "uncertain",
+}
+MEDIA_STATUS_VALUES = {"yes", "no", "uncertain"}
+PRODUCTION_FIELD_KEYS = (
+    "title",
+    "seotitle",
+    "category",
+    "style",
+    "tags",
+    "cons",
+    "design",
+    "score",
+    "reason",
+    "image_defects",
+    "trait",
+)
+
+
+def _required_text(value: Any, *, field: str, limit: int) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{field} 必须是非空字符串")
+    normalized = value.strip()
+    if len(normalized) > limit:
+        raise ValueError(f"{field} 长度不能超过 {limit} 个字符")
+    return normalized
+
+
+def _validate_media_form(value: Any) -> None:
+    if not isinstance(value, dict) or not value:
+        raise ValueError("media_form 必须是非空对象")
+    for key, item in value.items():
+        if not isinstance(item, dict):
+            raise ValueError(f"media_form.{key} 必须是对象")
+        if item.get("status") not in MEDIA_STATUS_VALUES:
+            raise ValueError(f"media_form.{key}.status 包含未允许的枚举值")
+        confidence = item.get("confidence")
+        if (
+            not isinstance(confidence, (int, float))
+            or isinstance(confidence, bool)
+            or not 0 <= float(confidence) <= 1
+        ):
+            raise ValueError(f"media_form.{key}.confidence 必须在 0 至 1 之间")
+        evidence = item.get("evidence")
+        if not isinstance(evidence, list) or any(
+            not isinstance(entry, str) or not entry.strip() for entry in evidence
+        ):
+            raise ValueError(f"media_form.{key}.evidence 必须是可见证据字符串数组")
+
+
+def validate_production_correction(field_key: str, value: Any) -> None:
+    """Reject invalid human truth even when the API is called without the UI."""
+    text_limits = {
+        "production_fields.title": 10,
+        "production_fields.seotitle": 28,
+        "production_fields.category": 120,
+        "production_fields.style": 80,
+        "production_fields.cons": 1000,
+        "production_fields.design": 1000,
+    }
+    if field_key in text_limits:
+        _required_text(value, field=field_key, limit=text_limits[field_key])
+    elif field_key == "production_fields.tags":
+        if not isinstance(value, list) or len({
+            item.strip() for item in value if isinstance(item, str) and item.strip()
+        }) < 4:
+            raise ValueError("production_fields.tags 至少包含 4 个主要标签")
+    elif field_key == "production_fields.score":
+        if not isinstance(value, int) or isinstance(value, bool) or not 0 <= value <= 100:
+            raise ValueError("production_fields.score 必须是 0 至 100 的整数")
+    elif field_key == "production_fields.reason":
+        if not isinstance(value, list) or any(
+            item not in PRODUCTION_REASON_VALUES for item in value
+        ):
+            raise ValueError("production_fields.reason 包含未允许的枚举值")
+    elif field_key == "production_fields.image_defects":
+        if value not in {"", "有水印"}:
+            raise ValueError("production_fields.image_defects 只能为空字符串或“有水印”")
+    elif field_key == "production_fields.trait":
+        if value not in PRODUCTION_TRAIT_VALUES:
+            raise ValueError("production_fields.trait 包含未允许的枚举值")
+    elif field_key == "image_quality.quality_severity":
+        if value not in QUALITY_SEVERITY_VALUES:
+            raise ValueError("image_quality.quality_severity 包含未允许的枚举值")
+    elif field_key == "media_form":
+        _validate_media_form(value)
+
+
+def normalize_production_fields(
+    precheck: dict[str, Any],
+    *,
+    required: bool = False,
+) -> dict[str, Any]:
+    """Normalize the search/recommendation contract without changing scoring."""
+    source = precheck.get("production_fields")
+    if not isinstance(source, dict):
+        legacy = {key: precheck[key] for key in PRODUCTION_FIELD_KEYS if key in precheck}
+        source = legacy or None
+    if source is None:
+        if required:
+            raise ValueError("标准评分合同缺少 production_fields")
+        return precheck
+
+    missing = [key for key in PRODUCTION_FIELD_KEYS if key not in source]
+    if required and missing:
+        raise ValueError("production_fields 缺少字段：" + "、".join(missing))
+    if missing:
+        return precheck
+
+    tags = source.get("tags")
+    if not isinstance(tags, list):
+        raise ValueError("production_fields.tags 必须是字符串数组")
+    normalized_tags = list(dict.fromkeys(
+        item.strip() for item in tags if isinstance(item, str) and item.strip()
+    ))
+    if len(normalized_tags) < 4:
+        raise ValueError("production_fields.tags 至少包含 4 个主要标签")
+
+    score = source.get("score")
+    if not isinstance(score, int) or isinstance(score, bool) or not 0 <= score <= 100:
+        raise ValueError("production_fields.score 必须是 0 至 100 的整数")
+    reasons = source.get("reason")
+    if not isinstance(reasons, list) or any(
+        reason not in PRODUCTION_REASON_VALUES for reason in reasons
+    ):
+        raise ValueError("production_fields.reason 包含未允许的枚举值")
+    image_defects = source.get("image_defects")
+    if image_defects not in {"", "有水印"}:
+        raise ValueError("production_fields.image_defects 只能为空字符串或“有水印”")
+    trait = source.get("trait")
+    if trait not in PRODUCTION_TRAIT_VALUES:
+        raise ValueError("production_fields.trait 包含未允许的枚举值")
+
+    image_quality = precheck.get("image_quality")
+    if not isinstance(image_quality, dict):
+        raise ValueError("标准评分合同缺少 image_quality")
+    if image_quality.get("quality_severity") not in QUALITY_SEVERITY_VALUES:
+        raise ValueError("image_quality.quality_severity 包含未允许的枚举值")
+    _validate_media_form(precheck.get("media_form"))
+
+    precheck["production_fields"] = {
+        "title": _required_text(source.get("title"), field="title", limit=10),
+        "seotitle": _required_text(source.get("seotitle"), field="seotitle", limit=28),
+        "category": _required_text(source.get("category"), field="category", limit=120),
+        "style": _required_text(source.get("style"), field="style", limit=80),
+        "tags": normalized_tags,
+        "cons": _required_text(source.get("cons"), field="cons", limit=1000),
+        "design": _required_text(source.get("design"), field="design", limit=1000),
+        "score": score,
+        "reason": list(dict.fromkeys(reasons)),
+        "image_defects": image_defects,
+        "trait": trait,
+    }
+    return precheck
 
 
 def normalize_precheck_business_rules(precheck: dict[str, Any]) -> dict[str, Any]:

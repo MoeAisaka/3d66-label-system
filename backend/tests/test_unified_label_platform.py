@@ -82,7 +82,21 @@ def _database() -> tuple[object, Session, User, EvaluationResult]:
             db=db, bundle=bundle, prompt_a=prompt, prompt_b=None,
             sampling_policy=policy, aesthetic={"scoring_profile": "space_aesthetic_v1.3"},
         ),
-        precheck_json=json.dumps({"classification": {"scope_status": "in_scope", "primary_category": "住宅"}}),
+        precheck_json=json.dumps({
+            "classification": {"scope_status": "in_scope", "primary_category": "住宅"},
+            "production_fields": {
+                "title": "现代客厅", "seotitle": "现代简约客厅空间设计效果图",
+                "category": "住宅空间，客厅", "style": "现代简约",
+                "tags": ["客厅", "现代", "简约", "木饰面"],
+                "cons": "电视墙留白偏多。", "design": "以暖木材质组织空间。",
+                "score": 82, "reason": [], "image_defects": "",
+                "trait": "3D数字效果图",
+            },
+            "image_quality": {"quality_severity": "normal"},
+            "media_form": {
+                "rendering": {"status": "yes", "confidence": 0.98, "evidence": ["数字渲染"]},
+            },
+        }),
         aesthetic_json=json.dumps({"dimensions": {"lighting": {"grade": 4}}}),
         scoring_json="{}", raw_response_a="{}", score=78, level="L3", confidence=0.92,
         needs_review=False, review_stage="completed", model_id=model.model_id,
@@ -101,7 +115,8 @@ def _database() -> tuple[object, Session, User, EvaluationResult]:
         evaluation_id=result.id, required_reviewers=1, status="completed", final_review_id=review.id,
         final_truth_json=json.dumps({
             "decision": "corrected", "corrected_level": "L2", "corrected_score": 63,
-            "dimensions": {"lighting": 3}, "key_fields": {"style": "现代"},
+            "dimensions": {"lighting": 3},
+            "key_fields": {"production_fields.style": "现代"},
         }),
         completed_at=datetime.now(timezone.utc),
     )
@@ -190,6 +205,10 @@ def test_ingress_publish_consumer_cursor_and_rollback_are_versioned(
         assert read.headers["etag"]
         assert read.json()["version"] == 1
         assert read.json()["label"]["level"] == "L2"
+        assert read.json()["label"]["production_fields"]["style"] == "现代"
+        assert read.json()["label"]["production_fields"]["score"] == 82
+        assert read.json()["label"]["image_quality"]["quality_severity"] == "normal"
+        assert read.json()["label"]["media_form"]["rendering"]["status"] == "yes"
         assert "raw_response" not in json.dumps(read.json(), ensure_ascii=False)
         changes = client.get("/api/consumer/v1/changes", headers=headers).json()
         assert changes["next_cursor"] == 1

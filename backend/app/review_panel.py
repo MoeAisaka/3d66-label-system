@@ -9,12 +9,15 @@ from sqlalchemy import update
 from sqlalchemy.orm import Session
 
 from .models import EvaluationResult, HumanReview, ReviewPanel
+from .schema_adapter import PRODUCTION_FIELD_KEYS
 
 
 KEY_FIELD_PATHS = (
     "classification.scope_status",
     "classification.primary_category",
     "image_quality.quality_severity",
+    "media_form",
+    *(f"production_fields.{key}" for key in PRODUCTION_FIELD_KEYS),
 )
 
 
@@ -63,19 +66,16 @@ def _model_truth(evaluation: EvaluationResult) -> dict[str, Any]:
         for key, value in (aesthetic.get("dimensions") or {}).items()
         if isinstance(value, dict) and isinstance(value.get("grade"), int)
     }
-    classification = precheck.get("classification") or {}
-    image_quality = precheck.get("image_quality") or {}
+    def nested(path: str) -> Any:
+        value: Any = precheck
+        for key in path.split("."):
+            if not isinstance(value, dict):
+                return None
+            value = value.get(key)
+        return value
     return {
         "dimensions": dimensions,
-        "key_fields": {
-            "classification.scope_status": classification.get("scope_status"),
-            "classification.primary_category": classification.get(
-                "primary_category"
-            ),
-            "image_quality.quality_severity": image_quality.get(
-                "quality_severity"
-            ),
-        },
+        "key_fields": {path: nested(path) for path in KEY_FIELD_PATHS},
         "level": evaluation.level,
         "score": evaluation.score,
     }

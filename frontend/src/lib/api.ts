@@ -132,8 +132,16 @@ export function jsonBody(value: unknown): RequestInit {
 }
 
 export const baselineRegressionApi = {
-  listAssets: (packageId?: number, categoryKey?: string) => {
-    const params = new URLSearchParams({ limit: "1000" })
+  listAssets: (
+    packageId?: number,
+    categoryKey?: string,
+    offset = 0,
+    limit = 200,
+  ) => {
+    const params = new URLSearchParams({
+      limit: String(limit),
+      offset: String(offset),
+    })
     if (packageId) params.set("package_id", String(packageId))
     if (categoryKey) params.set("category_key", categoryKey)
     return api<{ items: Asset[]; total: number }>(`/api/assets?${params.toString()}`)
@@ -159,7 +167,10 @@ export const baselineRegressionApi = {
     const query = params.size ? `?${params.toString()}` : ""
     return api<{ items: BaselineSetSummary[] }>(`/api/baseline-sets${query}`)
   },
-  getSet: (setId: number) => api<BaselineSetDetail>(`/api/baseline-sets/${setId}`),
+  getSet: (setId: number, includeItems = true) => {
+    const params = new URLSearchParams({ include_items: String(includeItems) })
+    return api<BaselineSetDetail>(`/api/baseline-sets/${setId}?${params.toString()}`)
+  },
   createSet: (payload: {
     name: string
     description: string
@@ -193,9 +204,15 @@ export const baselineRegressionApi = {
     `/api/baseline-sets/${setId}/runs`,
     { method: "POST", ...jsonBody(payload) },
   ),
-  getRun: (runId: number) => api<BaselineRegressionDetail>(
-    `/api/baseline-regressions/${runId}`,
-  ),
+  getRun: (runId: number, offset = 0, limit = 200) => {
+    const params = new URLSearchParams({
+      offset: String(offset),
+      limit: String(limit),
+    })
+    return api<BaselineRegressionDetail>(
+      `/api/baseline-regressions/${runId}?${params.toString()}`,
+    )
+  },
   enqueueDeviations: (runId: number, itemIds: number[]) => api<{
     run_id: number
     case_ids: number[]

@@ -43,6 +43,8 @@ const levelNames: Record<BaselineLevel, string> = {
 }
 
 type DimensionChoice = "category_default" | "none" | `schema:${number}`
+const ASSET_PAGE_SIZE = 200
+const RUN_PAGE_SIZE = 200
 
 export function BaselineRegressionPage() {
   const queryClient = useQueryClient()
@@ -62,6 +64,8 @@ export function BaselineRegressionPage() {
   const [selectedPromptBId, setSelectedPromptBId] = useState(0)
   const [executionMode, setExecutionMode] = useState<"freeform" | "structured">("freeform")
   const [dimensionChoice, setDimensionChoice] = useState<DimensionChoice>("category_default")
+  const [assetPage, setAssetPage] = useState(0)
+  const [runPage, setRunPage] = useState(0)
 
   const categories = useQuery({
     queryKey: ["evaluation-categories"],
@@ -73,10 +77,12 @@ export function BaselineRegressionPage() {
   })
 
   const assets = useQuery({
-    queryKey: ["baseline-assets", selectedCategoryKey, selectedPackageId],
+    queryKey: ["baseline-assets", selectedCategoryKey, selectedPackageId, assetPage],
     queryFn: () => baselineRegressionApi.listAssets(
       selectedPackageId || undefined,
       selectedCategoryKey,
+      assetPage * ASSET_PAGE_SIZE,
+      ASSET_PAGE_SIZE,
     ),
   })
   const packages = useQuery({
@@ -97,14 +103,18 @@ export function BaselineRegressionPage() {
   })
   const selectedSet = useQuery({
     queryKey: ["baseline-set", selectedSetId],
-    queryFn: () => baselineRegressionApi.getSet(selectedSetId),
+    queryFn: () => baselineRegressionApi.getSet(selectedSetId, false),
     enabled: selectedSetId > 0,
     refetchInterval: (query) =>
       query.state.data?.runs.some((run) => run.status === "running") ? 3000 : false,
   })
   const runDetail = useQuery({
-    queryKey: ["baseline-regression", selectedRunId],
-    queryFn: () => baselineRegressionApi.getRun(selectedRunId),
+    queryKey: ["baseline-regression", selectedRunId, runPage],
+    queryFn: () => baselineRegressionApi.getRun(
+      selectedRunId,
+      runPage * RUN_PAGE_SIZE,
+      RUN_PAGE_SIZE,
+    ),
     enabled: selectedRunId > 0,
     refetchInterval: (query) =>
       query.state.data?.summary.status === "running" ? 3000 : false,
@@ -139,6 +149,16 @@ export function BaselineRegressionPage() {
   const publishedPromptB = promptBOptions.find(
     (prompt) => prompt.id === selectedCategory?.prompt_b_id,
   )
+  const effectivePromptAId = promptSelectionMode === "published"
+    ? publishedPromptA?.id ?? 0
+    : promptAOptions.some((prompt) => prompt.id === selectedPromptAId)
+      ? selectedPromptAId
+      : publishedPromptA?.id ?? promptAOptions[0]?.id ?? 0
+  const effectivePromptBId = promptSelectionMode === "manual"
+    ? promptBOptions.some((prompt) => prompt.id === selectedPromptBId)
+      ? selectedPromptBId
+      : publishedPromptB?.id ?? promptBOptions[0]?.id ?? 0
+    : publishedPromptB?.id ?? 0
   const selectableDimensionSchemas = useMemo(
     () => (dimensionSchemas.data?.items ?? []).filter((schema) => (
       schema.status === "published"
@@ -157,6 +177,14 @@ export function BaselineRegressionPage() {
       )
     }
   }, [activeCategories, selectedCategoryKey])
+
+  useEffect(() => {
+    setAssetPage(0)
+  }, [selectedCategoryKey, selectedPackageId])
+
+  useEffect(() => {
+    setRunPage(0)
+  }, [selectedRunId])
 
   useEffect(() => {
     const items = baselineSets.data?.items ?? []
@@ -186,32 +214,6 @@ export function BaselineRegressionPage() {
       }
     }
   }, [queryClient, runDetail.data?.summary.status, selectedSetId])
-
-  useEffect(() => {
-    if (promptSelectionMode === "published") return
-    if (
-      !promptAOptions.some((prompt) => prompt.id === selectedPromptAId)
-      && publishedPromptA
-    ) {
-      setSelectedPromptAId(publishedPromptA.id)
-    }
-    if (
-      promptSelectionMode === "manual"
-      &&
-      !promptBOptions.some((prompt) => prompt.id === selectedPromptBId)
-      && publishedPromptB
-    ) {
-      setSelectedPromptBId(publishedPromptB.id)
-    }
-  }, [
-    promptSelectionMode,
-    promptAOptions,
-    promptBOptions,
-    publishedPromptA,
-    publishedPromptB,
-    selectedPromptAId,
-    selectedPromptBId,
-  ])
 
   const upload = useMutation({
     mutationFn: (files: File[]) => baselineRegressionApi.uploadAssets(
@@ -311,11 +313,11 @@ export function BaselineRegressionPage() {
   const createRun = useMutation({
     mutationFn: () => {
       const promptPayload = promptSelectionMode === "single"
-        ? { prompt_id: selectedPromptAId }
+        ? { prompt_id: effectivePromptAId }
         : promptSelectionMode === "manual"
           ? {
-              prompt_a_id: selectedPromptAId,
-              prompt_b_id: selectedPromptBId,
+              prompt_a_id: effectivePromptAId,
+              prompt_b_id: effectivePromptBId,
             }
           : {}
       const dimensionPayload = dimensionChoice === "none"
@@ -351,6 +353,10 @@ export function BaselineRegressionPage() {
   const creationCount = useWholePackage
     ? selectedPackage?.active_asset_count ?? 0
     : selectedAssetIds.size
+  const assetPageCount = Math.max(
+    1,
+    Math.ceil((assets.data?.total ?? 0) / ASSET_PAGE_SIZE),
+  )
   const selectedRun = selectedSet.data?.runs.find((run) => run.id === selectedRunId)
   const summary = runDetail.data?.summary ?? selectedRun
 
@@ -602,7 +608,7 @@ export function BaselineRegressionPage() {
                   }}
                 >
                   {allSelected ? <CheckSquare weight="fill" /> : <Square />}
-                  {allSelected ? "取消全选" : "全选当前素材"}
+                  {allSelected ? "取消本页全选" : "全选本页素材"}
                 </Button>
                 <Button
                   variant="secondary"
@@ -627,9 +633,30 @@ export function BaselineRegressionPage() {
             </div>
             {useWholePackage && (
               <div className="border-t border-[var(--line)] bg-[#f6f9dc] px-5 py-3 text-xs font-semibold">
-                已启用整包模式：系统先按文件名中的 L1–L5 / 好 / 中等 / 中差 / 极差 / 过滤预填；下方可逐张修改。未显示的素材同样由服务端解析，不受页面 1000 条预览上限影响。
+                已启用整包模式：单个基准集最多 10000 张。系统先按文件名中的 L1–L5 / 好 / 中等 / 中差 / 极差 / 过滤预填；下方按页预览并可逐张修改，未访问页面的素材同样由服务端解析。
               </div>
             )}
+            <div className="flex items-center justify-between gap-3 border-t border-[var(--line)] px-5 py-3 text-xs text-[var(--muted)]">
+              <span>第 {assetPage + 1} / {assetPageCount} 页 · 每页最多 {ASSET_PAGE_SIZE} 张</span>
+              <div className="flex gap-2">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  disabled={assetPage <= 0 || assets.isFetching}
+                  onClick={() => setAssetPage((current) => Math.max(0, current - 1))}
+                >
+                  上一页
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  disabled={assetPage + 1 >= assetPageCount || assets.isFetching}
+                  onClick={() => setAssetPage((current) => current + 1)}
+                >
+                  下一页
+                </Button>
+              </div>
+            </div>
             <div className="max-h-[440px] overflow-auto">
               {assets.isLoading ? (
                 <div className="h-48 animate-pulse bg-white" />
@@ -760,7 +787,7 @@ export function BaselineRegressionPage() {
                   </label>
                   <PromptSelect
                     label={promptSelectionMode === "single" ? "单提示词" : "调用 A"}
-                    value={selectedPromptAId}
+                    value={effectivePromptAId}
                     options={promptAOptions}
                     published={publishedPromptA}
                     disabled={promptSelectionMode === "published"}
@@ -768,7 +795,7 @@ export function BaselineRegressionPage() {
                   />
                   <PromptSelect
                     label="调用 B"
-                    value={selectedPromptBId}
+                    value={effectivePromptBId}
                     options={promptBOptions}
                     published={publishedPromptB}
                     disabled={promptSelectionMode !== "manual"}
@@ -800,8 +827,8 @@ export function BaselineRegressionPage() {
                       || selectedSet.data.runs.some((run) => run.status === "running")
                       || (
                         promptSelectionMode !== "published"
-                        && (!selectedPromptAId
-                          || (promptSelectionMode === "manual" && !selectedPromptBId))
+                        && (!effectivePromptAId
+                          || (promptSelectionMode === "manual" && !effectivePromptBId))
                       )
                     }
                     onClick={() => createRun.mutate()}
@@ -865,6 +892,13 @@ export function BaselineRegressionPage() {
                 <RegressionResults
                   run={summary}
                   items={runDetail.data?.items ?? []}
+                  pagination={runDetail.data?.pagination ?? {
+                    offset: 0,
+                    limit: RUN_PAGE_SIZE,
+                    total: summary.total,
+                  }}
+                  page={runPage}
+                  onPageChange={setRunPage}
                   loading={runDetail.isLoading}
                 />
               )}
@@ -883,10 +917,16 @@ export function BaselineRegressionPage() {
 function RegressionResults({
   run,
   items,
+  pagination,
+  page,
+  onPageChange,
   loading,
 }: {
   run: BaselineRegressionRun
   items: BaselineRegressionItem[]
+  pagination: { offset: number; limit: number; total: number }
+  page: number
+  onPageChange: (page: number) => void
   loading: boolean
 }) {
   const queryClient = useQueryClient()
@@ -979,6 +1019,7 @@ function RegressionResults({
   })
 
   const metrics = run.metrics
+  const pageCount = Math.max(1, Math.ceil(pagination.total / pagination.limit))
   return (
     <>
       <section className="mt-6 grid gap-px border-y border-[var(--line)] bg-[var(--line)] md:grid-cols-2 xl:grid-cols-4">
@@ -1100,7 +1141,23 @@ function RegressionResults({
               <p className="mt-1 text-xs text-[var(--muted)]">每张展示冻结评测理由，并可原位确认、纠偏或退回。</p>
             </div>
             <div className="flex flex-wrap items-center gap-2">
-              <Badge>{items.length} 张</Badge>
+              <Badge>第 {page + 1}/{pageCount} 页 · 共 {pagination.total} 张</Badge>
+              <Button
+                variant="ghost"
+                size="sm"
+                disabled={page <= 0 || loading}
+                onClick={() => onPageChange(Math.max(0, page - 1))}
+              >
+                上一页
+              </Button>
+              <Button
+                variant="ghost"
+                size="sm"
+                disabled={page + 1 >= pageCount || loading}
+                onClick={() => onPageChange(page + 1)}
+              >
+                下一页
+              </Button>
               {availableDeviationIds.length > 0 && (
                 <>
                   <Button
@@ -1115,8 +1172,8 @@ function RegressionResults({
                     }}
                   >
                     {selectedDeviationIds.size === availableDeviationIds.length
-                      ? "取消偏差全选"
-                      : "选择全部偏差"}
+                      ? "取消本页偏差全选"
+                      : "选择本页全部偏差"}
                   </Button>
                   <Button
                     size="sm"
@@ -1270,6 +1327,7 @@ function RegressionResults({
                           <ReviewCorrectionForm
                             key={`${evaluation.id}-${evaluation.review_revision}`}
                             dimensions={evaluation.aesthetic?.dimensions ?? {}}
+                            precheck={evaluation.precheck ?? {}}
                             dimensionSchema={evaluation.dimension_schema}
                             scoring={evaluation.scoring ?? {}}
                             pending={reviewResult.isPending}

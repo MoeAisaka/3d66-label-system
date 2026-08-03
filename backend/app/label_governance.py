@@ -224,15 +224,30 @@ def build_label_snapshot(
         final_score = evaluation.score
     if not final_level or final_score is None:
         raise ValueError("人工真值缺少正式等级或服务端分数")
+    key_fields = truth.get("key_fields") or {}
+    classification = dict(precheck.get("classification") or {})
+    image_quality = dict(precheck.get("image_quality") or {})
+    production_fields = dict(precheck.get("production_fields") or {})
+    for field_key, value in key_fields.items():
+        if field_key.startswith("classification."):
+            classification[field_key.split(".", 1)[1]] = value
+        elif field_key.startswith("image_quality."):
+            image_quality[field_key.split(".", 1)[1]] = value
+        elif field_key.startswith("production_fields."):
+            production_fields[field_key.split(".", 1)[1]] = value
+    media_form = key_fields.get("media_form", precheck.get("media_form", {}))
     payload = {
         "schema_version": LABEL_SCHEMA_VERSION,
         "content_key": _content_key(db, evaluation, content_key),
         "category_key": evaluation.job.category_key,
         "level": final_level,
         "score": final_score,
-        "classification": precheck.get("classification", {}),
+        "classification": classification,
         "dimensions": truth.get("dimensions") or aesthetic.get("dimensions", {}),
-        "key_fields": truth.get("key_fields", {}),
+        "key_fields": key_fields,
+        "production_fields": production_fields,
+        "image_quality": image_quality,
+        "media_form": media_form,
         "provenance": {
             "evaluation_id": evaluation.id,
             "job_id": evaluation.job_id,
