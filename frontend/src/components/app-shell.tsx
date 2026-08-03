@@ -97,6 +97,7 @@ const advancedWorkflowDomain =
     tabs: [
       { to: "/workflow/governance", label: "高级设置首页" },
       { to: "/workflow/optimization/category-evaluation-preview", label: "类目评测底座预览" },
+      { to: "/workflow/optimization/category-evaluation-v3-config", label: "类目评测 v3 合同配置" },
     ],
   } as const
 

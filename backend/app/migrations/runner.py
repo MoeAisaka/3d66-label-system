@@ -6582,6 +6582,40 @@ def _migration_051_raise_default_max_concurrency(connection: Connection) -> None
     )
 
 
+def _migration_052_add_category_evaluation_v3_configs(connection: Connection) -> None:
+    """Create the isolated ADR-0033 v3 category-evaluation config store.
+
+    Additive only: creates ``category_evaluation_v3_configs`` and its
+    supporting index.  It touches no existing table and migrates no data.  The
+    table is fully decoupled from the v1 ``evaluation_category_profiles``
+    pipeline — separate key space, separate CRUD — and nothing here is wired
+    into the worker / scoring path.
+    """
+    connection.exec_driver_sql(
+        """
+        CREATE TABLE IF NOT EXISTS category_evaluation_v3_configs (
+            id INTEGER PRIMARY KEY,
+            category_key VARCHAR(40) NOT NULL UNIQUE,
+            display_name VARCHAR(120) NOT NULL,
+            status VARCHAR(20) NOT NULL DEFAULT 'draft',
+            contract_json TEXT NOT NULL DEFAULT '{}',
+            classification_map_json TEXT NOT NULL DEFAULT '{}',
+            subcategory_dimensions_json TEXT NOT NULL DEFAULT '{}',
+            revision INTEGER NOT NULL DEFAULT 1,
+            contract_hash VARCHAR(64) NOT NULL DEFAULT '',
+            created_by VARCHAR(80) NOT NULL DEFAULT 'system',
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            CHECK (status IN ('draft','active','retired'))
+        )
+        """
+    )
+    connection.exec_driver_sql(
+        "CREATE INDEX IF NOT EXISTS ix_category_evaluation_v3_configs_status "
+        "ON category_evaluation_v3_configs(status, updated_at)"
+    )
+
+
 MIGRATIONS = [
     Migration(1, "add_sample_expected_level", _migration_001_add_sample_expected_level),
     Migration(2, "add_review_corrections", _migration_002_add_review_corrections),
@@ -6793,6 +6827,11 @@ MIGRATIONS = [
         51,
         "raise_default_max_concurrency",
         _migration_051_raise_default_max_concurrency,
+    ),
+    Migration(
+        52,
+        "add_category_evaluation_v3_configs",
+        _migration_052_add_category_evaluation_v3_configs,
     ),
 ]
 

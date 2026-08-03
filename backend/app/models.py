@@ -353,6 +353,52 @@ class EvaluationCategoryProfile(Base):
     )
 
 
+class CategoryEvaluationV3Config(Base):
+    """Persisted ADR-0033 v3 category-evaluation contract (isolated from v1).
+
+    This is a standalone store for the v3 contract assembled by
+    ``inspiration_category_seed`` (红线 + 子类目赛道 + 共性/特有维度组 +
+    分类映射).  It deliberately shares **nothing** with the v1
+    ``EvaluationCategoryProfile`` pipeline: separate table, separate key space,
+    separate CRUD.  Nothing here is wired into the worker / scoring path — rows
+    are draft configs awaiting canary/regression validation before any线上接入.
+    """
+
+    __tablename__ = "category_evaluation_v3_configs"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('draft','active','retired')",
+            name="ck_category_evaluation_v3_configs_status",
+        ),
+        UniqueConstraint(
+            "category_key", name="uq_category_evaluation_v3_configs_key"
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    category_key: Mapped[str] = mapped_column(String(40), index=True)
+    display_name: Mapped[str] = mapped_column(String(120))
+    status: Mapped[str] = mapped_column(
+        String(20), default="draft", server_default="draft", index=True
+    )
+    contract_json: Mapped[str] = mapped_column(Text, default="{}", server_default="{}")
+    classification_map_json: Mapped[str] = mapped_column(
+        Text, default="{}", server_default="{}"
+    )
+    subcategory_dimensions_json: Mapped[str] = mapped_column(
+        Text, default="{}", server_default="{}"
+    )
+    revision: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
+    contract_hash: Mapped[str] = mapped_column(String(64), default="")
+    created_by: Mapped[str] = mapped_column(String(80), default="system")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+
 class MaterialPackage(Base):
     __tablename__ = "material_packages"
     __table_args__ = (
