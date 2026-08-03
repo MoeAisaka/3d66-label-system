@@ -96,6 +96,7 @@ const advancedWorkflowDomain =
     icon: SlidersHorizontal,
     tabs: [
       { to: "/workflow/governance", label: "高级设置首页" },
+      { to: "/workflow/optimization/category-evaluation-preview", label: "类目评测底座预览" },
     ],
   } as const
 

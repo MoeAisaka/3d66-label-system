@@ -36,6 +36,9 @@ const ReviewPage = lazy(() =>
 const CanaryRunsPage = lazy(() =>
   import("@/pages/canary-runs-page").then((module) => ({ default: module.CanaryRunsPage })),
 )
+const CategoryEvaluationPreviewPage = lazy(() =>
+  import("@/pages/category-evaluation-preview-page").then((module) => ({ default: module.CategoryEvaluationPreviewPage })),
+)
 const HistoricalCorrectionsPage = lazy(() =>
   import("@/pages/historical-corrections-page").then((module) => ({ default: module.HistoricalCorrectionsPage })),
 )
@@ -127,6 +130,7 @@ export default function App() {
             <Route path="workflow/optimization/feedback" element={<Suspense fallback={<RouteLoading />}><ProductionFeedbackPage /></Suspense>} />
             <Route path="workflow/optimization/candidates" element={<Suspense fallback={<RouteLoading />}><PromptCandidatesPage /></Suspense>} />
             <Route path="workflow/optimization/dimensions" element={<Suspense fallback={<RouteLoading />}><DimensionManagerPage /></Suspense>} />
+            <Route path="workflow/optimization/category-evaluation-preview" element={<Suspense fallback={<RouteLoading />}><CategoryEvaluationPreviewPage /></Suspense>} />
             <Route path="workflow/optimization/paired-regression" element={<Suspense fallback={<RouteLoading />}><PairedRegressionPage user={user} /></Suspense>} />
             <Route path="workflow/optimization/baseline-regression" element={<Suspense fallback={<RouteLoading />}><BaselineRegressionPage /></Suspense>} />
             <Route path="workflow/releases/packages" element={<Suspense fallback={<RouteLoading />}><EvaluationPackageReviewListPage /></Suspense>} />
