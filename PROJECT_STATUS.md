@@ -9,14 +9,16 @@
   `doubao-seed-2-0-lite-260215`，6 档并发（1/2/4/6/8/10）× 12 真实请求。
   结论：全程 0 个 429/5xx/超时，未触发限流；瓶颈是单次调用延迟（p50 24-27s、
   单次 ~4400 tokens），非限速；吞吐随并发到 8 近线性、10 出现拐点。**最优并发=8**。
-  建议：默认 `max_concurrency` 2→8（提速约 2.9 倍）+ 收紧调用A输出预算降单次延迟。
-  证据：`artifacts/canary-20260803/`（脚本 `scripts/canary_concurrency_probe.py`，Key 仅走环境变量、未落盘）。
-- **类目自定义评测底座重构已立项（ADR-0033，Proposed）。** Owner 已拍板四点：
-  L5=最差（平台方向写反，需带语义版本迁移校正）、A/B/维度边界要在前端显性说明、
-  赛道分类与17类一级标签两套并存、先搭通用框架。链路=红线前置过滤(硬淘汰直出档)→
-  分类(赛道定基底分/维度Schema/封顶)→维度评分(含固定通用维度:媒介降权+80分一票压分)。
-  讨论稿 `docs/discussion/category-evaluation-base-refactor-20260803.md`，规则快照
-  `docs/reference/category-inspiration-image-rules-20260803.md`。尚未开工编码。
+  **已落地：默认并发 2→8**（`models.py` + migration 51 只抬旧默认 2 的行、保留操作员自定值；
+  前端新建表单默认也改 8）。后端 726 passed/1 skipped，前端 build 通过。证据 `artifacts/canary-20260803/`
+  （脚本 `scripts/canary_concurrency_probe.py`，Key 仅走环境变量、未落盘）。待做：收紧调用A输出预算降单次延迟。
+- **类目自定义评测底座重构已开工（ADR-0033，框架先行）。** Owner 拍板：L5=最差（需语义版本迁移校正）、
+  A/B/维度边界前端显性说明、赛道分类与17类一级标签两套并存、先搭通用框架。
+  **Phase 1（确定性合同底座）已委派 MacBook-Company Claude Fable 5** 在可信 worktree
+  `~/OpenClaw/labellab-adr33-framework`（基线 `352316e`）执行：新建 `redline_policy.py`、
+  `category_evaluation_contract.py` 及两个单测，纯函数、不接生产执行路径、不做 L 翻转。
+  Claude 只写 Read/Edit/Write/Glob/Grep；OpenClaw 负责跑测试/build/提交与验收。
+  任务书 `docs/discussion/adr33-phase1-delegation-brief.md`。
 
 ## 最新完成：基准回归自由提示词实验（2026-08-03）
 
