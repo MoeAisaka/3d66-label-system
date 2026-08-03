@@ -167,7 +167,7 @@ def test_category_contracts_keep_pdf_and_material_inputs_isolated(tmp_path: Path
             files={"files": ("looks-like.pdf", _image_bytes((1, 2, 3)), "image/jpeg")},
         )
         assert wrong_pdf.status_code == 400
-        assert "PDF" in wrong_pdf.json()["detail"]
+        assert "PDF" in wrong_pdf.json()["detail"]["failed_files"][0]["reason"]
 
         categories = client.get("/api/evaluation-categories")
         assert categories.status_code == 200
@@ -655,9 +655,72 @@ def test_zip_upload_aggregates_nested_images_and_ignores_metadata(
     assert response.status_code == 200, response.text
     assert response.json()["package"]["item_count"] == 2
     assert response.json()["package"]["ignored_count"] == 2
+    assert response.json()["summary"] == {
+        "success_count": 2,
+        "skipped_count": 2,
+        "failed_count": 0,
+    }
+    assert [item["filename"] for item in response.json()["skipped_files"]] == [
+        "__MACOSX/._a.jpg",
+        "notes.txt",
+    ]
+    assert response.json()["successful_files"] == [
+        "room/a.jpg",
+        "room/deeper/b.png",
+    ]
 
 
-def test_invalid_file_rolls_back_package_assets_and_written_files(
+def test_plain_upload_skips_unsupported_files_and_keeps_valid_assets(
+    tmp_path: Path,
+) -> None:
+    with _api_context(tmp_path) as (client, sessions):
+        response = client.post(
+            "/api/assets/upload",
+            files=[
+                ("files", ("room/valid.jpg", _image_bytes((1, 2, 3)), "image/jpeg")),
+                ("files", ("room/Thumbs.db", b"metadata", "application/octet-stream")),
+                ("files", ("room/notes.txt", b"notes", "text/plain")),
+                ("files", ("room/link.lnk", b"shortcut", "application/octet-stream")),
+            ],
+        )
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["summary"] == {
+            "success_count": 1,
+            "skipped_count": 3,
+            "failed_count": 0,
+        }
+        assert body["successful_files"] == ["room/valid.jpg"]
+        assert [item["filename"] for item in body["skipped_files"]] == [
+            "room/Thumbs.db",
+            "room/notes.txt",
+            "room/link.lnk",
+        ]
+        with sessions() as db:
+            assert len(db.scalars(select(Asset)).all()) == 1
+            assert len(db.scalars(select(MaterialPackage)).all()) == 1
+
+
+def test_zip_compression_bomb_gate_applies_before_unsupported_file_skip(
+    tmp_path: Path,
+) -> None:
+    archive = io.BytesIO()
+    with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as bundle:
+        bundle.writestr("notes.txt", b"0" * (2 * 1024 * 1024))
+    archive.seek(0)
+
+    with _api_context(tmp_path) as (client, sessions):
+        response = client.post(
+            "/api/material-packages/import-archive",
+            files={"archive": ("bomb.zip", archive.getvalue(), "application/zip")},
+        )
+        assert response.status_code == 400
+        assert "压缩比异常" in response.json()["detail"]
+        with sessions() as db:
+            assert db.scalars(select(MaterialPackage)).all() == []
+
+
+def test_invalid_supported_file_is_reported_without_rolling_back_valid_asset(
     tmp_path: Path,
 ) -> None:
     with _api_context(tmp_path) as (client, sessions):
@@ -668,11 +731,43 @@ def test_invalid_file_rolls_back_package_assets_and_written_files(
                 ("files", ("invalid.jpg", b"not-an-image", "image/jpeg")),
             ],
         )
+        assert response.status_code == 200, response.text
+        assert response.json()["summary"] == {
+            "success_count": 1,
+            "skipped_count": 0,
+            "failed_count": 1,
+        }
+        assert response.json()["failed_files"][0]["filename"] == "invalid.jpg"
+        with sessions() as db:
+            assert len(db.scalars(select(Asset)).all()) == 1
+            assert len(db.scalars(select(MaterialPackage)).all()) == 1
+        assert len(list((tmp_path / "images").iterdir())) == 1
+
+
+def test_all_unsupported_plain_files_are_rejected_without_absolute_path_leak(
+    tmp_path: Path,
+) -> None:
+    with _api_context(tmp_path) as (client, sessions):
+        response = client.post(
+            "/api/assets/upload",
+            files=[
+                ("files", ("/Users/private/Thumbs.db", b"metadata", "application/octet-stream")),
+                ("files", ("C:\\secret\\notes.txt", b"notes", "text/plain")),
+            ],
+        )
         assert response.status_code == 400
+        detail = response.json()["detail"]
+        assert detail["code"] == "no_valid_files"
+        assert detail["skipped_count"] == 2
+        assert [item["filename"] for item in detail["skipped_files"]] == [
+            "Thumbs.db",
+            "notes.txt",
+        ]
+        assert "/Users/private" not in response.text
+        assert "C:\\secret" not in response.text
         with sessions() as db:
             assert db.scalars(select(Asset)).all() == []
             assert db.scalars(select(MaterialPackage)).all() == []
-        assert list((tmp_path / "images").iterdir()) == []
 
 
 def test_zip_path_traversal_is_rejected_without_persisting_package(
@@ -690,6 +785,7 @@ def test_zip_path_traversal_is_rejected_without_persisting_package(
         )
         assert response.status_code == 400
         assert "不安全路径" in response.json()["detail"]
+        assert "../" not in response.json()["detail"]
         with sessions() as db:
             assert db.scalars(select(MaterialPackage)).all() == []
         assert list((tmp_path / "images").iterdir()) == []

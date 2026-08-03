@@ -6492,6 +6492,34 @@ def _migration_049_isolate_prompt_categories(connection: Connection) -> None:
         raise RuntimeError(f"v49 提示词类目隔离迁移外键校验失败：{violations[:3]}")
 
 
+def _migration_050_repair_optimizer_protocol_columns(connection: Connection) -> None:
+    """Repair databases that applied v24 before its optimizer fields existed."""
+
+    tables = {
+        row[0]
+        for row in connection.exec_driver_sql(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )
+    }
+    if "optimizer_configs" not in tables:
+        return
+    columns = {
+        row[1]
+        for row in connection.exec_driver_sql("PRAGMA table_info(optimizer_configs)")
+    }
+    if "protocol" not in columns:
+        connection.exec_driver_sql(
+            "ALTER TABLE optimizer_configs ADD COLUMN "
+            "protocol VARCHAR(40) NOT NULL DEFAULT 'openai_chat'"
+        )
+    if "capabilities_json" not in columns:
+        connection.exec_driver_sql(
+            "ALTER TABLE optimizer_configs ADD COLUMN "
+            "capabilities_json TEXT NOT NULL DEFAULT "
+            "'[\"text\",\"structured_output\"]'"
+        )
+
+
 MIGRATIONS = [
     Migration(1, "add_sample_expected_level", _migration_001_add_sample_expected_level),
     Migration(2, "add_review_corrections", _migration_002_add_review_corrections),
@@ -6693,6 +6721,11 @@ MIGRATIONS = [
         49,
         "isolate_prompt_categories",
         _migration_049_isolate_prompt_categories,
+    ),
+    Migration(
+        50,
+        "repair_optimizer_protocol_columns",
+        _migration_050_repair_optimizer_protocol_columns,
     ),
 ]
 

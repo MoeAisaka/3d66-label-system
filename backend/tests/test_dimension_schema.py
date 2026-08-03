@@ -92,6 +92,23 @@ def _grade_points(definition: dict) -> dict[int, float]:
     }
 
 
+def _managed_definition(definition: dict) -> dict:
+    managed = json.loads(json.dumps(definition))
+    common_anchors = managed.get("common_grade_anchors", {})
+    for dimension in managed["dimensions"]:
+        dimension["description"] = (
+            dimension.get("description")
+            or f"评审{dimension['label']}的完成度、证据与代表性"
+        )
+        dimension["anchors"] = {
+            str(level): dimension.get("anchors", {}).get(str(level))
+            or common_anchors.get(str(level))
+            or f"{dimension['label']} {level} 级表现"
+            for level in range(1, 6)
+        }
+    return managed
+
+
 def test_materialized_space_revisions_equal_live_scoring_constants(
     engine,
 ) -> None:
@@ -413,7 +430,7 @@ def test_admin_dimension_schema_api_manages_drafts_and_preserves_published_versi
             f"/api/dimension-schemas/{SPACE_SCHEMA_KEY}"
             f"/versions/{ACTIVE_V13_VERSION}"
         ).json()
-        definition = source["definition"]
+        definition = _managed_definition(source["definition"])
         definition["package_version"] = "managed-draft-v1"
         created = client.post(
             "/api/dimension-schemas",
@@ -545,7 +562,57 @@ def test_admin_dimension_schema_crud_creates_new_version_and_freezes_publish(
     client = TestClient(app)
     try:
         with session_factory() as db:
-            definition = _definition_by_version(db, ACTIVE_V13_VERSION)
+            definition = _managed_definition(
+                _definition_by_version(db, ACTIVE_V13_VERSION)
+            )
+        invalid_definition = json.loads(json.dumps(definition))
+        invalid_definition["dimensions"][0]["key"] = "Invalid-Key"
+        invalid = client.post(
+            "/api/dimension-schemas",
+            json={
+                "schema_key": "space.invalid-managed-test",
+                "version": "1.0.0",
+                "schema_type": "family_pack",
+                "family_key": "space",
+                "display_name": "无效维度管理测试",
+                "definition": invalid_definition,
+            },
+        )
+        assert invalid.status_code == 422
+        assert "key" in invalid.json()["detail"]
+
+        missing_metadata = json.loads(json.dumps(definition))
+        missing_metadata["dimensions"][0]["description"] = ""
+        rejected_metadata = client.post(
+            "/api/dimension-schemas",
+            json={
+                "schema_key": "space.missing-managed-metadata",
+                "version": "1.0.0",
+                "schema_type": "family_pack",
+                "family_key": "space",
+                "display_name": "缺少评审元数据",
+                "definition": missing_metadata,
+            },
+        )
+        assert rejected_metadata.status_code == 422
+        assert "评审说明" in rejected_metadata.json()["detail"]
+
+        missing_anchor = json.loads(json.dumps(definition))
+        missing_anchor["dimensions"][0]["anchors"].pop("2")
+        rejected_anchor = client.post(
+            "/api/dimension-schemas",
+            json={
+                "schema_key": "space.missing-managed-anchor",
+                "version": "1.0.0",
+                "schema_type": "family_pack",
+                "family_key": "space",
+                "display_name": "缺少维度锚点",
+                "definition": missing_anchor,
+            },
+        )
+        assert rejected_anchor.status_code == 422
+        assert "1-5 级锚点" in rejected_anchor.json()["detail"]
+
         definition["package_version"] = "managed-v1"
         created = client.post(
             "/api/dimension-schemas",

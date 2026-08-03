@@ -69,10 +69,12 @@ export type HumanReview = {
 export type DimensionDefinition = {
   key: string
   label: string
+  description?: string
   display_order?: number
   weight?: number
   grade_points?: Record<string, number>
   aggregation_role?: string
+  layer?: string
   anchors?: Record<string, string>
 }
 
@@ -570,6 +572,32 @@ export type MaterialPackage = {
   status_summary: Record<NonNullable<Asset["evaluation_status"]>, number>
   created_by: string
   created_at: string
+}
+
+export type UploadFileIssue = {
+  filename: string
+  reason: string
+}
+
+export type MaterialUploadResult = {
+  items: Asset[]
+  successful_files: string[]
+  skipped_files: UploadFileIssue[]
+  failed_files: UploadFileIssue[]
+  summary: {
+    success_count: number
+    skipped_count: number
+    failed_count: number
+  }
+  package: {
+    id: number
+    name: string
+    item_count: number
+    duplicate_count: number
+    restored_count: number
+    ignored_count: number
+    failed_count: number
+  }
 }
 
 export type EvaluationCategoryProfile = {

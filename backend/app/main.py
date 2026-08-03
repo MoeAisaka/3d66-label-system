@@ -7,6 +7,7 @@ import io
 import json
 import logging
 import mimetypes
+import re
 import uuid
 import zipfile
 from collections import Counter
@@ -3124,6 +3125,74 @@ def _validate_asset_bytes(
     return mime_type, width, height
 
 
+def _relative_upload_name(filename: str | None, *, fallback: str) -> str:
+    """Normalize an untrusted display name without echoing absolute paths."""
+
+    raw = (filename or "").strip().replace("\\", "/")
+    path = PurePosixPath(raw)
+    is_absolute = (
+        path.is_absolute()
+        or raw.startswith("//")
+        or (len(raw) >= 2 and raw[1] == ":")
+        or ".." in path.parts
+    )
+    parts = [
+        part
+        for part in path.parts
+        if part not in {"", ".", "..", "/"} and not part.endswith(":")
+    ]
+    if is_absolute and parts:
+        parts = parts[-1:]
+    normalized = "/".join(parts) or fallback
+    return normalized[-500:].lstrip("/") or fallback
+
+
+def _unsupported_upload_reason(
+    filename: str,
+    *,
+    allowed_suffixes: set[str],
+) -> str | None:
+    path = PurePosixPath(filename)
+    lowered_parts = {part.lower() for part in path.parts}
+    if (
+        "__macosx" in lowered_parts
+        or any(part.startswith(".") for part in path.parts)
+        or path.name.lower() in {"thumbs.db", "desktop.ini"}
+    ):
+        return "隐藏或系统元数据"
+    suffix = path.suffix.lower()
+    if suffix not in allowed_suffixes:
+        return f"当前类目不支持 {suffix or '无扩展名'} 格式"
+    return None
+
+
+def _upload_issue(filename: str, reason: str) -> dict[str, str]:
+    return {"filename": filename, "reason": reason}
+
+
+def _upload_failure_reason(exc: HTTPException) -> str:
+    return exc.detail if isinstance(exc.detail, str) else "文件内容不符合当前类目输入合同"
+
+
+def _no_valid_upload_error(
+    *,
+    skipped_files: list[dict[str, str]],
+    failed_files: list[dict[str, str]],
+) -> HTTPException:
+    return HTTPException(
+        status_code=400,
+        detail={
+            "code": "no_valid_files",
+            "message": "没有可上传的有效文件",
+            "success_count": 0,
+            "skipped_count": len(skipped_files),
+            "failed_count": len(failed_files),
+            "skipped_files": skipped_files,
+            "failed_files": failed_files,
+        },
+    )
+
+
 def _store_package_asset(
     *,
     db: Session,
@@ -3136,7 +3205,10 @@ def _store_package_asset(
     category_key: str,
     created_paths: list[Path],
 ) -> dict[str, Any]:
-    normalized_name = (filename.strip() or f"image-{position}")[:500]
+    normalized_name = _relative_upload_name(
+        filename,
+        fallback=f"file-{position}",
+    )
     profile = _category_profile(db, category_key, require_active=True)
     mime_type, width, height = _validate_asset_bytes(
         data,
@@ -3225,10 +3297,21 @@ def _upload_result(
     package: MaterialPackage,
     uploaded: list[dict[str, Any]],
     *,
-    ignored_count: int = 0,
+    skipped_files: list[dict[str, str]] | None = None,
+    failed_files: list[dict[str, str]] | None = None,
 ) -> dict[str, Any]:
+    skipped_files = skipped_files or []
+    failed_files = failed_files or []
     return {
         "items": uploaded,
+        "successful_files": [str(item["name"]) for item in uploaded],
+        "skipped_files": skipped_files,
+        "failed_files": failed_files,
+        "summary": {
+            "success_count": len(uploaded),
+            "skipped_count": len(skipped_files),
+            "failed_count": len(failed_files),
+        },
         "package": {
             "id": package.id,
             "package_key": package.package_key,
@@ -3243,7 +3326,8 @@ def _upload_result(
             "restored_count": sum(
                 1 for item in uploaded if item.get("restored")
             ),
-            "ignored_count": ignored_count,
+            "ignored_count": len(skipped_files),
+            "failed_count": len(failed_files),
             "created_by": package.created_by,
             "created_at": package.created_at,
         },
@@ -3265,12 +3349,39 @@ async def upload_assets(
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     profile = _category_profile(db, category_key, require_active=True)
+    pipeline = _profile_pipeline(profile, db)
+    allowed_suffixes = set(pipeline["allowed_suffixes"])
     if not files:
         raise HTTPException(status_code=422, detail="至少选择一个素材")
-    if len(files) > MAX_UPLOAD_FILES:
+    if len(files) > MAX_UPLOAD_FILES * 2:
         raise HTTPException(
             status_code=400,
-            detail=f"图片/文件夹单次最多上传 {MAX_UPLOAD_FILES} 张；更多素材请使用 ZIP",
+            detail="文件夹条目过多，请移除无关文件或使用 ZIP",
+        )
+    candidates: list[tuple[UploadFile, str]] = []
+    skipped_files: list[dict[str, str]] = []
+    for position, upload in enumerate(files, start=1):
+        relative_name = _relative_upload_name(
+            upload.filename,
+            fallback=f"file-{position}",
+        )
+        unsupported_reason = _unsupported_upload_reason(
+            relative_name,
+            allowed_suffixes=allowed_suffixes,
+        )
+        if unsupported_reason:
+            skipped_files.append(_upload_issue(relative_name, unsupported_reason))
+        else:
+            candidates.append((upload, relative_name))
+    if len(candidates) > MAX_UPLOAD_FILES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"图片/文件夹单次最多上传 {MAX_UPLOAD_FILES} 个有效文件；更多素材请使用 ZIP",
+        )
+    if not candidates:
+        raise _no_valid_upload_error(
+            skipped_files=skipped_files,
+            failed_files=[],
         )
     package = MaterialPackage(
         package_key=f"upload:{uuid.uuid4().hex}",
@@ -3288,21 +3399,32 @@ async def upload_assets(
     db.add(package)
     db.flush()
     uploaded: list[dict[str, Any]] = []
+    failed_files: list[dict[str, str]] = []
     created_paths: list[Path] = []
     try:
-        for position, upload in enumerate(files, start=1):
-            uploaded.append(
-                _store_package_asset(
+        for upload, relative_name in candidates:
+            try:
+                item = _store_package_asset(
                     db=db,
                     package=package,
-                    position=position,
-                    filename=upload.filename or f"image-{position}",
+                    position=len(uploaded) + 1,
+                    filename=relative_name,
                     content_type=upload.content_type,
                     data=await upload.read(),
                     actor=user.username,
                     category_key=category_key,
                     created_paths=created_paths,
                 )
+            except HTTPException as exc:
+                failed_files.append(
+                    _upload_issue(relative_name, _upload_failure_reason(exc))
+                )
+                continue
+            uploaded.append(item)
+        if not uploaded:
+            raise _no_valid_upload_error(
+                skipped_files=skipped_files,
+                failed_files=failed_files,
             )
         append_audit_event(
             db,
@@ -3316,6 +3438,8 @@ async def upload_assets(
                 "duplicate_count": sum(
                     1 for item in uploaded if item["duplicate"]
                 ),
+                "skipped_count": len(skipped_files),
+                "failed_count": len(failed_files),
                 "input_mode": "files_or_folder",
             },
             event_key=f"material-package:{package.id}:uploaded",
@@ -3324,7 +3448,12 @@ async def upload_assets(
     except Exception:
         _cleanup_failed_upload(db, created_paths)
         raise
-    return _upload_result(package, uploaded)
+    return _upload_result(
+        package,
+        uploaded,
+        skipped_files=skipped_files,
+        failed_files=failed_files,
+    )
 
 
 @app.post("/api/material-packages/import-archive")
@@ -3359,41 +3488,41 @@ async def import_material_package_archive(
     db.flush()
     uploaded: list[dict[str, Any]] = []
     created_paths: list[Path] = []
-    ignored_count = 0
+    skipped_files: list[dict[str, str]] = []
+    failed_files: list[dict[str, str]] = []
     try:
         with zipfile.ZipFile(archive.file) as bundle:
-            file_infos = [item for item in bundle.infolist() if not item.is_dir()]
-            if len(file_infos) > MAX_ARCHIVE_IMAGES * 2:
+            archive_infos = bundle.infolist()
+            if len(archive_infos) > MAX_ARCHIVE_IMAGES * 2:
                 raise HTTPException(
                     status_code=400,
                     detail="ZIP 文件条目过多，请拆分素材包",
                 )
+            for info in archive_infos:
+                normalized_path = info.filename.replace("\\", "/")
+                path = PurePosixPath(normalized_path)
+                if path.is_absolute() or ".." in path.parts:
+                    display_name = _relative_upload_name(
+                        normalized_path,
+                        fallback="archive-entry",
+                    )
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"ZIP 包含不安全路径：{display_name}",
+                    )
+            file_infos = [item for item in archive_infos if not item.is_dir()]
             image_infos: list[zipfile.ZipInfo] = []
             total_uncompressed = 0
             for info in file_infos:
                 normalized_path = info.filename.replace("\\", "/")
-                path = PurePosixPath(normalized_path)
-                if path.is_absolute() or ".." in path.parts:
-                    raise HTTPException(
-                        status_code=400,
-                        detail=f"ZIP 包含不安全路径：{info.filename}",
-                    )
-                if (
-                    "__MACOSX" in path.parts
-                    or path.name in {".DS_Store", "Thumbs.db"}
-                    or path.suffix.lower() not in allowed_suffixes
-                ):
-                    ignored_count += 1
-                    continue
+                display_name = _relative_upload_name(
+                    normalized_path,
+                    fallback="archive-entry",
+                )
                 if info.flag_bits & 0x1:
                     raise HTTPException(
                         status_code=400,
-                        detail=f"ZIP 内图片不能加密：{info.filename}",
-                    )
-                if info.file_size <= 0 or info.file_size > MAX_UPLOAD_BYTES:
-                    raise HTTPException(
-                        status_code=400,
-                        detail=f"{info.filename} 为空或超过 25MB",
+                        detail=f"ZIP 内文件不能加密：{display_name}",
                     )
                 ratio = info.file_size / max(info.compress_size, 1)
                 if (
@@ -3402,7 +3531,7 @@ async def import_material_package_archive(
                 ):
                     raise HTTPException(
                         status_code=400,
-                        detail=f"ZIP 压缩比异常：{info.filename}",
+                        detail=f"ZIP 压缩比异常：{display_name}",
                     )
                 total_uncompressed += info.file_size
                 if total_uncompressed > MAX_ARCHIVE_UNCOMPRESSED_BYTES:
@@ -3410,29 +3539,60 @@ async def import_material_package_archive(
                         status_code=400,
                         detail="ZIP 解压后总大小超过 30GB，请拆分素材包",
                     )
+                unsupported_reason = _unsupported_upload_reason(
+                    display_name,
+                    allowed_suffixes=allowed_suffixes,
+                )
+                if unsupported_reason:
+                    skipped_files.append(
+                        _upload_issue(display_name, unsupported_reason)
+                    )
+                    continue
+                if info.file_size <= 0 or info.file_size > MAX_UPLOAD_BYTES:
+                    failed_files.append(
+                        _upload_issue(display_name, "文件为空或超过 25MB")
+                    )
+                    continue
                 image_infos.append(info)
             if not image_infos:
-                raise HTTPException(status_code=400, detail="ZIP 中没有符合类目输入合同的文件")
+                raise _no_valid_upload_error(
+                    skipped_files=skipped_files,
+                    failed_files=failed_files,
+                )
             if len(image_infos) > MAX_ARCHIVE_IMAGES:
                 raise HTTPException(
                     status_code=400,
                     detail=f"单个 ZIP 最多包含 {MAX_ARCHIVE_IMAGES} 张图片",
                 )
-            for position, info in enumerate(image_infos, start=1):
+            for info in image_infos:
+                relative_name = _relative_upload_name(
+                    info.filename,
+                    fallback="archive-entry",
+                )
                 with bundle.open(info) as source:
                     data = source.read(MAX_UPLOAD_BYTES + 1)
-                uploaded.append(
-                    _store_package_asset(
+                try:
+                    item = _store_package_asset(
                         db=db,
                         package=package,
-                        position=position,
-                        filename=info.filename,
+                        position=len(uploaded) + 1,
+                        filename=relative_name,
                         content_type=mimetypes.guess_type(info.filename)[0],
                         data=data,
                         actor=user.username,
                         category_key=category_key,
                         created_paths=created_paths,
                     )
+                except HTTPException as exc:
+                    failed_files.append(
+                        _upload_issue(relative_name, _upload_failure_reason(exc))
+                    )
+                    continue
+                uploaded.append(item)
+            if not uploaded:
+                raise _no_valid_upload_error(
+                    skipped_files=skipped_files,
+                    failed_files=failed_files,
                 )
         append_audit_event(
             db,
@@ -3446,7 +3606,8 @@ async def import_material_package_archive(
                 "duplicate_count": sum(
                     1 for item in uploaded if item["duplicate"]
                 ),
-                "ignored_count": ignored_count,
+                "ignored_count": len(skipped_files),
+                "failed_count": len(failed_files),
                 "input_mode": "zip_archive",
             },
             event_key=f"material-package:{package.id}:uploaded",
@@ -3461,7 +3622,8 @@ async def import_material_package_archive(
     return _upload_result(
         package,
         uploaded,
-        ignored_count=ignored_count,
+        skipped_files=skipped_files,
+        failed_files=failed_files,
     )
 
 
@@ -9286,6 +9448,39 @@ def _dimension_schema_payload(
 def _validated_dimension_definition(definition: dict[str, Any]) -> tuple[str, str]:
     if definition.get("format_version") != "dimension-schema-definition-v1":
         raise HTTPException(status_code=422, detail="维度方案格式版本不受支持")
+    dimensions = definition.get("dimensions")
+    if not isinstance(dimensions, list) or not dimensions:
+        raise HTTPException(status_code=422, detail="维度方案至少需要一个维度")
+    seen_keys: set[str] = set()
+    for index, dimension in enumerate(dimensions, start=1):
+        if not isinstance(dimension, dict):
+            raise HTTPException(status_code=422, detail=f"第 {index} 个维度必须是对象")
+        key = dimension.get("key")
+        if not isinstance(key, str) or re.fullmatch(r"[a-z][a-z0-9_]{2,79}", key) is None:
+            raise HTTPException(
+                status_code=422,
+                detail=f"第 {index} 个维度 key 必须是 3-80 位小写英文、数字或下划线",
+            )
+        if key in seen_keys:
+            raise HTTPException(status_code=422, detail=f"维度 key 重复：{key}")
+        seen_keys.add(key)
+        label = dimension.get("label")
+        if (
+            not isinstance(label, str)
+            or not label.strip()
+            or re.search(r"[\u4e00-\u9fff]", label) is None
+        ):
+            raise HTTPException(status_code=422, detail=f"维度 {key} 必须填写中文名")
+        description = dimension.get("description")
+        if not isinstance(description, str) or not description.strip():
+            raise HTTPException(status_code=422, detail=f"维度 {key} 必须填写评审说明/关注点")
+        anchors = dimension.get("anchors")
+        if not isinstance(anchors, dict) or any(
+            not isinstance(anchors.get(str(level)), str)
+            or not anchors[str(level)].strip()
+            for level in range(1, 6)
+        ):
+            raise HTTPException(status_code=422, detail=f"维度 {key} 必须填写 1-5 级锚点")
     try:
         validate_dimension_scoring_contract(definition)
     except (DimensionScoringContractError, TypeError, ValueError) as exc:

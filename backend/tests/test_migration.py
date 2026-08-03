@@ -63,6 +63,7 @@ MIGRATION_NAMES = [
     "bind_default_production_dimension",
     "add_baseline_stock_pipeline",
     "isolate_prompt_categories",
+    "repair_optimizer_protocol_columns",
 ]
 
 
@@ -358,6 +359,66 @@ def test_v49_backfills_prompt_owners_and_closes_inherited_space_dimensions(
             assert connection.exec_driver_sql(
                 "PRAGMA foreign_key_check"
             ).all() == []
+    finally:
+        engine.dispose()
+
+
+def test_v50_repairs_optimizer_protocol_columns_from_v49_database(tmp_path) -> None:
+    engine = _engine(tmp_path, "v50-optimizer-protocol.db")
+    try:
+        with engine.begin() as connection:
+            connection.exec_driver_sql(
+                "CREATE TABLE optimizer_configs ("
+                "id INTEGER PRIMARY KEY, "
+                "name VARCHAR(120) NOT NULL, "
+                "provider VARCHAR(40) NOT NULL)"
+            )
+            connection.exec_driver_sql(
+                "INSERT INTO optimizer_configs(id, name, provider) "
+                "VALUES (7, '历史优化模型', 'openai')"
+            )
+            connection.exec_driver_sql(
+                "CREATE TABLE schema_migrations ("
+                "version INTEGER PRIMARY KEY, name VARCHAR(200) NOT NULL, "
+                "applied_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP)"
+            )
+            for version, name in enumerate(MIGRATION_NAMES[:49], start=1):
+                connection.exec_driver_sql(
+                    "INSERT INTO schema_migrations(version, name) VALUES (?, ?)",
+                    (version, name),
+                )
+
+            run_migrations(connection)
+
+            columns = {
+                row[1]
+                for row in connection.exec_driver_sql(
+                    "PRAGMA table_info(optimizer_configs)"
+                )
+            }
+            assert {"protocol", "capabilities_json"}.issubset(columns)
+            assert connection.exec_driver_sql(
+                "SELECT id, name, provider, protocol, capabilities_json "
+                "FROM optimizer_configs"
+            ).one() == (
+                7,
+                "历史优化模型",
+                "openai",
+                "openai_chat",
+                '["text","structured_output"]',
+            )
+            assert connection.exec_driver_sql(
+                "SELECT name FROM schema_migrations WHERE version=50"
+            ).scalar_one() == "repair_optimizer_protocol_columns"
+
+            connection.exec_driver_sql(
+                "DELETE FROM schema_migrations WHERE version=50"
+            )
+            run_migrations(connection)
+            assert connection.exec_driver_sql(
+                "SELECT COUNT(*) FROM pragma_table_info('optimizer_configs') "
+                "WHERE name IN ('protocol','capabilities_json')"
+            ).scalar_one() == 2
     finally:
         engine.dispose()
 

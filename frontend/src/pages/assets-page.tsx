@@ -18,21 +18,22 @@ import { PageHeader } from "@/components/app-shell"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
-import { api, jsonBody } from "@/lib/api"
-import type { Asset, EvaluationCategoryProfile, MaterialPackage } from "@/lib/types"
+import { ApiError, api, jsonBody } from "@/lib/api"
+import type {
+  Asset,
+  EvaluationCategoryProfile,
+  MaterialPackage,
+  MaterialUploadResult,
+  UploadFileIssue,
+} from "@/lib/types"
 
 type CategoryKey = EvaluationCategoryProfile["category_key"]
 
-type UploadResult = {
-  items: Asset[]
-  package: {
-    id: number
-    name: string
-    item_count: number
-    duplicate_count: number
-    restored_count: number
-    ignored_count?: number
-  }
+type UploadFeedback = {
+  source: string
+  successful: string[]
+  skipped: UploadFileIssue[]
+  failed: UploadFileIssue[]
 }
 
 function fileSize(bytes: number) {
@@ -48,6 +49,43 @@ function snapshotFiles(files: FileList | null) {
   return files ? Array.from(files) : []
 }
 
+function relativeBrowserFileName(file: File) {
+  const relativePath = (file as File & { webkitRelativePath?: string }).webkitRelativePath
+  const raw = (relativePath || file.name).replaceAll("\\", "/")
+  const parts = raw.split("/").filter((part) => part && part !== "." && part !== "..")
+  const absolute = raw.startsWith("/") || raw.startsWith("//") || /^[A-Za-z]:\//.test(raw) || raw.split("/").includes("..")
+  return (absolute ? parts.at(-1) : parts.join("/")) || "unnamed-file"
+}
+
+function fileSkipReason(file: File, category?: EvaluationCategoryProfile) {
+  const filename = relativeBrowserFileName(file)
+  const parts = filename.split("/")
+  const basename = parts.at(-1)?.toLowerCase() ?? ""
+  if (
+    parts.some((part) => part.startsWith("."))
+    || parts.some((part) => part.toLowerCase() === "__macosx")
+    || basename === "thumbs.db"
+    || basename === "desktop.ini"
+  ) return "隐藏或系统元数据"
+  const suffixIndex = basename.lastIndexOf(".")
+  const suffix = suffixIndex >= 0 ? basename.slice(suffixIndex) : ""
+  const allowedSuffixes = new Set(category?.pipeline_config.allowed_suffixes.map((item) => item.toLowerCase()) ?? [])
+  if (!allowedSuffixes.has(suffix)) return `当前类目不支持 ${suffix || "无扩展名"} 格式`
+  return null
+}
+
+function uploadIssuesFromError(error: unknown, key: "skipped_files" | "failed_files") {
+  if (!(error instanceof ApiError) || !Array.isArray(error.detail?.[key])) return []
+  return error.detail[key].filter((item): item is UploadFileIssue => (
+    Boolean(item)
+    && typeof item === "object"
+    && "filename" in item
+    && typeof item.filename === "string"
+    && "reason" in item
+    && typeof item.reason === "string"
+  ))
+}
+
 export function AssetsPage() {
   const fileInputRef = useRef<HTMLInputElement>(null)
   const folderInputRef = useRef<HTMLInputElement>(null)
@@ -60,6 +98,7 @@ export function AssetsPage() {
   const [uploadedFrom, setUploadedFrom] = useState("")
   const [uploadedTo, setUploadedTo] = useState("")
   const [categoryKey, setCategoryKey] = useState<CategoryKey>("space_image")
+  const [uploadFeedback, setUploadFeedback] = useState<UploadFeedback | null>(null)
   const queryClient = useQueryClient()
   const categories = useQuery({
     queryKey: ["evaluation-categories"],
@@ -101,23 +140,44 @@ export function AssetsPage() {
   }
 
   const upload = useMutation({
-    mutationFn: async ({ files, packageName }: { files: File[]; packageName?: string }) => {
+    mutationFn: async ({ files, packageName }: { files: File[]; packageName?: string; skipped: UploadFileIssue[] }) => {
       const form = new FormData()
-      files.forEach((file) => form.append("files", file))
+      files.forEach((file) => form.append("files", file, relativeBrowserFileName(file)))
       if (packageName?.trim()) form.append("package_name", packageName.trim())
       form.append("category_key", categoryKey)
-      return api<UploadResult>("/api/assets/upload", { method: "POST", body: form })
+      return api<MaterialUploadResult>("/api/assets/upload", { method: "POST", body: form })
     },
-    onSuccess: async (data) => {
+    onSuccess: async (data, variables) => {
       setUploadPackageName("")
       await refreshMaterials()
+      const skipped = [...variables.skipped, ...data.skipped_files]
+      setUploadFeedback({
+        source: data.package.name,
+        successful: data.successful_files,
+        skipped,
+        failed: data.failed_files,
+      })
       const notes = [
         data.package.duplicate_count ? `${data.package.duplicate_count} 张重复` : "",
         data.package.restored_count ? `${data.package.restored_count} 张恢复` : "",
+        skipped.length ? `跳过 ${skipped.length}` : "",
+        data.failed_files.length ? `失败 ${data.failed_files.length}` : "",
       ].filter(Boolean)
       toast.success(`“${data.package.name}”已汇总 ${data.items.length} 张${notes.length ? `（${notes.join("，")}）` : ""}`)
     },
-    onError: (error) => toast.error(error.message),
+    onError: (error, variables) => {
+      const serverSkipped = uploadIssuesFromError(error, "skipped_files")
+      const serverFailed = uploadIssuesFromError(error, "failed_files")
+      setUploadFeedback({
+        source: variables.packageName?.trim() || "本次上传",
+        successful: [],
+        skipped: [...variables.skipped, ...serverSkipped],
+        failed: serverFailed.length
+          ? serverFailed
+          : variables.files.map((file) => ({ filename: relativeBrowserFileName(file), reason: error.message })),
+      })
+      toast.error(error.message)
+    },
   })
 
   const archiveUpload = useMutation({
@@ -126,7 +186,7 @@ export function AssetsPage() {
       form.append("archive", archive)
       if (packageName?.trim()) form.append("package_name", packageName.trim())
       form.append("category_key", categoryKey)
-      return api<UploadResult>("/api/material-packages/import-archive", {
+      return api<MaterialUploadResult>("/api/material-packages/import-archive", {
         method: "POST",
         body: form,
       })
@@ -134,12 +194,29 @@ export function AssetsPage() {
     onSuccess: async (data) => {
       setUploadPackageName("")
       await refreshMaterials()
+      setUploadFeedback({
+        source: data.package.name,
+        successful: data.successful_files,
+        skipped: data.skipped_files,
+        failed: data.failed_files,
+      })
       toast.success(
         `“${data.package.name}”已从 ZIP 汇总 ${data.items.length} 张`
-        + (data.package.ignored_count ? `，忽略 ${data.package.ignored_count} 个非图片文件` : ""),
+        + (data.skipped_files.length ? `，跳过 ${data.skipped_files.length} 个文件` : "")
+        + (data.failed_files.length ? `，失败 ${data.failed_files.length} 个文件` : ""),
       )
     },
-    onError: (error) => toast.error(error.message),
+    onError: (error, variables) => {
+      const skipped = uploadIssuesFromError(error, "skipped_files")
+      const failed = uploadIssuesFromError(error, "failed_files")
+      setUploadFeedback({
+        source: variables.packageName?.trim() || variables.archive.name,
+        successful: [],
+        skipped,
+        failed: failed.length ? failed : [{ filename: variables.archive.name, reason: error.message }],
+      })
+      toast.error(error.message)
+    },
   })
 
   const createPackage = useMutation({
@@ -228,7 +305,28 @@ export function AssetsPage() {
 
   function submitFiles(files: File[], packageName?: string) {
     if (!files.length) return
-    upload.mutate({ files, packageName: packageName || uploadPackageName })
+    if (!selectedCategory) {
+      toast.error("评测类目尚未加载完成")
+      return
+    }
+    const skipped: UploadFileIssue[] = []
+    const accepted = files.filter((file) => {
+      const reason = fileSkipReason(file, selectedCategory)
+      if (!reason) return true
+      skipped.push({ filename: relativeBrowserFileName(file), reason })
+      return false
+    })
+    if (!accepted.length) {
+      setUploadFeedback({
+        source: packageName || uploadPackageName || "本次上传",
+        successful: [],
+        skipped,
+        failed: [],
+      })
+      toast.error(`没有符合${selectedCategory.display_name}输入格式的文件，已跳过 ${skipped.length} 个`)
+      return
+    }
+    upload.mutate({ files: accepted, packageName: packageName || uploadPackageName, skipped })
   }
 
   function toggleAll() {
@@ -338,6 +436,7 @@ export function AssetsPage() {
               {isDocumentCategory ? "PDF 单文件不超过 25MB；上传后按类目处理链执行" : "图片/文件夹单次最多 1000 张；更多素材用 ZIP，最多 10000 张；单张不超过 25MB"}
             </p>
           </button>
+          {uploadFeedback && <UploadFeedbackPanel feedback={uploadFeedback} />}
         </section>
 
         <section className="mt-10">
@@ -525,6 +624,51 @@ export function AssetsPage() {
         </section>
       </div>
     </>
+  )
+}
+
+function UploadFeedbackPanel({ feedback }: { feedback: UploadFeedback }) {
+  const groups: Array<{
+    key: "successful" | "skipped" | "failed"
+    label: string
+    tone: "success" | "warning" | "danger"
+    items: string[]
+  }> = [
+    { key: "successful", label: "成功", tone: "success", items: feedback.successful },
+    {
+      key: "skipped",
+      label: "跳过",
+      tone: "warning",
+      items: feedback.skipped.map((item) => `${item.filename} · ${item.reason}`),
+    },
+    {
+      key: "failed",
+      label: "失败",
+      tone: "danger",
+      items: feedback.failed.map((item) => `${item.filename} · ${item.reason}`),
+    },
+  ]
+  return (
+    <div className="border-t border-[var(--line)] bg-[#fafbf8] px-5 py-4" aria-live="polite">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <p className="text-sm font-bold">{feedback.source}处理结果</p>
+        <div className="flex flex-wrap gap-2">
+          {groups.map((group) => <Badge key={group.key} tone={group.tone}>{group.label} {group.items.length}</Badge>)}
+        </div>
+      </div>
+      <div className="mt-3 grid gap-3 lg:grid-cols-3">
+        {groups.map((group) => (
+          <details key={group.key} className="border-t border-[var(--line)] pt-2" open={group.key !== "successful" && group.items.length > 0}>
+            <summary className="cursor-pointer text-xs font-semibold">{group.label}文件（{group.items.length}）</summary>
+            <div className="font-data mt-2 max-h-32 space-y-1 overflow-auto text-[11px] leading-5 text-[var(--muted)]">
+              {group.items.length
+                ? group.items.map((item, index) => <p className="break-all" key={`${item}-${index}`}>{item}</p>)
+                : <p>无</p>}
+            </div>
+          </details>
+        ))}
+      </div>
+    </div>
   )
 }
 

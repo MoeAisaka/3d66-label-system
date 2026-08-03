@@ -42,6 +42,17 @@ const schemaStatusNames: Record<DimensionSchemaRegistryItem["status"], string> =
   retired: "已停用",
 }
 
+const DIMENSION_KEY_PATTERN = /^[a-z][a-z0-9_]{2,79}$/
+const SCHEMA_KEY_PATTERN = /^[a-z][a-z0-9_.-]{2,79}$/
+const ANCHOR_LEVELS = [1, 2, 3, 4, 5] as const
+const DEFAULT_ANCHORS: Record<string, string> = {
+  "1": "核心关系严重失效，几乎没有有效价值",
+  "2": "问题较多，明显低于普通合格水平",
+  "3": "基础成立、普通可用，但存在明确提升空间",
+  "4": "明显良好、专业成熟，少量问题不影响整体",
+  "5": "代表性优秀，优势具体且证据充分",
+}
+
 function copyDimensionConfig(config: CategoryDimensionConfig): CategoryDimensionConfig {
   const keys = config.selected_keys ?? config.enabled_keys ?? []
   return {
@@ -90,8 +101,20 @@ function cloneDefinition(definition: NonNullable<DimensionSchemaRegistryItem["de
   return JSON.parse(JSON.stringify(definition)) as NonNullable<DimensionSchemaRegistryItem["definition"]>
 }
 
-function cloneDimension(dimension: DimensionDefinition) {
-  return JSON.parse(JSON.stringify(dimension)) as DimensionDefinition
+function editableDefinition(definition: NonNullable<DimensionSchemaRegistryItem["definition"]>) {
+  const editable = cloneDefinition(definition)
+  const commonAnchors = editable.common_grade_anchors && typeof editable.common_grade_anchors === "object"
+    ? editable.common_grade_anchors as Record<string, string>
+    : DEFAULT_ANCHORS
+  editable.dimensions = editable.dimensions.map((dimension) => ({
+    ...dimension,
+    description: dimension.description?.trim() || `评审${dimension.label}的完成度、证据与代表性`,
+    anchors: Object.fromEntries(ANCHOR_LEVELS.map((level) => [
+      String(level),
+      dimension.anchors?.[String(level)] || commonAnchors[String(level)] || DEFAULT_ANCHORS[String(level)],
+    ])),
+  }))
+  return editable
 }
 
 function editableSchemaDraft(schema: DimensionSchemaRegistryItem): SchemaDraft | null {
@@ -103,7 +126,39 @@ function editableSchemaDraft(schema: DimensionSchemaRegistryItem): SchemaDraft |
     display_name: schema.display_name,
     family_key: schema.family_key,
     parent_schema_id: schema.status === "published" ? schema.id : schema.parent_schema_id,
-    definition: cloneDefinition(schema.definition),
+    definition: editableDefinition(schema.definition),
+  }
+}
+
+type DimensionFieldErrors = {
+  key?: string
+  label?: string
+  description?: string
+  weight?: string
+  anchors?: string
+}
+
+function validateManagedDimensions(dimensions: DimensionDefinition[]) {
+  const keyCounts = new Map<string, number>()
+  dimensions.forEach((dimension) => keyCounts.set(dimension.key.trim(), (keyCounts.get(dimension.key.trim()) ?? 0) + 1))
+  const fields: DimensionFieldErrors[] = dimensions.map((dimension) => {
+    const errors: DimensionFieldErrors = {}
+    const key = dimension.key.trim()
+    if (!DIMENSION_KEY_PATTERN.test(key)) errors.key = "3-80 位小写英文、数字或下划线"
+    else if ((keyCounts.get(key) ?? 0) > 1) errors.key = "key 不能重复"
+    if (!dimension.label.trim() || !/[\u4e00-\u9fff]/.test(dimension.label)) errors.label = "请填写中文名"
+    if (!dimension.description?.trim()) errors.description = "请填写评审说明/关注点"
+    if (!Number.isFinite(dimension.weight) || Number(dimension.weight) <= 0) errors.weight = "权重必须大于 0"
+    if (ANCHOR_LEVELS.some((level) => !dimension.anchors?.[String(level)]?.trim())) errors.anchors = "1-5 级锚点均为必填"
+    return errors
+  })
+  const weightSum = dimensions.reduce((sum, item) => sum + (Number(item.weight) || 0), 0)
+  const weightSumValid = Math.abs(weightSum - 1) < 0.0001
+  return {
+    fields,
+    weightSum,
+    weightSumValid,
+    valid: dimensions.length > 0 && weightSumValid && fields.every((item) => Object.keys(item).length === 0),
   }
 }
 
@@ -111,8 +166,14 @@ function synchronizeDefinition(draft: SchemaDraft): SchemaDraft {
   const definition = cloneDefinition(draft.definition)
   definition.dimensions = definition.dimensions.map((item, index) => ({
     ...item,
+    key: item.key.trim(),
+    label: item.label.trim(),
+    description: item.description?.trim(),
+    anchors: Object.fromEntries(ANCHOR_LEVELS.map((level) => [String(level), item.anchors?.[String(level)]?.trim() ?? ""])),
     display_order: index + 1,
   }))
+  definition.package_key = draft.schema_key.trim()
+  definition.package_version = draft.version.trim()
   const keys = definition.dimensions.map((item) => item.key)
   if (definition.output_contract) definition.output_contract.dimension_output_keys = keys
   if (definition.risk_review) definition.risk_review.dimension_keys = keys
@@ -738,7 +799,14 @@ function SchemaVersionManager({
   busy: boolean
 }) {
   const dimensions = schemaDraft?.definition.dimensions ?? selectedSchema?.definition?.dimensions ?? []
-  const weightSum = dimensions.reduce((sum, item) => sum + (Number(item.weight) || 0), 0)
+  const validation = validateManagedDimensions(schemaDraft?.definition.dimensions ?? [])
+  const weightSum = schemaDraft ? validation.weightSum : dimensions.reduce((sum, item) => sum + (Number(item.weight) || 0), 0)
+  const schemaIdentityValid = Boolean(
+    schemaDraft
+    && SCHEMA_KEY_PATTERN.test(schemaDraft.schema_key.trim())
+    && schemaDraft.version.trim()
+    && schemaDraft.display_name.trim(),
+  )
   const isBound = Boolean(
     selectedCategory && selectedSchema
     && selectedCategory.dimension_schema_key === selectedSchema.schema_key
@@ -751,10 +819,30 @@ function SchemaVersionManager({
     if (!next) return
     next.id = null
     next.parent_schema_id = selectedSchema.id
-    next.version = `${selectedSchema.version}-draft-${new Date().toISOString().slice(0, 10).replaceAll("-", "")}`
+    next.version = `${selectedSchema.version}-draft-${new Date().toISOString().slice(0, 10).replaceAll("-", "")}-${Date.now().toString(36)}`
     next.display_name = `${selectedSchema.display_name} 新版本`
     next.definition.package_version = next.version
     setSchemaDraft(next)
+  }
+
+  function beginBlank() {
+    if (!selectedSchema?.definition) return
+    const definition = editableDefinition(selectedSchema.definition)
+    definition.dimensions = []
+    if (definition.output_contract) definition.output_contract.dimension_output_keys = []
+    if (definition.risk_review) definition.risk_review.dimension_keys = []
+    definition.core_dimension_keys = []
+    definition.family_dimension_keys = []
+    const stamp = Date.now().toString(36)
+    setSchemaDraft({
+      id: null,
+      schema_key: `custom.dimension_${stamp}`,
+      version: "1.0.0",
+      display_name: selectedCategory ? `${selectedCategory.display_name}新维度方案` : "新维度方案",
+      family_key: selectedSchema.family_key,
+      parent_schema_id: null,
+      definition,
+    })
   }
 
   function updateSchema(patch: Partial<SchemaDraft>) {
@@ -779,24 +867,37 @@ function SchemaVersionManager({
   }
 
   function removeDimension(index: number) {
-    if (!schemaDraft || schemaDraft.definition.dimensions.length <= 1) return
+    if (!schemaDraft) return
     const definition = cloneDefinition(schemaDraft.definition)
     definition.dimensions.splice(index, 1)
+    const weightSum = definition.dimensions.reduce((sum, item) => sum + (Number(item.weight) || 0), 0)
+    if (weightSum > 0) {
+      definition.dimensions = definition.dimensions.map((item) => ({ ...item, weight: Number(item.weight) / weightSum }))
+    }
     updateSchema({ definition })
   }
 
   function addDimension() {
     if (!schemaDraft) return
     const definition = cloneDefinition(schemaDraft.definition)
-    const template = definition.dimensions[0]
-    const suffix = definition.dimensions.length + 1
+    const currentCount = definition.dimensions.length
+    const newWeight = currentCount === 0 ? 1 : Math.min(0.1, 1 / (currentCount + 1))
+    if (currentCount > 0) {
+      definition.dimensions = definition.dimensions.map((item) => ({
+        ...item,
+        weight: (Number(item.weight) || 0) * (1 - newWeight),
+      }))
+    }
     definition.dimensions.push({
-      ...cloneDimension(template),
-      key: `new_dimension_${suffix}`,
-      label: `新维度 ${suffix}`,
-      weight: 0,
-      display_order: suffix,
-      anchors: { "1": "明显不合格", "3": "普通可用", "5": "代表性优秀" },
+      key: "",
+      label: "",
+      description: "",
+      layer: "family",
+      aggregation_role: "score",
+      grade_points: { ...(definition.aggregation?.grade_points ?? {}) },
+      weight: newWeight,
+      display_order: currentCount + 1,
+      anchors: Object.fromEntries(ANCHOR_LEVELS.map((level) => [String(level), ""])),
     })
     updateSchema({ definition })
   }
@@ -809,7 +910,10 @@ function SchemaVersionManager({
           <h2 className="font-editorial mt-1 text-xl font-bold">定义、发布并绑定评测维度</h2>
         </div>
         <div className="flex flex-wrap gap-2">
-          {selectedSchema?.status === "published" && (
+          <Button type="button" variant="secondary" onClick={beginBlank} disabled={busy || !selectedSchema?.definition}>
+            <Plus />新建空白方案
+          </Button>
+          {(selectedSchema?.status === "published" || selectedSchema?.status === "retired") && (
             <Button type="button" variant="secondary" onClick={beginCopy} disabled={busy}>
               <Copy />复制为新草稿
             </Button>
@@ -845,18 +949,18 @@ function SchemaVersionManager({
         <div className="min-w-0 px-5 py-5">
           {schemaDraft ? (
             <div className="grid gap-4 md:grid-cols-2">
-              <label className="text-xs font-semibold">方案名称<Input className="mt-2" value={schemaDraft.display_name} onChange={(event) => updateSchema({ display_name: event.target.value })} /></label>
-              <label className="text-xs font-semibold">版本号<Input className="font-data mt-2" value={schemaDraft.version} disabled={schemaDraft.id !== null} onChange={(event) => updateSchema({ version: event.target.value })} /></label>
-              <label className="text-xs font-semibold">方案标识<Input className="font-data mt-2" value={schemaDraft.schema_key} disabled={schemaDraft.id !== null} onChange={(event) => updateSchema({ schema_key: event.target.value })} /></label>
+              <label className="text-xs font-semibold">方案名称<Input className="mt-2" value={schemaDraft.display_name} onChange={(event) => updateSchema({ display_name: event.target.value })} />{!schemaDraft.display_name.trim() && <span className="mt-1 block text-[#8d2924]">方案名称必填</span>}</label>
+              <label className="text-xs font-semibold">版本号<Input className="font-data mt-2" value={schemaDraft.version} disabled={schemaDraft.id !== null} onChange={(event) => updateSchema({ version: event.target.value })} />{!schemaDraft.version.trim() && <span className="mt-1 block text-[#8d2924]">版本号必填</span>}</label>
+              <label className="text-xs font-semibold">方案标识<Input className="font-data mt-2" value={schemaDraft.schema_key} disabled={schemaDraft.id !== null} onChange={(event) => updateSchema({ schema_key: event.target.value })} />{!SCHEMA_KEY_PATTERN.test(schemaDraft.schema_key.trim()) && <span className="mt-1 block text-[#8d2924]">请使用小写英文、数字、下划线、点或连字符</span>}</label>
               <div className="flex items-end justify-between gap-3 border-b border-[var(--line)] pb-2 text-xs">
                 <span className="font-semibold">当前权重合计</span>
-                <span className={cn("font-data font-bold", Math.abs(weightSum - 1) < 0.0001 ? "text-[#4f5e13]" : "text-[#8d2924]")}>{(weightSum * 100).toFixed(1)}%</span>
+                <span className={cn("font-data font-bold", validation.weightSumValid ? "text-[#4f5e13]" : "text-[#8d2924]")}>{(weightSum * 100).toFixed(1)}%{validation.weightSumValid ? "" : " · 必须等于 100%"}</span>
               </div>
             </div>
           ) : selectedSchema ? (
             <div>
-              <div className="flex min-w-0 flex-wrap items-center gap-2"><Badge tone="active">已发布，只读</Badge><span className="font-data min-w-0 break-all text-xs text-[var(--muted)]">{selectedSchema.canonical_hash}</span></div>
-              <p className="mt-3 text-sm leading-6 text-[var(--muted)]">已发布版本不能原地修改。需要增删维度时，请复制为新草稿，编辑完成后发布，再绑定到目标类目。</p>
+              <div className="flex min-w-0 flex-wrap items-center gap-2"><Badge tone={selectedSchema.status === "published" ? "active" : "neutral"}>{schemaStatusNames[selectedSchema.status]}，只读</Badge><span className="font-data min-w-0 break-all text-xs text-[var(--muted)]">{selectedSchema.canonical_hash}</span></div>
+              <p className="mt-3 text-sm leading-6 text-[var(--muted)]">已发布或已停用版本不能原地修改。需要增删维度时，请复制为新草稿，编辑完成后发布，再绑定到目标类目。</p>
             </div>
           ) : <p className="text-sm text-[var(--muted)]">请选择一个维度方案版本。</p>}
         </div>
@@ -864,19 +968,57 @@ function SchemaVersionManager({
 
       {dimensions.length > 0 && (
         <div className="divide-y divide-[var(--line)]">
-          {dimensions.map((dimension, index) => (
-            <div key={`${dimension.key}-${index}`} className="grid gap-4 px-5 py-4 xl:grid-cols-[70px_180px_190px_100px_minmax(260px,1fr)_auto] xl:items-start">
-              <div className="flex items-center gap-1">
-                <span className="font-data w-6 text-xs text-[var(--muted)]">{String(index + 1).padStart(2, "0")}</span>
-                {schemaDraft && <><button type="button" title="上移" onClick={() => moveDimension(index, -1)} disabled={index === 0}><ArrowUp /></button><button type="button" title="下移" onClick={() => moveDimension(index, 1)} disabled={index === dimensions.length - 1}><ArrowDown /></button></>}
+          {dimensions.map((dimension, index) => {
+            const errors = validation.fields[index] ?? {}
+            return (
+              <div key={`${dimension.key}-${index}`} className="px-5 py-5">
+                <div className="grid gap-4 md:grid-cols-[70px_minmax(180px,0.8fr)_minmax(220px,1fr)_120px_auto] md:items-start">
+                  <div className="flex items-center gap-1 pt-2">
+                    <span className="font-data w-6 text-xs text-[var(--muted)]">{String(index + 1).padStart(2, "0")}</span>
+                    {schemaDraft && <><button type="button" title="上移" onClick={() => moveDimension(index, -1)} disabled={index === 0}><ArrowUp /></button><button type="button" title="下移" onClick={() => moveDimension(index, 1)} disabled={index === dimensions.length - 1}><ArrowDown /></button></>}
+                  </div>
+                  <label className="text-xs font-semibold">中文名
+                    {schemaDraft ? <Input className="mt-2" placeholder="例：构图与视角" value={dimension.label} onChange={(event) => updateDimension(index, { label: event.target.value })} /> : <p className="mt-2 text-sm font-semibold">{dimension.label}</p>}
+                    {errors.label && <span className="mt-1 block text-[#8d2924]">{errors.label}</span>}
+                  </label>
+                  <label className="text-xs font-semibold">稳定 key
+                    {schemaDraft ? <Input className="font-data mt-2" placeholder="composition_viewpoint" value={dimension.key} onChange={(event) => updateDimension(index, { key: event.target.value })} /> : <p className="font-data mt-2 break-all text-xs text-[var(--muted)]">{dimension.key}</p>}
+                    {errors.key && <span className="mt-1 block text-[#8d2924]">{errors.key}</span>}
+                  </label>
+                  <label className="text-xs font-semibold">权重
+                    {schemaDraft ? <Input className="mt-2" type="number" min="0.001" max="1" step="0.01" value={dimension.weight ?? 0} onChange={(event) => updateDimension(index, { weight: Number(event.target.value) })} /> : <p className="font-data mt-2 text-sm">{typeof dimension.weight === "number" ? `${(dimension.weight * 100).toFixed(1)}%` : "-"}</p>}
+                    {errors.weight && <span className="mt-1 block text-[#8d2924]">{errors.weight}</span>}
+                  </label>
+                  {schemaDraft && <Button type="button" size="sm" variant="ghost" title="删除维度" onClick={() => removeDimension(index)}><Trash />删除</Button>}
+                </div>
+
+                <label className="mt-4 block text-xs font-semibold">评审说明 / 关注点
+                  {schemaDraft
+                    ? <Textarea className="mt-2 min-h-[72px]" placeholder="告诉评审人和模型这个维度具体要看什么" value={dimension.description ?? ""} onChange={(event) => updateDimension(index, { description: event.target.value })} />
+                    : <p className="mt-2 text-xs leading-5 text-[var(--muted)]">{dimension.description || "历史版本未声明评审说明"}</p>}
+                  {errors.description && <span className="mt-1 block text-[#8d2924]">{errors.description}</span>}
+                </label>
+
+                <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-5">
+                  {ANCHOR_LEVELS.map((level) => (
+                    <label key={level} className="text-xs font-semibold">{level} 级锚点
+                      {schemaDraft
+                        ? <Textarea className="mt-2 min-h-[104px]" placeholder={`${level} 级具体可观察标准`} value={dimension.anchors?.[String(level)] ?? ""} onChange={(event) => updateDimension(index, { anchors: { ...dimension.anchors, [String(level)]: event.target.value } })} />
+                        : <p className="mt-2 text-xs leading-5 text-[var(--muted)]">{dimension.anchors?.[String(level)] ?? "历史版本未声明"}</p>}
+                    </label>
+                  ))}
+                </div>
+                {errors.anchors && <p className="mt-2 text-xs font-semibold text-[#8d2924]">{errors.anchors}</p>}
               </div>
-              {schemaDraft ? <Input value={dimension.label} onChange={(event) => updateDimension(index, { label: event.target.value })} /> : <p className="text-sm font-semibold">{dimension.label}</p>}
-              {schemaDraft ? <Input className="font-data" value={dimension.key} onChange={(event) => updateDimension(index, { key: event.target.value })} /> : <p className="font-data break-all text-xs text-[var(--muted)]">{dimension.key}</p>}
-              {schemaDraft ? <Input type="number" min="0.001" max="1" step="0.01" value={dimension.weight ?? 0} onChange={(event) => updateDimension(index, { weight: Number(event.target.value) })} /> : <p className="font-data text-sm">{typeof dimension.weight === "number" ? `${(dimension.weight * 100).toFixed(0)}%` : "-"}</p>}
-              {schemaDraft ? <Textarea className="min-h-[72px]" value={dimension.anchors?.["3"] ?? ""} onChange={(event) => updateDimension(index, { anchors: { ...dimension.anchors, "3": event.target.value } })} /> : <p className="text-xs leading-5 text-[var(--muted)]">{dimension.anchors?.["3"] ?? "未声明 3 级锚点"}</p>}
-              {schemaDraft && <Button type="button" size="sm" variant="ghost" title="删除维度" onClick={() => removeDimension(index)} disabled={dimensions.length <= 1}><Trash /></Button>}
-            </div>
-          ))}
+            )
+          })}
+        </div>
+      )}
+
+      {schemaDraft && dimensions.length === 0 && (
+        <div className="border-b border-[var(--line)] px-5 py-8 text-center">
+          <p className="text-sm font-bold">这是空白方案</p>
+          <p className="mt-1 text-xs text-[var(--muted)]">手动新增至少一个维度，并补齐中文名、评审说明、权重与 1-5 级锚点。</p>
         </div>
       )}
 
@@ -885,8 +1027,8 @@ function SchemaVersionManager({
           <Button type="button" variant="secondary" onClick={addDimension}><Plus />新增维度</Button>
           <div className="flex flex-wrap gap-2">
             {schemaDraft.id && <Button type="button" variant="ghost" onClick={() => onDelete(schemaDraft.id!)} disabled={busy}><Trash />删除草稿</Button>}
-            <Button type="button" variant="secondary" onClick={onSave} disabled={busy || !schemaDraft.display_name.trim() || !schemaDraft.version.trim() || dimensions.length === 0 || Math.abs(weightSum - 1) > 0.0001}><FloppyDisk />保存草稿</Button>
-            <Button type="button" onClick={onPublish} disabled={busy || !schemaDraft.id || Math.abs(weightSum - 1) > 0.0001}><RocketLaunch />发布版本</Button>
+            <Button type="button" variant="secondary" onClick={onSave} disabled={busy || !schemaIdentityValid || !validation.valid}><FloppyDisk />保存草稿</Button>
+            <Button type="button" onClick={onPublish} disabled={busy || !schemaDraft.id || !schemaIdentityValid || !validation.valid}><RocketLaunch />发布版本</Button>
           </div>
         </div>
       )}
