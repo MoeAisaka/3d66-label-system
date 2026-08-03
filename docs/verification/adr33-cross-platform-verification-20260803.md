@@ -84,4 +84,15 @@
 
 ## 结论
 
+## 补充：ADR-0033 框架层全成 + 预览 API/前端（2026-08-04 凌晨）
+
+无人值守批量完成：红线/合同/聚合器/grade→deduction桥/共性+特有维度组合/分类器解析器/灵感图seed 共七个纯函数框架件，加只读+dry-run 预览 API 与前端预览页。
+
+| 平台 | 结果 |
+|---|---|
+| Mac | 后端全量 **910 passed, 1 skipped**；前端 `tsc` + `build` 通过 |
+| Windows 真机（13600K）| ADR-0033 所有层 + 预览 API 共 **184 passed** |
+| Docker/Linux | 镜像 build；容器 health ok；migration=51、max_concurrency=8；预览 API 已注册（未登录 401 非 404）；**容器内鉴权 dry-run 实跑**：AI图→class_one、score 85、L1 |
+
+该预览 API 严格只读+纯计算：无 DB 写入/队列/发布/模型调用，未 touch 生产评分路径与已发布标签。
 本次交付（并发 8 + Phase 1/2 确定性底座）在 **Mac、Docker/Linux 与 Windows 三平台均实测通过**（Windows 为局域网 13600K 真机：73 新模块测试 + 60 部署/security + DPAPI 实密往返 + 应用 health 200 + migration 51 + mc=8）。全部改动向后兼容、可回归、未触碰生产评分与已发布数据。可推 codeup 特性分支。
