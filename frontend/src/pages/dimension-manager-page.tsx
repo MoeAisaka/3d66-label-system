@@ -16,6 +16,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { toast } from "sonner"
 
 import { PageHeader } from "@/components/app-shell"
+import { EvaluationBoundaryNote } from "@/components/evaluation-boundary-note"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -488,6 +489,7 @@ export function DimensionManagerPage() {
         description="按评测类目开启、关闭或缩减维度范围。可关闭维度测评，对照仅提示词评测的质量表现。"
       />
       <div className="mx-auto max-w-[1540px] px-5 py-8 md:px-8 lg:px-10">
+        <div className="mb-4"><EvaluationBoundaryNote slot="dimension" /></div>
         <div className="flex items-start gap-3 border-y border-[#d4a53d] bg-[#fff9e9] px-4 py-3 text-sm leading-6 text-[#665016]">
           <WarningCircle className="mt-0.5 shrink-0" size={18} weight="fill" />
           <p>
