@@ -3,7 +3,7 @@
 > 最后更新：2026-08-03
 > 本文件只记录“现在做到哪里”；长期原则见 `PRODUCT.md` 和 `AGENTS.md`，历史背景见 `CODEX_HANDOFF.md`。
 
-## 最新：真实模型金丝雀 + 类目自定义评测底座重构立项（2026-08-03）
+## 最新完成：真实模型金丝雀 + 类目自定义评测底座重构立项（2026-08-03）
 
 - **真实 Key 金丝雀（供应商限流与最优并发）已完成。** 火山方舟 Doubao
   `doubao-seed-2-0-lite-260215`，6 档并发（1/2/4/6/8/10）× 12 真实请求。
@@ -19,6 +19,13 @@
   `category_evaluation_contract.py` 及两个单测，纯函数、不接生产执行路径、不做 L 翻转。
   Claude 只写 Read/Edit/Write/Glob/Grep；OpenClaw 负责跑测试/build/提交与验收。
   任务书 `docs/discussion/adr33-phase1-delegation-brief.md`。
+
+## 最新：ADR-0033 聚合器与两条流水线关系 + 前端边界说明（2026-08-03）
+
+- **聚合器/红线/合同与现有两条流水线的关系：零耦合并列新引擎，尚未接入。**
+  完整流水线（full_pipeline）与基准回归（baseline_regression）**共用同一个算分函数** `scoring.py::calculate_score()`（当前 L5=最优），worker 靠 `baseline_regression_item_id` 区分两线。新三件（redline_policy/category_evaluation_contract/category_evaluation_aggregator）是独立纯函数、L5=最差、**未被 worker import**。未来接入点（Phase 4）：在 worker 唯一的算分步骤按**合同版本**分流——v3（含 redline/track/common_modifiers）走 `aggregate_category_evaluation()`，否则走老 `calculate_score()`；因两线共用算分步，一次接入同时生效，且不按业务名分支（守 ADR-0028）。现有 material-family-routing/dimension_router 与维度 Schema 变成聚合器“维度扣分”这一步的输入。
+- **前端 A/B/维度边界说明已交付（Owner 明确要的）。** 新增可折叠共享组件 `EvaluationBoundaryNote`，说清三位职责：调用A=事实+红线信号（不出维度分/最终L）、调用B=分维度grade+证据（不出总分/不降权）、维度层=服务端确定性算分（红线→赛道→扣分→媒介降权→压分→封顶→映射L，可回归、不调模型）。嵌入提示词管理器（高亮当前 A/B 阶段）与维度管理器（高亮维度位）。前端 build + tsc typecheck 通过；Docker/Linux 构建产物含该组件（code-split）。
+  推送 hub + codeup（b640009）。
 
 ## 最新完成：基准回归自由提示词实验（2026-08-03）
 
