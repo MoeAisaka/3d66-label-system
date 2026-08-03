@@ -111,13 +111,17 @@ export function BaselineRegressionPage() {
 
   const promptAOptions = useMemo(
     () => (prompts.data?.items ?? []).filter(
-      (prompt: PromptVersion) => prompt.stage === "A",
+      (prompt: PromptVersion) => prompt.stage === "A"
+        && prompt.status !== "archived"
+        && (prompt.pipeline_scope === "baseline_regression" || prompt.pipeline_scope === "shared" || !prompt.pipeline_scope),
     ),
     [prompts.data?.items],
   )
   const promptBOptions = useMemo(
     () => (prompts.data?.items ?? []).filter(
-      (prompt: PromptVersion) => prompt.stage === "B",
+      (prompt: PromptVersion) => prompt.stage === "B"
+        && prompt.status !== "archived"
+        && (prompt.pipeline_scope === "baseline_regression" || prompt.pipeline_scope === "shared" || !prompt.pipeline_scope),
     ),
     [prompts.data?.items],
   )
@@ -1127,7 +1131,7 @@ function RegressionResults({
                             {levelExplanationSummary(item)}
                           </p>
                           {item.error_message && (
-                            <p className="mt-1 text-xs text-[#8d2924]">{item.error_message}</p>
+                            <p className="mt-1 text-xs text-[#8d2924]">失败原因：{baselineErrorMessage(item.error_message)}</p>
                           )}
                         </div>
                         <div className="flex flex-wrap items-center gap-2 sm:max-w-72 sm:justify-end">
@@ -1733,6 +1737,21 @@ function levelExplanationSummary(item: BaselineRegressionItem) {
       : `服务端按 ${explanation.authoritative_score ?? "—"} 分判定为 ${explanation.predicted_level ?? "未定级"}`
 }
 
+function baselineErrorMessage(error: string) {
+  const labels: Record<string, string> = {
+    missing_level: "未形成 L1-L5 有效等级",
+    no_authoritative_score: "未形成服务端权威分数",
+    missing_quality_evidence: "未返回画质证据",
+    missing_confidence: "未返回模型置信度",
+    missing_precheck_scope_status: "调用 A 未返回评测范围字段，无法继续调用 B",
+    missing_prompt_b_response: "调用 B 未返回结果",
+    missing_aesthetic_result: "未形成八个美感维度结果",
+  }
+  const [, reasons] = error.split(":", 2)
+  if (!reasons) return error
+  return reasons.split(",").map((reason) => labels[reason] ?? reason).join("；")
+}
+
 function reviewStatus(evaluation: BaselineRegressionItem["evaluation"]) {
   if (!evaluation) return null
   const decision = evaluation.human_review?.decision
@@ -1810,7 +1829,7 @@ function PromptSelect({
         )}
         {options.map((prompt) => (
           <option key={prompt.id} value={prompt.id}>
-            {prompt.version} · {prompt.name} · {promptStatusName(prompt.status)}
+            {prompt.version} · {prompt.name} · {promptStatusName(prompt.status)} · {promptScopeName(prompt.pipeline_scope)}
           </option>
         ))}
       </select>
@@ -1842,6 +1861,12 @@ function promptStatusName(status: PromptVersion["status"]) {
   if (status === "published") return "已发布"
   if (status === "archived") return "已归档"
   return "草稿"
+}
+
+function promptScopeName(scope: PromptVersion["pipeline_scope"]) {
+  if (scope === "baseline_regression") return "基准回归专用"
+  if (scope === "full_pipeline") return "完整流水线专用"
+  return "共用"
 }
 
 function percent(value: number) {

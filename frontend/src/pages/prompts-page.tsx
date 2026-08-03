@@ -9,7 +9,7 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
-import { api, jsonBody } from "@/lib/api"
+import { api, jsonBody, promptApi, type PromptPipelineScope } from "@/lib/api"
 import type {
   EvaluationCategoryProfile,
   OptimizerConfig,
@@ -22,6 +22,12 @@ import type {
 } from "@/lib/types"
 
 type RegressionRole = "target_error" | "stable_control" | "blind_holdout"
+
+const pipelineScopeNames: Record<PromptPipelineScope, string> = {
+  full_pipeline: "完整流水线专用",
+  baseline_regression: "基准回归专用",
+  shared: "完整流水线 + 基准回归共用",
+}
 
 const regressionRoleNames: Record<RegressionRole, string> = {
   target_error: "目标错例",
@@ -36,6 +42,8 @@ export function PromptCandidatesPage() {
     queryFn: () => api<{ items: EvaluationCategoryProfile[] }>("/api/evaluation-categories"),
   })
   const [selectedCategoryKey, setSelectedCategoryKey] = useState("space_image")
+  const [pipelinePath, setPipelinePath] = useState<"full_pipeline" | "baseline_regression">("full_pipeline")
+  const [stageFilter, setStageFilter] = useState<"A" | "B">("A")
   const prompts = useQuery({
     queryKey: ["prompts", selectedCategoryKey],
     queryFn: () => api<{ items: PromptVersion[] }>(`/api/prompts?category_key=${encodeURIComponent(selectedCategoryKey)}`),
@@ -53,14 +61,23 @@ export function PromptCandidatesPage() {
     refetchInterval: (query) => query.state.data?.items.some((item) => ["queued", "running"].includes(item.status)) ? 3000 : false,
   })
   const [selectedId, setSelectedId] = useState<number | null>(null)
+  const visiblePrompts = useMemo(
+    () => (prompts.data?.items ?? []).filter((item) => (
+      item.stage === stageFilter
+      && (item.pipeline_scope === pipelinePath || item.pipeline_scope === "shared" || !item.pipeline_scope)
+    )),
+    [pipelinePath, prompts.data?.items, stageFilter],
+  )
   const selected = useMemo(
-    () => prompts.data?.items.find((item) => item.id === selectedId) ?? prompts.data?.items[0],
-    [prompts.data?.items, selectedId],
+    () => visiblePrompts.find((item) => item.id === selectedId) ?? visiblePrompts[0],
+    [selectedId, visiblePrompts],
   )
   const [systemPrompt, setSystemPrompt] = useState("")
   const [userPrompt, setUserPrompt] = useState("")
   const [version, setVersion] = useState("")
   const [changeNote, setChangeNote] = useState("")
+  const [pipelineScope, setPipelineScope] = useState<PromptPipelineScope>("shared")
+  const [publishScope, setPublishScope] = useState<PromptPipelineScope>("shared")
   const [aiInstruction, setAiInstruction] = useState("")
   const [sampleSetId, setSampleSetId] = useState<number | null>(null)
   const [validationVersion, setValidationVersion] = useState("")
@@ -68,6 +85,7 @@ export function PromptCandidatesPage() {
   const [metricRulesVersion, setMetricRulesVersion] = useState("paired-metric-rules-v1")
   const [roleAssignments, setRoleAssignments] = useState<Record<number, RegressionRole | "">>({})
   const activeCategories = (categories.data?.items ?? []).filter((item) => item.status === "active")
+  const selectedCategory = activeCategories.find((item) => item.category_key === selectedCategoryKey)
   const filteredSampleSets = (sampleSets.data?.items ?? []).filter(
     (item) => item.category_key === selectedCategoryKey,
   )
@@ -83,42 +101,100 @@ export function PromptCandidatesPage() {
   }, [activeCategories, selectedCategoryKey])
 
   useEffect(() => {
+    setSelectedId(null)
+    setPipelineScope(pipelinePath)
+    setPublishScope(pipelinePath)
+  }, [pipelinePath, stageFilter])
+
+  useEffect(() => {
     if (!selected) return
     setSystemPrompt(selected.system_prompt)
     setUserPrompt(selected.user_prompt)
-    setVersion(`${selected.version}-draft`)
+    setVersion(selected.version)
     setChangeNote("")
+    setPipelineScope(selected.pipeline_scope ?? "shared")
+    setPublishScope(selected.pipeline_scope ?? "shared")
   }, [selected?.id])
 
-  const create = useMutation({
-    mutationFn: () =>
-      api<{ id: number }>("/api/prompts", {
-        method: "POST",
-        ...jsonBody({
-          category_key: selectedCategoryKey,
-          stage: selected?.stage,
-          name: selected?.name,
-          version,
-          system_prompt: systemPrompt,
-          user_prompt: userPrompt,
-          rubric_version: selected?.rubric_version,
-          change_note: changeNote,
-          source: "manual",
-        }),
+  const promptPayload = () => ({
+    category_key: selectedCategoryKey,
+    pipeline_scope: pipelineScope,
+    stage: selected?.stage ?? "A",
+    name: selected?.name ?? "手动提示词",
+    version: version.trim(),
+    system_prompt: systemPrompt,
+    user_prompt: userPrompt,
+    rubric_version: selected?.rubric_version ?? "rubric-v2.1",
+    change_note: changeNote,
+  })
+  const createNew = useMutation({
+    mutationFn: () => api<{ id: number }>("/api/prompts", {
+      method: "POST",
+      ...jsonBody({
+        category_key: selectedCategoryKey,
+        pipeline_scope: pipelineScope,
+        stage: stageFilter,
+        name: stageFilter === "A" ? "新提示词 A" : "新提示词 B",
+        version: `prompt-${Date.now()}`,
+        system_prompt: systemPrompt.trim() || "你是一个严格遵循输出合同的评测助手。",
+        user_prompt: userPrompt.trim() || "请按当前类目规则完成评测并输出合法 JSON。",
+        rubric_version: "rubric-v2.1",
+        change_note: changeNote,
+        source: "manual",
       }),
+    }),
     onSuccess: async (data) => {
       await queryClient.invalidateQueries({ queryKey: ["prompts"] })
       setSelectedId(data.id)
-      toast.success("已保存为草稿版本，不会自动生效")
+      toast.success("已创建新草稿提示词")
+    },
+    onError: (error) => toast.error(error.message),
+  })
+  const save = useMutation({
+    mutationFn: () => {
+      if (!selected) throw new Error("请先选择提示词版本")
+      return promptApi.update(selected.id, promptPayload())
+    },
+    onSuccess: async (data) => {
+      await queryClient.invalidateQueries({ queryKey: ["prompts"] })
+      setSelectedId(data.id)
+      toast.success("当前草稿版本已保存")
+    },
+    onError: (error) => toast.error(error.message),
+  })
+  const saveAs = useMutation({
+    mutationFn: () => {
+      if (!selected) throw new Error("请先选择提示词版本")
+      return promptApi.clone(selected.id, promptPayload())
+    },
+    onSuccess: async (data) => {
+      await queryClient.invalidateQueries({ queryKey: ["prompts"] })
+      setSelectedId(data.id)
+      toast.success("已另存为新的草稿版本")
+    },
+    onError: (error) => toast.error(error.message),
+  })
+  const archive = useMutation({
+    mutationFn: () => {
+      if (!selected) throw new Error("请先选择提示词版本")
+      return promptApi.archive(selected.id)
+    },
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["prompts"] })
+      setSelectedId(null)
+      toast.success("提示词已归档")
     },
     onError: (error) => toast.error(error.message),
   })
   const publish = useMutation({
-    mutationFn: () => api<{ ok: boolean; regression_run_ids: number[] }>(`/api/prompts/${selected?.id}/publish`, { method: "POST" }),
+    mutationFn: () => {
+      if (!selected) throw new Error("请先选择提示词版本")
+      return promptApi.publish(selected.id, publishScope)
+    },
     onSuccess: async (data) => {
       await queryClient.invalidateQueries({ queryKey: ["prompts"] })
       await queryClient.invalidateQueries({ queryKey: ["prompt-regressions"] })
-      toast.success(data.regression_run_ids.length ? `提示词已发布，并启动 ${data.regression_run_ids.length} 组黄金回归` : "提示词已发布；当前没有已锁定的黄金样本")
+      toast.success(data.regression_run_ids?.length ? `提示词已发布，并启动 ${data.regression_run_ids.length} 组黄金回归` : "提示词已发布")
     },
     onError: (error) => toast.error(error.message),
   })
@@ -233,8 +309,6 @@ export function PromptCandidatesPage() {
   const samplePolicy = diagnosis.sample_policy ?? {}
   const promptChanges = Array.isArray(diagnosis.prompt_changes) ? diagnosis.prompt_changes : []
   const activeOptimization = latestOptimization && ["queued", "running"].includes(latestOptimization.status)
-  const singlePromptCatalog = (prompts.data?.items.length ?? 0) === 1
-
   return (
     <>
       <PageHeader
@@ -257,35 +331,66 @@ export function PromptCandidatesPage() {
                 <option key={category.category_key} value={category.category_key}>{category.display_name}</option>
               ))}
             </select>
+            <select
+              aria-label="提示词流水线路径"
+              className="h-10 rounded-[4px] border border-[var(--line-strong)] bg-white px-3 text-sm"
+              value={pipelinePath}
+              onChange={(event) => setPipelinePath(event.target.value as "full_pipeline" | "baseline_regression")}
+            >
+              <option value="full_pipeline">完整流水线</option>
+              <option value="baseline_regression">基准回归</option>
+            </select>
+            <select
+              aria-label="提示词调用阶段"
+              className="h-10 rounded-[4px] border border-[var(--line-strong)] bg-white px-3 text-sm"
+              value={stageFilter}
+              onChange={(event) => setStageFilter(event.target.value as "A" | "B")}
+            >
+              <option value="A">调用 A</option>
+              <option value="B">调用 B</option>
+            </select>
             <Button variant="secondary" onClick={() => prompts.refetch()}><ArrowClockwise />刷新</Button>
-            <Button onClick={() => create.mutate()} disabled={!selected || !version || create.isPending}><Plus />另存草稿</Button>
+            <Button variant="secondary" onClick={() => createNew.mutate()} disabled={createNew.isPending}><Plus />新建提示词</Button>
+            <Button onClick={() => saveAs.mutate()} disabled={!selected || !version || saveAs.isPending}><Plus />另存草稿</Button>
           </>
         }
       />
       <div className="mx-auto grid max-w-[1720px] lg:grid-cols-[280px_minmax(0,1fr)]">
         <aside className="border-r border-[var(--line)] bg-white p-4 lg:min-h-[calc(100dvh-125px)]">
-          <div className="mb-4 flex items-center justify-between"><h2 className="text-sm font-semibold">版本</h2><span className="font-data text-xs text-[var(--muted)]">{prompts.data?.items.length ?? 0}</span></div>
+          <div className="mb-4 flex items-center justify-between"><h2 className="text-sm font-semibold">版本</h2><span className="font-data text-xs text-[var(--muted)]">{visiblePrompts.length}</span></div>
           <div className="space-y-1">
-            {prompts.data?.items.map((prompt) => (
+            {visiblePrompts.map((prompt) => {
+              const currentEnabled = prompt.id === (prompt.stage === "A" ? selectedCategory?.prompt_a_id : selectedCategory?.prompt_b_id)
+              return (
               <button
                 key={prompt.id}
                 className={`w-full rounded-[4px] border px-3 py-3 text-left transition-colors ${selected?.id === prompt.id ? "border-[var(--line-strong)] bg-[#f6f9dc]" : "border-transparent hover:bg-[#f8f9f6]"}`}
                 onClick={() => setSelectedId(prompt.id)}
               >
-                <div className="flex items-center justify-between gap-2"><span className="font-data text-xs font-semibold">{singlePromptCatalog ? "单提示词" : `调用 ${prompt.stage}`}</span><Badge tone={prompt.status === "published" ? "active" : prompt.status === "draft" ? "warning" : "neutral"}>{prompt.status}</Badge></div>
+                <div className="flex items-center justify-between gap-2"><span className="font-data text-xs font-semibold">调用 {prompt.stage}</span><span className="flex items-center gap-1">{currentEnabled && <Badge tone="success">当前启用</Badge>}<Badge tone={prompt.status === "published" ? "active" : prompt.status === "draft" ? "warning" : "neutral"}>{prompt.status === "published" ? "已发布" : prompt.status === "draft" ? "草稿" : "已归档"}</Badge></span></div>
                 <p className="mt-2 truncate text-sm font-semibold">{prompt.version}</p>
+                <p className="mt-1 text-[0.68rem] font-semibold text-[var(--muted)]">{pipelineScopeNames[prompt.pipeline_scope ?? "shared"]}</p>
                 <p className="mt-1 line-clamp-2 text-xs leading-5 text-[var(--muted)]">{prompt.change_note || prompt.name}</p>
                 <p className="font-data mt-2 text-[0.68rem] text-[var(--muted)]">最新更新 {new Date(prompt.updated_at).toLocaleString("zh-CN")}</p>
               </button>
-            ))}
+              )
+            })}
+            {!visiblePrompts.length && <p className="px-3 py-8 text-center text-xs leading-5 text-[var(--muted)]">当前类目、流水线和调用阶段下暂无提示词版本。</p>}
           </div>
         </aside>
 
         {selected ? (
           <main className="min-w-0 px-5 py-7 md:px-8 lg:px-10 lg:py-9">
             <div className="flex flex-wrap items-start justify-between gap-5 border-b border-[var(--line-strong)] pb-6">
-              <div><p className="font-data text-xs text-[var(--muted)]">调用 {selected.stage} · {selected.rubric_version}</p><h2 className="font-editorial mt-2 text-3xl font-bold">{selected.name}</h2><p className="mt-2 text-sm text-[var(--muted)]">当前选择：{selected.version}，创建者 {selected.created_by}</p><p className="font-data mt-1 text-xs text-[var(--muted)]">最新更新时间：{new Date(selected.updated_at).toLocaleString("zh-CN")}</p></div>
-              {selected.status !== "published" && <div className="text-right"><Button onClick={() => publish.mutate()} disabled={publish.isPending || !selectedPublishReady}><UploadSimple />发布此版本</Button>{selected.source_optimization_run_id && <p className="mt-2 max-w-64 text-xs text-[var(--muted)]">{selectedPublishReady ? "配对回归与人工批准已通过，可以发布。" : "需先通过发布前配对回归并完成人工批准。"}</p>}</div>}
+              <div><p className="font-data text-xs text-[var(--muted)]">调用 {selected.stage} · {selected.rubric_version}</p><h2 className="font-editorial mt-2 text-3xl font-bold">{selected.name}</h2><p className="mt-2 text-sm text-[var(--muted)]">当前选择：{selected.version}，创建者 {selected.created_by}</p><p className="mt-1 text-xs font-semibold text-[var(--muted)]">{pipelineScopeNames[selected.pipeline_scope ?? "shared"]}</p><p className="font-data mt-1 text-xs text-[var(--muted)]">最新更新时间：{new Date(selected.updated_at).toLocaleString("zh-CN")}</p></div>
+              <div className="flex flex-wrap items-end justify-end gap-2 text-right">
+                {selected.status !== "published" && <>
+                  <label className="text-left"><span className="mb-1 block text-[0.68rem] font-semibold text-[var(--muted)]">发布范围</span><select className="h-9 rounded-[4px] border border-[var(--line-strong)] bg-white px-2 text-xs" value={publishScope} onChange={(event) => setPublishScope(event.target.value as PromptPipelineScope)}>{(Object.keys(pipelineScopeNames) as PromptPipelineScope[]).map((scope) => <option key={scope} value={scope}>{pipelineScopeNames[scope]}</option>)}</select></label>
+                  <Button onClick={() => publish.mutate()} disabled={publish.isPending || !selectedPublishReady}><UploadSimple />发布</Button>
+                </>}
+                <Button variant="secondary" onClick={() => archive.mutate()} disabled={archive.isPending || selected.status === "archived"}>归档</Button>
+                {selected.source_optimization_run_id && <p className="basis-full max-w-64 text-xs text-[var(--muted)]">{selectedPublishReady ? "配对回归与人工批准已通过，可以发布。" : "需先通过发布前配对回归并完成人工批准。"}</p>}
+              </div>
             </div>
 
             <section className="mt-7 border-y border-[var(--line-strong)] bg-white">
@@ -356,12 +461,14 @@ export function PromptCandidatesPage() {
             </div>
 
             <section className="mt-8 border-y border-[var(--line-strong)] bg-white p-5">
-              <h3 className="font-editorial text-xl font-bold">保存新版本</h3>
-              <div className="mt-4 grid gap-4 lg:grid-cols-[260px_1fr_auto]">
+              <h3 className="font-editorial text-xl font-bold">保存当前版本</h3>
+              <div className="mt-4 grid gap-4 lg:grid-cols-[220px_220px_minmax(220px,1fr)_auto]">
                 <label><span className="mb-2 block text-xs font-semibold">版本号</span><Input value={version} onChange={(event) => setVersion(event.target.value)} /></label>
+                <label><span className="mb-2 block text-xs font-semibold">流水线归属</span><select className="h-11 w-full rounded-[4px] border border-[var(--line-strong)] bg-white px-3 text-sm" value={pipelineScope} onChange={(event) => setPipelineScope(event.target.value as PromptPipelineScope)}>{(Object.keys(pipelineScopeNames) as PromptPipelineScope[]).map((scope) => <option key={scope} value={scope}>{pipelineScopeNames[scope]}</option>)}</select></label>
                 <label><span className="mb-2 block text-xs font-semibold">修改说明</span><Input value={changeNote} onChange={(event) => setChangeNote(event.target.value)} placeholder="说明修改目的和预期影响" /></label>
-                <div className="flex items-end"><Button onClick={() => create.mutate()} disabled={!version || create.isPending}><Check />保存草稿</Button></div>
+                <div className="flex items-end gap-2"><Button onClick={() => save.mutate()} disabled={!version || selected.status !== "draft" || save.isPending}><Check />保存当前版本</Button><Button variant="secondary" onClick={() => saveAs.mutate()} disabled={!version || saveAs.isPending}><Plus />另存为草稿</Button></div>
               </div>
+              {selected.status === "published" && <p className="mt-3 text-xs leading-5 text-[var(--muted)]">已发布版本不可原地修改；编辑后请使用“另存为草稿”，再发布到目标流水线。</p>}
             </section>
           </main>
         ) : <div className="min-h-[60dvh] animate-pulse bg-white" />}

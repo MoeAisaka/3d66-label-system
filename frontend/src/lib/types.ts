@@ -1014,6 +1014,7 @@ export type ReviewWorkflowPolicy = {
 export type PromptVersion = {
   id: number
   category_key: string
+  pipeline_scope?: "full_pipeline" | "baseline_regression" | "shared"
   stage: "A" | "B"
   name: string
   version: string

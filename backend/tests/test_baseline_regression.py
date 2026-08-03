@@ -210,6 +210,42 @@ def test_baseline_api_freezes_truth_reports_and_enqueues_idempotently() -> None:
         ).json()["items"][0]["level_explanation"]
         assert historical["status"] == "unavailable_historical"
         assert historical["message"] == "历史结果未冻结评测理由"
+
+        invalid_run_response = client.post(f"/api/baseline-sets/{set_id}/runs")
+        assert invalid_run_response.status_code == 200
+        invalid_run = db.get(BaselineRegressionRun, invalid_run_response.json()["id"])
+        invalid_item = invalid_run.items[0]
+        invalid_job = db.get(EvaluationJob, invalid_item.job_id)
+        invalid_result = EvaluationResult(
+            asset_id=asset.id,
+            job_id=invalid_job.id,
+            strategy_bundle_id=invalid_run.strategy_bundle_id,
+            strategy_snapshot_json=invalid_run.strategy_snapshot_json,
+            precheck_json=json.dumps({"classification": {"scope_status": "in_scope"}}),
+            aesthetic_json=None,
+            scoring_json=json.dumps({"caps": [], "review_reasons": []}),
+            raw_response_a="{}",
+            raw_response_b=None,
+            score=None,
+            level=None,
+            confidence=None,
+            needs_review=False,
+            model_id=invalid_run.strategy_bundle.model_id,
+            prompt_a_version="A1",
+            prompt_b_version="B1",
+            rubric_version="R1",
+            engine_version=invalid_run.strategy_bundle.engine_version,
+            risk_review_version=invalid_run.strategy_bundle.risk_review_version,
+        )
+        db.add(invalid_result)
+        db.flush()
+        complete_baseline_item(db, item_id=invalid_item.id, result=invalid_result)
+        db.commit()
+        assert invalid_item.status == "failed"
+        assert invalid_job.status == "failed"
+        assert "missing_level" in invalid_item.error_message
+        assert "no_authoritative_score" in invalid_item.error_message
+        assert invalid_run.status == "failed"
         db.refresh(asset)
         assert asset.status == "uploaded"
     finally:
@@ -461,6 +497,16 @@ def test_baseline_run_can_freeze_manual_prompt_pair_and_reserves_dimension_choic
         rubric_version="R2",
         status="draft",
     )
+    full_only = PromptVersion(
+        stage="A",
+        name="仅完整流水线",
+        version="A-full-only",
+        system_prompt="full pipeline only system prompt",
+        user_prompt="full pipeline only user prompt",
+        rubric_version="R2",
+        pipeline_scope="full_pipeline",
+        status="draft",
+    )
     db.add_all(
         [
             user,
@@ -470,6 +516,7 @@ def test_baseline_run_can_freeze_manual_prompt_pair_and_reserves_dimension_choic
             published_b,
             draft_a,
             draft_b,
+            full_only,
         ]
     )
     db.commit()
@@ -519,6 +566,13 @@ def test_baseline_run_can_freeze_manual_prompt_pair_and_reserves_dimension_choic
             error_code="test_single_prompt_finished",
         )
         db.commit()
+
+        scope_rejected = client.post(
+            f"/api/baseline-sets/{set_id}/runs",
+            json={"prompt_id": full_only.id},
+        )
+        assert scope_rejected.status_code == 422
+        assert "不允许用于基准回归" in scope_rejected.text
 
         partial = client.post(
             f"/api/baseline-sets/{set_id}/runs",

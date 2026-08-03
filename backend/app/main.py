@@ -669,6 +669,7 @@ class PromptCreateRequest(BaseModel):
     category_key: str = Field(
         default="space_image", pattern=r"^[a-z][a-z0-9_]{2,39}$"
     )
+    pipeline_scope: Literal["full_pipeline", "baseline_regression", "shared"] = "shared"
     stage: str = Field(pattern="^[AB]$")
     name: str = Field(min_length=1, max_length=120)
     version: str = Field(min_length=1, max_length=40)
@@ -677,6 +678,26 @@ class PromptCreateRequest(BaseModel):
     rubric_version: str = Field(min_length=1, max_length=40)
     change_note: str = ""
     source: str = "manual"
+
+
+class PromptUpdateRequest(BaseModel):
+    category_key: str = Field(pattern=r"^[a-z][a-z0-9_]{2,39}$")
+    pipeline_scope: Literal["full_pipeline", "baseline_regression", "shared"]
+    stage: Literal["A", "B"]
+    name: str = Field(min_length=1, max_length=120)
+    version: str = Field(min_length=1, max_length=40)
+    system_prompt: str = Field(min_length=20)
+    user_prompt: str = Field(min_length=5)
+    rubric_version: str = Field(min_length=1, max_length=40)
+    change_note: str = ""
+
+
+class PromptCloneRequest(PromptUpdateRequest):
+    pass
+
+
+class PromptPublishRequest(BaseModel):
+    pipeline_scope: Literal["full_pipeline", "baseline_regression", "shared"] | None = None
 
 
 class PromptAiReviseRequest(BaseModel):
@@ -4207,6 +4228,8 @@ def _enqueue_jobs(
                 not prompt
                 or prompt.stage != stage
                 or prompt.category_key != payload.category_key
+                or prompt.status == "archived"
+                or prompt.pipeline_scope not in {"full_pipeline", "shared"}
             ):
                 raise HTTPException(status_code=400, detail=f"提示词 {stage} 版本无效")
             return prompt
@@ -4216,6 +4239,7 @@ def _enqueue_jobs(
                 PromptVersion.category_key == payload.category_key,
                 PromptVersion.stage == stage,
                 PromptVersion.status == "published",
+                PromptVersion.pipeline_scope.in_(("full_pipeline", "shared")),
             )
             .order_by(PromptVersion.created_at.desc())
             .limit(1)
@@ -4968,18 +4992,27 @@ async def preview_historical_corrections(
 @app.get("/api/prompts")
 def list_prompts(
     category_key: str | None = None,
+    pipeline_scope: Literal["full_pipeline", "baseline_regression", "shared"] | None = None,
+    include_archived: bool = False,
     _user: User = Depends(current_user), db: Session = Depends(get_db)
 ) -> dict[str, Any]:
     statement = select(PromptVersion)
     if category_key is not None:
         _category_profile(db, category_key)
         statement = statement.where(PromptVersion.category_key == category_key)
+    if pipeline_scope is not None:
+        statement = statement.where(
+            PromptVersion.pipeline_scope.in_((pipeline_scope, "shared"))
+        )
+    if not include_archived:
+        statement = statement.where(PromptVersion.status != "archived")
     prompts = db.scalars(statement.order_by(PromptVersion.created_at.desc())).all()
     return {
         "items": [
             {
                 "id": prompt.id,
                 "category_key": prompt.category_key,
+                "pipeline_scope": prompt.pipeline_scope,
                 "stage": prompt.stage,
                 "name": prompt.name,
                 "version": prompt.version,
@@ -5000,6 +5033,123 @@ def list_prompts(
             for prompt in prompts
         ]
     }
+
+
+def _prompt_has_references(db: Session, prompt_id: int) -> bool:
+    return bool(
+        db.scalar(select(EvaluationJob.id).where(
+            (EvaluationJob.prompt_a_id == prompt_id)
+            | (EvaluationJob.prompt_b_id == prompt_id)
+        ).limit(1))
+        or db.scalar(select(EvaluationCategoryProfile.id).where(
+            (EvaluationCategoryProfile.prompt_a_id == prompt_id)
+            | (EvaluationCategoryProfile.prompt_b_id == prompt_id)
+        ).limit(1))
+        or db.scalar(select(EvaluationPackage.id).where(
+            (EvaluationPackage.prompt_a_id == prompt_id)
+            | (EvaluationPackage.prompt_b_id == prompt_id)
+        ).limit(1))
+    )
+
+
+def _apply_prompt_payload(prompt: PromptVersion, payload: PromptUpdateRequest) -> None:
+    for field in (
+        "category_key", "pipeline_scope", "stage", "name", "version",
+        "system_prompt", "user_prompt", "rubric_version", "change_note",
+    ):
+        setattr(prompt, field, getattr(payload, field))
+
+
+@app.put("/api/prompts/{prompt_id}")
+def update_prompt(
+    prompt_id: int,
+    payload: PromptUpdateRequest,
+    user: User = Depends(admin_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    prompt = db.get(PromptVersion, prompt_id)
+    if prompt is None:
+        raise HTTPException(status_code=404, detail="提示词版本不存在")
+    if prompt.status == "archived":
+        raise HTTPException(status_code=409, detail="已归档提示词不可编辑")
+    if prompt.status == "published":
+        raise HTTPException(status_code=409, detail="已发布提示词不可原地修改，请使用另存为")
+    if _prompt_has_references(db, prompt_id):
+        raise HTTPException(
+            status_code=409,
+            detail="提示词已被任务冻结，不能原地修改，请使用另存为",
+        )
+    _category_profile(db, payload.category_key)
+    duplicate = db.scalar(select(PromptVersion).where(
+        PromptVersion.category_key == payload.category_key,
+        PromptVersion.stage == payload.stage,
+        PromptVersion.version == payload.version,
+        PromptVersion.id != prompt_id,
+        PromptVersion.status != "archived",
+    ))
+    if duplicate is not None:
+        raise HTTPException(status_code=409, detail="提示词版本号已存在")
+    _apply_prompt_payload(prompt, payload)
+    prompt.created_by = user.username
+    db.commit()
+    db.refresh(prompt)
+    return {"id": prompt.id, "status": prompt.status}
+
+
+@app.post("/api/prompts/{prompt_id}/clone")
+def clone_prompt(
+    prompt_id: int,
+    payload: PromptCloneRequest,
+    user: User = Depends(admin_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    source = db.get(PromptVersion, prompt_id)
+    if source is None:
+        raise HTTPException(status_code=404, detail="提示词版本不存在")
+    _category_profile(db, payload.category_key)
+    duplicate = db.scalar(select(PromptVersion).where(
+        PromptVersion.category_key == payload.category_key,
+        PromptVersion.stage == payload.stage,
+        PromptVersion.version == payload.version,
+    ))
+    if duplicate is not None:
+        raise HTTPException(status_code=409, detail="提示词版本号已存在")
+    clone = PromptVersion(**payload.model_dump(), status="draft", created_by=user.username)
+    db.add(clone)
+    db.commit()
+    db.refresh(clone)
+    return {"id": clone.id, "status": clone.status}
+
+
+@app.delete("/api/prompts/{prompt_id}")
+def archive_prompt(
+    prompt_id: int,
+    user: User = Depends(admin_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    prompt = db.get(PromptVersion, prompt_id)
+    if prompt is None:
+        raise HTTPException(status_code=404, detail="提示词版本不存在")
+    if prompt.status == "published":
+        binding_column = (
+            EvaluationCategoryProfile.prompt_a_id
+            if prompt.stage == "A"
+            else EvaluationCategoryProfile.prompt_b_id
+        )
+        active_binding = db.scalar(
+            select(EvaluationCategoryProfile.id).where(
+                EvaluationCategoryProfile.status == "active",
+                binding_column == prompt.id,
+            ).limit(1)
+        )
+        if active_binding is not None:
+            raise HTTPException(status_code=409, detail="活动类目仍绑定此已发布版本，请先切换类目发布版本")
+    # Archive is deliberately soft: historical bundles/jobs keep their FK and
+    # frozen contents while the version disappears from active selectors.
+    prompt.status = "archived"
+    prompt.change_note = (f"{prompt.change_note}\n由 {user.username} 归档").strip()
+    db.commit()
+    return {"ok": True, "id": prompt.id, "status": prompt.status}
 
 
 def _prompt_version_metrics(
@@ -5287,7 +5437,12 @@ def create_prompt(
     db: Session = Depends(get_db),
 ) -> dict[str, int]:
     _category_profile(db, payload.category_key)
-    exists = db.scalar(select(PromptVersion).where(PromptVersion.version == payload.version))
+    exists = db.scalar(select(PromptVersion).where(
+        PromptVersion.category_key == payload.category_key,
+        PromptVersion.stage == payload.stage,
+        PromptVersion.version == payload.version,
+        PromptVersion.status != "archived",
+    ))
     if exists:
         raise HTTPException(status_code=409, detail="提示词版本号已存在")
     prompt = PromptVersion(**payload.model_dump(), status="draft", created_by=user.username)
@@ -5300,12 +5455,17 @@ def create_prompt(
 @app.post("/api/prompts/{prompt_id}/publish")
 def publish_prompt(
     prompt_id: int,
+    payload: PromptPublishRequest | None = None,
     user: User = Depends(admin_user),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     prompt = db.get(PromptVersion, prompt_id)
     if not prompt:
         raise HTTPException(status_code=404, detail="提示词版本不存在")
+    if prompt.status == "archived":
+        raise HTTPException(status_code=409, detail="已归档提示词不可发布")
+    if payload is not None and payload.pipeline_scope is not None:
+        prompt.pipeline_scope = payload.pipeline_scope
     legacy_regression_id = db.scalar(
         select(PromptRegressionRun.id)
         .where(PromptRegressionRun.trigger_prompt_id == prompt.id)
@@ -8337,6 +8497,10 @@ def create_baseline_run(
         )
         if prompt_a is None:
             raise HTTPException(status_code=409, detail="该类目尚未绑定可用的单提示词版本")
+        if prompt_a.status == "archived" or prompt_a.pipeline_scope not in {
+            "baseline_regression", "shared"
+        }:
+            raise HTTPException(status_code=422, detail="所选单提示词不允许用于基准回归")
         if prompt_a.stage != "A":
             raise HTTPException(
                 status_code=422,
@@ -8364,6 +8528,12 @@ def create_baseline_run(
                 status_code=422,
                 detail="所选提示词阶段不匹配：A 选择器只能选 A，B 选择器只能选 B",
             )
+        if any(
+            prompt.status == "archived"
+            or prompt.pipeline_scope not in {"baseline_regression", "shared"}
+            for prompt in (prompt_a, prompt_b)
+        ):
+            raise HTTPException(status_code=422, detail="所选提示词不允许用于基准回归")
         if (
             prompt_a.category_key != baseline_set.category_key
             or prompt_b.category_key != baseline_set.category_key
@@ -8387,6 +8557,7 @@ def create_baseline_run(
                     PromptVersion.category_key == baseline_set.category_key,
                     PromptVersion.stage == "A",
                     PromptVersion.status == "published",
+                    PromptVersion.pipeline_scope.in_(("baseline_regression", "shared")),
                 )
                 .order_by(PromptVersion.created_at.desc(), PromptVersion.id.desc())
                 .limit(1)
@@ -8397,6 +8568,7 @@ def create_baseline_run(
                     PromptVersion.category_key == baseline_set.category_key,
                     PromptVersion.stage == "B",
                     PromptVersion.status == "published",
+                    PromptVersion.pipeline_scope.in_(("baseline_regression", "shared")),
                 )
                 .order_by(PromptVersion.created_at.desc(), PromptVersion.id.desc())
                 .limit(1)
@@ -8406,6 +8578,14 @@ def create_baseline_run(
             or (prompt_b is not None and prompt_b.category_key != baseline_set.category_key)
         ):
             raise HTTPException(status_code=409, detail="类目当前发布提示词归属不一致")
+    if (
+        prompt_a is not None
+        and (prompt_a.status == "archived" or prompt_a.pipeline_scope not in {"baseline_regression", "shared"})
+    ) or (
+        prompt_b is not None
+        and (prompt_b.status == "archived" or prompt_b.pipeline_scope not in {"baseline_regression", "shared"})
+    ):
+        raise HTTPException(status_code=409, detail="当前类目绑定的提示词未发布到基准回归流水线")
     if model_config is None or prompt_a is None or (
         prompt_b is None and not single_prompt_mode
     ):

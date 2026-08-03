@@ -553,6 +553,8 @@ def _build_prompt_definition(prompt: PromptVersion) -> dict[str, Any]:
         raise ValueError("PromptVersion 必须先持久化，才能创建 StrategyBundle")
     definition = {
         "id": prompt.id,
+        "category_key": prompt.category_key,
+        "pipeline_scope": prompt.pipeline_scope,
         "stage": prompt.stage,
         "version": prompt.version,
         "name": prompt.name,

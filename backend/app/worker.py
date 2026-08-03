@@ -466,6 +466,8 @@ def _prompt_for_job(
         prompt = db.get(PromptVersion, prompt_id) if prompt_id else None
         if prompt is not None and (
             prompt.stage != stage or prompt.category_key != category_key
+            or prompt.status == "archived"
+            or prompt.pipeline_scope not in {"full_pipeline", "shared"}
         ):
             prompt = None
         if prompt is None:
@@ -475,6 +477,7 @@ def _prompt_for_job(
                     PromptVersion.category_key == category_key,
                     PromptVersion.stage == stage,
                     PromptVersion.status == "published",
+                    PromptVersion.pipeline_scope.in_(("full_pipeline", "shared")),
                 )
                 .order_by(PromptVersion.created_at.desc())
             )
@@ -488,7 +491,13 @@ def _single_prompt_for_job(
 ) -> PromptVersion:
     with session_scope() as db:
         prompt = db.get(PromptVersion, prompt_id) if prompt_id else None
-        if not prompt or prompt.stage != "A" or prompt.category_key != category_key:
+        if (
+            not prompt
+            or prompt.stage != "A"
+            or prompt.category_key != category_key
+            or prompt.status == "archived"
+            or prompt.pipeline_scope not in {"baseline_regression", "shared"}
+        ):
             raise RuntimeError("单提示词版本不存在")
         return prompt
 
@@ -1517,15 +1526,58 @@ async def evaluate_job(job_id: int) -> None:
             rubric_version=rubric_version,
             engine_version=bundle.engine_version,
         )
+        is_baseline_regression = (
+            current_job.baseline_regression_item_id is not None
+        )
         db.add(result)
         db.flush()
+        if is_baseline_regression and (
+            result.level not in {"L1", "L2", "L3", "L4", "L5"}
+            or not isinstance(result.score, (int, float))
+            or isinstance(result.score, bool)
+        ):
+            reasons: list[str] = []
+            if result.level not in {"L1", "L2", "L3", "L4", "L5"}:
+                reasons.append("missing_level")
+            if not isinstance(result.score, (int, float)) or isinstance(result.score, bool):
+                reasons.append("no_authoritative_score")
+            quality = precheck.get("image_quality") if isinstance(precheck, dict) else None
+            if not isinstance(quality, dict) or not quality.get("quality_severity"):
+                reasons.append("missing_quality_evidence")
+            if result.confidence is None:
+                reasons.append("missing_confidence")
+            classification = precheck.get("classification") if isinstance(precheck, dict) else None
+            scope_status = classification.get("scope_status") if isinstance(classification, dict) else None
+            if scope_status not in {"in_scope", "boundary", "out_of_scope"}:
+                reasons.append("missing_precheck_scope_status")
+            elif scope_status in {"in_scope", "boundary"} and not single_mode:
+                if response_b is None:
+                    reasons.append("missing_prompt_b_response")
+                if aesthetic is None:
+                    reasons.append("missing_aesthetic_result")
+            error_code = "invalid_result:" + ",".join(reasons)
+            db.execute(
+                update(EvaluationJob)
+                .where(EvaluationJob.id == job_id)
+                .values(
+                    status="failed",
+                    stage="invalid_result",
+                    progress=100,
+                    error_message=error_code,
+                    finished_at=now,
+                )
+            )
+            fail_baseline_item(
+                db,
+                item_id=current_job.baseline_regression_item_id,
+                error_code=error_code,
+                job_id=job_id,
+            )
+            return
         low_confidence_threshold = (
             sampling_policy.low_confidence_threshold
             if sampling_policy is not None
             else 0.7
-        )
-        is_baseline_regression = (
-            current_job.baseline_regression_item_id is not None
         )
         if (
             not is_baseline_regression

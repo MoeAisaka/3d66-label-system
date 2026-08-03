@@ -177,9 +177,9 @@ export const baselineRegressionApi = {
     ...jsonBody(payload),
   }),
   listPrompts: (categoryKey?: string) => {
-    const query = categoryKey
-      ? `?${new URLSearchParams({ category_key: categoryKey }).toString()}`
-      : ""
+    const params = new URLSearchParams({ pipeline_scope: "baseline_regression" })
+    if (categoryKey) params.set("category_key", categoryKey)
+    const query = `?${params.toString()}`
     return api<{ items: PromptVersion[] }>(`/api/prompts${query}`)
   },
   createRun: (setId: number, payload: {
@@ -222,4 +222,42 @@ export const baselineRegressionApi = {
     `/api/baseline-corrections/${correctionRunId}/retry`,
     { method: "POST" },
   ),
+}
+
+export type PromptPipelineScope = "full_pipeline" | "baseline_regression" | "shared"
+
+export const promptApi = {
+  update: (promptId: number, payload: {
+    category_key: string
+    pipeline_scope: PromptPipelineScope
+    stage: "A" | "B"
+    name: string
+    version: string
+    system_prompt: string
+    user_prompt: string
+    rubric_version: string
+    change_note?: string
+  }) => api<PromptVersion>(`/api/prompts/${promptId}`, {
+    method: "PUT",
+    ...jsonBody(payload),
+  }),
+  clone: (promptId: number, payload: {
+    category_key: string
+    pipeline_scope: PromptPipelineScope
+    stage: "A" | "B"
+    name: string
+    version: string
+    system_prompt: string
+    user_prompt: string
+    rubric_version: string
+    change_note?: string
+  }) => api<{ id: number }>(`/api/prompts/${promptId}/clone`, {
+    method: "POST",
+    ...jsonBody(payload),
+  }),
+  publish: (promptId: number, pipelineScope?: PromptPipelineScope) => api<{ ok: boolean; regression_run_ids?: number[] }>(
+    `/api/prompts/${promptId}/publish`,
+    { method: "POST", ...jsonBody(pipelineScope ? { pipeline_scope: pipelineScope } : {}) },
+  ),
+  archive: (promptId: number) => api<{ ok: boolean }>(`/api/prompts/${promptId}`, { method: "DELETE" }),
 }

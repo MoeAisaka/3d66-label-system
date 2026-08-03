@@ -14,6 +14,7 @@ from .models import (
     BaselineCorrectionRun,
     BaselineRegressionItem,
     BaselineRegressionRun,
+    EvaluationJob,
     EvaluationResult,
 )
 from .category_pipeline import dimension_selection_from_job_snapshot
@@ -406,6 +407,30 @@ def complete_baseline_item(
         raise ValueError("基准回归结果素材与冻结条目不一致")
     if result.strategy_bundle_id != item.run.strategy_bundle_id:
         raise ValueError("基准回归结果策略与冻结 run 不一致")
+    invalid_reasons: list[str] = []
+    if result.level not in LEVELS:
+        invalid_reasons.append("missing_level")
+    if (
+        not isinstance(result.score, (int, float))
+        or isinstance(result.score, bool)
+    ):
+        invalid_reasons.append("no_authoritative_score")
+    if invalid_reasons:
+        item.evaluation_id = result.id
+        item.job_id = result.job_id
+        item.result_snapshot_json = canonical_json(result_snapshot(result))
+        item.status = "failed"
+        item.error_message = "invalid_evaluation_result:" + ",".join(invalid_reasons)
+        item.finished_at = datetime.now(timezone.utc)
+        job = db.get(EvaluationJob, result.job_id) if result.job_id is not None else None
+        if job is not None:
+            job.status = "failed"
+            job.stage = "failed"
+            job.progress = 100
+            job.error_message = item.error_message[:500]
+            job.finished_at = item.finished_at
+        refresh_baseline_run(item.run)
+        return
     run_execution = _json_object(item.run.execution_snapshot_json)
     frozen_selection = run_execution.get("dimension_selection")
     if frozen_selection is not None:

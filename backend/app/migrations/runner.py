@@ -6520,6 +6520,36 @@ def _migration_050_repair_optimizer_protocol_columns(connection: Connection) -> 
         )
 
 
+def _ensure_prompt_pipeline_scope(connection: Connection) -> None:
+    tables = {
+        row[0]
+        for row in connection.exec_driver_sql(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )
+    }
+    if "prompt_versions" not in tables:
+        return
+    columns = {
+        row[1]
+        for row in connection.exec_driver_sql("PRAGMA table_info(prompt_versions)")
+    }
+    if "pipeline_scope" not in columns:
+        connection.exec_driver_sql(
+            "ALTER TABLE prompt_versions ADD COLUMN pipeline_scope "
+            "VARCHAR(30) NOT NULL DEFAULT 'shared'"
+        )
+    connection.exec_driver_sql(
+        "CREATE INDEX IF NOT EXISTS ix_prompt_versions_pipeline_scope "
+        "ON prompt_versions(pipeline_scope)"
+    )
+    invalid = connection.exec_driver_sql(
+        "SELECT id FROM prompt_versions WHERE pipeline_scope NOT IN "
+        "('full_pipeline','baseline_regression','shared') LIMIT 1"
+    ).first()
+    if invalid is not None:
+        raise RuntimeError("提示词流水线用途迁移发现非法数据")
+
+
 MIGRATIONS = [
     Migration(1, "add_sample_expected_level", _migration_001_add_sample_expected_level),
     Migration(2, "add_review_corrections", _migration_002_add_review_corrections),
@@ -6733,6 +6763,10 @@ MIGRATIONS = [
 def run_migrations(connection: Connection) -> None:
     _probe_sqlite_json_functions(connection)
     _ensure_schema_migrations_table(connection)
+    # Keep this additive repair outside the numbered ledger so installations
+    # already at v50 receive the new prompt routing column without changing
+    # the historical migration contract.
+    _ensure_prompt_pipeline_scope(connection)
 
     applied_versions = {
         row[0] for row in connection.exec_driver_sql("SELECT version FROM schema_migrations")

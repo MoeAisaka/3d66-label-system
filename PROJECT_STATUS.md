@@ -1,7 +1,61 @@
 # 3d66 标签系统｜当前项目状态
 
-> 最后更新：2026-08-02
+> 最后更新：2026-08-03
 > 本文件只记录“现在做到哪里”；长期原则见 `PRODUCT.md` 和 `AGENTS.md`，历史背景见 `CODEX_HANDOFF.md`。
+
+## 最新完成：提示词版本管理与基准回归草稿选择（2026-08-03）
+
+- `PromptVersion` 增加流水线归属：完整流水线专用、基准回归专用、两条流水线共用；
+  每个版本同时绑定类目，服务端和 Worker 均执行归属门禁。
+- 提示词管理器支持按类目新建 A/B 版本、编辑草稿当前内容、另存为新草稿、发布归属和软归档；
+  已发布或已被任务冻结的版本不可原地修改，活动类目仍绑定的已发布版本不可归档。
+- 基准回归选择器只显示基准回归专用/共用版本，草稿可以手动加入全量回归；完整流水线专用版本
+  会被排除。完整流水线反向只接受完整流水线专用/共用版本。
+- 基准回归结果缺少合法等级或服务端权威分数时，Job 与 BaselineItem 均进入失败状态并保存
+  `missing_level`、`no_authoritative_score` 等原因，不再显示“运行完成但无有效分数”。
+- 公司实例 Run #6 已只读定位：Prompt A #14 返回旧扁平字段，没有
+  `classification.scope_status`，Worker 因无法判断评测范围而跳过 Prompt B #16；最终
+  `aesthetic/score/level` 均为空。新版本会额外返回 `missing_precheck_scope_status`、
+  `missing_prompt_b_response`、`missing_aesthetic_result` 并在页面翻译为可读失败原因。
+- 兼容修复会为已到 v50 的旧 SQLite 数据补充 `pipeline_scope`，不改历史 migration ledger；
+  策略快照也冻结类目和流水线归属。
+
+当前验证：后端 `718 passed, 1 skipped`；前端 `npm run lint`、`npm run contract:dimensions`、
+`npm run build`、Python `compileall`、`git diff --check` 通过。公司正式实例
+`http://192.168.1.35:8081/` 健康检查已通过，但尚未用本候选完成部署或修复后真实回归验证。
+
+## 最新完成：Prompt 类目隔离与非空间类目真实回归（2026-08-03）
+
+- 数据库迁移升级到 v49，`PromptVersion` 正式持久化 `category_key`。Prompt、基准集、
+  回归任务、Worker、评测包与自动优化均执行服务端跨类目门禁，前端筛选不作为唯一
+  安全层；已归档但被类目冻结绑定的 Prompt 仍可用于历史回归，不允许跨类目复用。
+- PDF 文本与材质图在没有专属已发布维度方案时，默认采用单提示词并关闭维度；不会
+  借用空间图片八维，也不会生成虚假的逐维结论。v49 真实迁移后 PDF Prompt #13、
+  材质 Prompt #14 及两个类目 Profile 的归属和模式均正确，外键检查为空。
+- 使用当前机器的 Edge 登录态和隔离验收库完成真实浏览器端到端操作：PDF 基准集 #6、
+  Run #6 完成 PDF 多模态总结与单提示词评测，结果 L3/68、期望 L3；材质基准集 #7、
+  Run #7 完成单提示词评测，结果 L4/82、期望 L4。两条流水线总体和相邻等级准确率
+  均为 100%，均冻结 `dimension_mode=none`；材质结果明确标记
+  `formal=false, experimental=true`。
+- API 强制跨类目探针通过：PDF Prompt 创建材质 Run、空间 Schema 创建材质 Run 均
+  返回 422；`/api/prompts` 与 `/api/baseline-sets` 的三类目查询结果完全隔离。
+- Edge 390×844 复验无文档级横向溢出，侧栏收起后不遮挡主内容；混淆矩阵只在自身
+  容器内横向滚动。截图与可复跑 CDP 脚本位于
+  `artifacts/browser-validation-20260803/`。
+
+当前验证：
+
+- 后端全量：`711 passed, 1 skipped`。
+- 前端：`npm run lint`、`npm run contract:dimensions`、`npm run build` 通过。
+- Windows、macOS、Docker 专项：`58 passed`。
+- Docker 镜像构建、`docker compose config -q`、容器启动、数据库 v49 迁移、外键检查
+  与健康检查通过；容器状态为 `running|healthy|0`。
+- `git diff --check` 通过。
+
+仍待完成：
+
+- 公司 Windows 正式实例尚未部署本候选，不能把上述隔离环境、原生 Windows 和 Docker
+  验收表述为公司线上已部署。
 
 ## 最新完成：类目维度管理与仅提示词实验（2026-08-02）
 

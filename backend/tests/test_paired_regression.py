@@ -527,6 +527,8 @@ def test_paired_regression_passes_then_requires_separate_human_approval() -> Non
         assert candidate_strategy["model_config"]["temperature"] == 0.1
         assert candidate_strategy["prompt_a"] == {
             "id": seed.prompts["candidate_a"].id,
+            "category_key": "space_image",
+            "pipeline_scope": "shared",
             "stage": "A",
             "version": "paired-A-v2",
             "name": "候选A",
@@ -540,6 +542,8 @@ def test_paired_regression_passes_then_requires_separate_human_approval() -> Non
         assert candidate_strategy["prompt_b"]["id"] == (
             seed.prompts["candidate_b"].id
         )
+        assert candidate_strategy["prompt_b"]["category_key"] == "space_image"
+        assert candidate_strategy["prompt_b"]["pipeline_scope"] == "shared"
         assert candidate_strategy["prompt_b"]["version"] == "paired-B-v2"
         assert candidate_strategy["rubric_version"] == "paired-rubric-v1"
         assert candidate_strategy["engine_version"] == "paired-engine-v1"
