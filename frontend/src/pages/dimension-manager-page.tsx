@@ -21,6 +21,11 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
 import { api, jsonBody } from "@/lib/api"
+import {
+  authoringFamilyForCategory,
+  dimensionAuthoringTemplateCandidates,
+  isExecutableAuthoringTemplate,
+} from "@/lib/dimension-schema"
 import type {
   CategoryDimensionConfig,
   DimensionDefinition,
@@ -798,6 +803,7 @@ function SchemaVersionManager({
   onDelete: (id: number) => void
   busy: boolean
 }) {
+  const [blankBusy, setBlankBusy] = useState(false)
   const dimensions = schemaDraft?.definition.dimensions ?? selectedSchema?.definition?.dimensions ?? []
   const validation = validateManagedDimensions(schemaDraft?.definition.dimensions ?? [])
   const weightSum = schemaDraft ? validation.weightSum : dimensions.reduce((sum, item) => sum + (Number(item.weight) || 0), 0)
@@ -825,24 +831,47 @@ function SchemaVersionManager({
     setSchemaDraft(next)
   }
 
-  function beginBlank() {
-    if (!selectedSchema?.definition) return
-    const definition = editableDefinition(selectedSchema.definition)
-    definition.dimensions = []
-    if (definition.output_contract) definition.output_contract.dimension_output_keys = []
-    if (definition.risk_review) definition.risk_review.dimension_keys = []
-    definition.core_dimension_keys = []
-    definition.family_dimension_keys = []
-    const stamp = Date.now().toString(36)
-    setSchemaDraft({
-      id: null,
-      schema_key: `custom.dimension_${stamp}`,
-      version: "1.0.0",
-      display_name: selectedCategory ? `${selectedCategory.display_name}新维度方案` : "新维度方案",
-      family_key: selectedSchema.family_key,
-      parent_schema_id: null,
-      definition,
-    })
+  async function beginBlank() {
+    setBlankBusy(true)
+    try {
+      let template: DimensionSchemaRegistryItem | undefined
+      for (const candidate of dimensionAuthoringTemplateCandidates(
+        schemas,
+        selectedSchema,
+        selectedCategory?.category_key,
+      )) {
+        const resolved = candidate.definition
+          ? candidate
+          : await api<DimensionSchemaRegistryItem>(
+            `/api/dimension-schemas/${encodeURIComponent(candidate.schema_key)}/versions/${encodeURIComponent(candidate.version)}`,
+          )
+        if (isExecutableAuthoringTemplate(resolved.definition)) {
+          template = resolved
+          break
+        }
+      }
+      if (!template?.definition) throw new Error("没有可用于新方案的执行模板，请先发布一个可执行维度版本")
+      const definition = editableDefinition(template.definition)
+      definition.dimensions = []
+      if (definition.output_contract) definition.output_contract.dimension_output_keys = []
+      if (definition.risk_review) definition.risk_review.dimension_keys = []
+      definition.core_dimension_keys = []
+      definition.family_dimension_keys = []
+      const stamp = Date.now().toString(36)
+      setSchemaDraft({
+        id: null,
+        schema_key: `custom.dimension_${stamp}`,
+        version: "1.0.0",
+        display_name: selectedCategory ? `${selectedCategory.display_name}新维度方案` : "新维度方案",
+        family_key: authoringFamilyForCategory(selectedCategory?.category_key),
+        parent_schema_id: null,
+        definition,
+      })
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "新建空白方案失败")
+    } finally {
+      setBlankBusy(false)
+    }
   }
 
   function updateSchema(patch: Partial<SchemaDraft>) {
@@ -910,8 +939,8 @@ function SchemaVersionManager({
           <h2 className="font-editorial mt-1 text-xl font-bold">定义、发布并绑定评测维度</h2>
         </div>
         <div className="flex flex-wrap gap-2">
-          <Button type="button" variant="secondary" onClick={beginBlank} disabled={busy || !selectedSchema?.definition}>
-            <Plus />新建空白方案
+          <Button type="button" variant="secondary" onClick={beginBlank} disabled={busy || blankBusy || !schemas.length}>
+            <Plus />{blankBusy ? "正在准备" : "新建空白方案"}
           </Button>
           {(selectedSchema?.status === "published" || selectedSchema?.status === "retired") && (
             <Button type="button" variant="secondary" onClick={beginCopy} disabled={busy}>

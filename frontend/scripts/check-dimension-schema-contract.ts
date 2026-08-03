@@ -1,11 +1,14 @@
 import assert from "node:assert/strict"
 
 import {
+  authoringFamilyForCategory,
   calculateDimensionPreview,
+  dimensionAuthoringTemplateCandidates,
   dimensionKeys,
   dimensionLabels,
+  isExecutableAuthoringTemplate,
 } from "../src/lib/dimension-schema.ts"
-import type { EvaluationDimensionSchema } from "../src/lib/types.ts"
+import type { DimensionSchemaRegistryItem, EvaluationDimensionSchema } from "../src/lib/types.ts"
 
 const schema: EvaluationDimensionSchema = {
   status: "resolved",
@@ -75,6 +78,50 @@ assert.deepEqual(
     [{ cap: "L2" }],
   ),
   { score: 59, level: "L2" },
+)
+
+const summary = (patch: Partial<DimensionSchemaRegistryItem>): DimensionSchemaRegistryItem => ({
+  id: 1,
+  schema_key: "common_core",
+  version: "1.0.0",
+  schema_type: "core",
+  family_key: "common",
+  display_name: "通用核心维",
+  status: "published",
+  parent_schema_id: null,
+  core_schema_id: null,
+  canonical_hash: "b".repeat(64),
+  created_by: "system",
+  created_at: "2026-08-03T00:00:00Z",
+  published_by: "system",
+  published_at: "2026-08-03T00:00:00Z",
+  retired_at: null,
+  ...patch,
+})
+const commonCore = summary({ definition: { dimensions: schema.definition!.dimensions } })
+const productPack = summary({
+  id: 2,
+  schema_key: "product_aesthetic",
+  schema_type: "family_pack",
+  family_key: "product",
+  status: "candidate",
+})
+const spacePack = summary({
+  id: 3,
+  schema_key: "space_aesthetic",
+  schema_type: "family_pack",
+  family_key: "space",
+})
+assert.equal(isExecutableAuthoringTemplate(commonCore.definition), false)
+assert.equal(isExecutableAuthoringTemplate(schema.definition), true)
+assert.equal(authoringFamilyForCategory("material_image"), "product")
+assert.deepEqual(
+  dimensionAuthoringTemplateCandidates(
+    [commonCore, spacePack, productPack],
+    commonCore,
+    "material_image",
+  ).map((item) => item.schema_key),
+  ["product_aesthetic", "space_aesthetic"],
 )
 
 console.log("dimension schema frontend contract: ok")

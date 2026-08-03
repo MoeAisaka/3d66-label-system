@@ -1,10 +1,61 @@
 import type {
   DimensionDefinition,
+  DimensionSchemaDefinition,
+  DimensionSchemaRegistryItem,
   EvaluationDimensionSchema,
   SampleTruth,
 } from "@/lib/types"
 
 type ScoreCap = { cap?: unknown }
+
+const AUTHORING_FAMILY_BY_CATEGORY: Record<string, DimensionSchemaRegistryItem["family_key"]> = {
+  space_image: "space",
+  material_image: "product",
+  pdf_text: "intent",
+}
+
+export function authoringFamilyForCategory(categoryKey: string | undefined) {
+  return AUTHORING_FAMILY_BY_CATEGORY[categoryKey ?? ""] ?? "common"
+}
+
+export function isExecutableAuthoringTemplate(
+  definition: DimensionSchemaDefinition | null | undefined,
+) {
+  return Boolean(
+    definition
+    && Array.isArray(definition.dimensions)
+    && definition.dimensions.length > 0
+    && definition.aggregation
+    && typeof definition.aggregation === "object"
+    && definition.output_contract
+    && typeof definition.output_contract === "object",
+  )
+}
+
+export function dimensionAuthoringTemplateCandidates(
+  schemas: DimensionSchemaRegistryItem[],
+  selectedSchema: DimensionSchemaRegistryItem | undefined,
+  categoryKey: string | undefined,
+) {
+  const preferredFamily = authoringFamilyForCategory(categoryKey)
+  const statusOrder: Record<DimensionSchemaRegistryItem["status"], number> = {
+    published: 0,
+    candidate: 1,
+    draft: 2,
+    retired: 3,
+  }
+  const candidates = schemas
+    .filter((schema) => schema.id !== selectedSchema?.id)
+    .sort((left, right) => (
+      Number(left.family_key !== preferredFamily) - Number(right.family_key !== preferredFamily)
+      || Number(left.schema_type === "core") - Number(right.schema_type === "core")
+      || statusOrder[left.status] - statusOrder[right.status]
+      || left.id - right.id
+    ))
+  return isExecutableAuthoringTemplate(selectedSchema?.definition)
+    ? [selectedSchema!, ...candidates]
+    : candidates
+}
 
 export function resolvedDimensionDefinitions(
   schema: EvaluationDimensionSchema | null | undefined,
