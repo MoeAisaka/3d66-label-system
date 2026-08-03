@@ -6550,6 +6550,38 @@ def _ensure_prompt_pipeline_scope(connection: Connection) -> None:
         raise RuntimeError("提示词流水线用途迁移发现非法数据")
 
 
+def _migration_051_raise_default_max_concurrency(connection: Connection) -> None:
+    """Raise the evaluation default concurrency from 2 to 8.
+
+    Canary evidence (2026-08-03, doubao-seed-2-0-lite): the provider did not
+    throttle at concurrency <= 10 and throughput scaled near-linearly to 8
+    (0.198 -> 0.237 rps at 6 -> 8, then a 2% plateau at 10). The per-call
+    latency (~24-27s) is the real bottleneck, not rate limiting. 8 is the
+    throughput knee within the launcher clamp of 10, so it becomes the new
+    default. Only rows still at the historical default of 2 are bumped;
+    operator-tuned values are preserved.
+    """
+
+    tables = {
+        row[0]
+        for row in connection.exec_driver_sql(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )
+    }
+    if "model_configs" not in tables:
+        return
+    columns = {
+        row[1]
+        for row in connection.exec_driver_sql("PRAGMA table_info(model_configs)")
+    }
+    if "max_concurrency" not in columns:
+        return
+    connection.exec_driver_sql(
+        "UPDATE model_configs SET max_concurrency=8, updated_at=CURRENT_TIMESTAMP "
+        "WHERE max_concurrency=2"
+    )
+
+
 MIGRATIONS = [
     Migration(1, "add_sample_expected_level", _migration_001_add_sample_expected_level),
     Migration(2, "add_review_corrections", _migration_002_add_review_corrections),
@@ -6756,6 +6788,11 @@ MIGRATIONS = [
         50,
         "repair_optimizer_protocol_columns",
         _migration_050_repair_optimizer_protocol_columns,
+    ),
+    Migration(
+        51,
+        "raise_default_max_concurrency",
+        _migration_051_raise_default_max_concurrency,
     ),
 ]
 

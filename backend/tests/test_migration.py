@@ -64,6 +64,7 @@ MIGRATION_NAMES = [
     "add_baseline_stock_pipeline",
     "isolate_prompt_categories",
     "repair_optimizer_protocol_columns",
+    "raise_default_max_concurrency",
 ]
 
 
@@ -419,6 +420,70 @@ def test_v50_repairs_optimizer_protocol_columns_from_v49_database(tmp_path) -> N
                 "SELECT COUNT(*) FROM pragma_table_info('optimizer_configs') "
                 "WHERE name IN ('protocol','capabilities_json')"
             ).scalar_one() == 2
+    finally:
+        engine.dispose()
+
+
+def test_v51_raises_default_max_concurrency_only_for_legacy_default(tmp_path) -> None:
+    engine = _engine(tmp_path, "v51-max-concurrency.db")
+    try:
+        with engine.begin() as connection:
+            connection.exec_driver_sql(
+                "CREATE TABLE model_configs ("
+                "id INTEGER PRIMARY KEY, "
+                "name VARCHAR(120) NOT NULL, "
+                "max_concurrency INTEGER NOT NULL DEFAULT 2, "
+                "updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP)"
+            )
+            # Row at the historical default 2 must be raised to 8.
+            connection.exec_driver_sql(
+                "INSERT INTO model_configs(id, name, max_concurrency) "
+                "VALUES (1, '主评测模型', 2)"
+            )
+            # Operator-tuned rows (not equal to 2) must be preserved.
+            connection.exec_driver_sql(
+                "INSERT INTO model_configs(id, name, max_concurrency) "
+                "VALUES (2, '手工调过的模型', 4)"
+            )
+            connection.exec_driver_sql(
+                "INSERT INTO model_configs(id, name, max_concurrency) "
+                "VALUES (3, '低并发模型', 1)"
+            )
+            connection.exec_driver_sql(
+                "CREATE TABLE schema_migrations ("
+                "version INTEGER PRIMARY KEY, name VARCHAR(200) NOT NULL, "
+                "applied_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP)"
+            )
+            for version, name in enumerate(MIGRATION_NAMES[:50], start=1):
+                connection.exec_driver_sql(
+                    "INSERT INTO schema_migrations(version, name) VALUES (?, ?)",
+                    (version, name),
+                )
+
+            run_migrations(connection)
+
+            rows = dict(
+                connection.exec_driver_sql(
+                    "SELECT id, max_concurrency FROM model_configs ORDER BY id"
+                ).fetchall()
+            )
+            assert rows == {1: 8, 2: 4, 3: 1}
+            assert connection.exec_driver_sql(
+                "SELECT name FROM schema_migrations WHERE version=51"
+            ).scalar_one() == "raise_default_max_concurrency"
+
+            # Idempotent: a re-run must not push the already-raised 8 anywhere,
+            # and must not touch the preserved operator values.
+            connection.exec_driver_sql(
+                "DELETE FROM schema_migrations WHERE version=51"
+            )
+            run_migrations(connection)
+            rows_again = dict(
+                connection.exec_driver_sql(
+                    "SELECT id, max_concurrency FROM model_configs ORDER BY id"
+                ).fetchall()
+            )
+            assert rows_again == {1: 8, 2: 4, 3: 1}
     finally:
         engine.dispose()
 

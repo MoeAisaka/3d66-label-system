@@ -115,7 +115,7 @@ class ModelConfig(Base):
     max_tokens: Mapped[int] = mapped_column(Integer, default=4096)
     timeout_seconds: Mapped[int] = mapped_column(Integer, default=120)
     max_retries: Mapped[int] = mapped_column(Integer, default=1)
-    max_concurrency: Mapped[int] = mapped_column(Integer, default=2)
+    max_concurrency: Mapped[int] = mapped_column(Integer, default=8)
     structured_output: Mapped[bool] = mapped_column(Boolean, default=True)
     high_risk_review_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     input_micros_per_million_tokens: Mapped[int] = mapped_column(

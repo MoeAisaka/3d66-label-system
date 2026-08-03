@@ -59,7 +59,7 @@ const emptyBenchmarkConfig: BenchmarkConfigDraft = {
   max_tokens: 4096,
   timeout_seconds: 120,
   max_retries: 1,
-  max_concurrency: 1,
+  max_concurrency: 8,
   structured_output: true,
   high_risk_review_enabled: false,
   input_micros_per_million_tokens: 0,

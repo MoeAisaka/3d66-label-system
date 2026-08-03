@@ -41,7 +41,7 @@ def test_database_receives_prompt_pipeline_scope_without_ledger_drift() -> None:
             assert "pipeline_scope" in columns
             assert connection.exec_driver_sql(
                 "SELECT max(version) FROM schema_migrations"
-            ).scalar_one() == 50
+            ).scalar_one() == max(m.version for m in MIGRATIONS)
     finally:
         engine.dispose()
 
