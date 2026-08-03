@@ -187,6 +187,9 @@ from .optimization_automation import (
     consume_optimization_queue_once,
 )
 from .p0e_canary_api import build_canary_router
+from .category_evaluation_preview_api import (
+    build_category_evaluation_preview_router,
+)
 from .evaluation_packages import (
     build_evaluation_package_router,
     publish_evaluation_package,
@@ -1327,6 +1330,7 @@ def label_consumer_sender(
 
 
 app.include_router(build_canary_router(current_user))
+app.include_router(build_category_evaluation_preview_router(current_user))
 app.include_router(
     build_evaluation_package_router(
         require_permission("releases:read"),
