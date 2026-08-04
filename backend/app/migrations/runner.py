@@ -6627,6 +6627,11 @@ def _migration_053_add_evaluation_result_v3_shadow(connection: Connection) -> No
     result_columns = {
         row[1] for row in connection.exec_driver_sql("PRAGMA table_info(evaluation_results)")
     }
+    if not result_columns:
+        # Table absent (partial historical snapshots that never created
+        # evaluation_results): nothing to alter. The base schema's create_all
+        # will define the column with the model on real installations.
+        return
     if "v3_shadow_json" not in result_columns:
         connection.exec_driver_sql(
             "ALTER TABLE evaluation_results ADD COLUMN v3_shadow_json TEXT"

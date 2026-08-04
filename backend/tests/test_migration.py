@@ -66,6 +66,7 @@ MIGRATION_NAMES = [
     "repair_optimizer_protocol_columns",
     "raise_default_max_concurrency",
     "add_category_evaluation_v3_configs",
+    "add_evaluation_result_v3_shadow",
 ]
 
 
