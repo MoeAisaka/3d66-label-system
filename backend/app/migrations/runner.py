@@ -6616,6 +6616,23 @@ def _migration_052_add_category_evaluation_v3_configs(connection: Connection) ->
     )
 
 
+def _migration_053_add_evaluation_result_v3_shadow(connection: Connection) -> None:
+    """Add the nullable ADR-0033 v3 shadow-scoring sidecar column.
+
+    Additive and idempotent: only adds ``evaluation_results.v3_shadow_json`` when
+    absent (mirroring the "check PRAGMA before ALTER" range of the earlier
+    result-column migrations, e.g. ``_migration_009``).  Existing rows keep NULL;
+    no authoritative field is touched.
+    """
+    result_columns = {
+        row[1] for row in connection.exec_driver_sql("PRAGMA table_info(evaluation_results)")
+    }
+    if "v3_shadow_json" not in result_columns:
+        connection.exec_driver_sql(
+            "ALTER TABLE evaluation_results ADD COLUMN v3_shadow_json TEXT"
+        )
+
+
 MIGRATIONS = [
     Migration(1, "add_sample_expected_level", _migration_001_add_sample_expected_level),
     Migration(2, "add_review_corrections", _migration_002_add_review_corrections),
@@ -6832,6 +6849,11 @@ MIGRATIONS = [
         52,
         "add_category_evaluation_v3_configs",
         _migration_052_add_category_evaluation_v3_configs,
+    ),
+    Migration(
+        53,
+        "add_evaluation_result_v3_shadow",
+        _migration_053_add_evaluation_result_v3_shadow,
     ),
 ]
 

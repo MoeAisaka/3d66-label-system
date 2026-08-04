@@ -126,6 +126,7 @@ from .strategy_bundle import (
     resolve_frozen_dimension_entry,
 )
 from .baseline_regression import complete_baseline_item, fail_baseline_item
+from .worker_v3_shadow import compute_v3_shadow, v3_shadow_enabled
 
 
 settings = get_settings()
@@ -1686,6 +1687,18 @@ async def evaluate_job(job_id: int) -> None:
             ),
         )
 
+        # ADR-0033 Phase 4 灰度旁挂：v3 影子评分（默认关、非侵入、best-effort）。
+        # compute_v3_shadow issues only read-only SELECTs and never raises; when
+        # the switch is off it returns None and the shadow column stays NULL.
+        # Nothing here reads or mutates the authoritative `scoring` above.
+        v3_shadow_payload = compute_v3_shadow(
+            db,
+            current_job.category_key,
+            precheck,
+            aesthetic,
+            enabled=v3_shadow_enabled(),
+        )
+
         result = EvaluationResult(
             asset_id=asset.id,
             job_id=job_id,
@@ -1745,6 +1758,11 @@ async def evaluate_job(job_id: int) -> None:
             risk_review_version=bundle.risk_review_version,
             rubric_version=rubric_version,
             engine_version=bundle.engine_version,
+            v3_shadow_json=(
+                json.dumps(v3_shadow_payload, ensure_ascii=False)
+                if v3_shadow_payload is not None
+                else None
+            ),
         )
         is_baseline_regression = (
             current_job.baseline_regression_item_id is not None

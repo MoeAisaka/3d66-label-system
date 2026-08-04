@@ -1544,6 +1544,10 @@ class EvaluationResult(Base):
     precheck_json: Mapped[str] = mapped_column(Text)
     aesthetic_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     scoring_json: Mapped[str] = mapped_column(Text)
+    # ADR-0033 Phase 4 灰度旁挂：v3 影子评分旁存字段。Nullable, best-effort, never
+    # part of any authoritative decision — populated only when the shadow switch
+    # is on; the v1 scoring above is unaffected.
+    v3_shadow_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     raw_response_a: Mapped[str] = mapped_column(Text)
     raw_response_b: Mapped[str | None] = mapped_column(Text, nullable=True)
     raw_response_risk_review: Mapped[str | None] = mapped_column(Text, nullable=True)
