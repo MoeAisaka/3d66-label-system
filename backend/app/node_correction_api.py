@@ -181,6 +181,133 @@ def _response(result: EvaluationResult, correction: dict[str, Any]) -> dict[str,
     }
 
 
+def apply_node_correction(
+    db: Session,
+    *,
+    result: EvaluationResult,
+    payload: CorrectNodeRequest,
+    corrector: str,
+    corrector_confidence: float | None = None,
+    corrector_policy: str | None = None,
+) -> dict[str, Any]:
+    """Apply one correction through the same append-only v3 replay path.
+
+    The caller owns the surrounding transaction.  Both the authenticated API
+    and the automatic corrector use this function so automatic changes remain
+    visible in the existing node-correction editor and can be overridden by a
+    later human event.
+    """
+
+    scoring = _json_value(result.scoring_json, {})
+    context = scoring.get("v3_context") if isinstance(scoring, dict) else None
+    if not isinstance(context, dict):
+        raise _coded(409, "not_v3_rule_result", "该结果不含可重放的 v3 冻结上下文")
+    history = _json_value(result.correction_history_json, [])
+    if payload.correction_key:
+        previous = next(
+            (
+                item
+                for item in history
+                if item.get("correction_key") == payload.correction_key
+            ),
+            None,
+        )
+        if previous is not None:
+            return _response(result, previous)
+
+    precheck = _json_value(result.precheck_json, {})
+    dimension_output = _json_value(result.aesthetic_json, {})
+    previous_scoring = dict(scoring)
+    track_override: str | None = None
+    downstream_recomputed = payload.node_type != "final_level"
+
+    if payload.node_type in {"precheck_field", "redline"}:
+        prefix = "redline." if payload.node_path.startswith("redline.") else "precheck."
+        parts = _path_parts(payload.node_path, prefix=prefix)
+        old_value = _get_dict_path(precheck, parts)
+        assign: Callable[[Any], None] = lambda value: _set_dict_path(
+            precheck, parts, value
+        )
+    elif payload.node_type == "dimension_rule":
+        if not isinstance(dimension_output, dict):
+            raise _coded(409, "dimension_output_missing", "结果缺少维度规则命中输出")
+        old_value, assign = _dimension_node(dimension_output, payload.node_path)
+    elif payload.node_type == "track":
+        old_value = scoring.get("track_key")
+        if payload.node_path not in {"track", "track_key", "scoring.track_key"}:
+            raise _coded(400, "node_path_invalid", "赛道节点路径必须是 track_key")
+        if not isinstance(payload.new_value, str):
+            raise _coded(400, "track_invalid", "新赛道必须是字符串")
+        track_override = payload.new_value
+        assign = lambda _value: None
+    else:
+        old_value = result.level
+        if payload.node_path not in {"final_level", "level", "scoring.level"}:
+            raise _coded(400, "node_path_invalid", "最终等级路径必须是 final_level")
+        if payload.new_value not in {"L1", "L2", "L3", "L4", "L5"}:
+            raise _coded(400, "level_invalid", "新等级必须是 L1-L5")
+        assign = lambda _value: None
+
+    if old_value != payload.old_value:
+        raise _coded(409, "node_value_conflict", "节点当前值已变化，请刷新后重试")
+    assign(payload.new_value)
+
+    if downstream_recomputed:
+        try:
+            replayed = recompute_qualified_v3(
+                v3_context=context,
+                precheck=precheck,
+                dimension_output=dimension_output,
+                track_key=track_override,
+            )
+        except (KeyError, TypeError, ValueError, V3PipelineError) as exc:
+            raise _coded(
+                400,
+                getattr(exc, "code", "node_recompute_failed"),
+                f"节点纠偏无法重算：{exc}",
+            ) from exc
+        scoring = build_v3_authoritative_scoring(replayed, precheck=precheck)
+        scoring.pop("_dimension_deduction_raw_payload", None)
+        scoring["v3_context"] = context
+        scoring["v3_config_revision"] = context.get("config_revision")
+        scoring["dimension_mode"] = previous_scoring.get("dimension_mode", "all")
+        scoring["dimension_selection"] = previous_scoring.get("dimension_selection")
+        if isinstance(replayed.get("dimension_deduction_output"), dict):
+            dimension_output = replayed["dimension_deduction_output"]
+        result.precheck_json = json.dumps(precheck, ensure_ascii=False)
+        result.aesthetic_json = json.dumps(dimension_output, ensure_ascii=False)
+        result.scoring_json = json.dumps(scoring, ensure_ascii=False)
+        result.score = scoring.get("score")
+        result.level = scoring.get("level")
+        result.confidence = scoring.get("confidence")
+        result.needs_review = bool(scoring.get("needs_review"))
+    else:
+        scoring["level"] = payload.new_value
+        scoring["manual_final_level"] = payload.new_value
+        result.scoring_json = json.dumps(scoring, ensure_ascii=False)
+        result.level = payload.new_value
+        result.needs_review = False
+
+    correction = NodeCorrection(
+        correction_key=payload.correction_key,
+        node_type=payload.node_type,
+        node_path=payload.node_path,
+        old_value=old_value,
+        new_value=payload.new_value,
+        evidence=payload.evidence,
+        reason=payload.reason,
+        corrector=corrector,
+        corrector_confidence=corrector_confidence,
+        corrector_policy=corrector_policy,
+        corrected_at=datetime.now(timezone.utc),
+        downstream_recomputed=downstream_recomputed,
+    ).model_dump(mode="json")
+    history.append(correction)
+    result.correction_history_json = json.dumps(history, ensure_ascii=False)
+    db.flush()
+    return _response(result, correction)
+
+
 def build_node_correction_router(require_reviewer: Callable[..., Any]) -> APIRouter:
     router = APIRouter(tags=["evaluation-node-correction"])
 
@@ -194,119 +321,17 @@ def build_node_correction_router(require_reviewer: Callable[..., Any]) -> APIRou
         result = db.get(EvaluationResult, evaluation_id)
         if result is None:
             raise _coded(404, "evaluation_result_not_found", "评测结果不存在")
-
-        scoring = _json_value(result.scoring_json, {})
-        context = scoring.get("v3_context") if isinstance(scoring, dict) else None
-        if not isinstance(context, dict):
-            raise _coded(409, "not_v3_rule_result", "该结果不含可重放的 v3 冻结上下文")
-        history = _json_value(result.correction_history_json, [])
-        if payload.correction_key:
-            previous = next(
-                (
-                    item
-                    for item in history
-                    if item.get("correction_key") == payload.correction_key
-                ),
-                None,
-            )
-            if previous is not None:
-                return _response(result, previous)
-
-        precheck = _json_value(result.precheck_json, {})
-        dimension_output = _json_value(result.aesthetic_json, {})
-        previous_scoring = dict(scoring)
-        track_override: str | None = None
-        downstream_recomputed = payload.node_type != "final_level"
-
-        if payload.node_type in {"precheck_field", "redline"}:
-            prefix = "redline." if payload.node_path.startswith("redline.") else "precheck."
-            parts = _path_parts(payload.node_path, prefix=prefix)
-            old_value = _get_dict_path(precheck, parts)
-            assign: Callable[[Any], None] = lambda value: _set_dict_path(
-                precheck, parts, value
-            )
-        elif payload.node_type == "dimension_rule":
-            if not isinstance(dimension_output, dict):
-                raise _coded(409, "dimension_output_missing", "结果缺少维度规则命中输出")
-            old_value, assign = _dimension_node(dimension_output, payload.node_path)
-        elif payload.node_type == "track":
-            old_value = scoring.get("track_key")
-            if payload.node_path not in {"track", "track_key", "scoring.track_key"}:
-                raise _coded(400, "node_path_invalid", "赛道节点路径必须是 track_key")
-            if not isinstance(payload.new_value, str):
-                raise _coded(400, "track_invalid", "新赛道必须是字符串")
-            track_override = payload.new_value
-            assign = lambda _value: None
-        else:
-            old_value = result.level
-            if payload.node_path not in {"final_level", "level", "scoring.level"}:
-                raise _coded(400, "node_path_invalid", "最终等级路径必须是 final_level")
-            if payload.new_value not in {"L1", "L2", "L3", "L4", "L5"}:
-                raise _coded(400, "level_invalid", "新等级必须是 L1-L5")
-            assign = lambda _value: None
-
-        if old_value != payload.old_value:
-            raise _coded(
-                409,
-                "node_value_conflict",
-                "节点当前值已变化，请刷新后重试",
-            )
-        assign(payload.new_value)
-
-        if downstream_recomputed:
-            try:
-                replayed = recompute_qualified_v3(
-                    v3_context=context,
-                    precheck=precheck,
-                    dimension_output=dimension_output,
-                    track_key=track_override,
-                )
-            except (KeyError, TypeError, ValueError, V3PipelineError) as exc:
-                raise _coded(
-                    400,
-                    getattr(exc, "code", "node_recompute_failed"),
-                    f"节点纠偏无法重算：{exc}",
-                ) from exc
-            scoring = build_v3_authoritative_scoring(replayed, precheck=precheck)
-            scoring.pop("_dimension_deduction_raw_payload", None)
-            scoring["v3_context"] = context
-            scoring["v3_config_revision"] = context.get("config_revision")
-            scoring["dimension_mode"] = previous_scoring.get("dimension_mode", "all")
-            scoring["dimension_selection"] = previous_scoring.get(
-                "dimension_selection"
-            )
-            if isinstance(replayed.get("dimension_deduction_output"), dict):
-                dimension_output = replayed["dimension_deduction_output"]
-            result.precheck_json = json.dumps(precheck, ensure_ascii=False)
-            result.aesthetic_json = json.dumps(dimension_output, ensure_ascii=False)
-            result.scoring_json = json.dumps(scoring, ensure_ascii=False)
-            result.score = scoring.get("score")
-            result.level = scoring.get("level")
-            result.confidence = scoring.get("confidence")
-            result.needs_review = bool(scoring.get("needs_review"))
-        else:
-            scoring["level"] = payload.new_value
-            scoring["manual_final_level"] = payload.new_value
-            result.scoring_json = json.dumps(scoring, ensure_ascii=False)
-            result.level = payload.new_value
-            result.needs_review = False
-
-        correction = NodeCorrection(
-            correction_key=payload.correction_key,
-            node_type=payload.node_type,
-            node_path=payload.node_path,
-            old_value=old_value,
-            new_value=payload.new_value,
-            evidence=payload.evidence,
-            reason=payload.reason,
-            corrector=str(getattr(user, "display_name", None) or getattr(user, "username", "unknown")),
-            corrected_at=datetime.now(timezone.utc),
-            downstream_recomputed=downstream_recomputed,
-        ).model_dump(mode="json")
-        history.append(correction)
-        result.correction_history_json = json.dumps(history, ensure_ascii=False)
+        response = apply_node_correction(
+            db,
+            result=result,
+            payload=payload,
+            corrector=str(
+                getattr(user, "display_name", None)
+                or getattr(user, "username", "unknown")
+            ),
+        )
         db.commit()
         db.refresh(result)
-        return _response(result, correction)
+        return response
 
     return router

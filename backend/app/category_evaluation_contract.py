@@ -129,6 +129,8 @@ class NodeCorrection(BaseModel):
     evidence: list[NodeCorrectionEvidence] = Field(default_factory=list)
     reason: str
     corrector: str
+    corrector_confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    corrector_policy: str | None = None
     corrected_at: datetime
     downstream_recomputed: bool
 

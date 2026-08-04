@@ -138,6 +138,11 @@ from .baseline_regression import (
     filename_level_suggestion,
     run_comparison,
 )
+from .inspiration_auto_correction import (
+    AutoCorrectionPolicy,
+    apply_auto_correction_to_run,
+    build_drift_report as build_inspiration_drift_report,
+)
 from .benchmarking import (
     MODEL_KEYS,
     DeterministicBenchmarkAdapter,
@@ -932,6 +937,17 @@ class BaselineCorrectionCreateRequest(BaseModel):
         if len(self.item_ids) != len(set(self.item_ids)):
             raise ValueError("纠偏样本不能重复")
         return self
+
+
+class InspirationAutoCorrectionRequest(BaseModel):
+    confidence_threshold: float = Field(default=0.85, ge=0.0, le=1.0)
+    minimum_support: int = Field(default=30, ge=1, le=10_000)
+    coverage_rate: float = Field(default=0.10, ge=0.0, le=1.0)
+    calibration_fraction: float = Field(default=0.70, ge=0.1, le=0.9)
+    maximum_level_shift: int = Field(default=1, ge=1, le=4)
+
+    def to_policy(self) -> AutoCorrectionPolicy:
+        return AutoCorrectionPolicy(**self.model_dump())
 
 
 class PairedRegressionSampleRequest(BaseModel):
@@ -9139,6 +9155,60 @@ def _baseline_correction_payload(row: BaselineCorrectionRun) -> dict[str, Any]:
         "updated_at": row.updated_at,
         "finished_at": row.finished_at,
     }
+
+
+@app.post("/api/baseline-regressions/{run_id}/auto-corrections")
+def apply_inspiration_auto_corrections(
+    run_id: int,
+    payload: InspirationAutoCorrectionRequest | None = None,
+    _user: User = Depends(_permission_user("reviews:write")),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    run = db.get(BaselineRegressionRun, run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="基准回归 run 不存在")
+    try:
+        return apply_auto_correction_to_run(
+            db,
+            run=run,
+            policy=(payload or InspirationAutoCorrectionRequest()).to_policy(),
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "auto_correction_not_ready", "message": str(exc)},
+        ) from exc
+
+
+@app.get("/api/baseline-regressions/{run_id}/drift-test")
+def inspiration_auto_correction_drift_test(
+    run_id: int,
+    confidence_threshold: float = 0.85,
+    minimum_support: int = 30,
+    coverage_rate: float = 0.10,
+    calibration_fraction: float = 0.70,
+    maximum_level_shift: int = 1,
+    _user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    run = db.get(BaselineRegressionRun, run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="基准回归 run 不存在")
+    try:
+        policy = AutoCorrectionPolicy(
+            confidence_threshold=confidence_threshold,
+            minimum_support=minimum_support,
+            coverage_rate=coverage_rate,
+            calibration_fraction=calibration_fraction,
+            maximum_level_shift=maximum_level_shift,
+        )
+        policy.validate()
+        return build_inspiration_drift_report(run, policy=policy)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "drift_policy_invalid", "message": str(exc)},
+        ) from exc
 
 
 def _execute_baseline_correction(

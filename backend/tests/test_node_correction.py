@@ -18,7 +18,11 @@ from app.inspiration_category_seed import (
     build_inspiration_v3_contract,
 )
 from app.models import EvaluationResult
-from app.node_correction_api import build_node_correction_router
+from app.node_correction_api import (
+    CorrectNodeRequest,
+    apply_node_correction,
+    build_node_correction_router,
+)
 from app.worker_v3_authoritative import build_v3_authoritative_scoring
 
 
@@ -160,6 +164,33 @@ def test_correct_dimension_rule_appends_evidence_and_recomputes_downstream() -> 
     )
     assert replay.status_code == 200
     assert len(replay.json()["correction_history"]) == 1
+
+    with sessions() as db:
+        stored = db.get(EvaluationResult, result_id)
+        assert stored is not None
+        old_level = stored.level
+        new_level = "L5" if old_level != "L5" else "L4"
+        apply_node_correction(
+            db,
+            result=stored,
+            payload=CorrectNodeRequest(
+                correction_key="auto-corrector-test",
+                node_type="final_level",
+                node_path="final_level",
+                old_value=old_level,
+                new_value=new_level,
+                evidence=[],
+                reason="黄金集高置信度校准",
+            ),
+            corrector="auto-corrector-v1",
+            corrector_confidence=0.91,
+            corrector_policy="level-confusion-calibration-v1",
+        )
+        db.commit()
+        history = json.loads(stored.correction_history_json)
+        assert history[-1]["corrector"] == "auto-corrector-v1"
+        assert history[-1]["corrector_confidence"] == 0.91
+        assert history[-1]["corrector_policy"] == "level-confusion-calibration-v1"
     engine.dispose()
 
 
