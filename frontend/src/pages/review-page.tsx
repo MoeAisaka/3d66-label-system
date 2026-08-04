@@ -30,6 +30,7 @@ import {
   ReviewList,
   reviewStageMeta,
   reviewWorkspaceMeta,
+  ruleDeductionDimensions,
   type ReviewWorkspaceView,
 } from "@/pages/review-list"
 
@@ -84,19 +85,35 @@ export function ReviewPage({ user }: { user: User }) {
   const sampling = asset?.sampling
   const dimensions = evaluation?.aesthetic?.dimensions ?? {}
   const scoring = evaluation?.scoring
+  const ruleMode = scoring?.dimension_scoring_mode === "rule_deduction"
+  const deductionDimensions = useMemo(
+    () => ruleDeductionDimensions(evaluation) ?? {},
+    [evaluation],
+  )
   const scopeStatus = evaluation?.precheck?.classification?.scope_status
-  const requiredDimensionKeys = useMemo(
-    () => dimensionKeysForSchema(evaluation?.dimension_schema),
-    [evaluation?.dimension_schema],
-  )
-  const dimensionLabels = useMemo(
-    () => dimensionLabelsForSchema(evaluation?.dimension_schema),
-    [evaluation?.dimension_schema],
-  )
-  const completeDimensionCount = requiredDimensionKeys.filter((key) => Number(dimensions[key]?.grade)).length
+  const requiredDimensionKeys = useMemo(() => (
+    ruleMode ? Object.keys(deductionDimensions) : dimensionKeysForSchema(evaluation?.dimension_schema)
+  ), [deductionDimensions, evaluation?.dimension_schema, ruleMode])
+  const dimensionLabels = useMemo(() => {
+    if (!ruleMode) return dimensionLabelsForSchema(evaluation?.dimension_schema)
+    const labels: Record<string, string> = {}
+    const context = scoring?.v3_context
+    const track = context?.subcategory_dimensions?.[scoring?.track_key]
+    for (const groupName of ["common_group", "specific_group"]) {
+      const definitions = track?.[groupName]?.schema_definition?.dimensions
+      if (!Array.isArray(definitions)) continue
+      for (const definition of definitions) {
+        if (typeof definition?.key === "string") labels[definition.key] = String(definition.label || definition.key)
+      }
+    }
+    return labels
+  }, [evaluation?.dimension_schema, ruleMode, scoring])
+  const completeDimensionCount = ruleMode
+    ? requiredDimensionKeys.filter((key) => Array.isArray(deductionDimensions[key]?.hit_rules)).length
+    : requiredDimensionKeys.filter((key) => Number(dimensions[key]?.grade)).length
   const dimensionContractReady = Boolean(
-    evaluation?.dimension_schema?.status === "resolved"
-    && requiredDimensionKeys.length,
+    requiredDimensionKeys.length
+    && (ruleMode || evaluation?.dimension_schema?.status === "resolved"),
   )
 
   useEffect(() => {
@@ -284,6 +301,27 @@ export function ReviewPage({ user }: { user: User }) {
               </div>
             ) : (
               <>
+                {ruleMode && (
+                  <section className="border-b border-[var(--line-strong)] bg-[#f7faef] px-5 py-4" aria-label="维度扣分规则命中证据">
+                    <div className="flex flex-wrap items-start justify-between gap-3">
+                      <div>
+                        <p className="text-sm font-bold">维度扣分（规则命中）</p>
+                        <p className="font-data mt-1 text-[0.68rem] text-[var(--muted)]">{evaluation.aesthetic?.bridge_version || "dimension-deduction-bridge"} · 服务端确定性聚合</p>
+                      </div>
+                      <Badge tone="success">{scoring?.dimension_evidence?.applied_deduction_total ?? 0} 分扣减</Badge>
+                    </div>
+                    <div className="mt-3 grid gap-2">
+                      {requiredDimensionKeys.map((key) => {
+                        const hits = Array.isArray(deductionDimensions[key]?.hit_rules) ? deductionDimensions[key].hit_rules : []
+                        return <div key={key} className="border border-[var(--line)] bg-white px-3 py-2.5">
+                          <div className="flex items-center justify-between gap-3"><p className="text-xs font-semibold">{dimensionLabels[key] || key}</p><Badge tone={hits.length ? "warning" : "success"}>{hits.length ? `命中 ${hits.length} 条` : "未命中"}</Badge></div>
+                          {hits.map((hit: any, index: number) => <div key={`${hit.rule_id || "rule"}-${index}`} className="mt-2 border-t border-[var(--line)] pt-2 text-xs leading-5"><p><strong>{hit.rule_id || "规则"}</strong>{hit.deduction != null ? ` · 扣 ${hit.deduction} 分` : ""}{hit.confidence != null ? ` · 置信度 ${Math.round(Number(hit.confidence) * 100)}%` : ""}</p>{hit.evidence && <p className="mt-1 text-[var(--muted)]">证据：{String(hit.evidence)}</p>}</div>)}
+                        </div>
+                      })}
+                    </div>
+                    {Array.isArray(scoring?.steps) && scoring.steps.find((item: any) => item.step === "dimension_rule_deduction")?.note && <p className="mt-3 text-xs font-semibold text-[#45620c]">{scoring.steps.find((item: any) => item.step === "dimension_rule_deduction").note}</p>}
+                  </section>
+                )}
                 {evaluation.preprocess?.category_key === "pdf_text" && (
                   <div className="border-b border-[var(--line)] bg-[#f5f8fb] px-5 py-4">
                     <div className="flex flex-wrap items-center justify-between gap-3">
@@ -344,9 +382,9 @@ export function ReviewPage({ user }: { user: User }) {
                     <Button variant="secondary" onClick={() => review.mutate({ decision: "rejected", corrected_level: null, reviewNote: note.trim() })} disabled={review.isPending}>退回复核</Button>
                     <Button onClick={() => review.mutate({ decision: "approved", corrected_level: null, reviewNote: note.trim() })} disabled={review.isPending}><Check weight="bold" />确认结果</Button>
                   </div></div>}
-                  <ReviewCorrectionForm key={`${evaluation.id}-${evaluation.review_revision}`} dimensions={dimensions} precheck={evaluation.precheck ?? {}} dimensionSchema={evaluation.dimension_schema} scoring={scoring ?? {}} pending={review.isPending} editable={evaluation.review_stage !== "completed"} onSubmit={({ note: correctionNote, corrections }) => {
+                  {ruleMode ? <div className="border-t border-[var(--line)] bg-[#fafbf8] px-5 py-4 text-xs leading-5 text-[var(--muted)]">规则节点纠偏已由后端接口支持；本批配置页与评测详情先提供逐规则证据只读展示，节点编辑界面按后续批次接入。</div> : <ReviewCorrectionForm key={`${evaluation.id}-${evaluation.review_revision}`} dimensions={dimensions} precheck={evaluation.precheck ?? {}} dimensionSchema={evaluation.dimension_schema} scoring={scoring ?? {}} pending={review.isPending} editable={evaluation.review_stage !== "completed"} onSubmit={({ note: correctionNote, corrections }) => {
                     review.mutate({ decision: "corrected", corrected_level: null, reviewNote: correctionNote, corrections })
-                  }} />
+                  }} />}
                 </div>
               </>
             )}
