@@ -464,4 +464,17 @@ def build_category_evaluation_v3_config_router(
         errors = _collect_validation_errors(payload)
         return ValidateResponse(ok=not errors, errors=errors)
 
+    @router.post("/validate", response_model=ValidateResponse)
+    def validate_candidate(
+        payload: V3ConfigWriteRequest,
+        _user: Any = Depends(require_user),
+    ) -> ValidateResponse:
+        """Dry-run validate a candidate config before it has a key — no write.
+
+        Same reused validators as create/update; never persists.  Used by the
+        editor before first save (no existing ``category_key`` yet).
+        """
+        errors = _collect_validation_errors(payload)
+        return ValidateResponse(ok=not errors, errors=errors)
+
     return router

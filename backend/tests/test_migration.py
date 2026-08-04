@@ -65,6 +65,7 @@ MIGRATION_NAMES = [
     "isolate_prompt_categories",
     "repair_optimizer_protocol_columns",
     "raise_default_max_concurrency",
+    "add_category_evaluation_v3_configs",
 ]
 
 
