@@ -31,7 +31,7 @@ def _sessions():
 
 def test_rating_regex_is_path_aware_and_does_not_guess() -> None:
     assert rating_from_original_name("好图补充/好_15015638.jpeg") == "好"
-    assert rating_from_original_name(r"豆包美感\中差_14304072.jpeg") == "中差"
+    assert rating_from_original_name(r"豆包美感\中差_14304072.jpeg") is None
     assert rating_from_original_name("批次_过滤_100.png") == "过滤"
     assert rating_from_original_name("好东西_100.png") is None
     assert rating_from_original_name("中等偏上_100.png") is None
@@ -49,6 +49,7 @@ def test_golden_set_references_cross_category_assets_without_mutation() -> None:
                     size_bytes=1,
                     sha256="a" * 64,
                     category_key="space_image",
+                    status="deleted",
                 ),
                 Asset(
                     original_name="豆包美感/过滤_2.jpeg",
@@ -67,7 +68,7 @@ def test_golden_set_references_cross_category_assets_without_mutation() -> None:
                     category_key="pdf_text",
                 ),
                 Asset(
-                    original_name=r"好图补充\好_1.jpeg",
+                    original_name="好图补充/好_1.jpeg",
                     stored_name="a-copy.jpeg",
                     mime_type="image/jpeg",
                     size_bytes=1,

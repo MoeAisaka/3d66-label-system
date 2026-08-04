@@ -56,7 +56,7 @@ EXPECTED_RATING_DISTRIBUTION = {
     "极差": 237,
     "过滤": 427,
 }
-_RATING_PATTERN = re.compile(r"(?:^|[/\\_])(好|中等|中差|极差|过滤)_")
+_RATING_PATTERN = re.compile(r"(?:^|/|_)(好|中等|中差|极差|过滤)_")
 
 
 @dataclass(frozen=True)
@@ -111,9 +111,10 @@ def ensure_inspiration_golden_set(
     baseline run later creates ``EvaluationJob.category_key=inspiration_image``.
     """
 
-    assets = db.scalars(
-        select(Asset).where(Asset.status != "deleted").order_by(Asset.id.asc())
-    ).all()
+    # Asset deletion is a history-preserving soft delete (binary_retained=True).
+    # The human corpus is frozen by asset id and must not silently shrink when
+    # an operator hides an already-rated row from the normal asset list.
+    assets = db.scalars(select(Asset).order_by(Asset.id.asc())).all()
     selected: list[tuple[Asset, str, str]] = []
     distribution = {rating: 0 for rating in RATING_TO_LEVEL}
     for asset in assets:

@@ -48,13 +48,13 @@ EXPECTED_DISTRIBUTION = {
     "极差": 237,
     "过滤": 427,
 }
-PATTERN = re.compile(r"(?:^|[/\\_])(好|中等|中差|极差|过滤)_")
+PATTERN = re.compile(r"(?:^|/|_)(好|中等|中差|极差|过滤)_")
 
 
 with SessionLocal() as db:
-    assets = db.scalars(
-        select(Asset).where(Asset.status != "deleted").order_by(Asset.id)
-    ).all()
+    # Soft deletion keeps the binary and history by contract.  The frozen
+    # human corpus therefore follows asset identity, independent of UI status.
+    assets = db.scalars(select(Asset).order_by(Asset.id)).all()
     selected = []
     for asset in assets:
         match = PATTERN.search(asset.original_name or "")
