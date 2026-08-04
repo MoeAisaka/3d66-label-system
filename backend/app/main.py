@@ -2596,7 +2596,11 @@ def _category_profile(
             preprocess_config_json=defaults["preprocess_config_json"],
             pipeline_config_json=canonical_json(default_pipeline(category_key)),
             status="active",
-            rubric_version="rubric-v2.1",
+            rubric_version=(
+                "inspiration-rubric-v1"
+                if category_key == "inspiration_image"
+                else "rubric-v2.1"
+            ),
             dimension_schema_key=(
                 SPACE_SCHEMA_KEY
                 if category_key in {"space_image", "inspiration_image"}

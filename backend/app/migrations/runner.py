@@ -6732,6 +6732,27 @@ def _migration_056_bind_inspiration_production_dimension(
     )
 
 
+def _migration_057_bind_inspiration_production_rubric(
+    connection: Connection,
+) -> None:
+    """Replace only the legacy compatibility rubric on inspiration profiles."""
+    profile_columns = {
+        row[1]
+        for row in connection.exec_driver_sql(
+            "PRAGMA table_info(evaluation_category_profiles)"
+        )
+    }
+    if not {"category_key", "rubric_version"}.issubset(profile_columns):
+        return
+    connection.exec_driver_sql(
+        "UPDATE evaluation_category_profiles "
+        "SET rubric_version='inspiration-rubric-v1', "
+        "updated_at=CURRENT_TIMESTAMP "
+        "WHERE category_key='inspiration_image' "
+        "AND rubric_version='rubric-v2.1'"
+    )
+
+
 MIGRATIONS = [
     Migration(1, "add_sample_expected_level", _migration_001_add_sample_expected_level),
     Migration(2, "add_review_corrections", _migration_002_add_review_corrections),
@@ -6968,6 +6989,11 @@ MIGRATIONS = [
         56,
         "bind_inspiration_production_dimension",
         _migration_056_bind_inspiration_production_dimension,
+    ),
+    Migration(
+        57,
+        "bind_inspiration_production_rubric",
+        _migration_057_bind_inspiration_production_rubric,
     ),
 ]
 

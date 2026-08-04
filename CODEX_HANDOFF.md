@@ -732,5 +732,6 @@ npm.cmd run build
 - 数据迁移命令：`python -X utf8 -m app.migrations.upgrade_v3_to_rule_deduction`，可重复执行。
 - 迁移 56 负责只补齐缺失的 `inspiration_image` 生产维度绑定；如果运营已设置
   schema/version，则保持原值。
+- 迁移 57 只替换 `inspiration_image` 的历史通用默认 rubric，人工自定义值保持不变。
 - 新增五个指定测试文件均已落地，迁移、provider 失败、幂等纠偏和旧 fallback
   均有回归。

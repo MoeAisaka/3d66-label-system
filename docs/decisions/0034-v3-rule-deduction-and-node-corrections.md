@@ -30,6 +30,8 @@ draft/媒介关。只更新四条 v3 配置，旧 `EvaluationResult` 不回溯�
 配置对应的生产类目合同可能尚未绑定维度 schema。迁移 56 仅在该类目两个 schema
 字段均为空时补为 `space_aesthetic@1.3.0`，显式运营配置一律保留；运行时兼容路径也
 使用同一默认值，避免活跃 v3 合同被旧生产资料阻断。
+迁移 57 同理仅把历史通用默认 `rubric-v2.1` 替换为灵感图专属
+`inspiration-rubric-v1`；其它人工 rubric 不覆盖。
 
 ## 界面
 

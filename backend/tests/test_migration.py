@@ -70,6 +70,7 @@ MIGRATION_NAMES = [
     "add_evaluation_result_level_semantics",
     "add_rule_deduction_and_node_corrections",
     "bind_inspiration_production_dimension",
+    "bind_inspiration_production_rubric",
 ]
 
 
@@ -878,6 +879,52 @@ def test_v56_binds_only_missing_inspiration_production_dimension(tmp_path) -> No
                 "FROM evaluation_category_profiles "
                 "WHERE category_key='inspiration_image'"
             ).one() == ("operator_schema", "2.4.0")
+    finally:
+        engine.dispose()
+
+
+def test_v57_replaces_only_legacy_inspiration_rubric(tmp_path) -> None:
+    engine = _engine(tmp_path, "v57-inspiration-production-rubric.db")
+    _create_latest_and_run_migrations(engine)
+    try:
+        with Session(engine) as db:
+            db.add(
+                models.EvaluationCategoryProfile(
+                    category_key="inspiration_image",
+                    display_name="灵感图",
+                    status="active",
+                    allowed_mime_types_json='["image/jpeg"]',
+                    preprocess_config_json="{}",
+                    pipeline_config_json="{}",
+                    rubric_version="rubric-v2.1",
+                    created_by="test",
+                )
+            )
+            db.commit()
+
+        with engine.begin() as connection:
+            connection.exec_driver_sql(
+                "DELETE FROM schema_migrations WHERE version=57"
+            )
+            run_migrations(connection)
+            assert connection.exec_driver_sql(
+                "SELECT rubric_version FROM evaluation_category_profiles "
+                "WHERE category_key='inspiration_image'"
+            ).scalar_one() == "inspiration-rubric-v1"
+
+            connection.exec_driver_sql(
+                "UPDATE evaluation_category_profiles "
+                "SET rubric_version='operator-rubric-v9' "
+                "WHERE category_key='inspiration_image'"
+            )
+            connection.exec_driver_sql(
+                "DELETE FROM schema_migrations WHERE version=57"
+            )
+            run_migrations(connection)
+            assert connection.exec_driver_sql(
+                "SELECT rubric_version FROM evaluation_category_profiles "
+                "WHERE category_key='inspiration_image'"
+            ).scalar_one() == "operator-rubric-v9"
     finally:
         engine.dispose()
 
