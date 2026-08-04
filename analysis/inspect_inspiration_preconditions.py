@@ -60,9 +60,15 @@ with SessionLocal() as db:
                         "status": item.status,
                         "pipeline_scope": item.pipeline_scope,
                         "version": item.version,
-                        "content_length": len(item.content or ""),
+                        "content_length": len(
+                            (item.system_prompt or "") + (item.user_prompt or "")
+                        ),
                         "content_sha256": hashlib.sha256(
-                            (item.content or "").encode("utf-8")
+                            (
+                                (item.system_prompt or "")
+                                + "\n"
+                                + (item.user_prompt or "")
+                            ).encode("utf-8")
                         ).hexdigest(),
                     }
                     for item in prompts
