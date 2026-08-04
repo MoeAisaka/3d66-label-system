@@ -55,6 +55,15 @@ with SessionLocal() as db:
                     for item in assets
                     if PATTERN.search(item.original_name or "") is None
                 ],
+                "tail": [
+                    {
+                        "id": item.id,
+                        "name": item.original_name,
+                        "status": item.status,
+                        "created_at": item.created_at.isoformat(),
+                    }
+                    for item in assets[-25:]
+                ],
             },
             ensure_ascii=False,
             sort_keys=True,
