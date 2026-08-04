@@ -14,7 +14,11 @@ v2 fields are intentionally not redefined here.
 from __future__ import annotations
 
 import re
+from datetime import datetime
+from typing import Literal
 from typing import Any
+
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from .dimension_schema_registry import canonical_hash as _canonical_hash
 from .dimension_schema_registry import canonical_json as _canonical_json
@@ -30,6 +34,103 @@ COMMON_MODIFIERS_FORMAT_VERSION = "common-modifiers-v1"
 
 _TRACK_KEY_PATTERN = re.compile(r"^[a-z][a-z0-9_]{2,39}$")
 _MEDIA_PENALTY_KEYS = frozenset({"real_photo", "render_3d", "ai_image", "other"})
+_RULE_ID_PATTERN = re.compile(r"^[a-z][a-z0-9_-]{0,39}$")
+_HAN_PATTERN = re.compile(r"[\u3400-\u9fff]")
+
+
+class DeductionRule(BaseModel):
+    """One operator-authored rule scoped to a single dimension."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    rule_id: str
+    description: str
+    deduction: float = Field(gt=0, le=100)
+    tags: list[str] = Field(default_factory=list, max_length=12)
+
+    @field_validator("rule_id")
+    @classmethod
+    def _valid_rule_id(cls, value: str) -> str:
+        value = value.strip()
+        if not _RULE_ID_PATTERN.fullmatch(value):
+            raise ValueError("rule_id 必须以小写字母开头，只含小写字母、数字、_、-")
+        return value
+
+    @field_validator("description")
+    @classmethod
+    def _valid_chinese_description(cls, value: str) -> str:
+        value = value.strip()
+        if not value or not _HAN_PATTERN.search(value):
+            raise ValueError("扣分规则 description 必须是非空中文描述")
+        return value
+
+    @field_validator("tags")
+    @classmethod
+    def _valid_tags(cls, value: list[str]) -> list[str]:
+        normalized = [item.strip() for item in value]
+        if any(not item for item in normalized):
+            raise ValueError("扣分规则 tags 不能包含空标签")
+        if len(set(normalized)) != len(normalized):
+            raise ValueError("扣分规则 tags 不能重复")
+        return normalized
+
+
+class DeductionRuleHit(BaseModel):
+    """Calling-B judgment for one configured rule."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    rule_id: str
+    confidence: Literal["high", "medium", "low"]
+    evidence: str
+
+    @field_validator("evidence")
+    @classmethod
+    def _valid_evidence(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("规则命中 evidence 不能为空")
+        return value
+
+
+class DimensionDeductionOutput(BaseModel):
+    """Normalized calling-B output for one dimension."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    dimension_key: str
+    hit_rules: list[DeductionRuleHit] = Field(default_factory=list)
+
+
+class NodeCorrectionEvidence(BaseModel):
+    """Per-rule evidence delta carried by a node correction."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    rule_id: str
+    old_confidence: Literal["high", "medium", "low"] | None = None
+    new_confidence: Literal["high", "medium", "low"] | None = None
+    old_evidence: str = ""
+    new_evidence: str = ""
+
+
+class NodeCorrection(BaseModel):
+    """Append-only correction event over the deterministic v3 scoring graph."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    correction_key: str | None = None
+    node_type: Literal[
+        "precheck_field", "redline", "track", "dimension_rule", "final_level"
+    ]
+    node_path: str
+    old_value: Any
+    new_value: Any
+    evidence: list[NodeCorrectionEvidence] = Field(default_factory=list)
+    reason: str
+    corrector: str
+    corrected_at: datetime
+    downstream_recomputed: bool
 
 
 class CategoryEvaluationContractError(ValueError):
@@ -141,6 +242,11 @@ def _validate_common_modifiers(block: Any) -> None:
         raise CategoryEvaluationContractError(
             "media_penalty_not_object", "media_type_penalty 必须是对象"
         )
+    enabled = media.get("enabled", True)
+    if not isinstance(enabled, bool):
+        raise CategoryEvaluationContractError(
+            "media_penalty_enabled", "media_type_penalty.enabled 必须是布尔值"
+        )
     penalties = media.get("penalties")
     if not isinstance(penalties, dict) or set(penalties) != _MEDIA_PENALTY_KEYS:
         raise CategoryEvaluationContractError(
@@ -180,6 +286,37 @@ def _validate_common_modifiers(block: Any) -> None:
         raise CategoryEvaluationContractError(
             "veto_inconsistent", "high_score_veto.cap_to 必须小于 threshold"
         )
+
+
+def validate_deduction_rules(rules: Any, *, dimension_key: str) -> None:
+    """Validate one dimension's optional rule list.
+
+    Missing ``deduction_rules`` is legal and selects the deprecated grade-point
+    fallback.  A present list must be non-empty, structurally valid and unique
+    by ``rule_id``.  This helper is shared by the config validator and bridge.
+    """
+    if rules is None:
+        return
+    if not isinstance(rules, list) or not rules:
+        raise CategoryEvaluationContractError(
+            "deduction_rules_empty",
+            f"维度 {dimension_key} 的 deduction_rules 必须是非空数组",
+        )
+    seen: set[str] = set()
+    for index, raw_rule in enumerate(rules):
+        try:
+            rule = DeductionRule.model_validate(raw_rule)
+        except ValueError as exc:
+            raise CategoryEvaluationContractError(
+                "deduction_rule_invalid",
+                f"维度 {dimension_key} 的第 {index + 1} 条扣分规则无效：{exc}",
+            ) from exc
+        if rule.rule_id in seen:
+            raise CategoryEvaluationContractError(
+                "deduction_rule_duplicate",
+                f"维度 {dimension_key} 的 rule_id 重复：{rule.rule_id}",
+            )
+        seen.add(rule.rule_id)
 
 
 def validate_category_evaluation_contract(contract: Any) -> None:

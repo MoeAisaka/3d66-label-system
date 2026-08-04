@@ -716,3 +716,19 @@ npm.cmd run build
 可以直接对新对话说：
 
 > 请进入 `D:\3d66-label-system`，完整阅读 `CODEX_HANDOFF.md`、`README.md` 和 `PRODUCT.md`，检查 Git 状态和当前服务。不要重建项目，也不要覆盖本地数据。先向我概括当前产品目标、已完成功能和最高优先级缺口，然后继续我接下来的开发要求。
+
+## 15. 2026-08-04 v3 规则扣分制交接
+
+- 决策文档：`docs/decisions/0034-v3-rule-deduction-and-node-corrections.md`。
+- 权威数据仍是 v3 config 内冻结的 `subcategory_dimensions_json`；
+  `dimension_deduction_rules_json` 是每次配置写入时同步生成的可检查镜像。
+- 完整路径：调用 A 事实预检 → `dimension_deduction_bridge` 动态中文规则 Prompt →
+  `compose_rule_deductions` → `category_evaluation_aggregator`。
+- 简易路径：`evaluation_v3_pipeline.recompute_qualified_v3`，只读冻结预检/规则命中，
+  不调用 A/B；节点纠偏 API 使用同一重放函数。
+- 调用 B 失败的特例策略是空命中+警告+人工复核；合同/规则损坏仍 fail-closed。
+- 老结果不重算；新结果保存合同 revision、冻结 v3 context、规则命中、证据、
+  聚合 steps 和原始调用 B 载荷。
+- 数据迁移命令：`python -X utf8 -m app.migrations.upgrade_v3_to_rule_deduction`，可重复执行。
+- 新增五个指定测试文件均已落地，迁移、provider 失败、幂等纠偏和旧 fallback
+  均有回归。

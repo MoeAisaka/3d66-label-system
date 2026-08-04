@@ -31,7 +31,7 @@ from .category_evaluation_contract import (
 from .redline_policy import evaluate_redlines
 
 
-AGGREGATOR_VERSION = "category-evaluation-aggregator-v1"
+AGGREGATOR_VERSION = "category-evaluation-aggregator-v2-rule-deduction"
 LEVEL_SEMANTICS_VERSION = "doc-l5-worst-v1"
 
 # doc-l5-worst-v1 default score→level table.  Ordered high→low; the first entry
@@ -231,6 +231,16 @@ def _apply_dimension_deductions(
     }
     if isinstance(dimension_result.get("evidence"), (list, dict)):
         evidence["dimension_evidence"] = dimension_result["evidence"]
+    if isinstance(dimension_result.get("dimension_deductions"), dict):
+        evidence["dimension_deductions"] = dimension_result["dimension_deductions"]
+    warning = dimension_result.get("warning")
+    if isinstance(warning, str) and warning:
+        evidence["warning"] = warning
+    evidence["mode"] = (
+        "rule_deduction"
+        if dimension_result.get("mode") == "rule_deduction"
+        else "grade_fallback"
+    )
     return score_after, evidence
 
 
@@ -318,23 +328,40 @@ def aggregate_category_evaluation(
     score_after_dimensions, dim_evidence = _apply_dimension_deductions(
         dimension_result, base_score, dimension_max
     )
+    rule_mode = dim_evidence["mode"] == "rule_deduction"
+    dimension_note = (
+        "维度扣分（规则命中）："
+        if rule_mode
+        else "维度扣分（@deprecated grade_points fallback）："
+    )
+    dimension_note += f"应用扣分 {dim_evidence['applied_deduction_total']}"
+    if dim_evidence["clamped_to_dimension_max"]:
+        dimension_note += "（已封顶到维度满分）"
+    if dim_evidence.get("warning"):
+        dimension_note += f"；{dim_evidence['warning']}"
     steps.append(_step(
-        "dimensions",
+        "dimension_rule_deduction" if rule_mode else "dimensions",
         score_after_dimensions,
-        "扣减维度扣分（累计封顶到维度满分）："
-        f"应用扣分 {dim_evidence['applied_deduction_total']}"
-        + ("（已封顶到维度满分）" if dim_evidence["clamped_to_dimension_max"] else ""),
+        dimension_note,
     ))
 
     # Step 5 — fixed media-type penalty (common modifier).
-    media_key, media_uncertain = _trait_to_media_key(precheck)
-    penalties = contract["common_modifiers"]["media_type_penalty"]["penalties"]
-    media_penalty = penalties[media_key]
-    score_after_media = score_after_dimensions + float(media_penalty)
-    media_note = f"媒介类型 {media_key}，固定扣分 {media_penalty}"
-    if media_uncertain:
-        media_note += "（trait 缺失/未知，安全落 other 并记不确定性）"
-    steps.append(_step("media", score_after_media, media_note))
+    media_config = contract["common_modifiers"]["media_type_penalty"]
+    media_enabled = media_config.get("enabled", True)
+    if media_enabled:
+        media_key, media_uncertain = _trait_to_media_key(precheck)
+        penalties = media_config["penalties"]
+        media_penalty = penalties[media_key]
+        score_after_media = score_after_dimensions + float(media_penalty)
+        media_note = f"媒介类型 {media_key}，固定扣分 {media_penalty}"
+        if media_uncertain:
+            media_note += "（trait 缺失/未知，安全落 other 并记不确定性）"
+        steps.append(_step("media", score_after_media, media_note))
+    else:
+        media_key = None
+        media_penalty = 0
+        score_after_media = score_after_dimensions
+        steps.append(_step("media_skipped", score_after_media, "媒介降权已关闭，节点 penalty=0"))
 
     # Step 6 — high-score veto (一票压分).
     veto = contract["common_modifiers"]["high_score_veto"]
@@ -394,6 +421,10 @@ def aggregate_category_evaluation(
         "level": level,
         "raw_level": raw_level,
         "hit_rules": list(redline["hit_rules"]),
+        "dimension_evidence": dim_evidence,
+        "media_penalty_enabled": bool(media_enabled),
+        "media_key": media_key,
+        "media_penalty": media_penalty,
         "caps": caps,
         "steps": steps,
     }

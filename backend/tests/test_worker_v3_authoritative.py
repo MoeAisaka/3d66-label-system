@@ -128,13 +128,35 @@ class _FakeClient:
         self.calls = 0
 
     async def chat_json(
-        self, _system_prompt: str, user_prompt: str, **_kwargs: Any
+        self, system_prompt: str, user_prompt: str, **_kwargs: Any
     ) -> _FakeResponse:
         self.calls += 1
         if self.raise_exc:
             raise RuntimeError("调用B network exploded")
         if self.bad_payload:
             return _FakeResponse({"unexpected": "shape"})
+        if "规则命中判断" in system_prompt:
+            configs = build_inspiration_subcategory_dimensions()
+            all_dimensions = []
+            seen: set[str] = set()
+            for config in configs.values():
+                for dimension in config["common_group"]["schema_definition"]["dimensions"]:
+                    if dimension["key"] in user_prompt and dimension["key"] not in seen:
+                        seen.add(dimension["key"])
+                        hits = []
+                        if self.specific_grade == 1:
+                            hits = [
+                                {
+                                    "rule_id": rule["rule_id"],
+                                    "confidence": "high",
+                                    "evidence": f"{dimension['label']}命中{rule['rule_id']}",
+                                }
+                                for rule in dimension["deduction_rules"]
+                            ]
+                        all_dimensions.append(
+                            {"dimension_key": dimension["key"], "hit_rules": hits}
+                        )
+            return _FakeResponse({"dimensions": all_dimensions, "overall_note": ""})
         # Grade every key the prompt mentions.  The prompt lists the specific
         # dimension keys verbatim, so scan the user prompt for known keys.  方案 A
         # 后 inspiration_image 的 specific_group 已置空，此路径只由注入了合成特有维度
@@ -287,6 +309,19 @@ def _bundle(db: Session) -> dict:
     return bundle
 
 
+def _legacy_bundle(db: Session) -> dict:
+    """Freeze a pre-migration grade_points-only contract for fallback tests."""
+    bundle = _bundle(db)
+    for config in bundle["subcategory_dimensions"].values():
+        for group_name in ("common_group", "specific_group"):
+            group = config.get(group_name)
+            if not isinstance(group, dict):
+                continue
+            for dimension in group["schema_definition"].get("dimensions", []):
+                dimension.pop("deduction_rules", None)
+    return bundle
+
+
 def _bundle_with_specific(db: Session) -> dict:
     """A bundle whose class_one track carries a synthetic non-empty specific group.
 
@@ -295,7 +330,7 @@ def _bundle_with_specific(db: Session) -> dict:
     的 group_weight 与 specific 平分，专门用来回归「特有 grade 拿不齐 → V3AuthoritativeError」
     的 fail-closed 分支——不改任何引擎核心，只在测试侧构造带特有组的 config。
     """
-    bundle = _bundle(db)
+    bundle = _legacy_bundle(db)
     class_one = bundle["subcategory_dimensions"]["class_one"]
     class_one["common_group"]["group_weight"] = 0.6
     class_one["specific_group"] = {
@@ -360,7 +395,7 @@ def test_normal_in_scope_produces_score(sessions: sessionmaker[Session]) -> None
 
 def test_common_grade_unavailable_raises(sessions: sessionmaker[Session]) -> None:
     with sessions() as db:
-        bundle = _bundle(db)
+        bundle = _legacy_bundle(db)
     with pytest.raises(V3AuthoritativeError) as excinfo:
         asyncio.run(
             evaluate_v3_authoritative(

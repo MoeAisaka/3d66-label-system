@@ -30,6 +30,7 @@ from .inspiration_category_seed import (
     TRACK_CLASS_TWO,
     build_inspiration_classification_map,
     build_inspiration_v3_contract,
+    placeholder_deduction_rules,
 )
 from .subcategory_resolver import validate_classification_map
 
@@ -67,6 +68,8 @@ def _placeholder_dimensions() -> list[dict[str, Any]]:
             "key": key,
             "label": label,
             "weight": weight,
+            "deduction_rules": placeholder_deduction_rules(label),
+            # @deprecated: retained as the explicit old-contract fallback.
             "grade_points": dict(_LINEAR_GRADE_POINTS),
         })
     drift = 1.0 - sum(dimension["weight"] for dimension in dimensions)
@@ -101,6 +104,7 @@ def build_placeholder_v3_contract(category_key: str) -> dict[str, Any]:
     """老类目占位合同：复用 inspiration 的红线/赛道/媒介结构，只换 category_key。"""
     contract = deepcopy(build_inspiration_v3_contract())
     contract["category_key"] = category_key
+    contract["common_modifiers"]["media_type_penalty"]["enabled"] = False
     validate_category_evaluation_contract(contract)
     return contract
 

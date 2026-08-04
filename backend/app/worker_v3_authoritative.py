@@ -101,6 +101,30 @@ def v3_authoritative_category(db: Session, category_key: Any) -> dict | None:
         return None
 
 
+def v3_uses_rule_deductions(v3_bundle: Any, precheck: Any) -> bool:
+    """Resolve whether this image's active track uses the new calling-B path."""
+    if not isinstance(v3_bundle, dict) or not isinstance(precheck, dict):
+        return False
+    try:
+        from .dimension_deduction_bridge import has_deduction_rules
+        from .redline_policy import evaluate_redlines
+        from .subcategory_resolver import resolve_subcategory
+
+        contract = v3_bundle["contract"]
+        if evaluate_redlines(precheck, policy=contract["redline_policy"]).get("hit"):
+            # Redlines terminate before B, but still need to bypass legacy B.
+            return True
+        resolved = resolve_subcategory(
+            precheck,
+            classification_map=v3_bundle["classification_map"],
+            track_classification=contract["track_classification"],
+        )
+        config = v3_bundle["subcategory_dimensions"].get(resolved["track_key"])
+        return has_deduction_rules(config)
+    except Exception:  # noqa: BLE001 - probe only; authoritative path will report
+        return False
+
+
 async def evaluate_v3_authoritative(
     client: Any,
     image_path: Any,
@@ -141,6 +165,8 @@ async def evaluate_v3_authoritative(
 
     common_grades_by_track: dict[str, dict[str, int]] = {}
     specific_grades_by_track: dict[str, dict[str, int]] = {}
+    rule_dimension_output: dict[str, Any] | None = None
+    resolved_track_key: str | None = None
 
     try:
         redline = evaluate_redlines(precheck_obj, policy=contract["redline_policy"])
@@ -163,6 +189,7 @@ async def evaluate_v3_authoritative(
             ) from exc
 
         track_key = resolved["track_key"]
+        resolved_track_key = track_key
         track_config = subcategory_dimensions.get(track_key)
         if not isinstance(track_config, dict):
             raise V3AuthoritativeError(
@@ -170,7 +197,44 @@ async def evaluate_v3_authoritative(
                 f"track {track_key} 缺少 subcategory_dimensions 配置，无法权威评分",
             )
 
-        # 共性 grade：从 v1 aesthetic 忠实映射（v3 共性组复用 v13 空间 schema key）。
+        from .dimension_deduction_bridge import (
+            call_multimodal_for_dimension_deductions,
+            compose_rule_deductions,
+            has_deduction_rules,
+        )
+
+        if has_deduction_rules(track_config):
+            # New rule-deduction path: calling B judges rule hits only.  Provider
+            # failure is converted by the bridge into empty hits + warning.
+            rule_dimension_output = await call_multimodal_for_dimension_deductions(
+                image_path,
+                track_config,
+                client=client,
+                mime_type=mime_type,
+                precheck=precheck_obj,
+            )
+            try:
+                composed = compose_rule_deductions(
+                    config=track_config,
+                    dimension_output=rule_dimension_output,
+                )
+                from .category_evaluation_aggregator import (
+                    aggregate_category_evaluation,
+                )
+
+                result = aggregate_category_evaluation(
+                    contract, precheck_obj, composed, track_key=track_key
+                )
+                result["dimension_deduction_output"] = rule_dimension_output
+                result["dimension_scoring_mode"] = "rule_deduction"
+                return result
+            except Exception as exc:  # noqa: BLE001 - deterministic contract fault
+                raise V3AuthoritativeError(
+                    "v3_rule_engine_failed", f"v3 规则扣分聚合失败：{exc}"
+                ) from exc
+
+        # @deprecated fallback: contracts without deduction_rules keep the
+        # historic 1-5 grade bridge byte-for-byte compatible.
         common_keys = _dimension_keys(track_config.get("common_group"))
         if common_keys:
             common_grades = _common_grades_from_aesthetic(aesthetic, common_keys)
@@ -182,7 +246,6 @@ async def evaluate_v3_authoritative(
                 )
             common_grades_by_track[track_key] = common_grades
 
-        # 特有 grade：走专用调用B（权威模式 enabled=True），拿不齐即 fail-closed。
         specific_dims = _dimension_defs(track_config.get("specific_group"))
         if specific_dims:
             shadow = await fetch_v3_specific_grades(
@@ -194,11 +257,7 @@ async def evaluate_v3_authoritative(
                 enabled=True,
             )
             if not (isinstance(shadow, dict) and shadow.get("status") == "ok"):
-                detail = (
-                    shadow.get("error")
-                    if isinstance(shadow, dict)
-                    else "调用B 未返回结果"
-                )
+                detail = shadow.get("error") if isinstance(shadow, dict) else "调用B 未返回结果"
                 raise V3AuthoritativeError(
                     "specific_grade_unavailable",
                     f"track {track_key} 的特有维度调用B 未产出完整 grade（{detail}），"
@@ -220,6 +279,8 @@ async def evaluate_v3_authoritative(
             "v3_engine_failed", f"v3 权威评分引擎失败：{exc}"
         ) from exc
 
+    outcome["result"]["dimension_scoring_mode"] = "grade_fallback"
+    outcome["result"]["resolved_track_key"] = resolved_track_key
     return outcome["result"]
 
 
@@ -264,6 +325,29 @@ def build_v3_authoritative_scoring(v3_result: dict, *, precheck: Any) -> dict:
     )
 
     caps = v3_result.get("caps") or []
+    dimension_output = v3_result.get("dimension_deduction_output")
+    raw_dimension_payload = (
+        dimension_output.get("raw_payload")
+        if isinstance(dimension_output, dict)
+        else None
+    )
+    public_dimension_output = (
+        {
+            key: value
+            for key, value in dimension_output.items()
+            if key != "raw_payload"
+        }
+        if isinstance(dimension_output, dict)
+        else None
+    )
+    bridge_warning = (
+        dimension_output.get("warning")
+        if isinstance(dimension_output, dict)
+        else None
+    )
+    if bridge_warning:
+        review_reasons.append(str(bridge_warning))
+        needs_review = True
     return {
         "engine_version": v3_result.get("aggregator_version"),
         "scoring_mode": "v3_authoritative",
@@ -280,6 +364,16 @@ def build_v3_authoritative_scoring(v3_result: dict, *, precheck: Any) -> dict:
         "hit_rules": list(hit_rules),
         "track_key": v3_result.get("track_key"),
         "steps": v3_result.get("steps") or [],
+        "dimension_scoring_mode": v3_result.get("dimension_scoring_mode"),
+        "dimension_deduction_output": public_dimension_output,
+        # Worker consumes then removes this transport-only field before
+        # persisting scoring_json.  The provider payload belongs exclusively in
+        # raw_response_b and must not be duplicated into the decision graph.
+        "_dimension_deduction_raw_payload": raw_dimension_payload,
+        "dimension_evidence": v3_result.get("dimension_evidence"),
+        "media_penalty_enabled": v3_result.get("media_penalty_enabled"),
+        "media_key": v3_result.get("media_key"),
+        "media_penalty": v3_result.get("media_penalty"),
         "level_semantics_version": v3_result.get("level_semantics_version"),
     }
 

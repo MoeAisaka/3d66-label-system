@@ -68,6 +68,7 @@ MIGRATION_NAMES = [
     "add_category_evaluation_v3_configs",
     "add_evaluation_result_v3_shadow",
     "add_evaluation_result_level_semantics",
+    "add_rule_deduction_and_node_corrections",
 ]
 
 
@@ -780,6 +781,32 @@ def test_repeated_migration_is_idempotent(tmp_path) -> None:
         assert [row[0] for row in versions] == list(
             range(1, len(MIGRATION_NAMES) + 1)
         )
+    finally:
+        engine.dispose()
+
+
+def test_rule_deduction_migration_adds_config_and_result_columns(tmp_path) -> None:
+    engine = _engine(tmp_path, "rule-deduction-columns.db")
+    _create_latest_and_run_migrations(engine)
+    try:
+        with engine.connect() as connection:
+            config_columns = {
+                row[1]
+                for row in connection.exec_driver_sql(
+                    "PRAGMA table_info(category_evaluation_v3_configs)"
+                )
+            }
+            result_columns = {
+                row[1]
+                for row in connection.exec_driver_sql(
+                    "PRAGMA table_info(evaluation_results)"
+                )
+            }
+        assert {
+            "dimension_deduction_rules_json",
+            "media_penalty_enabled",
+        } <= config_columns
+        assert "correction_history_json" in result_columns
     finally:
         engine.dispose()
 

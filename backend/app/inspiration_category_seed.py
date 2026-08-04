@@ -161,6 +161,7 @@ def _common_modifiers() -> dict[str, Any]:
     return {
         "format_version": COMMON_MODIFIERS_FORMAT_VERSION,
         "media_type_penalty": {
+            "enabled": True,
             "baseline": "real_photo",
             "penalties": {
                 "real_photo": 0,
@@ -287,6 +288,30 @@ _TRACK_DIMENSION_MAX = {
 }
 
 
+def placeholder_deduction_rules(label: str) -> list[dict[str, Any]]:
+    """Generic Chinese placeholder rules; operators replace them with specifics."""
+    return [
+        {
+            "rule_id": "r1",
+            "description": f"{label}存在明显硬伤，影响基础可用性",
+            "deduction": 35.0,
+            "tags": ["硬伤"],
+        },
+        {
+            "rule_id": "r2",
+            "description": f"{label}表现同质化或套路化，缺少辨识度",
+            "deduction": 20.0,
+            "tags": ["同质化"],
+        },
+        {
+            "rule_id": "r3",
+            "description": f"{label}完成度或视觉感染力不足",
+            "deduction": 15.0,
+            "tags": ["完成度"],
+        },
+    ]
+
+
 def _dimensions_from_specs(
     specs: list[tuple[str, str, int]], dimension_max: int
 ) -> list[dict[str, Any]]:
@@ -301,6 +326,9 @@ def _dimensions_from_specs(
             "key": key,
             "label": label,
             "weight": float(full_marks) / float(dimension_max),
+            "deduction_rules": placeholder_deduction_rules(label),
+            # @deprecated: retained only for configs created before the rule
+            # deduction migration and for explicit legacy fallback tests.
             "grade_points": dict(_LINEAR_GRADE_POINTS),
         })
     # 末位吸收浮点漂移，组内权重和严格 = 1。

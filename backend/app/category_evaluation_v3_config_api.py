@@ -43,6 +43,7 @@ from .category_evaluation_contract import (
 )
 from .database import get_db
 from .dimension_composition import validate_subcategory_dimensions
+from .dimension_deduction_bridge import extract_dimension_deduction_rules
 from .dimension_schema_registry import canonical_json
 from .models import CategoryEvaluationV3Config
 from .redline_policy import evaluate_redlines
@@ -96,6 +97,7 @@ class V3ConfigSummary(BaseModel):
     status: str
     revision: int
     contract_hash: str
+    media_penalty_enabled: bool
     updated_at: Any
 
 
@@ -111,6 +113,8 @@ class V3ConfigDetail(BaseModel):
     contract: dict[str, Any]
     classification_map: dict[str, Any]
     subcategory_dimensions: dict[str, Any]
+    dimension_deduction_rules: dict[str, Any]
+    media_penalty_enabled: bool
     created_by: str
     created_at: Any
     updated_at: Any
@@ -256,6 +260,7 @@ def _summary(row: CategoryEvaluationV3Config) -> V3ConfigSummary:
         status=row.status,
         revision=row.revision,
         contract_hash=row.contract_hash,
+        media_penalty_enabled=row.media_penalty_enabled,
         updated_at=row.updated_at,
     )
 
@@ -271,6 +276,10 @@ def _detail(row: CategoryEvaluationV3Config) -> V3ConfigDetail:
         contract=json.loads(row.contract_json),
         classification_map=json.loads(row.classification_map_json),
         subcategory_dimensions=json.loads(row.subcategory_dimensions_json),
+        dimension_deduction_rules=json.loads(
+            row.dimension_deduction_rules_json or "{}"
+        ),
+        media_penalty_enabled=row.media_penalty_enabled,
         created_by=row.created_by,
         created_at=row.created_at,
         updated_at=row.updated_at,
@@ -375,6 +384,12 @@ def build_category_evaluation_v3_config_router(
             subcategory_dimensions_json=canonical_json(
                 payload.subcategory_dimensions
             ),
+            dimension_deduction_rules_json=canonical_json(
+                extract_dimension_deduction_rules(payload.subcategory_dimensions)
+            ),
+            media_penalty_enabled=payload.contract["common_modifiers"][
+                "media_type_penalty"
+            ].get("enabled", True),
             revision=1,
             contract_hash=canonical_contract_hash(payload.contract),
             created_by=created_by,
@@ -414,6 +429,12 @@ def build_category_evaluation_v3_config_router(
         row.subcategory_dimensions_json = canonical_json(
             payload.subcategory_dimensions
         )
+        row.dimension_deduction_rules_json = canonical_json(
+            extract_dimension_deduction_rules(payload.subcategory_dimensions)
+        )
+        row.media_penalty_enabled = payload.contract["common_modifiers"][
+            "media_type_penalty"
+        ].get("enabled", True)
         row.revision = row.revision + 1
         row.contract_hash = canonical_contract_hash(payload.contract)
         db.commit()

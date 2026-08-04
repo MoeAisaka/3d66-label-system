@@ -6660,6 +6660,45 @@ def _migration_054_add_evaluation_result_level_semantics(connection: Connection)
         )
 
 
+def _migration_055_add_rule_deduction_and_node_corrections(
+    connection: Connection,
+) -> None:
+    """Add the v3 rule-deduction mirrors and append-only node history.
+
+    Additive and idempotent.  Existing config rows default to the legacy-safe
+    media behaviour (enabled); the data upgrade later derives the exact value
+    per category and fills the rule mirror.  Existing evaluation rows receive
+    an empty correction history and are never recalculated.
+    """
+    config_columns = {
+        row[1]
+        for row in connection.exec_driver_sql(
+            "PRAGMA table_info(category_evaluation_v3_configs)"
+        )
+    }
+    if config_columns:
+        if "dimension_deduction_rules_json" not in config_columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE category_evaluation_v3_configs "
+                "ADD COLUMN dimension_deduction_rules_json TEXT NOT NULL DEFAULT '{}'"
+            )
+        if "media_penalty_enabled" not in config_columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE category_evaluation_v3_configs "
+                "ADD COLUMN media_penalty_enabled BOOLEAN NOT NULL DEFAULT 1"
+            )
+
+    result_columns = {
+        row[1]
+        for row in connection.exec_driver_sql("PRAGMA table_info(evaluation_results)")
+    }
+    if result_columns and "correction_history_json" not in result_columns:
+        connection.exec_driver_sql(
+            "ALTER TABLE evaluation_results "
+            "ADD COLUMN correction_history_json TEXT NOT NULL DEFAULT '[]'"
+        )
+
+
 MIGRATIONS = [
     Migration(1, "add_sample_expected_level", _migration_001_add_sample_expected_level),
     Migration(2, "add_review_corrections", _migration_002_add_review_corrections),
@@ -6886,6 +6925,11 @@ MIGRATIONS = [
         54,
         "add_evaluation_result_level_semantics",
         _migration_054_add_evaluation_result_level_semantics,
+    ),
+    Migration(
+        55,
+        "add_rule_deduction_and_node_corrections",
+        _migration_055_add_rule_deduction_and_node_corrections,
     ),
 ]
 

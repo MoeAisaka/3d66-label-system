@@ -228,6 +228,12 @@ def seed_defaults(db: Session) -> None:
     _seed_inspiration_image_prompts(db, settings)
     _seed_inspiration_image_v3_config(db)
     _seed_legacy_placeholder_v3_configs(db)
+    # Existing grade-era rows are upgraded in place; fresh rows are already in
+    # rule form so this converges without an extra revision bump.
+    from .migrations.upgrade_v3_to_rule_deduction import (
+        upgrade_v3_to_rule_deduction,
+    )
+    upgrade_v3_to_rule_deduction(db)
     db.commit()
 
 
@@ -301,6 +307,7 @@ def _seed_inspiration_image_v3_config(db: Session) -> None:
     )
     from .dimension_composition import validate_subcategory_dimensions
     from .dimension_schema_registry import canonical_json
+    from .dimension_deduction_bridge import extract_dimension_deduction_rules
     from .inspiration_category_seed import (
         build_inspiration_classification_map,
         build_inspiration_subcategory_dimensions,
@@ -341,6 +348,10 @@ def _seed_inspiration_image_v3_config(db: Session) -> None:
             contract_json=canonical_json(contract),
             classification_map_json=canonical_json(classification_map),
             subcategory_dimensions_json=canonical_json(subcategory_dimensions),
+            dimension_deduction_rules_json=canonical_json(
+                extract_dimension_deduction_rules(subcategory_dimensions)
+            ),
+            media_penalty_enabled=True,
             revision=1,
             contract_hash=canonical_contract_hash(contract),
             created_by="system",
@@ -361,6 +372,7 @@ def _seed_legacy_placeholder_v3_configs(db: Session) -> None:
     """
     from .category_evaluation_contract import canonical_contract_hash
     from .dimension_schema_registry import canonical_json
+    from .dimension_deduction_bridge import extract_dimension_deduction_rules
     from .legacy_v3_placeholder import build_placeholder_v3_config
 
     legacy_categories = {
@@ -386,6 +398,12 @@ def _seed_legacy_placeholder_v3_configs(db: Session) -> None:
                 subcategory_dimensions_json=canonical_json(
                     built["subcategory_dimensions"]
                 ),
+                dimension_deduction_rules_json=canonical_json(
+                    extract_dimension_deduction_rules(
+                        built["subcategory_dimensions"]
+                    )
+                ),
+                media_penalty_enabled=False,
                 revision=1,
                 contract_hash=canonical_contract_hash(built["contract"]),
                 created_by="system",

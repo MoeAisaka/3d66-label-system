@@ -193,6 +193,7 @@ from .category_evaluation_preview_api import (
 from .category_evaluation_v3_config_api import (
     build_category_evaluation_v3_config_router,
 )
+from .node_correction_api import build_node_correction_router
 from .evaluation_packages import (
     build_evaluation_package_router,
     publish_evaluation_package,
@@ -1335,6 +1336,7 @@ def label_consumer_sender(
 app.include_router(build_canary_router(current_user))
 app.include_router(build_category_evaluation_preview_router(current_user))
 app.include_router(build_category_evaluation_v3_config_router(current_user))
+app.include_router(build_node_correction_router(_permission_user("reviews:write")))
 app.include_router(
     build_evaluation_package_router(
         require_permission("releases:read"),
@@ -1495,6 +1497,7 @@ def _result_payload(result: EvaluationResult | None) -> dict[str, Any] | None:
             "completed" if completed_review is not None else "provisional"
         ),
         "review_history": review_history,
+        "correction_history": json.loads(result.correction_history_json or "[]"),
         "review_panel": (
             {
                 "id": panel.id,

@@ -138,6 +138,7 @@ from .worker_v3_authoritative import (
     build_v3_authoritative_scoring,
     evaluate_v3_authoritative,
     v3_authoritative_category,
+    v3_uses_rule_deductions,
 )
 from .level_semantics import (
     LEVEL_SEMANTICS_V1_L5_BEST,
@@ -875,10 +876,12 @@ async def _evaluate_targeted_loop_job(
 
 async def evaluate_job(job_id: int) -> None:
     production_dimension_contract = None
+    v3_bundle_for_job: dict[str, object] | None = None
     with session_scope() as db:
         job = db.get(EvaluationJob, job_id)
         if not job:
             raise RuntimeError("任务不存在")
+        v3_bundle_for_job = v3_authoritative_category(db, job.category_key)
         asset = db.get(Asset, job.asset_id)
         if not asset:
             raise RuntimeError("图片不存在")
@@ -1375,6 +1378,9 @@ async def evaluate_job(job_id: int) -> None:
         if isinstance(classification, dict)
         else None
     )
+    v3_rule_deduction_active = v3_uses_rule_deductions(
+        v3_bundle_for_job, precheck
+    )
 
     response_b = None
     response_b_attempts: list[object] = []
@@ -1385,7 +1391,7 @@ async def evaluate_job(job_id: int) -> None:
             and not combined_response
             and scope_status == "in_scope"
         )
-    ):
+    ) and not v3_rule_deduction_active:
         if prompt_b is None:
             prompt_b = _prompt_for_job("B", prompt_b_id, job.category_key)
         _set_job(job_id, stage="aesthetic", progress=48)
@@ -1516,7 +1522,13 @@ async def evaluate_job(job_id: int) -> None:
         "interpretation_status": "manual_required",
     }
     try:
-        if freeform_unscored:
+        if v3_rule_deduction_active:
+            dimension_definition = project_dimension_definition(
+                source_dimension_definition,
+                dimension_selection,
+            )
+            preliminary_scoring = dict(manual_scoring)
+        elif freeform_unscored:
             aesthetic = None
             dimension_definition = project_dimension_definition(
                 source_dimension_definition,
@@ -1552,7 +1564,7 @@ async def evaluate_job(job_id: int) -> None:
             dimension_selection,
         )
         preliminary_scoring = dict(manual_scoring)
-    trigger_reasons = [] if freeform_unscored else risk_review_reasons(
+    trigger_reasons = [] if (freeform_unscored or v3_rule_deduction_active) else risk_review_reasons(
         precheck,
         aesthetic,
         preliminary_scoring,
@@ -1564,7 +1576,12 @@ async def evaluate_job(job_id: int) -> None:
             risk_review_enabled
             and frozen_bundle.risk_review_version == RISK_REVIEW_VERSION
         )
-    if risk_review_enabled and aesthetic and trigger_reasons:
+    if (
+        not v3_rule_deduction_active
+        and risk_review_enabled
+        and aesthetic
+        and trigger_reasons
+    ):
         _set_job(job_id, stage="risk_review", progress=76)
         try:
             risk_response = await client.chat_json(
@@ -1628,6 +1645,17 @@ async def evaluate_job(job_id: int) -> None:
         dimension_selection,
     )
     scoring = ({
+        "engine_version": None,
+        "scoring_mode": "v3_rule_deduction_pending",
+        "formal": False,
+        "experimental": False,
+        "score": None,
+        "level": None,
+        "confidence": None,
+        "needs_review": False,
+        "caps": [],
+        "review_reasons": [],
+    } if v3_rule_deduction_active else {
         "engine_version": ENGINE_VERSION,
         "scoring_mode": "freeform_manual",
         "formal": False,
@@ -1671,7 +1699,9 @@ async def evaluate_job(job_id: int) -> None:
         # 共性/特有 grade 拿不齐或引擎异常 → V3AuthoritativeError → score/level=None +
         # 人工复核，**绝不**降级成老引擎给出误导性分数。
         _v3_level_semantics = LEVEL_SEMANTICS_V1_L5_BEST
-        v3_bundle = v3_authoritative_category(db, current_job.category_key)
+        v3_bundle = v3_bundle_for_job or v3_authoritative_category(
+            db, current_job.category_key
+        )
         if v3_bundle is not None:
             try:
                 v3_result = await evaluate_v3_authoritative(
@@ -1683,6 +1713,21 @@ async def evaluate_job(job_id: int) -> None:
                     aesthetic=aesthetic,
                 )
                 scoring = build_v3_authoritative_scoring(v3_result, precheck=precheck)
+                dimension_output = scoring.get("dimension_deduction_output")
+                if isinstance(dimension_output, dict):
+                    raw_payload = scoring.pop(
+                        "_dimension_deduction_raw_payload", None
+                    )
+                    aesthetic = dimension_output
+                    # Even the approved fail-open fallback must leave a
+                    # complete 调用B audit record.  It has no provider payload,
+                    # so persist the normalized empty-hit result itself.
+                    response_b_attempts.append(
+                        raw_payload if raw_payload is not None else aesthetic
+                    )
+                    response_b = SimpleNamespace(
+                        raw_text=json.dumps(aesthetic, ensure_ascii=False)
+                    )
             except V3AuthoritativeError as exc:
                 logger.warning(
                     "ADR-0033 v3 authoritative scoring failed (fail-closed, no v1 "
@@ -1695,6 +1740,16 @@ async def evaluate_job(job_id: int) -> None:
             scoring["dimension_mode"] = dimension_mode
             scoring["dimension_selection"] = dimension_selection
             scoring["v3_config_revision"] = v3_bundle.get("config_revision")
+            # Frozen context enables deterministic node correction without
+            # consulting a potentially newer active config revision.
+            scoring["v3_context"] = {
+                "contract": v3_bundle.get("contract"),
+                "classification_map": v3_bundle.get("classification_map"),
+                "subcategory_dimensions": v3_bundle.get(
+                    "subcategory_dimensions"
+                ),
+                "config_revision": v3_bundle.get("config_revision"),
+            }
             _v3_level_semantics = (
                 scoring.get("level_semantics_version") or LEVEL_SEMANTICS_V3_L5_WORST
             )

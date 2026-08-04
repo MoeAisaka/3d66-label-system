@@ -393,6 +393,18 @@ class CategoryEvaluationV3Config(Base):
     subcategory_dimensions_json: Mapped[str] = mapped_column(
         Text, default="{}", server_default="{}"
     )
+    # v3 rule-deduction mirror.  The authoritative definitions remain nested in
+    # ``subcategory_dimensions_json``; this column is derived on every write so
+    # migrations and operators can inspect/back up the rule set without parsing
+    # the complete dimension contract.  ``dimension_grade_points_json`` is not
+    # removed from historical schema variants; grade_points inside the frozen
+    # JSON stay supported as the deprecated fallback path.
+    dimension_deduction_rules_json: Mapped[str] = mapped_column(
+        Text, default="{}", server_default="{}"
+    )
+    media_penalty_enabled: Mapped[bool] = mapped_column(
+        Boolean, default=True, server_default="1"
+    )
     revision: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
     contract_hash: Mapped[str] = mapped_column(String(64), default="")
     created_by: Mapped[str] = mapped_column(String(80), default="system")
@@ -1557,6 +1569,12 @@ class EvaluationResult(Base):
     # "v1-l5-best"）。Nullable, 只读标签，不改任何 level 值 / 算分 / 已发布数据。
     level_semantics_version: Mapped[str | None] = mapped_column(
         String(40), nullable=True
+    )
+    # Append-only node-level v3 corrections.  Existing HumanReview rows remain
+    # untouched; this history records corrections to the deterministic scoring
+    # graph itself (precheck/redline/track/dimension rule/final level).
+    correction_history_json: Mapped[str] = mapped_column(
+        Text, default="[]", server_default="[]"
     )
     raw_response_a: Mapped[str] = mapped_column(Text)
     raw_response_b: Mapped[str | None] = mapped_column(Text, nullable=True)

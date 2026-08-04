@@ -45,6 +45,7 @@ type ConfigSummary = {
   status: string
   revision: number
   contract_hash: string
+  media_penalty_enabled: boolean
   updated_at: string
 }
 
@@ -52,6 +53,7 @@ type ConfigDetail = ConfigSummary & {
   contract: Json
   classification_map: Json
   subcategory_dimensions: Record<string, Json>
+  dimension_deduction_rules: Record<string, Json>
   created_by: string
   created_at: string
 }
@@ -118,6 +120,7 @@ function blankEditable(): Editable {
       common_modifiers: {
         format_version: COMMON_MODIFIERS_FORMAT_VERSION,
         media_type_penalty: {
+          enabled: true,
           baseline: "real_photo",
           penalties: { real_photo: 0, render_3d: -5, ai_image: -15, other: 0 },
         },
@@ -299,7 +302,7 @@ export function CategoryEvaluationV3ConfigPage() {
       <PageHeader
         index="A.7"
         title="类目评测 v3 合同配置"
-        description="编辑并持久化「灵感图」等类目的 v3 评测合同：红线规则 / 子类目赛道 / 每子类目共性+特有维度组 / 分类映射。保存前先校验（复用后端确定性校验器），保存后写入独立 v3 配置表并算 contract_hash、递增 revision。此页只做 CRUD + 校验，不入队、不发布、不接线上算分。"
+        description="编辑并持久化类目评测 v3 合同：红线、赛道、维度扣分规则、媒介降权和分类映射。已启用配置会进入新评测流水线；保存前请先校验。"
         actions={
           <Button variant="secondary" onClick={() => listQuery.refetch()} disabled={busy}>
             <ArrowClockwise />刷新列表
@@ -312,9 +315,8 @@ export function CategoryEvaluationV3ConfigPage() {
         <div className="mb-4 flex items-start gap-3 border-y border-[var(--line)] bg-[#fff6e9] px-4 py-3 text-xs leading-6 text-[#7d4308]">
           <WarningCircle className="mt-0.5 shrink-0" size={16} weight="fill" />
           <p>
-            本页编辑的是 <b>v3 合同配置</b>，保存后需经金丝雀/回归验证方可用于线上
-            （当前 worker 尚未接入 v3）。保存仅落库到隔离的 v3 配置表，不改动 v1 流水线、
-            不入队、不发布。
+            本页编辑的是 <b>v3 规则扣分合同</b>。状态为「已启用」的新评测会按调用A事实预检
+            → 调用B逐条判定扣分规则 → 确定性聚合执行；草稿配置不会接管旧流水线。
           </p>
         </div>
 
@@ -497,7 +499,7 @@ function V3ConfigEditor({
       <FieldCard title="基本信息">
         <div className="grid gap-3 sm:grid-cols-2">
           <label className="grid gap-1 text-xs">
-            <span className="font-semibold">category_key</span>
+            <span className="font-semibold">类目标识</span>
             <input
               className={inputClass}
               value={draft.category_key}
@@ -508,7 +510,7 @@ function V3ConfigEditor({
             {!isNew && <span className="text-[0.68rem] text-[var(--muted)]">key 保存后不可改</span>}
           </label>
           <label className="grid gap-1 text-xs">
-            <span className="font-semibold">display_name</span>
+            <span className="font-semibold">中文名称</span>
             <input
               className={inputClass}
               value={draft.display_name}
@@ -520,6 +522,7 @@ function V3ConfigEditor({
 
       <RedlineEditor draft={draft} onPatch={onPatch} />
       <TrackEditor draft={draft} onPatch={onPatch} />
+      <MediaPenaltyEditor draft={draft} onPatch={onPatch} />
       <DimensionGroupsEditor draft={draft} trackKeys={trackKeys} onPatch={onPatch} />
       <ClassificationMapEditor draft={draft} trackKeys={trackKeys} onPatch={onPatch} />
     </div>
@@ -573,7 +576,7 @@ function RedlineEditor({
           <span className="font-semibold">启用红线阶段</span>
         </label>
         <label className="flex items-center gap-2">
-          <span className="font-semibold">hit_level</span>
+          <span className="font-semibold">命中等级</span>
           <select
             className="h-8 rounded-[4px] border border-[var(--line-strong)] px-2"
             value={policy.hit_level ?? "L5"}
@@ -583,7 +586,7 @@ function RedlineEditor({
           </select>
         </label>
         <label className="flex items-center gap-2">
-          <span className="font-semibold">hit_score_cap</span>
+          <span className="font-semibold">命中后分数上限</span>
           <input
             type="number"
             className={numberClass}
@@ -597,13 +600,13 @@ function RedlineEditor({
           <div key={idx} className="grid gap-2 border border-[var(--line)] px-3 py-2 sm:grid-cols-[110px_1fr_1fr_auto] sm:items-center">
             <input
               className={inputClass}
-              placeholder="key"
+              placeholder="规则标识"
               value={rule.key ?? ""}
               onChange={(e) => onPatch((n) => { n.contract.redline_policy.rules[idx].key = e.target.value })}
             />
             <input
               className={inputClass}
-              placeholder="label"
+              placeholder="规则中文名"
               value={rule.label ?? ""}
               onChange={(e) => onPatch((n) => { n.contract.redline_policy.rules[idx].label = e.target.value })}
             />
@@ -661,7 +664,7 @@ function TrackEditor({
   return (
     <FieldCard title="子类目赛道（分数基底 / 维度满分 / 赛道上限 / 默认兜底）">
       <div className="mb-3 flex items-center gap-2 text-xs">
-        <span className="font-semibold">default_track</span>
+        <span className="font-semibold">默认赛道</span>
         <select
           className="h-8 rounded-[4px] border border-[var(--line-strong)] px-2"
           value={tc.default_track ?? ""}
@@ -674,17 +677,17 @@ function TrackEditor({
         {tracks.map((track, idx) => (
           <div key={idx} className="grid gap-2 border border-[var(--line)] px-3 py-2 sm:grid-cols-[1fr_1fr_auto] sm:items-start">
             <div className="grid gap-2">
-              <input className={inputClass} placeholder="key" value={track.key ?? ""} onChange={(e) => onPatch((n) => { n.contract.track_classification.tracks[idx].key = e.target.value })} />
-              <input className={inputClass} placeholder="label" value={track.label ?? ""} onChange={(e) => onPatch((n) => { n.contract.track_classification.tracks[idx].label = e.target.value })} />
+              <input className={inputClass} placeholder="赛道标识" value={track.key ?? ""} onChange={(e) => onPatch((n) => { n.contract.track_classification.tracks[idx].key = e.target.value })} />
+              <input className={inputClass} placeholder="赛道中文名" value={track.label ?? ""} onChange={(e) => onPatch((n) => { n.contract.track_classification.tracks[idx].label = e.target.value })} />
             </div>
             <div className="flex flex-wrap gap-2">
-              <label className="grid gap-0.5 text-[0.68rem]"><span>base_score</span>
+              <label className="grid gap-0.5 text-[0.68rem]"><span>基础分</span>
                 <input type="number" className={numberClass} value={track.base_score ?? 0} onChange={(e) => onPatch((n) => { n.contract.track_classification.tracks[idx].base_score = Number(e.target.value) })} />
               </label>
-              <label className="grid gap-0.5 text-[0.68rem]"><span>dimension_max</span>
+              <label className="grid gap-0.5 text-[0.68rem]"><span>维度满分</span>
                 <input type="number" className={numberClass} value={track.dimension_max ?? 0} onChange={(e) => onPatch((n) => { n.contract.track_classification.tracks[idx].dimension_max = Number(e.target.value) })} />
               </label>
-              <label className="grid gap-0.5 text-[0.68rem]"><span>track_cap</span>
+              <label className="grid gap-0.5 text-[0.68rem]"><span>赛道分数上限</span>
                 <input type="number" className={numberClass} value={track.track_cap ?? 0} onChange={(e) => onPatch((n) => { n.contract.track_classification.tracks[idx].track_cap = Number(e.target.value) })} />
               </label>
             </div>
@@ -708,6 +711,56 @@ function TrackEditor({
       <p className="mt-2 text-[0.68rem] text-[var(--muted)]">
         约束：base_score + dimension_max ≤ track_cap ≤ 100；default_track 必须是已定义的 key。
       </p>
+    </FieldCard>
+  )
+}
+
+const MEDIA_LABELS: Record<string, string> = {
+  real_photo: "实拍照片",
+  render_3d: "3D 效果图",
+  ai_image: "AI 图片",
+  other: "其他媒介",
+}
+
+function MediaPenaltyEditor({
+  draft,
+  onPatch,
+}: {
+  draft: Editable
+  onPatch: (mutator: (next: Editable) => void) => void
+}) {
+  const config = draft.contract?.common_modifiers?.media_type_penalty ?? {}
+  const enabled = config.enabled !== false
+  const penalties = config.penalties ?? {}
+  return (
+    <FieldCard title="媒介降权（可独立关闭）">
+      <label className="mb-3 flex items-center gap-2 text-xs font-semibold">
+        <input
+          type="checkbox"
+          checked={enabled}
+          onChange={(event) => onPatch((next) => {
+            next.contract.common_modifiers.media_type_penalty.enabled = event.target.checked
+          })}
+        />
+        启用媒介降权
+      </label>
+      <div className={`grid gap-2 sm:grid-cols-2 lg:grid-cols-4 ${enabled ? "" : "opacity-45"}`}>
+        {Object.entries(MEDIA_LABELS).map(([key, label]) => (
+          <label key={key} className="grid gap-1 text-xs">
+            <span className="font-semibold">{label}扣分值</span>
+            <input
+              type="number"
+              className={numberClass}
+              disabled={!enabled}
+              value={penalties[key] ?? 0}
+              onChange={(event) => onPatch((next) => {
+                next.contract.common_modifiers.media_type_penalty.penalties[key] = Number(event.target.value)
+              })}
+            />
+          </label>
+        ))}
+      </div>
+      {!enabled && <p className="mt-2 text-[0.68rem] text-[var(--muted)]">关闭后聚合器跳过此节点，媒介扣分固定为 0。</p>}
     </FieldCard>
   )
 }
@@ -748,7 +801,7 @@ function DimensionGroupsEditor({
               <div className="mb-2 flex items-center justify-between">
                 <span className="font-data text-xs font-semibold">{trackKey}</span>
                 <label className="flex items-center gap-1 text-[0.68rem]">
-                  dimension_max
+                  维度满分
                   <input
                     type="number"
                     className={numberClass}
@@ -796,6 +849,14 @@ function DimensionGroupsEditor({
   )
 }
 
+function placeholderRules(label: string): Json[] {
+  return [
+    { rule_id: "minor_defect", description: `${label}存在局部轻微缺陷`, deduction: 10, tags: ["占位"] },
+    { rule_id: "obvious_defect", description: `${label}存在明显缺陷`, deduction: 25, tags: ["占位"] },
+    { rule_id: "severe_defect", description: `${label}存在严重缺陷`, deduction: 50, tags: ["占位"] },
+  ]
+}
+
 function GroupEditor({
   trackKey,
   groupKey,
@@ -825,7 +886,7 @@ function GroupEditor({
         </label>
         {enabled && (
           <label className="flex items-center gap-1 text-[0.68rem]">
-            group_weight
+            组权重
             <input
               type="number"
               step={0.05}
@@ -838,13 +899,43 @@ function GroupEditor({
       </div>
       {enabled && (
         <>
-          <div className="mt-2 space-y-1">
+          <div className="mt-2 space-y-2">
             {dimensions.map((dim, idx) => (
-              <div key={idx} className="grid gap-2 sm:grid-cols-[1fr_1fr_90px_auto] sm:items-center">
-                <input className={inputClass} placeholder="key" value={dim.key ?? ""} onChange={(e) => onPatch((n) => { n.subcategory_dimensions[trackKey][groupKey].schema_definition.dimensions[idx].key = e.target.value })} />
-                <input className={inputClass} placeholder="label" value={dim.label ?? ""} onChange={(e) => onPatch((n) => { n.subcategory_dimensions[trackKey][groupKey].schema_definition.dimensions[idx].label = e.target.value })} />
-                <input type="number" step={0.05} className="h-9 w-full rounded-[4px] border border-[var(--line-strong)] px-2 text-xs font-data" placeholder="weight" value={dim.weight ?? 0} onChange={(e) => onPatch((n) => { n.subcategory_dimensions[trackKey][groupKey].schema_definition.dimensions[idx].weight = Number(e.target.value) })} />
-                <IconButton danger title="删除维度" onClick={() => onPatch((n) => { n.subcategory_dimensions[trackKey][groupKey].schema_definition.dimensions.splice(idx, 1) })} />
+              <div key={idx} className="border border-[var(--line)] bg-white px-3 py-3">
+                <div className="grid gap-2 sm:grid-cols-[1fr_1fr_110px_auto] sm:items-end">
+                  <label className="grid gap-1 text-[0.68rem]"><span className="font-semibold">维度标识</span>
+                    <input className={inputClass} placeholder="如 color_aesthetics" value={dim.key ?? ""} onChange={(e) => onPatch((n) => { n.subcategory_dimensions[trackKey][groupKey].schema_definition.dimensions[idx].key = e.target.value })} />
+                  </label>
+                  <label className="grid gap-1 text-[0.68rem]"><span className="font-semibold">维度中文名</span>
+                    <input className={inputClass} placeholder="如 色彩美感" value={dim.label ?? ""} onChange={(e) => onPatch((n) => { n.subcategory_dimensions[trackKey][groupKey].schema_definition.dimensions[idx].label = e.target.value })} />
+                  </label>
+                  <label className="grid gap-1 text-[0.68rem]"><span className="font-semibold">维度权重</span>
+                    <input type="number" step={0.05} className="h-9 w-full rounded-[4px] border border-[var(--line-strong)] px-2 text-xs font-data" value={dim.weight ?? 0} onChange={(e) => onPatch((n) => { n.subcategory_dimensions[trackKey][groupKey].schema_definition.dimensions[idx].weight = Number(e.target.value) })} />
+                  </label>
+                  <IconButton danger title="删除维度" onClick={() => onPatch((n) => { n.subcategory_dimensions[trackKey][groupKey].schema_definition.dimensions.splice(idx, 1) })} />
+                </div>
+                <div className="mt-3 border-t border-dashed border-[var(--line)] pt-2">
+                  <div className="mb-2 flex items-center justify-between">
+                    <span className="text-[0.68rem] font-semibold">
+                      扣分规则（调用B逐条判定） · 总扣分上限 {Math.min(100, (dim.deduction_rules ?? []).reduce((sum: number, rule: Json) => sum + Number(rule.deduction || 0), 0))}
+                    </span>
+                    <Button variant="ghost" size="sm" onClick={() => onPatch((n) => {
+                      const rules = n.subcategory_dimensions[trackKey][groupKey].schema_definition.dimensions[idx].deduction_rules ??= []
+                      rules.push({ rule_id: "", description: "", deduction: 10, tags: [] })
+                    })}><Plus />新增规则</Button>
+                  </div>
+                  <div className="space-y-1">
+                    {(dim.deduction_rules ?? []).map((rule: Json, ruleIdx: number) => (
+                      <div key={ruleIdx} className="grid gap-2 sm:grid-cols-[160px_1fr_110px_1fr_auto] sm:items-end">
+                        <label className="grid gap-1 text-[0.68rem]"><span>规则标识</span><input className={inputClass} value={rule.rule_id ?? ""} onChange={(e) => onPatch((n) => { n.subcategory_dimensions[trackKey][groupKey].schema_definition.dimensions[idx].deduction_rules[ruleIdx].rule_id = e.target.value })} /></label>
+                        <label className="grid gap-1 text-[0.68rem]"><span>中文规则描述</span><input className={inputClass} value={rule.description ?? ""} onChange={(e) => onPatch((n) => { n.subcategory_dimensions[trackKey][groupKey].schema_definition.dimensions[idx].deduction_rules[ruleIdx].description = e.target.value })} /></label>
+                        <label className="grid gap-1 text-[0.68rem]"><span>扣分值</span><input type="number" min={0.1} max={100} className={numberClass} value={rule.deduction ?? 0} onChange={(e) => onPatch((n) => { n.subcategory_dimensions[trackKey][groupKey].schema_definition.dimensions[idx].deduction_rules[ruleIdx].deduction = Number(e.target.value) })} /></label>
+                        <label className="grid gap-1 text-[0.68rem]"><span>标签（逗号分隔）</span><input className={inputClass} value={(rule.tags ?? []).join(",")} onChange={(e) => onPatch((n) => { n.subcategory_dimensions[trackKey][groupKey].schema_definition.dimensions[idx].deduction_rules[ruleIdx].tags = e.target.value.split(",").map((s) => s.trim()).filter(Boolean) })} /></label>
+                        <IconButton danger title="删除扣分规则" onClick={() => onPatch((n) => { n.subcategory_dimensions[trackKey][groupKey].schema_definition.dimensions[idx].deduction_rules.splice(ruleIdx, 1) })} />
+                      </div>
+                    ))}
+                  </div>
+                </div>
               </div>
             ))}
           </div>
@@ -854,7 +945,8 @@ function GroupEditor({
             className="mt-2"
             onClick={() => onPatch((n) => {
               n.subcategory_dimensions[trackKey][groupKey].schema_definition.dimensions.push({
-                key: "", label: "", weight: 1,
+                key: "", label: "新维度", weight: 1,
+                deduction_rules: placeholderRules("新维度"),
                 grade_points: { "1": 20, "2": 45, "3": 65, "4": 82, "5": 95 },
               })
             })}
@@ -882,7 +974,7 @@ function ClassificationMapEditor({
     <FieldCard title="分类映射（一级类目 → 子类目赛道）">
       <div className="mb-3 flex flex-wrap items-center gap-3 text-xs">
         <label className="flex items-center gap-2">
-          <span className="font-semibold">min_confidence</span>
+          <span className="font-semibold">最低分类置信度</span>
           <input
             type="number"
             step={0.05}
@@ -894,7 +986,7 @@ function ClassificationMapEditor({
           />
         </label>
         <label className="flex items-center gap-2">
-          <span className="font-semibold">out_of_scope → </span>
+          <span className="font-semibold">范围外兜底赛道 → </span>
           <select
             className="h-8 rounded-[4px] border border-[var(--line-strong)] px-2"
             value={map.out_of_scope_subcategory ?? ""}
