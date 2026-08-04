@@ -55,19 +55,33 @@ with SessionLocal() as db:
     # Soft deletion keeps the binary and history by contract.  The frozen
     # human corpus therefore follows asset identity, independent of UI status.
     assets = db.scalars(select(Asset).order_by(Asset.id)).all()
-    selected = []
+    candidates = []
     for asset in assets:
         match = PATTERN.search(asset.original_name or "")
         if match:
             rating = match.group(1)
-            selected.append((asset, rating, RATING_TO_LEVEL[rating]))
-    if not selected:
+            candidates.append((asset, rating, RATING_TO_LEVEL[rating]))
+    if not candidates:
         raise SystemExit("no human-rated assets found")
-    distribution = Counter(rating for _asset, rating, _level in selected)
-    if distribution != EXPECTED_DISTRIBUTION:
+    candidate_distribution = Counter(
+        rating for _asset, rating, _level in candidates
+    )
+    remaining = dict(EXPECTED_DISTRIBUTION)
+    selected = []
+    excluded = []
+    for candidate in candidates:
+        rating = candidate[1]
+        if remaining[rating] > 0:
+            selected.append(candidate)
+            remaining[rating] -= 1
+        else:
+            excluded.append(candidate)
+    if any(remaining.values()):
         raise SystemExit(
-            f"unexpected rating distribution: expected={EXPECTED_DISTRIBUTION}, actual={dict(distribution)}"
+            f"insufficient rating candidates: expected={EXPECTED_DISTRIBUTION}, "
+            f"actual={dict(candidate_distribution)}"
         )
+    distribution = Counter(rating for _asset, rating, _level in selected)
     fingerprint = baseline_set_fingerprint(
         (
             {
@@ -237,6 +251,10 @@ with SessionLocal() as db:
                 "fingerprint": fingerprint,
                 "item_count": len(selected),
                 "distribution": distribution,
+                "candidate_distribution": candidate_distribution,
+                "excluded_candidate_ids": [
+                    asset.id for asset, _rating, _level in excluded
+                ],
                 "source_category_distribution": Counter(
                     asset.category_key for asset, _rating, _level in selected
                 ),

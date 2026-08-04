@@ -115,22 +115,38 @@ def ensure_inspiration_golden_set(
     # The human corpus is frozen by asset id and must not silently shrink when
     # an operator hides an already-rated row from the normal asset list.
     assets = db.scalars(select(Asset).order_by(Asset.id.asc())).all()
-    selected: list[tuple[Asset, str, str]] = []
-    distribution = {rating: 0 for rating in RATING_TO_LEVEL}
+    candidates: list[tuple[Asset, str, str]] = []
+    candidate_distribution = {rating: 0 for rating in RATING_TO_LEVEL}
     for asset in assets:
         rating = rating_from_original_name(asset.original_name)
         if rating is None:
             continue
         level = RATING_TO_LEVEL[rating]
-        selected.append((asset, rating, level))
-        distribution[rating] += 1
-    if not selected:
+        candidates.append((asset, rating, level))
+        candidate_distribution[rating] += 1
+    if not candidates:
         raise ValueError("未找到文件名含人工评级前缀的灵感图资产")
-    if expected_distribution is not None and distribution != dict(expected_distribution):
-        raise ValueError(
-            "人工评级集分布与冻结口径不一致："
-            f"expected={dict(expected_distribution)}, actual={distribution}"
-        )
+    excluded: list[tuple[Asset, str, str]] = []
+    if expected_distribution is None:
+        selected = candidates
+    else:
+        selected = []
+        remaining = dict(expected_distribution)
+        for candidate in candidates:
+            rating = candidate[1]
+            if remaining.get(rating, 0) > 0:
+                selected.append(candidate)
+                remaining[rating] -= 1
+            else:
+                excluded.append(candidate)
+        if any(remaining.values()):
+            raise ValueError(
+                "人工评级候选不足以满足冻结口径："
+                f"expected={dict(expected_distribution)}, actual={candidate_distribution}"
+            )
+    distribution = {rating: 0 for rating in RATING_TO_LEVEL}
+    for _asset, rating, _level in selected:
+        distribution[rating] += 1
 
     manifest = [
         {
@@ -162,6 +178,8 @@ def ensure_inspiration_golden_set(
             "item_count": len(selected),
             "distribution": distribution,
             "fingerprint": fingerprint,
+            "candidate_distribution": candidate_distribution,
+            "excluded_candidate_ids": [asset.id for asset, _rating, _level in excluded],
         }
 
     baseline_set = BaselineSet(
@@ -231,6 +249,8 @@ def ensure_inspiration_golden_set(
             "fingerprint": fingerprint,
             "truth_updated_by": truth_source,
             "asset_category_mutations": 0,
+            "candidate_distribution": candidate_distribution,
+            "excluded_candidate_ids": [asset.id for asset, _rating, _level in excluded],
         },
         event_key=f"inspiration-golden-set:{fingerprint}",
     )
@@ -242,6 +262,8 @@ def ensure_inspiration_golden_set(
         "item_count": len(selected),
         "distribution": distribution,
         "fingerprint": fingerprint,
+        "candidate_distribution": candidate_distribution,
+        "excluded_candidate_ids": [asset.id for asset, _rating, _level in excluded],
     }
 
 
