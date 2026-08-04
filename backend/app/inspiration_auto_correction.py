@@ -114,24 +114,15 @@ def ensure_inspiration_golden_set(
     assets = db.scalars(
         select(Asset).where(Asset.status != "deleted").order_by(Asset.id.asc())
     ).all()
-    selected_by_name: dict[str, tuple[Asset, str, str]] = {}
+    selected: list[tuple[Asset, str, str]] = []
     distribution = {rating: 0 for rating in RATING_TO_LEVEL}
     for asset in assets:
         rating = rating_from_original_name(asset.original_name)
         if rating is None:
             continue
         level = RATING_TO_LEVEL[rating]
-        canonical_name = asset.original_name.replace("\\", "/")
-        previous = selected_by_name.get(canonical_name)
-        if previous is not None:
-            if previous[1] != rating:
-                raise ValueError(
-                    f"相同 original_name 的人工评级冲突：asset #{previous[0].id} 与 #{asset.id}"
-                )
-            continue
-        selected_by_name[canonical_name] = (asset, rating, level)
+        selected.append((asset, rating, level))
         distribution[rating] += 1
-    selected = list(selected_by_name.values())
     if not selected:
         raise ValueError("未找到文件名含人工评级前缀的灵感图资产")
     if expected_distribution is not None and distribution != dict(expected_distribution):

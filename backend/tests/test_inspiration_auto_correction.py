@@ -78,7 +78,7 @@ def test_golden_set_references_cross_category_assets_without_mutation() -> None:
         )
         db.commit()
         expected_distribution = {
-            "好": 1,
+            "好": 2,
             "中等": 0,
             "中差": 0,
             "极差": 0,
@@ -88,8 +88,8 @@ def test_golden_set_references_cross_category_assets_without_mutation() -> None:
             db, expected_distribution=expected_distribution
         )
         assert golden.category_key == "inspiration_image"
-        assert report["item_count"] == 2
-        assert report["distribution"]["好"] == 1
+        assert report["item_count"] == 3
+        assert report["distribution"]["好"] == 2
         assert report["distribution"]["过滤"] == 1
         assert db.scalars(select(Asset).order_by(Asset.id)).all()[0].category_key == "space_image"
         snapshots = [
@@ -99,8 +99,10 @@ def test_golden_set_references_cross_category_assets_without_mutation() -> None:
         assert [item["truth_updated_by"] for item in snapshots] == [
             "灵感图人工评级集-20260724",
             "灵感图人工评级集-20260724",
+            "灵感图人工评级集-20260724",
         ]
         assert [item["asset_source_category_key"] for item in snapshots] == [
+            "space_image",
             "space_image",
             "space_image",
         ]
@@ -110,7 +112,7 @@ def test_golden_set_references_cross_category_assets_without_mutation() -> None:
         )
         assert same.id == golden.id
         assert replay["idempotent"] is True
-        assert len(db.scalars(select(BaselineSetItem)).all()) == 2
+        assert len(db.scalars(select(BaselineSetItem)).all()) == 3
     engine.dispose()
 
 
