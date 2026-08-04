@@ -4,12 +4,16 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
+from collections import Counter
 
 from sqlalchemy import func, select
 
 from app.database import SessionLocal
 from app.models import (
+    Asset,
     BaselineSet,
+    BaselineSetItem,
     CategoryEvaluationV3Config,
     EvaluationCategoryProfile,
     ModelConfig,
@@ -18,6 +22,13 @@ from app.models import (
 
 
 with SessionLocal() as db:
+    pattern = re.compile(r"(?:^|[/\\_])(好|中等|中差|极差|过滤)_")
+    all_assets = db.scalars(select(Asset).order_by(Asset.id)).all()
+    asset_ratings = [
+        match.group(1)
+        for asset in all_assets
+        if (match := pattern.search(asset.original_name or ""))
+    ]
     profile = db.scalar(
         select(EvaluationCategoryProfile).where(
             EvaluationCategoryProfile.category_key == "inspiration_image"
@@ -78,6 +89,9 @@ with SessionLocal() as db:
                         ModelConfig.active.is_(True)
                     )
                 ),
+                "asset_total": len(all_assets),
+                "asset_rating_match_count": len(asset_ratings),
+                "asset_rating_distribution": Counter(asset_ratings),
                 "v3_configs": [
                     {
                         "id": item.id,
@@ -92,7 +106,11 @@ with SessionLocal() as db:
                         "id": golden.id,
                         "category_key": golden.category_key,
                         "fingerprint": golden.fingerprint,
-                        "item_count": len(golden.items),
+                        "item_count": db.scalar(
+                            select(func.count(BaselineSetItem.id)).where(
+                                BaselineSetItem.baseline_set_id == golden.id
+                            )
+                        ),
                     }
                     if golden
                     else None
