@@ -2598,10 +2598,14 @@ def _category_profile(
             status="active",
             rubric_version="rubric-v2.1",
             dimension_schema_key=(
-                SPACE_SCHEMA_KEY if category_key == "space_image" else None
+                SPACE_SCHEMA_KEY
+                if category_key in {"space_image", "inspiration_image"}
+                else None
             ),
             dimension_schema_version=(
-                ACTIVE_V13_VERSION if category_key == "space_image" else None
+                ACTIVE_V13_VERSION
+                if category_key in {"space_image", "inspiration_image"}
+                else None
             ),
             created_by="compatibility-default",
         )

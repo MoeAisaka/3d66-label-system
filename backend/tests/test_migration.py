@@ -69,6 +69,7 @@ MIGRATION_NAMES = [
     "add_evaluation_result_v3_shadow",
     "add_evaluation_result_level_semantics",
     "add_rule_deduction_and_node_corrections",
+    "bind_inspiration_production_dimension",
 ]
 
 
@@ -807,6 +808,76 @@ def test_rule_deduction_migration_adds_config_and_result_columns(tmp_path) -> No
             "media_penalty_enabled",
         } <= config_columns
         assert "correction_history_json" in result_columns
+    finally:
+        engine.dispose()
+
+
+def test_v56_binds_only_missing_inspiration_production_dimension(tmp_path) -> None:
+    engine = _engine(tmp_path, "v56-inspiration-production-dimension.db")
+    _create_latest_and_run_migrations(engine)
+    try:
+        with Session(engine) as db:
+            db.add_all(
+                [
+                    models.EvaluationCategoryProfile(
+                        category_key="inspiration_image",
+                        display_name="灵感图",
+                        status="active",
+                        allowed_mime_types_json='["image/jpeg"]',
+                        preprocess_config_json="{}",
+                        pipeline_config_json="{}",
+                        rubric_version="inspiration-rubric-v1",
+                        created_by="test",
+                    ),
+                    models.EvaluationCategoryProfile(
+                        category_key="inspiration_custom",
+                        display_name="灵感图自定义",
+                        status="active",
+                        allowed_mime_types_json='["image/jpeg"]',
+                        preprocess_config_json="{}",
+                        pipeline_config_json="{}",
+                        rubric_version="inspiration-rubric-v1",
+                        dimension_schema_key="custom_schema",
+                        dimension_schema_version="9.9.9",
+                        created_by="test",
+                    ),
+                ]
+            )
+            db.commit()
+
+        with engine.begin() as connection:
+            connection.exec_driver_sql(
+                "DELETE FROM schema_migrations WHERE version=56"
+            )
+            run_migrations(connection)
+            rows = connection.exec_driver_sql(
+                "SELECT category_key, dimension_schema_key, "
+                "dimension_schema_version FROM evaluation_category_profiles "
+                "WHERE category_key LIKE 'inspiration_%' ORDER BY category_key"
+            ).fetchall()
+            assert rows == [
+                ("inspiration_custom", "custom_schema", "9.9.9"),
+                ("inspiration_image", "space_aesthetic", "1.3.0"),
+            ]
+            assert connection.exec_driver_sql(
+                "SELECT name FROM schema_migrations WHERE version=56"
+            ).scalar_one() == "bind_inspiration_production_dimension"
+
+            connection.exec_driver_sql(
+                "UPDATE evaluation_category_profiles "
+                "SET dimension_schema_key='operator_schema', "
+                "dimension_schema_version='2.4.0' "
+                "WHERE category_key='inspiration_image'"
+            )
+            connection.exec_driver_sql(
+                "DELETE FROM schema_migrations WHERE version=56"
+            )
+            run_migrations(connection)
+            assert connection.exec_driver_sql(
+                "SELECT dimension_schema_key, dimension_schema_version "
+                "FROM evaluation_category_profiles "
+                "WHERE category_key='inspiration_image'"
+            ).one() == ("operator_schema", "2.4.0")
     finally:
         engine.dispose()
 

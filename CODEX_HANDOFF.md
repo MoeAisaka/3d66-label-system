@@ -730,5 +730,7 @@ npm.cmd run build
 - 老结果不重算；新结果保存合同 revision、冻结 v3 context、规则命中、证据、
   聚合 steps 和原始调用 B 载荷。
 - 数据迁移命令：`python -X utf8 -m app.migrations.upgrade_v3_to_rule_deduction`，可重复执行。
+- 迁移 56 负责只补齐缺失的 `inspiration_image` 生产维度绑定；如果运营已设置
+  schema/version，则保持原值。
 - 新增五个指定测试文件均已落地，迁移、provider 失败、幂等纠偏和旧 fallback
   均有回归。

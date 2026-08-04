@@ -1487,9 +1487,11 @@ npm.cmd run build
 - 无 `deduction_rules` 的旧合同仍走 `grade_points` fallback；旧评测结果不回溯重算。
 - 媒介降权增加开关。灵感图默认开，space/material/pdf 占位 draft 默认关。
 - 新增幂等迁移 `upgrade_v3_to_rule_deduction.py`；四类目均生成中文占位规则镜像。
+- 数据库迁移 56 为历史 `inspiration_image` 生产类目补齐缺失的
+  `space_aesthetic@1.3.0` 维度绑定；已有显式绑定不覆盖。
 - 新增 `POST /api/evaluation-results/{id}/correct-node`，支持预检/红线/赛道/维度规则/
   最终等级节点纠偏，逐规则证据只追加保存，下游基于原结果冻结合同重算。
 - 配置页已提供中文扣分规则编辑器和媒介开关，不新增前端依赖。
-- 本机全量回归：`1000 passed, 1 skipped`（已排除用户的 Synology 冲突副本）；
+- 本机全量回归：`1001 passed, 1 skipped`（已排除用户的 Synology 冲突副本）；
   前端 build、compileall、diff check 通过。三平台/共享测试环境结果见本次验收报告。
 - 架构决策见 ADR-0034。

@@ -6699,6 +6699,39 @@ def _migration_055_add_rule_deduction_and_node_corrections(
         )
 
 
+def _migration_056_bind_inspiration_production_dimension(
+    connection: Connection,
+) -> None:
+    """Unblock the full inspiration v3 pipeline at the enqueue boundary.
+
+    The v3 contract references the immutable ``space_aesthetic@1.3.0`` schema,
+    while installations created before rule deductions left the corresponding
+    production category profile unbound.  ``_enqueue_jobs`` correctly rejects
+    such an incomplete frozen profile before calling any model.  Bind only the
+    missing inspiration profile; explicit operator choices remain untouched.
+    """
+    profile_columns = {
+        row[1]
+        for row in connection.exec_driver_sql(
+            "PRAGMA table_info(evaluation_category_profiles)"
+        )
+    }
+    if not {
+        "category_key",
+        "dimension_schema_key",
+        "dimension_schema_version",
+    }.issubset(profile_columns):
+        return
+    connection.exec_driver_sql(
+        "UPDATE evaluation_category_profiles "
+        "SET dimension_schema_key='space_aesthetic', "
+        "dimension_schema_version='1.3.0', updated_at=CURRENT_TIMESTAMP "
+        "WHERE category_key='inspiration_image' "
+        "AND dimension_schema_key IS NULL "
+        "AND dimension_schema_version IS NULL"
+    )
+
+
 MIGRATIONS = [
     Migration(1, "add_sample_expected_level", _migration_001_add_sample_expected_level),
     Migration(2, "add_review_corrections", _migration_002_add_review_corrections),
@@ -6930,6 +6963,11 @@ MIGRATIONS = [
         55,
         "add_rule_deduction_and_node_corrections",
         _migration_055_add_rule_deduction_and_node_corrections,
+    ),
+    Migration(
+        56,
+        "bind_inspiration_production_dimension",
+        _migration_056_bind_inspiration_production_dimension,
     ),
 ]
 
