@@ -227,6 +227,7 @@ def seed_defaults(db: Session) -> None:
         )
     _seed_inspiration_image_prompts(db, settings)
     _seed_inspiration_image_v3_config(db)
+    _seed_legacy_placeholder_v3_configs(db)
     db.commit()
 
 
@@ -345,3 +346,48 @@ def _seed_inspiration_image_v3_config(db: Session) -> None:
             created_by="system",
         )
     )
+
+
+def _seed_legacy_placeholder_v3_configs(db: Session) -> None:
+    """Seed **draft** 8-dim placeholder v3 configs for legacy categories.
+
+    产品决策（2026-08-04）：老类目（space_image / material_image / pdf_text）转 v3
+    时不预定义维度，先落一份 8 维占位 config、``status=draft``，上线后由实验台使用者
+    在前端自由增删维度/红线/赛道，补齐后自行激活。
+
+    幂等：已存在（任意 status）则跳过，绝不覆盖使用者编辑。**draft 状态下 worker 的 v3
+    权威闸门返回 None**，老类目继续走未改动的 v1 引擎——建占位=零生产风险，激活是
+    使用者的显式操作。三件套经与 CRUD API 相同的确定性校验器校验。
+    """
+    from .category_evaluation_contract import canonical_contract_hash
+    from .dimension_schema_registry import canonical_json
+    from .legacy_v3_placeholder import build_placeholder_v3_config
+
+    legacy_categories = {
+        "space_image": "空间图片",
+        "material_image": "材质图",
+        "pdf_text": "PDF 方案文本",
+    }
+    for category_key, display_name in legacy_categories.items():
+        if db.scalar(
+            select(CategoryEvaluationV3Config).where(
+                CategoryEvaluationV3Config.category_key == category_key
+            )
+        ) is not None:
+            continue
+        built = build_placeholder_v3_config(category_key)
+        db.add(
+            CategoryEvaluationV3Config(
+                category_key=category_key,
+                display_name=display_name,
+                status="draft",
+                contract_json=canonical_json(built["contract"]),
+                classification_map_json=canonical_json(built["classification_map"]),
+                subcategory_dimensions_json=canonical_json(
+                    built["subcategory_dimensions"]
+                ),
+                revision=1,
+                contract_hash=canonical_contract_hash(built["contract"]),
+                created_by="system",
+            )
+        )
