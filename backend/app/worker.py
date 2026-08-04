@@ -132,7 +132,17 @@ from .worker_v3_shadow import (
     resolve_specific_shadow_targets,
     v3_shadow_enabled,
 )
-from .level_semantics import LEVEL_SEMANTICS_V1_L5_BEST
+from .worker_v3_authoritative import (
+    V3AuthoritativeError,
+    build_v3_authoritative_error_scoring,
+    build_v3_authoritative_scoring,
+    evaluate_v3_authoritative,
+    v3_authoritative_category,
+)
+from .level_semantics import (
+    LEVEL_SEMANTICS_V1_L5_BEST,
+    LEVEL_SEMANTICS_V3_L5_WORST,
+)
 
 
 settings = get_settings()
@@ -1651,6 +1661,44 @@ async def evaluate_job(job_id: int) -> None:
         if current_job is None or current_job.status != "processing":
             raise JobInterrupted("任务已暂停或取消，忽略本次模型返回")
 
+        # ADR-0033 Task 2b：v3 引擎权威化（仅对有 active v3 config 的新类目，如
+        # inspiration_image，且 v1 里根本不存在的类目生效）。这是**只读探针**，绝不
+        # raise：DB 里没有 active v3 config 时返回 None，老类目（space_image /
+        # material_image / pdf_text）走上面已算好的 `scoring`（1620 行）——逐字节不变。
+        #
+        # 命中 v3 权威类目时，用 v3 引擎产出的权威 score(0-100 越高越好) + level 覆盖
+        # `scoring`；level_semantics 打 v3 语义（doc-l5-worst-v1）。v3 评分 fail-closed：
+        # 共性/特有 grade 拿不齐或引擎异常 → V3AuthoritativeError → score/level=None +
+        # 人工复核，**绝不**降级成老引擎给出误导性分数。
+        _v3_level_semantics = LEVEL_SEMANTICS_V1_L5_BEST
+        v3_bundle = v3_authoritative_category(db, current_job.category_key)
+        if v3_bundle is not None:
+            try:
+                v3_result = await evaluate_v3_authoritative(
+                    client,
+                    model_image_path,
+                    model_mime_type,
+                    v3_bundle=v3_bundle,
+                    precheck=precheck,
+                    aesthetic=aesthetic,
+                )
+                scoring = build_v3_authoritative_scoring(v3_result, precheck=precheck)
+            except V3AuthoritativeError as exc:
+                logger.warning(
+                    "ADR-0033 v3 authoritative scoring failed (fail-closed, no v1 "
+                    "downgrade) for job %s category %s: %s",
+                    job_id,
+                    current_job.category_key,
+                    exc,
+                )
+                scoring = build_v3_authoritative_error_scoring(exc)
+            scoring["dimension_mode"] = dimension_mode
+            scoring["dimension_selection"] = dimension_selection
+            scoring["v3_config_revision"] = v3_bundle.get("config_revision")
+            _v3_level_semantics = (
+                scoring.get("level_semantics_version") or LEVEL_SEMANTICS_V3_L5_WORST
+            )
+
         rubric_version = (
             prompt_b.rubric_version if prompt_b else prompt_a.rubric_version
         )
@@ -1706,7 +1754,9 @@ async def evaluate_job(job_id: int) -> None:
         # can never raise (fetch_v3_specific_grades wraps everything), and touches
         # no authoritative kwarg — on failure/incompleteness compute_v3_shadow
         # simply records status="skipped".
-        _v3_shadow_on = v3_shadow_enabled()
+        # Task 2b：v3 权威类目下影子已无意义（权威路径已直接跑 v3），跳过影子以免重复
+        # 调用与浪费。老类目（v3_bundle is None）影子行为逐字节不变。
+        _v3_shadow_on = v3_shadow_enabled() and v3_bundle is None
         _v3_specific_grades: dict[str, dict[str, int]] = {}
         if _v3_shadow_on:
             _v3_target = resolve_specific_shadow_targets(
@@ -1801,9 +1851,10 @@ async def evaluate_job(job_id: int) -> None:
                 if v3_shadow_payload is not None
                 else None
             ),
-            # ADR-0033 Task 2 安全脚手架：如实标注当前权威分就是 v1 语义（L5=最高分）。
-            # 只是打标签，不改任何 level 值 / 算分。
-            level_semantics_version=LEVEL_SEMANTICS_V1_L5_BEST,
+            # ADR-0033 Task 2 安全脚手架 + Task 2b：老类目仍如实标 v1 语义（L5=最高分），
+            # v3 权威类目标 v3 语义（doc-l5-worst-v1，L5=最差）。只是打标签，不改任何
+            # 老类目 level 值 / 算分。
+            level_semantics_version=_v3_level_semantics,
         )
         is_baseline_regression = (
             current_job.baseline_regression_item_id is not None
