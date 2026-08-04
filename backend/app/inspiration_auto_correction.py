@@ -16,7 +16,7 @@ import re
 from dataclasses import asdict, dataclass
 from typing import Any, Iterable, Mapping
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
@@ -38,7 +38,7 @@ from .models import (
 from .node_correction_api import CorrectNodeRequest, apply_node_correction
 
 
-GOLDEN_SET_NAME = "灵感图人工评级黄金集-20260724"
+GOLDEN_SET_NAME = "灵感图人工评级黄金集-20260724-v2"
 TRUTH_SOURCE = "灵感图人工评级集-20260724"
 AUTO_CORRECTOR = "auto-corrector-v1"
 AUTO_CORRECTOR_POLICY = "level-confusion-calibration-v1"
@@ -48,6 +48,13 @@ RATING_TO_LEVEL = {
     "中差": "L3",
     "极差": "L4",
     "过滤": "L5",
+}
+EXPECTED_RATING_DISTRIBUTION = {
+    "好": 188,
+    "中等": 622,
+    "中差": 811,
+    "极差": 237,
+    "过滤": 427,
 }
 _RATING_PATTERN = re.compile(r"(?:^|[/\\_])(好|中等|中差|极差|过滤)_")
 
@@ -95,6 +102,7 @@ def ensure_inspiration_golden_set(
     name: str = GOLDEN_SET_NAME,
     truth_source: str = TRUTH_SOURCE,
     created_by: str = AUTO_CORRECTOR,
+    expected_distribution: Mapping[str, int] | None = EXPECTED_RATING_DISTRIBUTION,
 ) -> tuple[BaselineSet, dict[str, Any]]:
     """Create or validate the immutable inspiration golden baseline set.
 
@@ -106,17 +114,30 @@ def ensure_inspiration_golden_set(
     assets = db.scalars(
         select(Asset).where(Asset.status != "deleted").order_by(Asset.id.asc())
     ).all()
-    selected: list[tuple[Asset, str, str]] = []
+    selected_by_sha: dict[str, tuple[Asset, str, str]] = {}
     distribution = {rating: 0 for rating in RATING_TO_LEVEL}
     for asset in assets:
         rating = rating_from_original_name(asset.original_name)
         if rating is None:
             continue
         level = RATING_TO_LEVEL[rating]
-        selected.append((asset, rating, level))
+        previous = selected_by_sha.get(asset.sha256)
+        if previous is not None:
+            if previous[1] != rating:
+                raise ValueError(
+                    f"相同 sha256 的人工评级冲突：asset #{previous[0].id} 与 #{asset.id}"
+                )
+            continue
+        selected_by_sha[asset.sha256] = (asset, rating, level)
         distribution[rating] += 1
+    selected = list(selected_by_sha.values())
     if not selected:
         raise ValueError("未找到文件名含人工评级前缀的灵感图资产")
+    if expected_distribution is not None and distribution != dict(expected_distribution):
+        raise ValueError(
+            "人工评级集分布与冻结口径不一致："
+            f"expected={dict(expected_distribution)}, actual={distribution}"
+        )
 
     manifest = [
         {
@@ -135,7 +156,12 @@ def ensure_inspiration_golden_set(
             raise ValueError("同名黄金集的 category_key 不是 inspiration_image")
         if existing.fingerprint != fingerprint:
             raise ValueError("同名黄金集已存在，但人工真值指纹不一致；禁止原地改写")
-        if len(existing.items) != len(selected):
+        existing_count = db.scalar(
+            select(func.count(BaselineSetItem.id)).where(
+                BaselineSetItem.baseline_set_id == existing.id
+            )
+        )
+        if existing_count != len(selected):
             raise ValueError("同名黄金集条目数与当前人工真值不一致")
         return existing, {
             "created": False,
@@ -185,6 +211,18 @@ def ensure_inspiration_golden_set(
                 expected_level=level,
                 asset_snapshot_json=canonical_json(snapshot),
             )
+        )
+        if len(db.new) >= 500:
+            db.flush()
+    db.flush()
+    persisted_count = db.scalar(
+        select(func.count(BaselineSetItem.id)).where(
+            BaselineSetItem.baseline_set_id == baseline_set.id
+        )
+    )
+    if persisted_count != len(selected):
+        raise ValueError(
+            f"黄金集落库条目不完整：expected={len(selected)}, actual={persisted_count}"
         )
     append_audit_event(
         db,

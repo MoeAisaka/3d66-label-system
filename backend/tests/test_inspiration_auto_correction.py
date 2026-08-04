@@ -66,10 +66,27 @@ def test_golden_set_references_cross_category_assets_without_mutation() -> None:
                     sha256="c" * 64,
                     category_key="pdf_text",
                 ),
+                Asset(
+                    original_name="重复导入/好_1_copy.jpeg",
+                    stored_name="a-copy.jpeg",
+                    mime_type="image/jpeg",
+                    size_bytes=1,
+                    sha256="a" * 64,
+                    category_key="space_image",
+                ),
             ]
         )
         db.commit()
-        golden, report = ensure_inspiration_golden_set(db)
+        expected_distribution = {
+            "好": 1,
+            "中等": 0,
+            "中差": 0,
+            "极差": 0,
+            "过滤": 1,
+        }
+        golden, report = ensure_inspiration_golden_set(
+            db, expected_distribution=expected_distribution
+        )
         assert golden.category_key == "inspiration_image"
         assert report["item_count"] == 2
         assert report["distribution"]["好"] == 1
@@ -88,7 +105,9 @@ def test_golden_set_references_cross_category_assets_without_mutation() -> None:
             "space_image",
         ]
 
-        same, replay = ensure_inspiration_golden_set(db)
+        same, replay = ensure_inspiration_golden_set(
+            db, expected_distribution=expected_distribution
+        )
         assert same.id == golden.id
         assert replay["idempotent"] is True
         assert len(db.scalars(select(BaselineSetItem)).all()) == 2
