@@ -67,7 +67,7 @@ def test_golden_set_references_cross_category_assets_without_mutation() -> None:
                     category_key="pdf_text",
                 ),
                 Asset(
-                    original_name="重复导入/好_1_copy.jpeg",
+                    original_name=r"好图补充\好_1.jpeg",
                     stored_name="a-copy.jpeg",
                     mime_type="image/jpeg",
                     size_bytes=1,

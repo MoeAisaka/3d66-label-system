@@ -55,24 +55,25 @@ with SessionLocal() as db:
     assets = db.scalars(
         select(Asset).where(Asset.status != "deleted").order_by(Asset.id)
     ).all()
-    selected_by_sha = {}
+    selected_by_name = {}
     for asset in assets:
         match = PATTERN.search(asset.original_name or "")
         if match:
             rating = match.group(1)
-            previous = selected_by_sha.get(asset.sha256)
+            canonical_name = asset.original_name.replace("\\", "/")
+            previous = selected_by_name.get(canonical_name)
             if previous is not None:
                 if previous[1] != rating:
                     raise SystemExit(
-                        f"conflicting ratings for duplicate sha256: {previous[0].id}, {asset.id}"
+                        f"conflicting ratings for duplicate original_name: {previous[0].id}, {asset.id}"
                     )
                 continue
-            selected_by_sha[asset.sha256] = (
+            selected_by_name[canonical_name] = (
                 asset,
                 rating,
                 RATING_TO_LEVEL[rating],
             )
-    selected = list(selected_by_sha.values())
+    selected = list(selected_by_name.values())
     if not selected:
         raise SystemExit("no human-rated assets found")
     distribution = Counter(rating for _asset, rating, _level in selected)
