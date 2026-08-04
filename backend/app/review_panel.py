@@ -8,6 +8,7 @@ from typing import Any, Iterable
 from sqlalchemy import update
 from sqlalchemy.orm import Session
 
+from .dimension_deduction_bridge import dimension_result_map
 from .models import EvaluationResult, HumanReview, ReviewPanel
 from .schema_adapter import PRODUCTION_FIELD_KEYS
 
@@ -63,7 +64,7 @@ def _model_truth(evaluation: EvaluationResult) -> dict[str, Any]:
     aesthetic = json.loads(evaluation.aesthetic_json or "{}")
     dimensions = {
         key: value.get("grade")
-        for key, value in (aesthetic.get("dimensions") or {}).items()
+        for key, value in dimension_result_map(aesthetic.get("dimensions")).items()
         if isinstance(value, dict) and isinstance(value.get("grade"), int)
     }
     def nested(path: str) -> Any:

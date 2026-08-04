@@ -24,7 +24,7 @@ from .category_evaluation_contract import (
 from .dimension_composition import validate_subcategory_dimensions
 
 
-DEDUCTION_BRIDGE_VERSION = "dimension-deduction-bridge-v1"
+DEDUCTION_BRIDGE_VERSION = "dimension-deduction-bridge-v2"
 RULE_COMPOSITION_VERSION = "dimension-rule-composition-v1"
 FALLBACK_WARNING = "调用B失败，维度分按满分通过（安全兜底）"
 _WEIGHT_TOLERANCE = 1e-9
@@ -42,6 +42,24 @@ def _is_number(value: Any) -> bool:
         and isinstance(value, (int, float))
         and math.isfinite(float(value))
     )
+
+
+def dimension_result_map(value: Any) -> dict[str, dict[str, Any]]:
+    """Read current key-addressable output and the short-lived v1 array."""
+    if isinstance(value, dict):
+        return {
+            key: item
+            for key, item in value.items()
+            if isinstance(key, str) and isinstance(item, dict)
+        }
+    if not isinstance(value, list):
+        return {}
+    normalized: dict[str, dict[str, Any]] = {}
+    for item in value:
+        key = item.get("dimension_key") if isinstance(item, dict) else None
+        if isinstance(key, str) and key and key not in normalized:
+            normalized[key] = item
+    return normalized
 
 
 def dimension_definitions(config: Any) -> list[dict[str, Any]]:
@@ -74,10 +92,10 @@ def empty_deduction_output(
 ) -> dict[str, Any]:
     return {
         "bridge_version": DEDUCTION_BRIDGE_VERSION,
-        "dimensions": [
-            {"dimension_key": dimension["key"], "hit_rules": []}
+        "dimensions": {
+            dimension["key"]: {"hit_rules": []}
             for dimension in dimension_definitions(config)
-        ],
+        },
         "overall_note": "",
         "warning": warning,
         "raw_payload": None,
@@ -118,13 +136,26 @@ def normalize_dimension_deduction_output(
             "response_not_object", "调用B响应必须是 JSON 对象"
         )
     raw_dimensions = payload.get("dimensions")
-    if not isinstance(raw_dimensions, list):
+    if isinstance(raw_dimensions, dict):
+        raw_items = []
+        for dimension_key, value in raw_dimensions.items():
+            if not isinstance(value, dict):
+                raise DimensionDeductionBridgeError(
+                    "dimension_output_invalid",
+                    f"调用B维度 {dimension_key} 输出必须是对象",
+                )
+            raw_items.append({**value, "dimension_key": dimension_key})
+    elif isinstance(raw_dimensions, list):
+        # Compatibility with responses created by bridge-v1 before the public
+        # mapping shape was aligned with the contract.
+        raw_items = raw_dimensions
+    else:
         raise DimensionDeductionBridgeError(
-            "dimensions_not_array", "调用B响应 dimensions 必须是数组"
+            "dimensions_not_object", "调用B响应 dimensions 必须是维度 key 到命中结果的对象"
         )
 
     parsed: dict[str, DimensionDeductionOutput] = {}
-    for raw in raw_dimensions:
+    for raw in raw_items:
         try:
             item = DimensionDeductionOutput.model_validate(raw)
         except ValueError as exc:
@@ -165,7 +196,10 @@ def normalize_dimension_deduction_output(
         )
     return {
         "bridge_version": DEDUCTION_BRIDGE_VERSION,
-        "dimensions": [parsed[key].model_dump() for key in expected_keys],
+        "dimensions": {
+            key: {"hit_rules": parsed[key].model_dump()["hit_rules"]}
+            for key in expected_keys
+        },
         "overall_note": str(payload.get("overall_note") or "").strip(),
         "warning": None,
     }
@@ -192,9 +226,8 @@ def build_dimension_deduction_prompt(
             + "\n".join(rule_lines)
         )
     response_contract = {
-        "dimensions": [
-            {
-                "dimension_key": dimension["key"],
+        "dimensions": {
+            dimension["key"]: {
                 "hit_rules": [
                     {
                         "rule_id": "命中的规则ID",
@@ -204,7 +237,7 @@ def build_dimension_deduction_prompt(
                 ],
             }
             for dimension in dimensions
-        ],
+        },
         "overall_note": "整体说明",
     }
     user = (
@@ -267,8 +300,8 @@ def compose_rule_deductions(
     dimensions, rules_by_dimension = _configured_rules(config)
     normalized = normalize_dimension_deduction_output(dimension_output, config)
     hit_by_key = {
-        item["dimension_key"]: item["hit_rules"]
-        for item in normalized["dimensions"]
+        key: value["hit_rules"]
+        for key, value in normalized["dimensions"].items()
     }
 
     non_empty_groups: list[tuple[str, dict[str, Any]]] = []
@@ -323,10 +356,7 @@ def compose_rule_deductions(
         "mode": "rule_deduction",
         "sub_category_key": config["sub_category_key"],
         "dimension_max": dimension_max,
-        "dimension_deductions": {
-            item["dimension_key"]: {"hit_rules": item["hit_rules"]}
-            for item in normalized["dimensions"]
-        },
+        "dimension_deductions": dict(normalized["dimensions"]),
         "deductions": deductions,
         "evidence": evidence,
         "warning": dimension_output.get("warning"),

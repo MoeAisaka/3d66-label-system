@@ -5947,8 +5947,10 @@ def _requires_secondary_review(evaluation: EvaluationResult, decision: str) -> b
 
 
 def _model_dimension_scores(evaluation: EvaluationResult) -> dict[str, int]:
+    from .dimension_deduction_bridge import dimension_result_map
+
     aesthetic = json.loads(evaluation.aesthetic_json or "{}")
-    dimensions = aesthetic.get("dimensions") or {}
+    dimensions = dimension_result_map(aesthetic.get("dimensions"))
     return {
         str(key): int(value["grade"])
         for key, value in dimensions.items()

@@ -101,14 +101,18 @@ def _dimension_node(
         )
     dimension_key = parts[0]
     dimensions = output.get("dimensions")
-    target = next(
-        (
-            item
-            for item in dimensions or []
-            if isinstance(item, dict) and item.get("dimension_key") == dimension_key
-        ),
-        None,
-    )
+    if isinstance(dimensions, dict):
+        target = dimensions.get(dimension_key)
+    else:
+        # Results written by the first bridge-v1 deployment used an array.
+        target = next(
+            (
+                item
+                for item in dimensions or []
+                if isinstance(item, dict) and item.get("dimension_key") == dimension_key
+            ),
+            None,
+        )
     if target is None:
         raise _coded(400, "dimension_not_found", f"未找到维度 {dimension_key}")
     hits = target.setdefault("hit_rules", [])

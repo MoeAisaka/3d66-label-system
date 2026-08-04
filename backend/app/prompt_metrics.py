@@ -5,6 +5,7 @@ import hashlib
 import json
 from typing import Any
 
+from .dimension_deduction_bridge import dimension_result_map
 from .models import EvaluationResult, HumanReview, ReviewPanel
 
 
@@ -79,7 +80,7 @@ def calculate_prompt_metrics(
     dimension_corrected: dict[str, int] = {}
     for result, review in reviewed:
         aesthetic = json.loads(result.aesthetic_json or "{}")
-        dimension_keys = set((aesthetic.get("dimensions") or {}).keys())
+        dimension_keys = set(dimension_result_map(aesthetic.get("dimensions")))
         for key in dimension_keys:
             dimension_reviewed[key] = dimension_reviewed.get(key, 0) + 1
         for correction in json.loads(review.corrections_json or "[]"):

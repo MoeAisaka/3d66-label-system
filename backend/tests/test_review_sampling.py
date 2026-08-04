@@ -7,6 +7,7 @@ from app.dimension_schema_registry import (
     space_schema_definition_for_version,
 )
 from app.review_sampling import build_review_sampling
+from app.inspiration_category_seed import build_inspiration_subcategory_dimensions
 
 
 DIMENSION_KEYS = (
@@ -190,3 +191,33 @@ def test_sampling_fails_closed_for_tampered_dimension_snapshot() -> None:
     assert decision["tier"] == "required"
     assert decision["priority"] == 100
     assert "dimension_contract_invalid" in reason_codes(decision)
+
+
+def test_sampling_reads_rule_deductions_and_legacy_array_without_grade_logic() -> None:
+    configs = build_inspiration_subcategory_dimensions()
+    config = configs["class_three"]
+    keys = [
+        item["key"]
+        for item in config["common_group"]["schema_definition"]["dimensions"]
+    ]
+    scoring = {
+        "dimension_scoring_mode": "rule_deduction",
+        "track_key": "class_three",
+        "v3_context": {"subcategory_dimensions": configs},
+    }
+    # Compatibility proof for the short-lived bridge-v1 array persisted by an
+    # already completed result; current writes use a key-addressable mapping.
+    legacy_dimensions = [
+        {"dimension_key": key, "hit_rules": []}
+        for key in keys
+    ]
+    decision = build_review_sampling(
+        result_stub(
+            aesthetic_json=json.dumps({"dimensions": legacy_dimensions}),
+            scoring_json=json.dumps(scoring),
+        ),
+        combination_index=12,
+    )
+    assert "dimension_contract_invalid" not in reason_codes(decision)
+    assert "incomplete_dimensions" not in reason_codes(decision)
+    assert "grade_collapse" not in reason_codes(decision)

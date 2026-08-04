@@ -733,5 +733,7 @@ npm.cmd run build
 - 迁移 56 负责只补齐缺失的 `inspiration_image` 生产维度绑定；如果运营已设置
   schema/version，则保持原值。
 - 迁移 57 只替换 `inspiration_image` 的历史通用默认 rubric，人工自定义值保持不变。
+- bridge v2 的 `dimensions` 为维度 key 映射；读取层继续兼容 bridge v1 短期数组记录，
+  规则模式不再错误执行旧 grade 完整率或同分坍缩检查。
 - 新增五个指定测试文件均已落地，迁移、provider 失败、幂等纠偏和旧 fallback
   均有回归。

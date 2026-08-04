@@ -45,7 +45,8 @@ def test_bridge_normalizes_rule_hits_and_uses_chinese_prompt() -> None:
         )
     )
     assert output["warning"] is None
-    assert output["dimensions"][0]["hit_rules"][0]["evidence"] == "图中主体偏移"
+    first = next(iter(output["dimensions"].values()))
+    assert first["hit_rules"][0]["evidence"] == "图中主体偏移"
     assert "不打1-5分" in client.system
     assert "扣" in client.user
 
@@ -58,4 +59,4 @@ def test_bridge_provider_failure_returns_empty_hits_and_warning() -> None:
         )
     )
     assert output["warning"] == FALLBACK_WARNING
-    assert all(item["hit_rules"] == [] for item in output["dimensions"])
+    assert all(item["hit_rules"] == [] for item in output["dimensions"].values())

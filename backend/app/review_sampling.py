@@ -57,6 +57,52 @@ def _sample_hit(result: Any, sample_rate: int) -> bool:
     return bucket < sample_rate
 
 
+def _rule_dimensions(value: Any) -> dict[str, dict[str, Any]] | None:
+    """Normalize current mapping output and the short-lived bridge-v1 array."""
+    if isinstance(value, dict):
+        if all(
+            isinstance(key, str) and isinstance(item, dict)
+            for key, item in value.items()
+        ):
+            return value
+        return None
+    if not isinstance(value, list):
+        return None
+    normalized: dict[str, dict[str, Any]] = {}
+    for item in value:
+        if not isinstance(item, dict):
+            return None
+        key = item.get("dimension_key")
+        if not isinstance(key, str) or not key or key in normalized:
+            return None
+        normalized[key] = item
+    return normalized
+
+
+def _frozen_rule_dimension_keys(scoring: dict[str, Any]) -> tuple[str, ...]:
+    context = scoring.get("v3_context")
+    track_key = scoring.get("track_key")
+    if not isinstance(context, dict) or not isinstance(track_key, str):
+        return ()
+    all_configs = context.get("subcategory_dimensions")
+    config = all_configs.get(track_key) if isinstance(all_configs, dict) else None
+    if not isinstance(config, dict):
+        return ()
+    keys: list[str] = []
+    for group_name in ("common_group", "specific_group"):
+        group = config.get(group_name)
+        schema = group.get("schema_definition") if isinstance(group, dict) else None
+        definitions = schema.get("dimensions") if isinstance(schema, dict) else None
+        if not isinstance(definitions, list):
+            continue
+        for definition in definitions:
+            key = definition.get("key") if isinstance(definition, dict) else None
+            if not isinstance(key, str) or not key or key in keys:
+                return ()
+            keys.append(key)
+    return tuple(keys)
+
+
 def build_review_sampling(
     result: Any,
     *,
@@ -87,36 +133,57 @@ def build_review_sampling(
     classification = precheck.get("classification") or {}
     media = precheck.get("media_form") or {}
     quality = precheck.get("image_quality") or {}
-    dimensions = aesthetic.get("dimensions") or {}
-    try:
-        dimension_schema = dimension_schema_from_strategy_snapshot(
-            getattr(result, "strategy_snapshot_json", None),
-            aesthetic=aesthetic,
-        )
-        output_contract = dimension_schema.get("output_contract")
-        dimension_keys = (
-            output_contract.get("dimension_output_keys")
-            if isinstance(output_contract, dict)
-            else None
-        )
-        if (
-            not isinstance(dimension_keys, list)
-            or not dimension_keys
-            or len(dimension_keys) != len(set(dimension_keys))
-            or not all(
-                isinstance(key, str) and key for key in dimension_keys
-            )
+    scoring = _json_object(getattr(result, "scoring_json", None))
+    rule_mode = scoring.get("dimension_scoring_mode") == "rule_deduction"
+    if rule_mode:
+        dimensions = _rule_dimensions(aesthetic.get("dimensions"))
+        resolved_dimension_keys = _frozen_rule_dimension_keys(scoring)
+        if dimensions is None:
+            dimension_contract_error = "规则扣分维度输出结构无效"
+            dimensions = {}
+        elif not resolved_dimension_keys:
+            dimension_contract_error = "规则扣分结果缺少冻结 v3 维度合同"
+            resolved_dimension_keys = tuple(dimensions)
+        elif set(dimensions) != set(resolved_dimension_keys):
+            dimension_contract_error = "规则扣分维度与冻结 v3 合同不一致"
+        elif any(
+            not isinstance(dimensions[key].get("hit_rules"), list)
+            for key in resolved_dimension_keys
         ):
-            raise DimensionScoringContractError(
-                "DimensionSchema 输出维度合同不完整"
+            dimension_contract_error = "规则扣分维度缺少 hit_rules 数组"
+        else:
+            dimension_contract_error = None
+    else:
+        dimensions = aesthetic.get("dimensions") or {}
+        try:
+            dimension_schema = dimension_schema_from_strategy_snapshot(
+                getattr(result, "strategy_snapshot_json", None),
+                aesthetic=aesthetic,
             )
-        resolved_dimension_keys = tuple(dimension_keys)
-        dimension_contract_error = None
-    except (DimensionScoringContractError, ValueError) as exc:
-        resolved_dimension_keys = tuple(
-            key for key in dimensions if isinstance(key, str) and key
-        )
-        dimension_contract_error = str(exc)
+            output_contract = dimension_schema.get("output_contract")
+            dimension_keys = (
+                output_contract.get("dimension_output_keys")
+                if isinstance(output_contract, dict)
+                else None
+            )
+            if (
+                not isinstance(dimension_keys, list)
+                or not dimension_keys
+                or len(dimension_keys) != len(set(dimension_keys))
+                or not all(
+                    isinstance(key, str) and key for key in dimension_keys
+                )
+            ):
+                raise DimensionScoringContractError(
+                    "DimensionSchema 输出维度合同不完整"
+                )
+            resolved_dimension_keys = tuple(dimension_keys)
+            dimension_contract_error = None
+        except (DimensionScoringContractError, ValueError) as exc:
+            resolved_dimension_keys = tuple(
+                key for key in dimensions if isinstance(key, str) and key
+            )
+            dimension_contract_error = str(exc)
     scope_status = classification.get("scope_status")
     quality_severity = str(quality.get("quality_severity") or "uncertain")
 
@@ -188,37 +255,38 @@ def build_review_sampling(
     if combination_index is not None and combination_index <= cold_start_required_count:
         require("new_combination", f"模型与提示词组合的第{combination_index}条结果", 80)
 
-    grades = [
-        int((dimensions.get(key) or {}).get("grade") or 0)
-        for key in resolved_dimension_keys
-    ]
-    valid_grades = [grade for grade in grades if 1 <= grade <= 5]
-    dimension_count = len(resolved_dimension_keys)
-    dimension_count_label = (
-        "八个"
-        if dimension_count == len(DIMENSION_KEYS)
-        and resolved_dimension_keys == DIMENSION_KEYS
-        else f"{dimension_count}个"
-    )
-    if (
-        scope_status != "out_of_scope"
-        and len(valid_grades) < dimension_count
-    ):
-        require(
-            "incomplete_dimensions",
-            f"{dimension_count_label}美感维度结果不完整",
-            98,
+    if not rule_mode:
+        grades = [
+            int((dimensions.get(key) or {}).get("grade") or 0)
+            for key in resolved_dimension_keys
+        ]
+        valid_grades = [grade for grade in grades if 1 <= grade <= 5]
+        dimension_count = len(resolved_dimension_keys)
+        dimension_count_label = (
+            "八个"
+            if dimension_count == len(DIMENSION_KEYS)
+            and resolved_dimension_keys == DIMENSION_KEYS
+            else f"{dimension_count}个"
         )
-    elif (
-        dimension_count > 0
-        and len(valid_grades) == dimension_count
-        and len(set(valid_grades)) == 1
-    ):
-        require(
-            "grade_collapse",
-            f"{dimension_count_label}维度完全同分",
-            90,
-        )
+        if (
+            scope_status != "out_of_scope"
+            and len(valid_grades) < dimension_count
+        ):
+            require(
+                "incomplete_dimensions",
+                f"{dimension_count_label}美感维度结果不完整",
+                98,
+            )
+        elif (
+            dimension_count > 0
+            and len(valid_grades) == dimension_count
+            and len(set(valid_grades)) == 1
+        ):
+            require(
+                "grade_collapse",
+                f"{dimension_count_label}维度完全同分",
+                90,
+            )
 
     if scope_status == "boundary":
         sample("scope_boundary", "素材范围判定处于边界", 58)

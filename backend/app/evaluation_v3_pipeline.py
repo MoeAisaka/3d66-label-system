@@ -77,15 +77,20 @@ def recompute_qualified_v3(
 
     if has_deduction_rules(config):
         rule_output = dimension_output
-        expected_keys = {
-            item["dimension_key"]
-            for item in empty_deduction_output(config)["dimensions"]
-        }
-        actual_keys = {
-            item.get("dimension_key")
-            for item in (rule_output or {}).get("dimensions", [])
-            if isinstance(item, dict)
-        }
+        expected_keys = set(empty_deduction_output(config)["dimensions"])
+        raw_dimensions = (
+            rule_output.get("dimensions")
+            if isinstance(rule_output, dict)
+            else None
+        )
+        if isinstance(raw_dimensions, dict):
+            actual_keys = set(raw_dimensions)
+        else:
+            actual_keys = {
+                item.get("dimension_key")
+                for item in raw_dimensions or []
+                if isinstance(item, dict)
+            }
         # A corrected track can have another dimension set.  Starting that new
         # branch with empty hits is deterministic and does not invent evidence.
         if not isinstance(rule_output, dict) or actual_keys != expected_keys:

@@ -1494,6 +1494,6 @@ npm.cmd run build
 - 新增 `POST /api/evaluation-results/{id}/correct-node`，支持预检/红线/赛道/维度规则/
   最终等级节点纠偏，逐规则证据只追加保存，下游基于原结果冻结合同重算。
 - 配置页已提供中文扣分规则编辑器和媒介开关，不新增前端依赖。
-- 本机全量回归：`1002 passed, 1 skipped`（已排除用户的 Synology 冲突副本）；
+- 本机全量回归：`1003 passed, 1 skipped`（已排除用户的 Synology 冲突副本）；
   前端 build、compileall、diff check 通过。三平台/共享测试环境结果见本次验收报告。
 - 架构决策见 ADR-0034。

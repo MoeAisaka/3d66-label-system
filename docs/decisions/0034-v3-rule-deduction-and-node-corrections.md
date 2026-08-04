@@ -33,6 +33,10 @@ draft/媒介关。只更新四条 v3 配置，旧 `EvaluationResult` 不回溯�
 迁移 57 同理仅把历史通用默认 `rubric-v2.1` 替换为灵感图专属
 `inspiration-rubric-v1`；其它人工 rubric 不覆盖。
 
+真实金丝雀还验证了结果读取兼容性：bridge v2 将 `dimensions` 固定为
+`{dimension_key: {hit_rules: [...]}}`，结果列表按规则模式校验冻结 v3 维度，不再套用
+旧 grade 完整率/同分检查；已由 bridge v1 写入的短期数组结果仍可读取和节点纠偏。
+
 ## 界面
 
 配置页延续现有高密度白底运营工具风格，不增依赖。每个维度可编辑规则标识、
