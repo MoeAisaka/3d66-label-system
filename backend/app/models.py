@@ -1548,6 +1548,11 @@ class EvaluationResult(Base):
     # part of any authoritative decision — populated only when the shadow switch
     # is on; the v1 scoring above is unaffected.
     v3_shadow_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # ADR-0033 Task 2 安全脚手架：如实标注这条 level 属于哪套语义版本（v1 现状为
+    # "v1-l5-best"）。Nullable, 只读标签，不改任何 level 值 / 算分 / 已发布数据。
+    level_semantics_version: Mapped[str | None] = mapped_column(
+        String(40), nullable=True
+    )
     raw_response_a: Mapped[str] = mapped_column(Text)
     raw_response_b: Mapped[str | None] = mapped_column(Text, nullable=True)
     raw_response_risk_review: Mapped[str | None] = mapped_column(Text, nullable=True)

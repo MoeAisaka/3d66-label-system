@@ -6638,6 +6638,28 @@ def _migration_053_add_evaluation_result_v3_shadow(connection: Connection) -> No
         )
 
 
+def _migration_054_add_evaluation_result_level_semantics(connection: Connection) -> None:
+    """Add the nullable ADR-0033 Task 2 level-semantics-version tag column.
+
+    Additive and idempotent (mirrors migration 53's guard): only adds
+    ``evaluation_results.level_semantics_version`` when absent, and returns early
+    if the table does not exist yet (partial historical snapshots).  This is a
+    **read-only label** — existing rows keep NULL, no level value / score / scoring
+    is touched, and no CHECK constraint is added.
+    """
+    result_columns = {
+        row[1] for row in connection.exec_driver_sql("PRAGMA table_info(evaluation_results)")
+    }
+    if not result_columns:
+        # Table absent: nothing to alter. The base schema's create_all will define
+        # the column from the model on real installations.
+        return
+    if "level_semantics_version" not in result_columns:
+        connection.exec_driver_sql(
+            "ALTER TABLE evaluation_results ADD COLUMN level_semantics_version VARCHAR(40)"
+        )
+
+
 MIGRATIONS = [
     Migration(1, "add_sample_expected_level", _migration_001_add_sample_expected_level),
     Migration(2, "add_review_corrections", _migration_002_add_review_corrections),
@@ -6859,6 +6881,11 @@ MIGRATIONS = [
         53,
         "add_evaluation_result_v3_shadow",
         _migration_053_add_evaluation_result_v3_shadow,
+    ),
+    Migration(
+        54,
+        "add_evaluation_result_level_semantics",
+        _migration_054_add_evaluation_result_level_semantics,
     ),
 ]
 

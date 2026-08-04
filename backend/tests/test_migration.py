@@ -67,6 +67,7 @@ MIGRATION_NAMES = [
     "raise_default_max_concurrency",
     "add_category_evaluation_v3_configs",
     "add_evaluation_result_v3_shadow",
+    "add_evaluation_result_level_semantics",
 ]
 
 

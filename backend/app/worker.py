@@ -126,7 +126,13 @@ from .strategy_bundle import (
     resolve_frozen_dimension_entry,
 )
 from .baseline_regression import complete_baseline_item, fail_baseline_item
-from .worker_v3_shadow import compute_v3_shadow, v3_shadow_enabled
+from .worker_v3_shadow import (
+    compute_v3_shadow,
+    fetch_v3_specific_grades,
+    resolve_specific_shadow_targets,
+    v3_shadow_enabled,
+)
+from .level_semantics import LEVEL_SEMANTICS_V1_L5_BEST
 
 
 settings = get_settings()
@@ -1691,12 +1697,44 @@ async def evaluate_job(job_id: int) -> None:
         # compute_v3_shadow issues only read-only SELECTs and never raises; when
         # the switch is off it returns None and the shadow column stays NULL.
         # Nothing here reads or mutates the authoritative `scoring` above.
+        #
+        # Task 1b: v3's specific-track dimensions have no v1 调用B counterpart, so
+        # when a non-redline image resolves to a track carrying specific
+        # dimensions we issue ONE extra, switch-gated, best-effort shadow 调用B to
+        # grade *only* those dimensions, then feed them back into compute_v3_shadow.
+        # This extra model call fires strictly when v3_shadow_enabled() is True,
+        # can never raise (fetch_v3_specific_grades wraps everything), and touches
+        # no authoritative kwarg — on failure/incompleteness compute_v3_shadow
+        # simply records status="skipped".
+        _v3_shadow_on = v3_shadow_enabled()
+        _v3_specific_grades: dict[str, dict[str, int]] = {}
+        if _v3_shadow_on:
+            _v3_target = resolve_specific_shadow_targets(
+                db, current_job.category_key, precheck, enabled=_v3_shadow_on
+            )
+            if _v3_target is not None:
+                _v3_specific_shadow = await fetch_v3_specific_grades(
+                    client,
+                    model_image_path,
+                    model_mime_type,
+                    _v3_target["track_key"],
+                    _v3_target["specific_dims"],
+                    enabled=_v3_shadow_on,
+                )
+                if (
+                    isinstance(_v3_specific_shadow, dict)
+                    and _v3_specific_shadow.get("status") == "ok"
+                ):
+                    _v3_specific_grades[_v3_target["track_key"]] = _v3_specific_shadow[
+                        "grades"
+                    ]
         v3_shadow_payload = compute_v3_shadow(
             db,
             current_job.category_key,
             precheck,
             aesthetic,
-            enabled=v3_shadow_enabled(),
+            enabled=_v3_shadow_on,
+            specific_grades_by_track=_v3_specific_grades,
         )
 
         result = EvaluationResult(
@@ -1763,6 +1801,9 @@ async def evaluate_job(job_id: int) -> None:
                 if v3_shadow_payload is not None
                 else None
             ),
+            # ADR-0033 Task 2 安全脚手架：如实标注当前权威分就是 v1 语义（L5=最高分）。
+            # 只是打标签，不改任何 level 值 / 算分。
+            level_semantics_version=LEVEL_SEMANTICS_V1_L5_BEST,
         )
         is_baseline_regression = (
             current_job.baseline_regression_item_id is not None

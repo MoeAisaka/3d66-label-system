@@ -19,11 +19,28 @@ the heavy ``worker`` module, and so its failure surface is provably contained:
 Grade mapping honesty (see ADR33_TASK1_DONE.md): v3's *common* dimension group
 reuses the v13 space-schema keys, so common grades map faithfully from v1's
 ``aesthetic["dimensions"]``.  v3's *specific*-track dimensions have **no** v1
-counterpart, so when a resolved track carries a non-empty specific group we do
-**not** fabricate grades — we record ``status="skipped"``,
-``reason="grade_mapping_unavailable"`` and leave precise mapping as a TODO.  The
-redline branch needs no grades, so redline-hit images still get a full shadow
-result.
+counterpart.
+
+ADR-0033 Task 1b closes that gap with a **dedicated shadow 调用B**: rather than
+fabricate the specific-dimension grades, the worker issues a separate,
+best-effort, switch-gated model call (``fetch_v3_specific_grades``) that grades
+*only* those specific dimensions, and feeds the result back into
+``compute_v3_shadow`` via ``specific_grades_by_track``.  When that shadow call is
+absent / fails / returns an incomplete map, ``compute_v3_shadow`` records
+``status="skipped"``, ``reason="specific_grade_shadow_unavailable"`` (fail-closed:
+never guess).  The redline branch needs no grades, so redline-hit images still
+get a full shadow result.
+
+category_key alignment (TODO for OpenClaw): the worker feeds
+``current_job.category_key`` straight into ``compute_v3_shadow`` /
+``resolve_specific_shadow_targets``.  The active v3 config is keyed by
+``CategoryEvaluationV3Config.category_key`` (e.g. ``"inspiration_image"``).  If
+the job's ``category_key`` naming does not equal the v3 config key, the lookup
+falls through to ``no_active_v3_config`` and the shadow is simply skipped — this
+module deliberately does **not** guess a mapping.  Aligning the two (very likely
+via an explicit ``{job_category_key -> v3_config_key}`` alias table) is left for
+OpenClaw to confirm; add that table here and resolve through it once the mapping
+is settled.
 """
 
 from __future__ import annotations
@@ -106,6 +123,15 @@ def _common_grades_from_aesthetic(
 
 def _dimension_keys(group: Any) -> list[str]:
     """Best-effort extraction of a group's dimension keys (empty if malformed)."""
+    return [d["key"] for d in _dimension_defs(group)]
+
+
+def _dimension_defs(group: Any) -> list[dict[str, Any]]:
+    """Best-effort extraction of a group's ``{key, label}`` dimension defs.
+
+    Empty on any malformed shape.  ``label`` falls back to ``key`` when absent so
+    the shadow prompt always has something human-readable to describe.
+    """
     if not isinstance(group, dict):
         return []
     schema = group.get("schema_definition")
@@ -114,11 +140,179 @@ def _dimension_keys(group: Any) -> list[str]:
     dimensions = schema.get("dimensions")
     if not isinstance(dimensions, list):
         return []
-    return [
-        d["key"]
-        for d in dimensions
-        if isinstance(d, dict) and isinstance(d.get("key"), str) and d["key"]
-    ]
+    defs: list[dict[str, Any]] = []
+    for d in dimensions:
+        if not isinstance(d, dict):
+            continue
+        key = d.get("key")
+        if not isinstance(key, str) or not key:
+            continue
+        label = d.get("label")
+        defs.append({"key": key, "label": label if isinstance(label, str) and label else key})
+    return defs
+
+
+def _extract_specific_grades(
+    parsed: Any, expected_keys: list[str]
+) -> dict[str, int] | None:
+    """Parse a shadow 调用B ``parsed`` payload into ``{key: grade}`` (fail-closed).
+
+    Expects ``{"dimensions": {key: {"grade": 1..5, ...}}}`` (the shape
+    ``build_specific_dimension_shadow_prompt`` asks for).  Returns a complete map
+    covering **every** ``expected_keys`` entry with a valid 1-5 int grade, or
+    ``None`` when the payload is malformed / any expected key is missing or its
+    grade is absent / non-integer / out of range.  An incomplete map is treated
+    as "unavailable" rather than silently partial (fail-closed, mirrors
+    ``_common_grades_from_aesthetic``).
+    """
+    if not isinstance(parsed, dict):
+        return None
+    dimensions = parsed.get("dimensions")
+    if not isinstance(dimensions, dict):
+        return None
+    grades: dict[str, int] = {}
+    for key in expected_keys:
+        item = dimensions.get(key)
+        if not isinstance(item, dict):
+            return None
+        grade = item.get("grade")
+        if isinstance(grade, bool) or not isinstance(grade, int) or not 1 <= grade <= 5:
+            return None
+        grades[key] = grade
+    return grades
+
+
+def resolve_specific_shadow_targets(
+    db: Session, category_key: Any, precheck: Any, *, enabled: bool
+) -> dict[str, Any] | None:
+    """Read-only: decide whether/what a v3 specific-dimension 影子调用B should grade.
+
+    Runs the same pure redline/track resolution as ``compute_v3_shadow`` but stops
+    *before* any scoring, so the worker can learn — without a model call — the
+    resolved ``track_key`` and its specific-dimension defs.  The worker then only
+    issues the extra shadow 调用B when this returns a non-empty target.
+
+    Returns:
+    - ``None`` when the switch is off, there is no active/parseable config, the
+      precheck hits a redline, or the resolved track carries no specific
+      dimensions — in every one of those cases no shadow 调用B is needed (either
+      the shadow is skipped upstream, or the redline/common-only path already
+      produces a faithful result without specific grades).
+    - ``{"track_key": str, "specific_dims": [{"key","label"}, ...]}`` when the
+      resolved track has a non-empty specific group that a shadow 调用B should
+      grade.
+
+    NEVER raises: any failure degrades to ``None`` (the worker then skips the
+    extra call and ``compute_v3_shadow`` records the fail-closed skip).  Pure
+    read: only SELECTs, no writes, no model calls.
+    """
+    if not enabled:
+        return None
+    try:
+        if not isinstance(category_key, str) or not category_key:
+            return None
+        config = _load_active_v3_config(db, category_key)
+        if config is None:
+            return None
+
+        import json
+
+        contract = json.loads(config.contract_json or "{}")
+        classification_map = json.loads(config.classification_map_json or "{}")
+        subcategory_dimensions = json.loads(config.subcategory_dimensions_json or "{}")
+
+        from .redline_policy import evaluate_redlines
+        from .subcategory_resolver import resolve_subcategory
+
+        redline = evaluate_redlines(precheck, policy=contract["redline_policy"])
+        if redline.get("hit"):
+            return None
+
+        resolved = resolve_subcategory(
+            precheck,
+            classification_map=classification_map,
+            track_classification=contract["track_classification"],
+        )
+        track_key = resolved["track_key"]
+        track_config = subcategory_dimensions.get(track_key)
+        if not isinstance(track_config, dict):
+            return None
+        specific_dims = _dimension_defs(track_config.get("specific_group"))
+        if not specific_dims:
+            return None
+        return {"track_key": track_key, "specific_dims": specific_dims}
+    except Exception as exc:  # noqa: BLE001 — best-effort: never break the worker
+        logger.warning(
+            "ADR-0033 v3 specific-shadow target resolution failed (best-effort): %s",
+            exc,
+        )
+        return None
+
+
+async def fetch_v3_specific_grades(
+    client: Any,
+    image_path: Any,
+    mime_type: Any,
+    track_key: str,
+    specific_dims: list[dict[str, Any]],
+    *,
+    enabled: bool,
+) -> dict[str, Any] | None:
+    """Issue the extra v3 specific-dimension 影子调用B (best-effort, switch-gated).
+
+    This is the **only** place the shadow path performs an *additional* model
+    call, and it is fully contained:
+
+    - **默认关**：returns ``None`` immediately when ``enabled`` is False — no model
+      call is ever issued while the switch is off.
+    - **best-effort**：the whole ``client.chat_json`` + parse is wrapped in
+      ``try/except``; any exception (network, timeout, bad JSON, ...) is logged as
+      a warning and returned as ``{"status": "error", ...}`` — **never** re-raised,
+      so the authoritative evaluation is unaffected.
+
+    Returns:
+    - ``None`` when disabled, or when there are no specific dimensions to grade.
+    - ``{"status": "ok", "track_key", "grades": {key: 1..5}}`` when 调用B returns a
+      complete, valid grade map for every specific dimension.
+    - ``{"status": "error", ...}`` on any failure or incomplete/invalid map.
+    """
+    if not enabled:
+        return None
+    try:
+        expected_keys = [
+            d["key"]
+            for d in specific_dims
+            if isinstance(d, dict) and isinstance(d.get("key"), str) and d["key"]
+        ]
+        if not expected_keys:
+            return None
+
+        # Deferred import: keep the prompt builder lazy so an import failure
+        # degrades to a shadow "error", never a worker crash.
+        from .worker_v3_shadow_prompt import build_specific_dimension_shadow_prompt
+
+        system_prompt, user_prompt = build_specific_dimension_shadow_prompt(
+            track_key, specific_dims
+        )
+        response = await client.chat_json(
+            system_prompt,
+            user_prompt,
+            image_path=image_path,
+            mime_type=mime_type,
+        )
+        grades = _extract_specific_grades(getattr(response, "parsed", None), expected_keys)
+        if grades is None:
+            return {
+                "status": "error",
+                "error": "specific_grade_shadow_parse_incomplete",
+                "track_key": track_key,
+            }
+        return {"status": "ok", "track_key": track_key, "grades": grades}
+    except Exception as exc:  # noqa: BLE001 — best-effort: never break the worker
+        logger.warning(
+            "ADR-0033 v3 specific-dimension shadow 调用B failed (best-effort): %s", exc
+        )
+        return {"status": "error", "error": str(exc)[:500], "track_key": track_key}
 
 
 def compute_v3_shadow(
@@ -128,8 +322,16 @@ def compute_v3_shadow(
     aesthetic: Any,
     *,
     enabled: bool,
+    specific_grades_by_track: dict[str, dict[str, int]] | None = None,
 ) -> dict[str, Any] | None:
     """Compute the ADR-0033 v3 shadow payload for one image (best-effort, pure-read).
+
+    ``specific_grades_by_track`` (Task 1b) optionally supplies the per-track v3
+    *specific*-dimension grades produced by the dedicated shadow 调用B
+    (``fetch_v3_specific_grades``).  When a non-redline track carries specific
+    dimensions, those grades **must** be present and complete here; otherwise the
+    payload is ``status="skipped"``, ``reason="specific_grade_shadow_unavailable"``
+    (fail-closed: this function never fabricates specific grades).
 
     Returns:
     - ``None`` when the switch is off (the worker leaves the shadow column NULL —
@@ -177,7 +379,9 @@ def compute_v3_shadow(
 
         redline = evaluate_redlines(precheck, policy=contract["redline_policy"])
         common_grades_by_track: dict[str, dict[str, int]] = {}
-        specific_grades_by_track: dict[str, dict[str, int]] = {}
+        resolved_specific_grades: dict[str, dict[str, int]] = dict(
+            specific_grades_by_track or {}
+        )
 
         if not redline.get("hit"):
             resolved = resolve_subcategory(
@@ -195,16 +399,24 @@ def compute_v3_shadow(
                 }
             specific_keys = _dimension_keys(track_config.get("specific_group"))
             if specific_keys:
-                # v3 specific-track dimensions (spatial_originality, ...) are not
-                # produced by v1's 调用B; do not guess. Precise mapping is a TODO.
-                return {
-                    "status": "skipped",
-                    "reason": "grade_mapping_unavailable",
-                    "detail": (
-                        f"track {track_key} 含 v1 无对应的特有维度 "
-                        f"{sorted(specific_keys)}，未硬猜 grade，留待精确映射"
-                    ),
-                }
+                # Task 1b: v3 specific-track dimensions (spatial_originality, ...)
+                # have no v1 调用B counterpart, so they arrive via the dedicated
+                # shadow 调用B (``fetch_v3_specific_grades``) as
+                # ``specific_grades_by_track``.  Still fail-closed: if the shadow
+                # call is absent / incomplete for any specific key, skip rather
+                # than fabricate.
+                provided = resolved_specific_grades.get(track_key)
+                if not isinstance(provided, dict) or any(
+                    key not in provided for key in specific_keys
+                ):
+                    return {
+                        "status": "skipped",
+                        "reason": "specific_grade_shadow_unavailable",
+                        "detail": (
+                            f"track {track_key} 的特有维度 {sorted(specific_keys)} "
+                            f"影子调用B grade 缺失/不完整，未硬猜"
+                        ),
+                    }
             common_keys = _dimension_keys(track_config.get("common_group"))
             common_grades = _common_grades_from_aesthetic(aesthetic, common_keys)
             if common_keys and common_grades is None:
@@ -218,13 +430,15 @@ def compute_v3_shadow(
             if common_grades:
                 common_grades_by_track[track_key] = common_grades
 
+        specific_grades_arg = resolved_specific_grades
+
         result = evaluate_one(
             contract=contract,
             classification_map=classification_map,
             subcategory_dimensions=subcategory_dimensions,
             precheck=precheck if isinstance(precheck, dict) else {},
             common_grades_by_track=common_grades_by_track,
-            specific_grades_by_track=specific_grades_by_track,
+            specific_grades_by_track=specific_grades_arg,
         )
         return {
             "status": "ok",
