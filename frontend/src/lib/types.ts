@@ -1,3 +1,5 @@
+import type { NodeCorrectionHistoryItem } from "@/lib/node-correction"
+
 export type User = {
   id: number
   username: string
@@ -235,6 +237,7 @@ export type Evaluation = {
   review_truth_status: "provisional" | "completed"
   review_panel: ReviewPanelSummary | null
   review_history: HumanReview[]
+  correction_history?: NodeCorrectionHistoryItem[]
   human_review: HumanReview | null
   risk_review: {
     version: string

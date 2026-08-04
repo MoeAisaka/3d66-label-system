@@ -24,6 +24,7 @@ import {
   dimensionLabels as dimensionLabelsForSchema,
 } from "@/lib/dimension-schema"
 import type { EvaluationRecord, ReviewCorrection, ReviewStage, User } from "@/lib/types"
+import { NodeCorrectionEditor } from "@/pages/node-correction-editor"
 import { ReviewCorrectionForm } from "@/pages/review-correction-form"
 import {
   filterReviewAssets,
@@ -224,6 +225,7 @@ export function ReviewPage({ user }: { user: User }) {
           <Button asChild className="mt-6"><Link to="/assets">前往素材页<ArrowRight /></Link></Button>
         </div>
       ) : (
+        <>
         <div className="mx-auto grid max-w-[1820px] gap-0 bg-white xl:grid-cols-[minmax(0,1fr)_560px]">
           <section className="min-w-0 border-r border-[var(--line)]">
             <div className="flex min-h-14 flex-wrap items-center justify-between gap-2 border-b border-[var(--line)] px-4 py-2">
@@ -382,7 +384,7 @@ export function ReviewPage({ user }: { user: User }) {
                     <Button variant="secondary" onClick={() => review.mutate({ decision: "rejected", corrected_level: null, reviewNote: note.trim() })} disabled={review.isPending}>退回复核</Button>
                     <Button onClick={() => review.mutate({ decision: "approved", corrected_level: null, reviewNote: note.trim() })} disabled={review.isPending}><Check weight="bold" />确认结果</Button>
                   </div></div>}
-                  {ruleMode ? <div className="border-t border-[var(--line)] bg-[#fafbf8] px-5 py-4 text-xs leading-5 text-[var(--muted)]">规则节点纠偏已由后端接口支持；本批配置页与评测详情先提供逐规则证据只读展示，节点编辑界面按后续批次接入。</div> : <ReviewCorrectionForm key={`${evaluation.id}-${evaluation.review_revision}`} dimensions={dimensions} precheck={evaluation.precheck ?? {}} dimensionSchema={evaluation.dimension_schema} scoring={scoring ?? {}} pending={review.isPending} editable={evaluation.review_stage !== "completed"} onSubmit={({ note: correctionNote, corrections }) => {
+                  {ruleMode ? <div className="border-t border-[var(--line)] bg-[#fafbf8] px-5 py-4 text-xs leading-5 text-[var(--muted)]">逐规则证据保留在审核区；如需修改调用A、红线、赛道、规则命中或最终等级，请使用下方“节点纠偏工作台”。</div> : <ReviewCorrectionForm key={`${evaluation.id}-${evaluation.review_revision}`} dimensions={dimensions} precheck={evaluation.precheck ?? {}} dimensionSchema={evaluation.dimension_schema} scoring={scoring ?? {}} pending={review.isPending} editable={evaluation.review_stage !== "completed"} onSubmit={({ note: correctionNote, corrections }) => {
                     review.mutate({ decision: "corrected", corrected_level: null, reviewNote: correctionNote, corrections })
                   }} />}
                 </div>
@@ -390,6 +392,18 @@ export function ReviewPage({ user }: { user: User }) {
             )}
           </aside>
         </div>
+        {evaluation && ruleMode && <NodeCorrectionEditor
+          evaluation={evaluation}
+          corrector={user.display_name || user.username}
+          onCorrected={async () => {
+            await Promise.all([
+              queryClient.invalidateQueries({ queryKey: ["evaluation", currentId] }),
+              queryClient.invalidateQueries({ queryKey: ["evaluations"] }),
+              queryClient.invalidateQueries({ queryKey: ["dashboard"] }),
+            ])
+          }}
+        />}
+        </>
       )}
     </>
   )
