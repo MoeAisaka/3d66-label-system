@@ -18,6 +18,7 @@ PATTERN = re.compile(r"(?:^|[/\\_])(好|中等|中差|极差|过滤)_")
 with SessionLocal() as db:
     assets = db.scalars(select(Asset).order_by(Asset.id)).all()
     by_status: dict[str, Counter[str]] = defaultdict(Counter)
+    by_prefix: dict[str, Counter[str]] = defaultdict(Counter)
     matched = []
     for asset in assets:
         match = PATTERN.search(asset.original_name or "")
@@ -25,12 +26,17 @@ with SessionLocal() as db:
             continue
         rating = match.group(1)
         by_status[asset.status][rating] += 1
+        prefix = (asset.original_name or "").replace("\\", "/").split("/", 1)[0]
+        by_prefix[prefix][rating] += 1
         matched.append(asset)
     print(
         json.dumps(
             {
                 "by_status": {
                     status: dict(counter) for status, counter in sorted(by_status.items())
+                },
+                "by_prefix": {
+                    prefix: dict(counter) for prefix, counter in sorted(by_prefix.items())
                 },
                 "id_ranges": {
                     status: [
