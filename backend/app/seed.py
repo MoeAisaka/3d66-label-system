@@ -7,6 +7,7 @@ from .config import get_settings
 from .models import (
     AgentPlanVersion,
     AutomationPolicy,
+    CategoryEvaluationV3Config,
     EvaluationControl,
     ModelConfig,
     OptimizerConfig,
@@ -224,4 +225,70 @@ def seed_defaults(db: Session) -> None:
                 change_note=item["note"],
             )
         )
+    _seed_inspiration_image_v3_config(db)
     db.commit()
+
+
+def _seed_inspiration_image_v3_config(db: Session) -> None:
+    """Seed + activate the ADR-0033 v3 evaluation config for ``inspiration_image``.
+
+    Idempotent: only inserts when the row is absent, so re-running seed_defaults
+    (on every init) never duplicates or overwrites an operator-edited config.
+    The v3 authoritative worker branch only fires for categories that have an
+    ``active`` config here; this makes inspiration_image use v3 out of the box
+    while every legacy category (space_image / material_image / pdf_text) keeps
+    running the untouched v1 engine.  The three artifacts come from the frozen
+    seed builders and are validated by the same deterministic validators the
+    CRUD API uses before persisting.
+    """
+    from .category_evaluation_contract import (
+        canonical_contract_hash,
+        validate_category_evaluation_contract,
+    )
+    from .dimension_composition import validate_subcategory_dimensions
+    from .dimension_schema_registry import canonical_json
+    from .inspiration_category_seed import (
+        build_inspiration_classification_map,
+        build_inspiration_subcategory_dimensions,
+        build_inspiration_v3_contract,
+    )
+    from .subcategory_resolver import validate_classification_map
+
+    category_key = "inspiration_image"
+    if db.scalar(
+        select(CategoryEvaluationV3Config).where(
+            CategoryEvaluationV3Config.category_key == category_key
+        )
+    ) is not None:
+        return
+
+    contract = build_inspiration_v3_contract()
+    classification_map = build_inspiration_classification_map()
+    subcategory_dimensions = build_inspiration_subcategory_dimensions()
+
+    # Validate with the exact validators the CRUD API uses, so a seeded config
+    # can never be less strict than an operator-created one.
+    validate_category_evaluation_contract(contract)
+    validate_classification_map(
+        classification_map,
+        valid_track_keys={
+            track["key"]
+            for track in contract["track_classification"]["tracks"]
+        },
+    )
+    for config in subcategory_dimensions.values():
+        validate_subcategory_dimensions(config)
+
+    db.add(
+        CategoryEvaluationV3Config(
+            category_key=category_key,
+            display_name="灵感图",
+            status="active",
+            contract_json=canonical_json(contract),
+            classification_map_json=canonical_json(classification_map),
+            subcategory_dimensions_json=canonical_json(subcategory_dimensions),
+            revision=1,
+            contract_hash=canonical_contract_hash(contract),
+            created_by="system",
+        )
+    )

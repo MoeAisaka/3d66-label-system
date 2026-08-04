@@ -278,7 +278,7 @@ MAX_ARCHIVE_UNCOMPRESSED_BYTES = 30 * 1024 * 1024 * 1024
 MAX_ARCHIVE_COMPRESSION_RATIO = 200
 ALLOWED_MIME = {"image/jpeg", "image/png", "image/webp", "image/gif"}
 ALLOWED_IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
-CATEGORY_KEYS = ("space_image", "pdf_text", "material_image")
+CATEGORY_KEYS = ("space_image", "pdf_text", "material_image", "inspiration_image")
 ALLOWED_PDF_SUFFIXES = {".pdf"}
 
 

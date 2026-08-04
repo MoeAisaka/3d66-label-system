@@ -172,7 +172,7 @@ def test_category_contracts_keep_pdf_and_material_inputs_isolated(tmp_path: Path
         categories = client.get("/api/evaluation-categories")
         assert categories.status_code == 200
         assert {item["category_key"] for item in categories.json()["items"]} == {
-            "space_image", "pdf_text", "material_image"
+            "space_image", "pdf_text", "material_image", "inspiration_image"
         }
 
         pdf_profile = next(

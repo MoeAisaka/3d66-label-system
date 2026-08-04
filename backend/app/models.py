@@ -54,6 +54,11 @@ CATEGORY_PROFILE_DEFAULTS: dict[str, dict[str, str]] = {
         "allowed_mime_types_json": '["image/jpeg","image/png","image/webp","image/gif"]',
         "preprocess_config_json": '{"preprocess":"image","material_focus":true}',
     },
+    "inspiration_image": {
+        "display_name": "灵感图",
+        "allowed_mime_types_json": '["image/jpeg","image/png","image/webp","image/gif"]',
+        "preprocess_config_json": '{"preprocess":"image"}',
+    },
 }
 
 
