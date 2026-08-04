@@ -34,24 +34,39 @@ from app.inspiration_category_seed import (
 
 # --- shared grade fixtures (simulate 调用B): all-5 = full marks, zero deductions ---
 
-_COMMON_GRADE5 = {
-    "presentation_integrity": 5,
-    "visual_hierarchy": 5,
-    "inspiration_reference": 5,
-}
-_SPECIFIC_GRADE5 = {
-    TRACK_CLASS_ONE: {"spatial_originality": 5, "design_trendiness": 5},
-    TRACK_CLASS_TWO: {"product_form_language": 5, "artistic_expression": 5},
-    TRACK_CLASS_THREE: {"visual_impact": 5},
+# 方案 A 真实维度：一类/二类 6 维度、三类 5 维度，全部在 common_group，specific 置空。
+_CLASS_ONE_TWO_KEYS = (
+    "visual_structure",
+    "color_aesthetics",
+    "emotional_expression",
+    "design_aesthetics",
+    "originality",
+    "design_trendiness",
+)
+_CLASS_THREE_KEYS = (
+    "subject_focus",
+    "mood_atmosphere",
+    "composition_lighting",
+    "reference_value",
+    "visual_impact",
+)
+_COMMON_KEYS_BY_TRACK = {
+    TRACK_CLASS_ONE: _CLASS_ONE_TWO_KEYS,
+    TRACK_CLASS_TWO: _CLASS_ONE_TWO_KEYS,
+    TRACK_CLASS_THREE: _CLASS_THREE_KEYS,
 }
 
 
 def _common_grades_all5() -> dict:
-    return {track: dict(_COMMON_GRADE5) for track in _SPECIFIC_GRADE5}
+    return {
+        track: {key: 5 for key in keys}
+        for track, keys in _COMMON_KEYS_BY_TRACK.items()
+    }
 
 
 def _specific_grades_all5() -> dict:
-    return {track: dict(grades) for track, grades in _SPECIFIC_GRADE5.items()}
+    # specific_group 现为空组，不再需要特有 grade；保留空映射以对齐 evaluate_one 签名。
+    return {track: {} for track in _COMMON_KEYS_BY_TRACK}
 
 
 def _precheck(*, reason=None, trait="实景照片", category="建筑设计", confidence=0.95,
@@ -219,3 +234,70 @@ def test_evaluate_one_is_deterministic():
     first = _run(precheck)
     second = _run(precheck)
     assert first == second
+
+
+# --------------------------------------------------------------------------- #
+# 3. 方案 A 真实 6/5 维度：key/权重/结构断言 + hard_defects 一票压分。
+# --------------------------------------------------------------------------- #
+
+_WEIGHT_TOLERANCE = 1e-9
+
+
+def _common_dims(config: dict) -> list[dict]:
+    return config["common_group"]["schema_definition"]["dimensions"]
+
+
+def test_class_one_two_have_six_real_dimensions_weights_sum_to_one():
+    configs = build_inspiration_subcategory_dimensions()
+    for track_key in (TRACK_CLASS_ONE, TRACK_CLASS_TWO):
+        config = configs[track_key]
+        dims = _common_dims(config)
+        assert [d["key"] for d in dims] == list(_CLASS_ONE_TWO_KEYS)
+        assert config["dimension_max"] == 60
+        # 全部维度在 common_group，specific_group 为空。
+        assert config["common_group"]["group_weight"] == 1.0
+        assert _common_dims and not config["specific_group"]["schema_definition"]["dimensions"]
+        assert abs(sum(d["weight"] for d in dims) - 1.0) <= _WEIGHT_TOLERANCE
+        for d in dims:
+            assert d["grade_points"] == {"1": 0.0, "2": 25.0, "3": 50.0, "4": 75.0, "5": 100.0}
+
+
+def test_class_three_has_five_real_dimensions_weights_sum_to_one():
+    config = build_inspiration_subcategory_dimensions()[TRACK_CLASS_THREE]
+    dims = _common_dims(config)
+    assert [d["key"] for d in dims] == list(_CLASS_THREE_KEYS)
+    assert config["dimension_max"] == 30
+    assert config["common_group"]["group_weight"] == 1.0
+    assert not config["specific_group"]["schema_definition"]["dimensions"]
+    assert abs(sum(d["weight"] for d in dims) - 1.0) <= _WEIGHT_TOLERANCE
+    # 每维满分 6 / 30 = 0.2。
+    for d in dims:
+        assert abs(d["weight"] - 0.2) <= _WEIGHT_TOLERANCE
+
+
+def test_high_score_veto_class_one_hard_defects_caps_to_79():
+    # 一类全 grade5 real_photo 本应 100/L1；命中硬伤 → 达到 80 阈值被压至 79。
+    result = _run(
+        _precheck(
+            category="建筑设计",
+            trait="实景照片",
+            confidence=0.95,
+            hard_defects=["garish_color"],
+        )
+    )
+    agg = result["result"]
+    assert agg["track_key"] == TRACK_CLASS_ONE
+    assert agg["score"] == 79
+    # raw_level（未压分前）仍是 L1，压分后落 L2。
+    assert agg["raw_level"] == "L1"
+    assert agg["level"] == "L2"
+    veto_cap = next(c for c in agg["caps"] if c["cap"] == "high_score_veto")
+    assert "79" in veto_cap["reason"]
+    _assert_json_serializable(result)
+
+
+def test_high_score_veto_not_triggered_without_hard_defects():
+    # 无 hard_defects → 不压分，维持 100/L1（验证压分是条件性的）。
+    result = _run(_precheck(category="建筑设计", trait="实景照片", confidence=0.95))
+    assert result["result"]["score"] == 100
+    assert result["result"]["level"] == "L1"

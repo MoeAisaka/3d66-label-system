@@ -42,7 +42,6 @@ from .dimension_composition import (
 from .dimension_schema_registry import (
     ACTIVE_V13_VERSION,
     SPACE_SCHEMA_KEY,
-    space_schema_definition_for_version,
 )
 from .redline_policy import REDLINE_POLICY_FORMAT_VERSION, evaluate_redlines
 from .subcategory_resolver import (
@@ -238,102 +237,49 @@ def build_inspiration_classification_map() -> dict[str, Any]:
     }
 
 
-def _common_group_from_v13() -> dict[str, Any]:
-    """A non-empty common group drawn from the v13 space schema's core dimensions.
+# --------------------------------------------------------------------------- #
+# 方案 A（Owner 2026-08-04）：产品《【灵感图】-prompt》真实 6/5 维度体系。
+#
+# 每赛道的全部维度放入单一 **common_group（group_weight=1.0）**，specific_group
+# 置空——引擎（``dimension_composition``）对空组的处理是「其权重被丢弃，非空组的
+# group_weight 在彼此间重归一化并瓜分 dimension_max」，故单个满权重的 common_group
+# 独占整块 dimension_max，无自由分泄漏。合同的 ``dimension_schema_ref`` 只是引用标签，
+# 聚合器/组合器都不拿它跨校维度 key，所以在此直接承载真实维度不需要改任何引擎核心。
+#
+# grade_points 用线性锚点 {1:0,2:25,3:50,4:75,5:100}：grade5→该维度满分不扣、
+# grade1→该维度 share 全扣（调用B 的 1-5 档直接线性映射到扣分比例）。
+# --------------------------------------------------------------------------- #
 
-    Uses the schema's ``core_dimension_keys`` subset (a non-empty slice of the
-    v13 dimensions), re-normalizing their weights to sum to 1 inside the group so
-    the reused grade bridge accepts it.  Each dimension keeps its frozen
-    ``grade_points`` from the registry.
-    """
-    schema = space_schema_definition_for_version(ACTIVE_V13_VERSION)
-    core_keys = list(schema["core_dimension_keys"])
-    by_key = {dimension["key"]: dimension for dimension in schema["dimensions"]}
-    selected = [by_key[key] for key in core_keys]
+# 线性锚点：grade5=满分（不扣该维度 share），grade1=0（全扣该维度 share）。
+_LINEAR_GRADE_POINTS = {"1": 0.0, "2": 25.0, "3": 50.0, "4": 75.0, "5": 100.0}
 
-    weight_total = sum(float(dimension["weight"]) for dimension in selected)
-    dimensions = []
-    for dimension in selected:
-        normalized_weight = float(dimension["weight"]) / weight_total
-        dimensions.append({
-            "key": dimension["key"],
-            "label": dimension["label"],
-            "weight": normalized_weight,
-            "grade_points": dict(dimension["grade_points"]),
-        })
-    # Absorb any float drift onto the last weight so the group sums to exactly 1.
-    drift = 1.0 - sum(dimension["weight"] for dimension in dimensions)
-    dimensions[-1]["weight"] += drift
+# 一类/二类共用 6 维度（dimension_max=60）：(key, label, 满分)。weight=满分/60。
+_CLASS_ONE_TWO_DIMENSIONS: list[tuple[str, str, int]] = [
+    ("visual_structure", "视觉结构", 10),
+    ("color_aesthetics", "色彩美学", 10),
+    ("emotional_expression", "情感表达", 5),
+    ("design_aesthetics", "设计美学", 10),
+    ("originality", "原创设计感", 10),
+    ("design_trendiness", "设计流行度", 15),
+]
 
-    return {
-        "group_weight": 0.6,
-        "schema_definition": {
-            "format_version": schema["format_version"],
-            "schema_key": SPACE_SCHEMA_KEY,
-            "version": ACTIVE_V13_VERSION,
-            "dimensions": dimensions,
-        },
-    }
+# 三类 5 维度（dimension_max=30，每维满分 6）：weight=6/30=0.2 each。
+_CLASS_THREE_DIMENSIONS: list[tuple[str, str, int]] = [
+    ("subject_focus", "主题清晰焦点", 6),
+    ("mood_atmosphere", "情绪氛围可感知", 6),
+    ("composition_lighting", "构图光影专业章法", 6),
+    ("reference_value", "内容借鉴价值", 6),
+    ("visual_impact", "强视觉冲击力", 6),
+]
 
-
-def _specific_group(*, dimensions: list[dict[str, Any]]) -> dict[str, Any]:
-    """A subcategory-owned specific group with in-group weights summing to 1."""
-    return {
-        "group_weight": 0.4,
-        "schema_definition": {
-            "format_version": "dimension-schema-definition-v1",
-            "schema_key": "inspiration_specific",
-            "version": "v1",
-            "dimensions": dimensions,
-        },
-    }
-
-
-# Per-track specific dimensions.  grade_points reuse the doc's shared 1..5 anchor
-# scale; weights inside each specific group sum to 1.  Keys are disjoint from the
-# common group's core keys (no dimension_key_overlap).
-_SPECIFIC_GRADE_POINTS = {"1": 20.0, "2": 45.0, "3": 65.0, "4": 82.0, "5": 95.0}
-
-_SPECIFIC_DIMENSIONS: dict[str, list[dict[str, Any]]] = {
-    TRACK_CLASS_ONE: [
-        {
-            "key": "spatial_originality",
-            "label": "空间原创设计感",
-            "weight": 0.5,
-            "grade_points": dict(_SPECIFIC_GRADE_POINTS),
-        },
-        {
-            "key": "design_trendiness",
-            "label": "设计流行度",
-            "weight": 0.5,
-            "grade_points": dict(_SPECIFIC_GRADE_POINTS),
-        },
-    ],
-    TRACK_CLASS_TWO: [
-        {
-            "key": "product_form_language",
-            "label": "产品形态语言",
-            "weight": 0.5,
-            "grade_points": dict(_SPECIFIC_GRADE_POINTS),
-        },
-        {
-            "key": "artistic_expression",
-            "label": "美术表现力",
-            "weight": 0.5,
-            "grade_points": dict(_SPECIFIC_GRADE_POINTS),
-        },
-    ],
-    TRACK_CLASS_THREE: [
-        {
-            "key": "visual_impact",
-            "label": "强视觉冲击力",
-            "weight": 1.0,
-            "grade_points": dict(_SPECIFIC_GRADE_POINTS),
-        },
-    ],
+# 每赛道的维度定义（满分）与 dimension_max。一类/二类共用同一套 6 维度。
+_TRACK_DIMENSION_SPECS: dict[str, list[tuple[str, str, int]]] = {
+    TRACK_CLASS_ONE: _CLASS_ONE_TWO_DIMENSIONS,
+    TRACK_CLASS_TWO: _CLASS_ONE_TWO_DIMENSIONS,
+    TRACK_CLASS_THREE: _CLASS_THREE_DIMENSIONS,
 }
 
-# Each track's dimension_max mirrors its contract track (一类/二类 60, 三类 30).
+# 每赛道 dimension_max 与合同 track 一致（一类/二类 60，三类 30）。
 _TRACK_DIMENSION_MAX = {
     TRACK_CLASS_ONE: 60,
     TRACK_CLASS_TWO: 60,
@@ -341,24 +287,80 @@ _TRACK_DIMENSION_MAX = {
 }
 
 
-def build_inspiration_subcategory_dimensions() -> dict[str, dict[str, Any]]:
-    """Build a ``subcategory-dimensions-v1`` config per track (common + specific).
+def _dimensions_from_specs(
+    specs: list[tuple[str, str, int]], dimension_max: int
+) -> list[dict[str, Any]]:
+    """把 (key, label, 满分) 规格转成带 weight(=满分/dimension_max) 的维度定义。
 
-    Each config carries a non-empty common group (from the v13 space schema's
-    core dimensions, group_weight 0.6) and a non-empty specific group
-    (subcategory-owned, group_weight 0.4); group_weights sum to 1 and each
-    group's dimension weights sum to 1.  ``dimension_max`` matches the track
-    (一类/二类 60, 三类 30).  Every config passes
-    ``validate_subcategory_dimensions``.  Returns ``{track_key: config}``.
+    末位维度吸收浮点漂移，使组内 weight 之和严格 = 1（grade bridge 要求
+    ``abs(sum-1)<=1e-9``）。每个维度携带线性 grade_points。
+    """
+    dimensions: list[dict[str, Any]] = []
+    for key, label, full_marks in specs:
+        dimensions.append({
+            "key": key,
+            "label": label,
+            "weight": float(full_marks) / float(dimension_max),
+            "grade_points": dict(_LINEAR_GRADE_POINTS),
+        })
+    # 末位吸收浮点漂移，组内权重和严格 = 1。
+    drift = 1.0 - sum(dimension["weight"] for dimension in dimensions)
+    dimensions[-1]["weight"] += drift
+    return dimensions
+
+
+def _common_group(*, dimensions: list[dict[str, Any]]) -> dict[str, Any]:
+    """承载一个赛道全部真实维度的单一 common group（group_weight=1.0）。
+
+    schema_key 复用 ``SPACE_SCHEMA_KEY``、version 复用 ``ACTIVE_V13_VERSION`` 以对齐
+    合同 ``dimension_schema_ref``（仅作引用标签，引擎不据此跨校维度 key）。组内维度
+    weight 之和严格 = 1。
+    """
+    return {
+        "group_weight": 1.0,
+        "schema_definition": {
+            "format_version": "dimension-schema-definition-v1",
+            "schema_key": SPACE_SCHEMA_KEY,
+            "version": ACTIVE_V13_VERSION,
+            "dimensions": dimensions,
+        },
+    }
+
+
+def _empty_specific_group() -> dict[str, Any]:
+    """空的 specific group：0 维度、不保留 dimension_max 份额（引擎支持空组）。"""
+    return {
+        "schema_definition": {
+            "format_version": "dimension-schema-definition-v1",
+            "schema_key": "inspiration_specific",
+            "version": "v1",
+            "dimensions": [],
+        },
+    }
+
+
+def build_inspiration_subcategory_dimensions() -> dict[str, dict[str, Any]]:
+    """Build a ``subcategory-dimensions-v1`` config per track (真实 6/5 维度，方案 A).
+
+    每赛道的全部真实维度放入单一 common_group（group_weight=1.0）：一类/二类 6 维度
+    （visual_structure/color_aesthetics/emotional_expression/design_aesthetics/
+    originality/design_trendiness，dimension_max=60），三类 5 维度（subject_focus/
+    mood_atmosphere/composition_lighting/reference_value/visual_impact，
+    dimension_max=30）。specific_group 置空——非空的 common_group 独占整块
+    dimension_max。组内 weight 之和严格 = 1（末位吸收浮点漂移）。每个 config 通过
+    ``validate_subcategory_dimensions``。返回 ``{track_key: config}``。
     """
     configs: dict[str, dict[str, Any]] = {}
-    for track_key, specific in _SPECIFIC_DIMENSIONS.items():
+    for track_key, specs in _TRACK_DIMENSION_SPECS.items():
+        dimension_max = _TRACK_DIMENSION_MAX[track_key]
         configs[track_key] = {
             "format_version": SUBCATEGORY_DIMENSIONS_FORMAT_VERSION,
             "sub_category_key": track_key,
-            "dimension_max": _TRACK_DIMENSION_MAX[track_key],
-            "common_group": _common_group_from_v13(),
-            "specific_group": _specific_group(dimensions=specific),
+            "dimension_max": dimension_max,
+            "common_group": _common_group(
+                dimensions=_dimensions_from_specs(specs, dimension_max)
+            ),
+            "specific_group": _empty_specific_group(),
         }
     return configs
 

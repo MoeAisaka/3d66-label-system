@@ -72,8 +72,19 @@ def _seed_active_config(db: Session) -> int:
     return config.revision
 
 
+# 方案 A：class_one 的真实 6 维度全部在 common_group（specific_group 置空）。
+_CLASS_ONE_COMMON_KEYS = (
+    "visual_structure",
+    "color_aesthetics",
+    "emotional_expression",
+    "design_aesthetics",
+    "originality",
+    "design_trendiness",
+)
+
+
 def _class_one_precheck() -> dict[str, Any]:
-    """Non-redline precheck resolving to class_one (spatial_originality/design_trendiness)."""
+    """Non-redline precheck resolving to class_one（建筑设计 → class_one）."""
     return {
         "classification": {
             "scope_status": "in_scope",
@@ -85,16 +96,9 @@ def _class_one_precheck() -> dict[str, Any]:
 
 
 def _common_aesthetic() -> dict[str, Any]:
-    """A v1 调用B-shaped aesthetic covering class_one's common (v13 core) dims,
-    so the *common* grade mapping succeeds and the specific-grade branch is what's
-    being exercised."""
-    return {
-        "dimensions": {
-            "presentation_integrity": {"grade": 4},
-            "visual_hierarchy": {"grade": 3},
-            "inspiration_reference": {"grade": 4},
-        }
-    }
+    """A v1 调用B-shaped aesthetic covering class_one's real 6 common dims (方案 A),
+    so the *common* grade mapping succeeds end-to-end."""
+    return {"dimensions": {key: {"grade": 4} for key in _CLASS_ONE_COMMON_KEYS}}
 
 
 class _FakeResponse:
@@ -240,18 +244,18 @@ def test_resolve_targets_disabled_returns_none(sessions: sessionmaker[Session]) 
         ) is None
 
 
-def test_resolve_targets_non_redline_returns_specific_dims(
+def test_resolve_targets_empty_specific_group_returns_none(
     sessions: sessionmaker[Session],
 ) -> None:
+    """方案 A: every inspiration track carries all dimensions in common_group with
+    an empty specific_group, so the specific-shadow target resolver returns None
+    (no extra specific 调用B is ever needed for this category)."""
     with sessions() as db:
         _seed_active_config(db)
         target = worker_v3_shadow.resolve_specific_shadow_targets(
             db, _CATEGORY_KEY, _class_one_precheck(), enabled=True
         )
-    assert target is not None
-    assert target["track_key"] == "class_one"
-    keys = {d["key"] for d in target["specific_dims"]}
-    assert keys == {"spatial_originality", "design_trendiness"}
+    assert target is None
 
 
 def test_resolve_targets_redline_returns_none(sessions: sessionmaker[Session]) -> None:
@@ -278,7 +282,9 @@ def test_resolve_targets_no_config_returns_none(sessions: sessionmaker[Session])
 # --------------------------------------------------------------------------- #
 
 
-def test_compute_with_specific_grades_is_ok(sessions: sessionmaker[Session]) -> None:
+def test_compute_with_common_aesthetic_is_ok(sessions: sessionmaker[Session]) -> None:
+    # 方案 A: class_one 全部维度在 common_group，只要 v1 aesthetic 覆盖这 6 个 key，
+    # 共性 grade 就能完整映射 → ok（specific_group 为空，无需特有 grade）。
     with sessions() as db:
         revision = _seed_active_config(db)
         payload = worker_v3_shadow.compute_v3_shadow(
@@ -287,9 +293,6 @@ def test_compute_with_specific_grades_is_ok(sessions: sessionmaker[Session]) -> 
             _class_one_precheck(),
             _common_aesthetic(),
             enabled=True,
-            specific_grades_by_track={
-                "class_one": {"spatial_originality": 4, "design_trendiness": 3}
-            },
         )
     assert payload is not None
     assert payload["status"] == "ok"
@@ -298,9 +301,10 @@ def test_compute_with_specific_grades_is_ok(sessions: sessionmaker[Session]) -> 
     json.dumps(payload, ensure_ascii=False)  # serializable
 
 
-def test_compute_without_specific_grades_skips(
+def test_compute_without_common_grades_skips(
     sessions: sessionmaker[Session],
 ) -> None:
+    # 空 aesthetic → 共性 6 维度无法从 aesthetic 映射 → fail-closed skip。
     with sessions() as db:
         _seed_active_config(db)
         payload = worker_v3_shadow.compute_v3_shadow(
@@ -308,26 +312,26 @@ def test_compute_without_specific_grades_skips(
         )
     assert payload is not None
     assert payload["status"] == "skipped"
-    assert payload["reason"] == "specific_grade_shadow_unavailable"
+    assert payload["reason"] == "grade_mapping_unavailable"
 
 
-def test_compute_with_incomplete_specific_grades_skips(
+def test_compute_with_incomplete_common_grades_skips(
     sessions: sessionmaker[Session],
 ) -> None:
+    # 缺一个共性维度 grade → 仍 fail-closed skip，绝不硬猜。
+    incomplete = {"dimensions": {key: {"grade": 4} for key in _CLASS_ONE_COMMON_KEYS[:-1]}}
     with sessions() as db:
         _seed_active_config(db)
         payload = worker_v3_shadow.compute_v3_shadow(
             db,
             _CATEGORY_KEY,
             _class_one_precheck(),
-            {"dimensions": {}},
+            incomplete,
             enabled=True,
-            # design_trendiness missing → still fail-closed skip.
-            specific_grades_by_track={"class_one": {"spatial_originality": 4}},
         )
     assert payload is not None
     assert payload["status"] == "skipped"
-    assert payload["reason"] == "specific_grade_shadow_unavailable"
+    assert payload["reason"] == "grade_mapping_unavailable"
 
 
 # --------------------------------------------------------------------------- #
@@ -343,18 +347,17 @@ def test_specific_shadow_never_mutates_authoritative_scoring(
     with sessions() as db:
         _seed_active_config(db)
         count_before = len(db.scalars(select(CategoryEvaluationV3Config)).all())
-        for grades in (
+        for aesthetic in (
             None,
-            {"class_one": {"spatial_originality": 4, "design_trendiness": 3}},
-            {"class_one": {"spatial_originality": 4}},  # incomplete
+            _common_aesthetic(),
+            {"dimensions": {}},  # incomplete
         ):
             worker_v3_shadow.compute_v3_shadow(
                 db,
                 _CATEGORY_KEY,
                 _class_one_precheck(),
-                {"dimensions": {}},
+                aesthetic,
                 enabled=True,
-                specific_grades_by_track=grades,
             )
             assert authoritative == baseline
         count_after = len(db.scalars(select(CategoryEvaluationV3Config)).all())

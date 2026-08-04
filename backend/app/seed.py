@@ -225,8 +225,61 @@ def seed_defaults(db: Session) -> None:
                 change_note=item["note"],
             )
         )
+    _seed_inspiration_image_prompts(db, settings)
     _seed_inspiration_image_v3_config(db)
     db.commit()
+
+
+def _seed_inspiration_image_prompts(db: Session, settings) -> None:
+    """Seed the ADR-0033 inspiration_image A/B ``PromptVersion`` rows (idempotent).
+
+    Task 3b (方案 A): the two real-contract prompts —调用A 预检（红线/赛道/媒介/
+    hard_defects）与调用B 6/5 维度评级—live as plain single-block prompt files under
+    ``prompts/``.  Each file is loaded wholesale as ``system_prompt`` (they carry
+    no ``### System Prompt`` split markers); ``user_prompt`` is empty since the
+    per-image context is injected by the worker at call time.  Only inserted when
+    the ``version`` is absent, so re-running seed_defaults never duplicates.
+    """
+    prompt_specs = (
+        {
+            "stage": "A",
+            "name": "灵感图预检（红线/赛道/媒介/硬伤）",
+            "version": "inspiration-a-v1",
+            "filename": "inspiration_image_call_a.txt",
+            "note": "ADR-0033 Task3b 方案A：灵感图调用A 预检，含 hard_defects 硬伤信号",
+        },
+        {
+            "stage": "B",
+            "name": "灵感图 6/5 维度评级",
+            "version": "inspiration-b-v1",
+            "filename": "inspiration_image_call_b.txt",
+            "note": "ADR-0033 Task3b 方案A：灵感图调用B 真实 6/5 维度 1-5 档评级",
+        },
+    )
+    for item in prompt_specs:
+        exists = db.scalar(
+            select(PromptVersion.id).where(PromptVersion.version == item["version"])
+        )
+        if exists is not None:
+            continue
+        system_prompt = (
+            settings.project_root / "prompts" / item["filename"]
+        ).read_text(encoding="utf-8").strip()
+        db.add(
+            PromptVersion(
+                stage=item["stage"],
+                category_key="inspiration_image",
+                pipeline_scope="full_pipeline",
+                name=item["name"],
+                version=item["version"],
+                system_prompt=system_prompt,
+                user_prompt="",
+                rubric_version="inspiration-rubric-v1",
+                status="published",
+                source="imported",
+                change_note=item["note"],
+            )
+        )
 
 
 def _seed_inspiration_image_v3_config(db: Session) -> None:

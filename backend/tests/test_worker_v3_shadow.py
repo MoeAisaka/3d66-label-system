@@ -186,15 +186,15 @@ def test_redline_hit_produces_ok(sessions: sessionmaker[Session]) -> None:
     json.dumps(payload, ensure_ascii=False)
 
 
-def test_non_redline_with_specific_dims_skips_without_shadow(
+def test_non_redline_without_aesthetic_skips_fail_closed(
     sessions: sessionmaker[Session],
 ) -> None:
-    """A non-redline image resolves to a track with v1-less specific dims and no
-    specific-shadow grades supplied → skip, never a fabricated grade.
+    """A non-redline image with no v1 aesthetic supplied → skip, never fabricate.
 
-    Task 1b: the skip reason moved from ``grade_mapping_unavailable`` to
-    ``specific_grade_shadow_unavailable`` — the specific grades now arrive via the
-    dedicated shadow 调用B, and their absence is still fail-closed."""
+    方案 A: every inspiration track now carries all real dimensions in the
+    common_group (specific_group is empty), so a missing aesthetic means the
+    common grades cannot be mapped → fail-closed skip ``grade_mapping_unavailable``
+    (the specific-shadow path no longer fires for this category)."""
     precheck = {
         "classification": {
             "scope_status": "in_scope",
@@ -210,7 +210,7 @@ def test_non_redline_with_specific_dims_skips_without_shadow(
         )
     assert payload is not None
     assert payload["status"] == "skipped"
-    assert payload["reason"] == "specific_grade_shadow_unavailable"
+    assert payload["reason"] == "grade_mapping_unavailable"
 
 
 # --------------------------------------------------------------------------- #

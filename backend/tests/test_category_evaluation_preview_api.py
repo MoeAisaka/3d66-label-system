@@ -39,24 +39,39 @@ from app.inspiration_category_seed import (
 
 # --- shared grade fixtures (simulate 调用B): all-5 = full marks, zero deductions ---
 
-_COMMON_GRADE5 = {
-    "presentation_integrity": 5,
-    "visual_hierarchy": 5,
-    "inspiration_reference": 5,
-}
-_SPECIFIC_GRADE5 = {
-    TRACK_CLASS_ONE: {"spatial_originality": 5, "design_trendiness": 5},
-    TRACK_CLASS_TWO: {"product_form_language": 5, "artistic_expression": 5},
-    TRACK_CLASS_THREE: {"visual_impact": 5},
+# 方案 A 真实维度：一类/二类 6 维度、三类 5 维度，全部在 common_group，specific 置空。
+_CLASS_ONE_TWO_KEYS = (
+    "visual_structure",
+    "color_aesthetics",
+    "emotional_expression",
+    "design_aesthetics",
+    "originality",
+    "design_trendiness",
+)
+_CLASS_THREE_KEYS = (
+    "subject_focus",
+    "mood_atmosphere",
+    "composition_lighting",
+    "reference_value",
+    "visual_impact",
+)
+_COMMON_KEYS_BY_TRACK = {
+    TRACK_CLASS_ONE: _CLASS_ONE_TWO_KEYS,
+    TRACK_CLASS_TWO: _CLASS_ONE_TWO_KEYS,
+    TRACK_CLASS_THREE: _CLASS_THREE_KEYS,
 }
 
 
 def _common_grades_all5() -> dict[str, Any]:
-    return {track: dict(_COMMON_GRADE5) for track in _SPECIFIC_GRADE5}
+    return {
+        track: {key: 5 for key in keys}
+        for track, keys in _COMMON_KEYS_BY_TRACK.items()
+    }
 
 
 def _specific_grades_all5() -> dict[str, Any]:
-    return {track: dict(grades) for track, grades in _SPECIFIC_GRADE5.items()}
+    # specific_group 现为空组，特有 grade 空映射。
+    return {track: {} for track in _COMMON_KEYS_BY_TRACK}
 
 
 def _precheck(
@@ -180,15 +195,16 @@ def test_evaluate_invalid_grade_returns_coded_400_not_500(
     client: TestClient,
 ) -> None:
     # A grade of 9 is out of the 1-5 range; the reused grade bridge fails closed
-    # and the router must surface it as a coded HTTP 400 (never a 500).
-    specific = _specific_grades_all5()
-    specific[TRACK_CLASS_ONE]["spatial_originality"] = 9
+    # and the router must surface it as a coded HTTP 400 (never a 500).  方案 A：
+    # 真实维度全在 common_group，所以把越界 grade 注入一个共性维度 key。
+    common = _common_grades_all5()
+    common[TRACK_CLASS_ONE]["visual_structure"] = 9
     response = client.post(
         f"{_BASE}/inspiration/evaluate",
         json={
             "precheck": _precheck(category="建筑设计", confidence=0.95),
-            "common_grades_by_track": _common_grades_all5(),
-            "specific_grades_by_track": specific,
+            "common_grades_by_track": common,
+            "specific_grades_by_track": _specific_grades_all5(),
         },
     )
     assert response.status_code == 400, response.text

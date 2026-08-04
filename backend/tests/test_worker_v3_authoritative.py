@@ -47,8 +47,16 @@ from app.models import CategoryEvaluationV3Config
 
 _CATEGORY_KEY = "inspiration_image"
 
-# v3 共性组复用 v13 空间 schema 的 core_dimension_keys（见 dimension_schema_registry）。
-_COMMON_KEYS = ("presentation_integrity", "visual_hierarchy", "inspiration_reference")
+# 方案 A：一类/二类的真实 6 维度全部放在 common_group（specific_group 置空）。共性
+# grade 从 v1 aesthetic 按这些 key 忠实映射。三类是另一套 5 维度（此文件用一类/二类）。
+_COMMON_KEYS = (
+    "visual_structure",
+    "color_aesthetics",
+    "emotional_expression",
+    "design_aesthetics",
+    "originality",
+    "design_trendiness",
+)
 
 
 @pytest.fixture
@@ -87,6 +95,11 @@ def _seed_active_config(db: Session, category_key: str = _CATEGORY_KEY) -> int:
     return config.revision
 
 
+# 合成的特有维度 key（仅测试用）：方案 A 的真实合同 specific_group 为空，为回归
+# 权威路径「特有 grade 拿不齐 → fail-closed」分支，测试把这些 key 注入 bundle。
+_SYNTHETIC_SPECIFIC_KEYS = ("synthetic_specific_a", "synthetic_specific_b")
+
+
 class _FakeResponse:
     def __init__(self, parsed: Any) -> None:
         self.parsed = parsed
@@ -123,15 +136,11 @@ class _FakeClient:
         if self.bad_payload:
             return _FakeResponse({"unexpected": "shape"})
         # Grade every key the prompt mentions.  The prompt lists the specific
-        # dimension keys verbatim, so scan the user prompt for known keys.
+        # dimension keys verbatim, so scan the user prompt for known keys.  方案 A
+        # 后 inspiration_image 的 specific_group 已置空，此路径只由注入了合成特有维度
+        # 的 bundle（见 _bundle_with_specific）触发，用于回归特有 grade fail-closed 分支。
         dims: dict[str, dict[str, int]] = {}
-        for key in (
-            "spatial_originality",
-            "design_trendiness",
-            "product_form_language",
-            "artistic_expression",
-            "visual_impact",
-        ):
+        for key in _SYNTHETIC_SPECIFIC_KEYS:
             if key in user_prompt:
                 dims[key] = {"grade": self.specific_grade}
         return _FakeResponse({"dimensions": dims})
@@ -278,6 +287,37 @@ def _bundle(db: Session) -> dict:
     return bundle
 
 
+def _bundle_with_specific(db: Session) -> dict:
+    """A bundle whose class_one track carries a synthetic non-empty specific group.
+
+    方案 A 的真实合同 specific_group 为空，所以特有维度调用B（``fetch_v3_specific_grades``）
+    在正常路径永不触发。这个 helper 往 class_one 注入两个合成特有维度，且把 common_group
+    的 group_weight 与 specific 平分，专门用来回归「特有 grade 拿不齐 → V3AuthoritativeError」
+    的 fail-closed 分支——不改任何引擎核心，只在测试侧构造带特有组的 config。
+    """
+    bundle = _bundle(db)
+    class_one = bundle["subcategory_dimensions"]["class_one"]
+    class_one["common_group"]["group_weight"] = 0.6
+    class_one["specific_group"] = {
+        "group_weight": 0.4,
+        "schema_definition": {
+            "format_version": "dimension-schema-definition-v1",
+            "schema_key": "inspiration_specific",
+            "version": "v1",
+            "dimensions": [
+                {
+                    "key": key,
+                    "label": key,
+                    "weight": 0.5,
+                    "grade_points": {"1": 0.0, "2": 25.0, "3": 50.0, "4": 75.0, "5": 100.0},
+                }
+                for key in _SYNTHETIC_SPECIFIC_KEYS
+            ],
+        },
+    }
+    return bundle
+
+
 def test_redline_hit_hard_reject(sessions: sessionmaker[Session]) -> None:
     with sessions() as db:
         bundle = _bundle(db)
@@ -337,7 +377,7 @@ def test_common_grade_unavailable_raises(sessions: sessionmaker[Session]) -> Non
 
 def test_specific_call_exception_raises(sessions: sessionmaker[Session]) -> None:
     with sessions() as db:
-        bundle = _bundle(db)
+        bundle = _bundle_with_specific(db)
     with pytest.raises(V3AuthoritativeError) as excinfo:
         asyncio.run(
             evaluate_v3_authoritative(
@@ -354,7 +394,7 @@ def test_specific_call_exception_raises(sessions: sessionmaker[Session]) -> None
 
 def test_specific_call_bad_payload_raises(sessions: sessionmaker[Session]) -> None:
     with sessions() as db:
-        bundle = _bundle(db)
+        bundle = _bundle_with_specific(db)
     with pytest.raises(V3AuthoritativeError) as excinfo:
         asyncio.run(
             evaluate_v3_authoritative(
