@@ -103,7 +103,7 @@ def test_correct_dimension_rule_appends_evidence_and_recomputes_downstream() -> 
     first_rule = first_dimension["deduction_rules"][0]
     new_hit = {
         "rule_id": first_rule["rule_id"],
-        "confidence": "high",
+        "confidence": "medium",
         "evidence": "主体明显偏移，左侧大面积空置",
     }
     payload = {
@@ -116,7 +116,7 @@ def test_correct_dimension_rule_appends_evidence_and_recomputes_downstream() -> 
             {
                 "rule_id": first_rule["rule_id"],
                 "old_confidence": None,
-                "new_confidence": "high",
+                "new_confidence": "medium",
                 "old_evidence": "",
                 "new_evidence": new_hit["evidence"],
             }
@@ -124,6 +124,17 @@ def test_correct_dimension_rule_appends_evidence_and_recomputes_downstream() -> 
         "reason": "人工复核确认规则命中",
     }
     client = TestClient(app)
+    invalid_payload = {
+        **payload,
+        "correction_key": "case-invalid-chinese-confidence",
+        "new_value": {**new_hit, "confidence": "中"},
+    }
+    invalid = client.post(
+        f"/api/evaluation-results/{result_id}/correct-node", json=invalid_payload
+    )
+    assert invalid.status_code == 400
+    assert invalid.json()["detail"]["code"] == "dimension_rule_invalid"
+
     response = client.post(
         f"/api/evaluation-results/{result_id}/correct-node", json=payload
     )
@@ -132,7 +143,16 @@ def test_correct_dimension_rule_appends_evidence_and_recomputes_downstream() -> 
     assert body["score"] < original_score
     assert body["correction"]["downstream_recomputed"] is True
     assert body["correction"]["evidence"][0]["new_evidence"] == new_hit["evidence"]
+    assert body["correction"]["new_value"]["confidence"] == "medium"
+    assert body["correction_history"][0]["new_value"]["confidence"] == "medium"
     assert len(body["correction_history"]) == 1
+
+    with sessions() as db:
+        stored = db.get(EvaluationResult, result_id)
+        dimensions = json.loads(stored.aesthetic_json)["dimensions"]
+        assert dimensions[first_dimension["key"]]["hit_rules"][0]["confidence"] == "medium"
+        history = json.loads(stored.correction_history_json)
+        assert history[0]["new_value"]["confidence"] == "medium"
 
     # Same correction key is idempotent and never appends twice.
     replay = client.post(

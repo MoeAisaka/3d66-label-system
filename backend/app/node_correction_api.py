@@ -7,10 +7,12 @@ from datetime import datetime, timezone
 from typing import Any, Callable
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 from sqlalchemy.orm import Session
 
 from .category_evaluation_contract import (
+    DeductionRuleHit,
+    DimensionDeductionOutput,
     NodeCorrection,
     NodeCorrectionEvidence,
 )
@@ -117,7 +119,23 @@ def _dimension_node(
         raise _coded(400, "dimension_not_found", f"未找到维度 {dimension_key}")
     hits = target.setdefault("hit_rules", [])
     if len(parts) == 2:
-        return hits, lambda value: target.__setitem__("hit_rules", value)
+        def assign_all(value: Any) -> None:
+            try:
+                parsed = DimensionDeductionOutput(
+                    dimension_key=dimension_key,
+                    hit_rules=value,
+                )
+            except ValidationError as exc:
+                raise _coded(
+                    400,
+                    "dimension_rule_invalid",
+                    "规则命中必须使用 high/medium/low 置信度枚举",
+                ) from exc
+            target["hit_rules"] = [
+                item.model_dump(mode="json") for item in parsed.hit_rules
+            ]
+
+        return hits, assign_all
     rule_id = parts[2]
     index = next(
         (i for i, hit in enumerate(hits) if hit.get("rule_id") == rule_id), None
@@ -129,8 +147,17 @@ def _dimension_node(
             if index is not None:
                 hits.pop(index)
             return
-        if not isinstance(value, dict) or value.get("rule_id") != rule_id:
+        try:
+            parsed = DeductionRuleHit.model_validate(value)
+        except ValidationError as exc:
+            raise _coded(
+                400,
+                "dimension_rule_invalid",
+                "新规则命中必须使用 high/medium/low 置信度枚举",
+            ) from exc
+        if parsed.rule_id != rule_id:
             raise _coded(400, "dimension_rule_invalid", "新规则命中必须是同 rule_id 的对象")
+        value = parsed.model_dump(mode="json")
         if index is None:
             hits.append(value)
         else:

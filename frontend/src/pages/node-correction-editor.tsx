@@ -21,6 +21,7 @@ import {
   cloneJson,
   confidenceLabel,
   correctionValueLabel,
+  EMPTY_CORRECTION_HISTORY_TEXT,
   NODE_STAGE_META,
   normalizeRuleHits,
   redlineReasonsAfterToggle,
@@ -325,13 +326,22 @@ function CorrectionHistory({ history, nodes }: { history: NodeCorrectionHistoryI
         {[...history].reverse().map((item, reverseIndex) => (
           <article key={item.correction_key || `${item.corrected_at}-${reverseIndex}`} className="grid gap-3 px-5 py-4 md:grid-cols-[180px_minmax(0,1fr)_240px] md:px-7">
             <div><Badge tone={item.downstream_recomputed ? "success" : "active"}>{NODE_TYPE_LABEL[item.node_type]}</Badge><p className="mt-2 text-xs text-[var(--muted)]">{nodes.find((node) => node.nodeType === item.node_type && node.nodePath === item.node_path)?.label || NODE_TYPE_LABEL[item.node_type]}</p></div>
-            <div><p className="text-sm font-semibold">{correctionValueLabel(item.old_value)} <ArrowRight className="mx-1 inline" size={14} /> {correctionValueLabel(item.new_value)}</p><p className="mt-2 text-xs leading-5 text-[var(--muted)]">原因：{item.reason}</p>{item.evidence?.length ? <p className="mt-1 text-xs leading-5 text-[var(--muted)]">逐规则证据：{item.evidence.map((evidence) => `${evidence.rule_id} ${confidenceLabel(evidence.old_confidence) || "无"}→${confidenceLabel(evidence.new_confidence) || "无"}`).join("；")}</p> : null}</div>
+            <div><p className="text-sm font-semibold">{historyValueLabel(item, nodes, item.old_value)} <ArrowRight className="mx-1 inline" size={14} /> {historyValueLabel(item, nodes, item.new_value)}</p><p className="mt-2 text-xs leading-5 text-[var(--muted)]">原因：{item.reason}</p>{item.evidence?.length ? <p className="mt-1 text-xs leading-5 text-[var(--muted)]">逐规则证据：{item.evidence.map((evidence) => `${evidence.rule_id} ${confidenceLabel(evidence.old_confidence) || "无"}→${confidenceLabel(evidence.new_confidence) || "无"}`).join("；")}</p> : null}</div>
             <div className="md:text-right"><p className="text-xs font-semibold">{item.corrector || "未知纠偏人"}</p><p className="font-data mt-1 text-[0.68rem] text-[var(--muted)]">{formatDate(item.corrected_at)}</p><p className="mt-2 inline-flex items-center gap-1 text-xs text-[var(--muted)]"><CheckCircle />{item.downstream_recomputed ? "下游已重算" : "仅改最终等级"}</p></div>
           </article>
         ))}
       </div>
-    ) : <p className="border-t border-[var(--line)] px-5 py-5 text-sm text-[var(--muted)] md:px-7">暂无节点纠偏记录。旧评测没有 correction_history 时会安全显示为空。</p>}
+    ) : <p className="border-t border-[var(--line)] px-5 py-5 text-sm text-[var(--muted)] md:px-7">{EMPTY_CORRECTION_HISTORY_TEXT}</p>}
   </section>
+}
+
+function historyValueLabel(item: NodeCorrectionHistoryItem, nodes: CorrectionNode[], value: unknown) {
+  const node = nodes.find((candidate) => candidate.nodeType === item.node_type && candidate.nodePath === item.node_path)
+  if (typeof value === "string") {
+    const option = node?.options?.find((candidate) => candidate.value === value)
+    if (option) return option.label
+  }
+  return correctionValueLabel(value)
 }
 
 function formatDate(value: string) {

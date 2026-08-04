@@ -18,6 +18,7 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { api, jsonBody } from "@/lib/api"
+import { formatRuleConfidence } from "@/lib/node-correction"
 import { submitReviewDecision } from "@/lib/review-submit"
 import {
   dimensionKeys as dimensionKeysForSchema,
@@ -317,7 +318,7 @@ export function ReviewPage({ user }: { user: User }) {
                         const hits = Array.isArray(deductionDimensions[key]?.hit_rules) ? deductionDimensions[key].hit_rules : []
                         return <div key={key} className="border border-[var(--line)] bg-white px-3 py-2.5">
                           <div className="flex items-center justify-between gap-3"><p className="text-xs font-semibold">{dimensionLabels[key] || key}</p><Badge tone={hits.length ? "warning" : "success"}>{hits.length ? `命中 ${hits.length} 条` : "未命中"}</Badge></div>
-                          {hits.map((hit: any, index: number) => <div key={`${hit.rule_id || "rule"}-${index}`} className="mt-2 border-t border-[var(--line)] pt-2 text-xs leading-5"><p><strong>{hit.rule_id || "规则"}</strong>{hit.deduction != null ? ` · 扣 ${hit.deduction} 分` : ""}{hit.confidence != null ? ` · 置信度 ${Math.round(Number(hit.confidence) * 100)}%` : ""}</p>{hit.evidence && <p className="mt-1 text-[var(--muted)]">证据：{String(hit.evidence)}</p>}</div>)}
+                          {hits.map((hit: any, index: number) => <div key={`${hit.rule_id || "rule"}-${index}`} className="mt-2 border-t border-[var(--line)] pt-2 text-xs leading-5"><p><strong>{hit.rule_id || "规则"}</strong>{hit.deduction != null ? ` · 扣 ${hit.deduction} 分` : ""}{hit.confidence != null ? ` · 置信度 ${formatRuleConfidence(hit.confidence)}` : ""}</p>{hit.evidence && <p className="mt-1 text-[var(--muted)]">证据：{String(hit.evidence)}</p>}</div>)}
                         </div>
                       })}
                     </div>

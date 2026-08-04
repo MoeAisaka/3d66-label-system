@@ -2,6 +2,10 @@ import assert from "node:assert/strict"
 
 import {
   buildCorrectionNodes,
+  confidenceLabel,
+  EMPTY_CORRECTION_HISTORY_TEXT,
+  formatRuleConfidence,
+  normalizeRuleHits,
   redlineReasonsAfterToggle,
   ruleEvidenceDelta,
 } from "../src/lib/node-correction.ts"
@@ -75,6 +79,21 @@ const dimension = nodes.find((node) => node.id === "dimension:visual_structure")
 assert(dimension)
 assert.equal(dimension.summary, "命中 1 / 2 条")
 assert.equal(dimension.ruleDefinitions?.[0].description, "主体结构明显失衡")
+assert.equal(dimension.evidenceLines[0], "r1 · 置信度高 · 主体明显偏移")
+
+// UI uses Chinese labels while requests and persisted values stay canonical.
+assert.equal(confidenceLabel("medium"), "中")
+assert.equal(confidenceLabel("中"), "中")
+assert.equal(formatRuleConfidence("medium"), "中")
+assert.equal(formatRuleConfidence(0.82), "82%")
+assert.equal(formatRuleConfidence("not-a-confidence"), "未知")
+assert(!formatRuleConfidence("medium").includes("NaN"))
+assert.deepEqual(
+  normalizeRuleHits([{ rule_id: "legacy", confidence: "中", evidence: "历史中文值" }]),
+  [{ rule_id: "legacy", confidence: "medium", evidence: "历史中文值" }],
+)
+assert.equal(EMPTY_CORRECTION_HISTORY_TEXT, "暂无纠偏历史。旧评测没有纠偏记录时会安全显示为空。")
+assert(!EMPTY_CORRECTION_HISTORY_TEXT.includes("correction_history"))
 
 const redline = nodes.find((node) => node.id === "redline:screenshot")
 assert(redline?.redlineRule)

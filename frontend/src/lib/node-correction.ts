@@ -7,6 +7,20 @@ export type NodeCorrectionType =
 
 export type NodeCorrectionConfidence = "high" | "medium" | "low"
 
+const CONFIDENCE_LABELS: Record<NodeCorrectionConfidence, string> = {
+  high: "高",
+  medium: "中",
+  low: "低",
+}
+
+const LEGACY_CONFIDENCE_VALUES: Record<string, NodeCorrectionConfidence> = {
+  高: "high",
+  中: "medium",
+  低: "low",
+}
+
+export const EMPTY_CORRECTION_HISTORY_TEXT = "暂无纠偏历史。旧评测没有纠偏记录时会安全显示为空。"
+
 export type NodeCorrectionEvidence = {
   rule_id: string
   old_confidence: NodeCorrectionConfidence | null
@@ -146,17 +160,36 @@ export function correctionValueLabel(value: unknown): string {
 }
 
 export function confidenceLabel(value: unknown): string {
-  if (value === "high") return "高"
-  if (value === "medium") return "中"
-  if (value === "low") return "低"
-  return ""
+  const normalized = normalizeConfidence(value)
+  return normalized ? CONFIDENCE_LABELS[normalized] : ""
+}
+
+export function formatRuleConfidence(value: unknown): string {
+  const label = confidenceLabel(value)
+  if (label) return label
+
+  const numeric = typeof value === "number"
+    ? value
+    : typeof value === "string" && value.trim() !== ""
+      ? Number(value)
+      : Number.NaN
+  if (Number.isFinite(numeric) && numeric >= 0 && numeric <= 1) {
+    return `${Math.round(numeric * 100)}%`
+  }
+  return "未知"
+}
+
+export function normalizeConfidence(value: unknown): NodeCorrectionConfidence | null {
+  if (value === "high" || value === "medium" || value === "low") return value
+  if (typeof value === "string") return LEGACY_CONFIDENCE_VALUES[value.trim()] ?? null
+  return null
 }
 
 export function normalizeRuleHits(value: unknown): RuleHit[] {
   if (!Array.isArray(value)) return []
   return value.flatMap((item) => {
     if (!isRecord(item) || typeof item.rule_id !== "string") return []
-    const confidence = item.confidence === "high" || item.confidence === "low" ? item.confidence : "medium"
+    const confidence = normalizeConfidence(item.confidence) ?? "medium"
     return [{
       rule_id: item.rule_id,
       confidence,
