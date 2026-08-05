@@ -138,6 +138,7 @@ from .worker_v3_authoritative import (
     build_v3_authoritative_scoring,
     evaluate_v3_authoritative,
     v3_authoritative_category,
+    v3_authoritative_for_job,
     v3_uses_rule_deductions,
 )
 from .level_semantics import (
@@ -896,7 +897,7 @@ async def evaluate_job(job_id: int) -> None:
         job = db.get(EvaluationJob, job_id)
         if not job:
             raise RuntimeError("任务不存在")
-        v3_bundle_for_job = v3_authoritative_category(db, job.category_key)
+        v3_bundle_for_job = v3_authoritative_for_job(db, job)
         asset = db.get(Asset, job.asset_id)
         if not asset:
             raise RuntimeError("图片不存在")

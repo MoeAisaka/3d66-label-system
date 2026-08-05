@@ -199,6 +199,7 @@ from .category_evaluation_v3_config_api import (
     build_category_evaluation_v3_config_router,
 )
 from .node_correction_api import build_node_correction_router
+from .worker_v3_authoritative import v3_authoritative_category
 from .evaluation_packages import (
     build_evaluation_package_router,
     publish_evaluation_package,
@@ -8854,6 +8855,9 @@ def create_baseline_run(
         request.dimension_schema_id is not None
         or request.dimension_mode != "category_default"
     )
+    frozen_v3_bundle = v3_authoritative_category(db, baseline_set.category_key)
+    if frozen_v3_bundle is not None:
+        execution_payload["v3_authoritative_bundle"] = frozen_v3_bundle
     execution_snapshot = baseline_canonical_json(execution_payload)
     previous = db.scalar(
         select(BaselineRegressionRun)
@@ -8941,6 +8945,11 @@ def create_baseline_run(
             "category_key": baseline_set.category_key,
             "dimension_selection_mode": json.loads(execution_snapshot)["dimension_selection"]["mode"],
             "dimension_schema_id": dimension_contract.schema_id if dimension_contract else None,
+            "v3_config_revision": (
+                frozen_v3_bundle.get("config_revision")
+                if frozen_v3_bundle is not None
+                else None
+            ),
             "total": run.total,
         },
         event_key=f"baseline-run:{run.id}:created",

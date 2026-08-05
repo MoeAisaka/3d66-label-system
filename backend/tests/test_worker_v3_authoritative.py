@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from types import SimpleNamespace
 from typing import Any, Iterator
 
 import pytest
@@ -35,6 +36,7 @@ from app.worker_v3_authoritative import (
     build_v3_authoritative_scoring,
     evaluate_v3_authoritative,
     v3_authoritative_category,
+    v3_authoritative_for_job,
 )
 from app.database import Base
 from app.inspiration_category_seed import (
@@ -93,6 +95,38 @@ def _seed_active_config(db: Session, category_key: str = _CATEGORY_KEY) -> int:
     db.add(config)
     db.commit()
     return config.revision
+
+
+def test_baseline_job_prefers_frozen_v3_bundle(sessions) -> None:
+    frozen = {
+        "contract": {"schema_version": "frozen-contract"},
+        "classification_map": {"format_version": "frozen-map"},
+        "subcategory_dimensions": {"class_one": {"common_group": {}}},
+        "config_revision": 17,
+    }
+    job = SimpleNamespace(
+        category_key=_CATEGORY_KEY,
+        baseline_regression_item_id=123,
+        category_profile_snapshot_json=json.dumps(
+            {"v3_authoritative_bundle": frozen}, ensure_ascii=False
+        ),
+    )
+    with sessions() as db:
+        _seed_active_config(db)
+        assert v3_authoritative_for_job(db, job) == frozen
+
+
+def test_historical_job_without_frozen_v3_bundle_uses_active_config(sessions) -> None:
+    job = SimpleNamespace(
+        category_key=_CATEGORY_KEY,
+        baseline_regression_item_id=123,
+        category_profile_snapshot_json=json.dumps({"schema_version": "legacy"}),
+    )
+    with sessions() as db:
+        _seed_active_config(db)
+        resolved = v3_authoritative_for_job(db, job)
+        assert resolved is not None
+        assert resolved["config_revision"] == 9
 
 
 # 合成的特有维度 key（仅测试用）：方案 A 的真实合同 specific_group 为空，为回归

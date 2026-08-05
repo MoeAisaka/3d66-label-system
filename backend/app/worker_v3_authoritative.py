@@ -101,6 +101,36 @@ def v3_authoritative_category(db: Session, category_key: Any) -> dict | None:
         return None
 
 
+def v3_authoritative_for_job(db: Session, job: Any) -> dict | None:
+    """Resolve a job-bound v3 bundle, preferring a frozen baseline snapshot.
+
+    Baseline regression is only reproducible when every item sees the same
+    category contract.  New baseline jobs therefore embed the complete v3
+    bundle in ``category_profile_snapshot_json``.  Historical jobs without the
+    marker retain the prior active-config lookup for backward compatibility.
+    """
+
+    snapshot_text = getattr(job, "category_profile_snapshot_json", None)
+    if getattr(job, "baseline_regression_item_id", None) is not None and snapshot_text:
+        try:
+            snapshot = json.loads(snapshot_text)
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise V3AuthoritativeError(
+                "v3_frozen_config_invalid", "基线作业的冻结执行快照无法解析"
+            ) from exc
+        if isinstance(snapshot, dict) and "v3_authoritative_bundle" in snapshot:
+            bundle = snapshot["v3_authoritative_bundle"]
+            if not isinstance(bundle, dict) or any(
+                not isinstance(bundle.get(key), dict) or not bundle.get(key)
+                for key in ("contract", "classification_map", "subcategory_dimensions")
+            ):
+                raise V3AuthoritativeError(
+                    "v3_frozen_config_invalid", "基线作业的冻结 v3 配置不完整"
+                )
+            return bundle
+    return v3_authoritative_category(db, getattr(job, "category_key", None))
+
+
 def v3_uses_rule_deductions(v3_bundle: Any, precheck: Any) -> bool:
     """Resolve whether this image's active track uses the new calling-B path."""
     if not isinstance(v3_bundle, dict) or not isinstance(precheck, dict):
