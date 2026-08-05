@@ -7,7 +7,12 @@ import json
 from sqlalchemy import func, select
 
 from app.database import SessionLocal
-from app.models import BaselineRegressionItem, BaselineRegressionRun, BaselineSet
+from app.models import (
+    BaselineRegressionItem,
+    BaselineRegressionRun,
+    BaselineSet,
+    EvaluationJob,
+)
 
 
 with SessionLocal() as db:
@@ -43,7 +48,10 @@ with SessionLocal() as db:
                 BaselineRegressionItem.id,
                 BaselineRegressionItem.asset_id,
                 BaselineRegressionItem.error_message,
+                EvaluationJob.technical_error_type,
+                EvaluationJob.error_message,
             )
+            .join(EvaluationJob, EvaluationJob.id == BaselineRegressionItem.job_id)
             .where(
                 BaselineRegressionItem.run_id == run.id,
                 BaselineRegressionItem.status == "failed",
@@ -74,8 +82,16 @@ with SessionLocal() as db:
                                 "item_id": item_id,
                                 "asset_id": asset_id,
                                 "error": error,
+                                "technical_error_type": technical_error_type,
+                                "job_error": job_error,
                             }
-                            for item_id, asset_id, error in error_samples
+                            for (
+                                item_id,
+                                asset_id,
+                                error,
+                                technical_error_type,
+                                job_error,
+                            ) in error_samples
                         ],
                         "metrics": json.loads(run.metrics_json),
                     }
