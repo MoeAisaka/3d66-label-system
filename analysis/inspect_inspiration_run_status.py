@@ -11,7 +11,10 @@ from app.models import (
     BaselineRegressionItem,
     BaselineRegressionRun,
     BaselineSet,
+    CircuitBreaker,
+    EvaluationControl,
     EvaluationJob,
+    QueueSchedulerState,
 )
 
 
@@ -62,6 +65,28 @@ with SessionLocal() as db:
         if run is not None
         else []
     )
+    job_status = (
+        dict(
+            db.execute(
+                select(EvaluationJob.status, func.count())
+                .join(
+                    BaselineRegressionItem,
+                    BaselineRegressionItem.job_id == EvaluationJob.id,
+                )
+                .where(BaselineRegressionItem.run_id == run.id)
+                .group_by(EvaluationJob.status)
+            ).all()
+        )
+        if run is not None
+        else {}
+    )
+    control = db.get(EvaluationControl, 1)
+    scheduler = db.get(QueueSchedulerState, 1)
+    open_breakers = db.scalars(
+        select(CircuitBreaker)
+        .where(CircuitBreaker.state == "open")
+        .order_by(CircuitBreaker.id)
+    ).all()
     print(
         json.dumps(
             {
@@ -77,6 +102,7 @@ with SessionLocal() as db:
                         "valid_predictions": run.valid_predictions,
                         "failed": run.failed,
                         "item_status": item_status,
+                        "job_status": job_status,
                         "error_samples": [
                             {
                                 "item_id": item_id,
@@ -94,6 +120,24 @@ with SessionLocal() as db:
                             ) in error_samples
                         ],
                         "metrics": json.loads(run.metrics_json),
+                        "evaluation_paused": control.paused if control else None,
+                        "scheduler_global_limit": (
+                            scheduler.global_limit if scheduler else None
+                        ),
+                        "open_breakers": [
+                            {
+                                "scope_type": breaker.scope_type,
+                                "scope_key": breaker.scope_key,
+                                "failure_count": breaker.failure_count,
+                                "reason": breaker.reason,
+                                "cooldown_until": (
+                                    breaker.cooldown_until.isoformat()
+                                    if breaker.cooldown_until
+                                    else None
+                                ),
+                            }
+                            for breaker in open_breakers
+                        ],
                     }
                     if run is not None
                     else None
