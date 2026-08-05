@@ -15,10 +15,10 @@ import type { User } from "@/lib/types"
 const managementGroups = [
   {
     title: "评测方案",
-    description: "维护类目冻结方案、提示词和维度定义。普通审核员开始评测时无需配置这些内容。",
+    description: "维护类目评测 v3 合同、提示词和模型配置。普通审核员开始评测时无需配置这些内容。",
     icon: SlidersHorizontal,
     entries: [
-      { to: "/workflow/optimization/dimensions", label: "类目与维度", note: "配置类目处理链、维度定义和冻结规则" },
+      { to: "/workflow/optimization/category-evaluation-v3-config", label: "类目评测 v3 合同配置", note: "四类目的分类赛道与子类目维度唯一配置入口" },
       { to: "/workflow/optimization/candidates", label: "提示词版本", note: "查看候选、变更说明和人工发布门禁" },
       { to: "/workflow/governance/model-config", label: "模型配置", note: "维护服务连接和类目可用模型" },
     ],

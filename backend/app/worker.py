@@ -1177,24 +1177,8 @@ async def evaluate_job(job_id: int) -> None:
             prompt_rubrics.add(prompt_b.rubric_version)
         if not freeform_mode and prompt_rubrics != {frozen_rubric}:
             raise RuntimeError("任务冻结类目 rubric 与 Prompt 不一致")
-        if not (freeform_mode and dimension_mode == "none"):
-            try:
-                production_dimension_contract = resolve_frozen_dimension_contract(
-                    category_profile_snapshot,
-                    bundle=frozen_bundle,
-                )
-                if production_dimension_contract is None:
-                    production_dimension_contract = resolve_published_dimension_contract(
-                        db,
-                        schema_key=category_profile_snapshot.get("dimension_schema_key"),
-                        version=category_profile_snapshot.get("dimension_schema_version"),
-                        bundle=frozen_bundle,
-                    )
-            except ProductionDimensionContractError:
-                if not freeform_mode:
-                    raise
-                production_dimension_contract = None
-                freeform_dimension_contract_unavailable = True
+        # New runs are v3-only. DimensionSchema is retained solely for
+        # historical result rendering and is never consulted for execution.
     image_path = settings.upload_dir / asset.stored_name
     if not image_path.exists():
         raise RuntimeError("原始素材文件不存在")
@@ -1716,70 +1700,65 @@ async def evaluate_job(job_id: int) -> None:
         if current_job is None or current_job.status != "processing":
             raise JobInterrupted("任务已暂停或取消，忽略本次模型返回")
 
-        # ADR-0033 Task 2b：v3 引擎权威化（仅对有 active v3 config 的新类目，如
-        # inspiration_image，且 v1 里根本不存在的类目生效）。这是**只读探针**，绝不
-        # raise：DB 里没有 active v3 config 时返回 None，老类目（space_image /
-        # material_image / pdf_text）走上面已算好的 `scoring`（1620 行）——逐字节不变。
-        #
-        # 命中 v3 权威类目时，用 v3 引擎产出的权威 score(0-100 越高越好) + level 覆盖
-        # `scoring`；level_semantics 打 v3 语义（doc-l5-worst-v1）。v3 评分 fail-closed：
+        # ADR-0033 v3-only：所有类目必须使用已冻结/active v3 合同。
+        # v3 的 score + level 是唯一权威结果；level_semantics 使用 v3 语义。
+        # 评分 fail-closed：
         # 共性/特有 grade 拿不齐或引擎异常 → V3AuthoritativeError → score/level=None +
-        # 人工复核，**绝不**降级成老引擎给出误导性分数。
+        # 人工复核，绝不降级成 v1 给出误导性分数。
         _v3_level_semantics = LEVEL_SEMANTICS_V1_L5_BEST
         v3_bundle = v3_bundle_for_job or v3_authoritative_category(
             db, current_job.category_key
         )
-        if v3_bundle is not None:
-            try:
-                v3_result = await evaluate_v3_authoritative(
-                    client,
-                    model_image_path,
-                    model_mime_type,
-                    v3_bundle=v3_bundle,
-                    precheck=precheck,
-                    aesthetic=aesthetic,
-                )
-                scoring = build_v3_authoritative_scoring(v3_result, precheck=precheck)
-                dimension_output = scoring.get("dimension_deduction_output")
-                if isinstance(dimension_output, dict):
-                    raw_payload = scoring.pop(
-                        "_dimension_deduction_raw_payload", None
-                    )
-                    aesthetic = dimension_output
-                    # Even the approved fail-open fallback must leave a
-                    # complete 调用B audit record.  It has no provider payload,
-                    # so persist the normalized empty-hit result itself.
-                    response_b_attempts.append(
-                        raw_payload if raw_payload is not None else aesthetic
-                    )
-                    response_b = SimpleNamespace(
-                        raw_text=json.dumps(aesthetic, ensure_ascii=False)
-                    )
-            except V3AuthoritativeError as exc:
-                logger.warning(
-                    "ADR-0033 v3 authoritative scoring failed (fail-closed, no v1 "
-                    "downgrade) for job %s category %s: %s",
-                    job_id,
-                    current_job.category_key,
-                    exc,
-                )
-                scoring = build_v3_authoritative_error_scoring(exc)
-            scoring["dimension_mode"] = dimension_mode
-            scoring["dimension_selection"] = dimension_selection
-            scoring["v3_config_revision"] = v3_bundle.get("config_revision")
-            # Frozen context enables deterministic node correction without
-            # consulting a potentially newer active config revision.
-            scoring["v3_context"] = {
-                "contract": v3_bundle.get("contract"),
-                "classification_map": v3_bundle.get("classification_map"),
-                "subcategory_dimensions": v3_bundle.get(
-                    "subcategory_dimensions"
-                ),
-                "config_revision": v3_bundle.get("config_revision"),
-            }
-            _v3_level_semantics = (
-                scoring.get("level_semantics_version") or LEVEL_SEMANTICS_V3_L5_WORST
+        try:
+            v3_result = await evaluate_v3_authoritative(
+                client,
+                model_image_path,
+                model_mime_type,
+                v3_bundle=v3_bundle,
+                precheck=precheck,
+                aesthetic=aesthetic,
             )
+            scoring = build_v3_authoritative_scoring(v3_result, precheck=precheck)
+            dimension_output = scoring.get("dimension_deduction_output")
+            if isinstance(dimension_output, dict):
+                raw_payload = scoring.pop(
+                    "_dimension_deduction_raw_payload", None
+                )
+                aesthetic = dimension_output
+                # Even the approved fail-open fallback must leave a
+                # complete 调用B audit record.  It has no provider payload,
+                # so persist the normalized empty-hit result itself.
+                response_b_attempts.append(
+                    raw_payload if raw_payload is not None else aesthetic
+                )
+                response_b = SimpleNamespace(
+                    raw_text=json.dumps(aesthetic, ensure_ascii=False)
+                )
+        except V3AuthoritativeError as exc:
+            logger.warning(
+                "ADR-0033 v3 authoritative scoring failed (fail-closed, no v1 "
+                "downgrade) for job %s category %s: %s",
+                job_id,
+                current_job.category_key,
+                exc,
+            )
+            scoring = build_v3_authoritative_error_scoring(exc)
+        scoring["dimension_mode"] = dimension_mode
+        scoring["dimension_selection"] = dimension_selection
+        scoring["v3_config_revision"] = v3_bundle.get("config_revision")
+        # Frozen context enables deterministic node correction without
+        # consulting a potentially newer active config revision.
+        scoring["v3_context"] = {
+            "contract": v3_bundle.get("contract"),
+            "classification_map": v3_bundle.get("classification_map"),
+            "subcategory_dimensions": v3_bundle.get(
+                "subcategory_dimensions"
+            ),
+            "config_revision": v3_bundle.get("config_revision"),
+        }
+        _v3_level_semantics = (
+            scoring.get("level_semantics_version") or LEVEL_SEMANTICS_V3_L5_WORST
+        )
 
         rubric_version = (
             prompt_b.rubric_version if prompt_b else prompt_a.rubric_version

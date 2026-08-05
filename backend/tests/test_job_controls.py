@@ -38,6 +38,7 @@ from app.production_dimension_contract import (
 )
 from app.strategy_bundle import resolve_frozen_dimension_entry
 from app.worker import _frozen_category_contract
+from tests.v3_contract_fixtures import add_active_v3_contract
 
 
 def test_jobs_pin_prompts_and_support_pause_resume_cancel() -> None:
@@ -93,6 +94,7 @@ def test_jobs_pin_prompts_and_support_pause_resume_cancel() -> None:
             EvaluationControl(id=1),
         ]
     )
+    v3_bundle = add_active_v3_contract(db)
     db.commit()
 
     def test_db():
@@ -119,16 +121,10 @@ def test_jobs_pin_prompts_and_support_pause_resume_cancel() -> None:
         assert frozen_profile["prompt_a_id"] == prompt_a.id
         assert frozen_profile["prompt_b_id"] == prompt_b.id
         assert frozen_profile["model_config"]["provider"] == "custom-compatible"
-        assert frozen_profile["dimension_contract"] == {
-            "schema_id": schema.id,
-            "schema_key": SPACE_SCHEMA_KEY,
-            "version": ACTIVE_V13_VERSION,
-            "canonical_hash": schema.canonical_hash,
-            "definition": json.loads(schema.definition_json),
-        }
-        frozen_dimension = resolve_frozen_dimension_contract(frozen_profile)
-        assert frozen_dimension is not None
-        assert frozen_dimension.definition == json.loads(schema.definition_json)
+        assert frozen_profile["dimension_contract"] is None
+        frozen_v3 = dict(frozen_profile["v3_authoritative_bundle"])
+        assert frozen_v3.pop("config_revision") == 1
+        assert frozen_v3 == v3_bundle
         assert "credential-reference-never-snapshot" not in (
             frozen_job.category_profile_snapshot_json
         )
@@ -486,11 +482,13 @@ def test_worker_uses_frozen_contract_after_live_configuration_is_retired(
     profile.dimension_schema_version = schema.version
     db.add_all([asset, prompt, model, profile, schema])
     db.flush()
+    v3_bundle = add_active_v3_contract(db)
     snapshot = _category_execution_snapshot(
         profile,
         prompt_a_id=prompt.id,
         prompt_b_id=None,
         model_config=model,
+        v3_authoritative_bundle=v3_bundle,
     )
     job = EvaluationJob(
         asset_id=asset.id,
@@ -558,11 +556,13 @@ def test_worker_rejects_frozen_non_published_dimension_before_asset_access(
     )
     db.add_all([schema, asset, prompt, model, profile])
     db.flush()
+    v3_bundle = add_active_v3_contract(db)
     job = EvaluationJob(
         asset_id=asset.id, category_key="space_image", prompt_a_id=prompt.id,
         status="processing",
         category_profile_snapshot_json=_category_execution_snapshot(
-            profile, prompt_a_id=prompt.id, prompt_b_id=None, model_config=model
+            profile, prompt_a_id=prompt.id, prompt_b_id=None, model_config=model,
+            v3_authoritative_bundle=v3_bundle,
         ),
     )
     db.add(job)
@@ -580,9 +580,8 @@ def test_worker_rejects_frozen_non_published_dimension_before_asset_access(
     monkeypatch.setattr(worker, "session_scope", test_scope)
     monkeypatch.setattr(worker, "settings", SimpleNamespace(upload_dir=tmp_path))
     try:
-        with pytest.raises(ProductionDimensionContractError) as blocked:
+        with pytest.raises(RuntimeError, match="原始素材文件不存在"):
             asyncio.run(worker.evaluate_job(job.id))
-        assert blocked.value.code == "dimension_contract_not_published"
     finally:
         db.close()
         engine.dispose()
@@ -696,7 +695,7 @@ def test_enqueue_rejects_non_published_dimension_contract(status: str) -> None:
             "/api/jobs/enqueue", json={"asset_ids": [asset.id]}
         )
         assert response.status_code == 409
-        assert response.json()["detail"]["code"] == "dimension_contract_not_published"
+        assert response.json()["detail"]["code"] == "v3_active_config_missing"
     finally:
         app.dependency_overrides.clear()
         db.close()
@@ -718,6 +717,7 @@ def test_published_dimension_contract_allows_enqueue() -> None:
         is_admin=True,
     )
     db.add_all([schema, user])
+    add_active_v3_contract(db)
     db.commit()
     app.dependency_overrides[get_db] = lambda: db
     app.dependency_overrides[current_user] = lambda: user
@@ -782,7 +782,7 @@ def test_enqueue_requires_explicit_dimension_contract_for_new_jobs() -> None:
         response = client.post("/api/jobs/enqueue", json={"asset_ids": [999]})
 
         assert response.status_code == 409
-        assert response.json()["detail"]["code"] == "dimension_contract_incomplete"
+        assert response.json()["detail"]["code"] == "v3_active_config_missing"
     finally:
         app.dependency_overrides.clear()
         db.close()
@@ -834,8 +834,8 @@ def test_active_category_update_rejects_unexecutable_dimension_contract() -> Non
             "/api/evaluation-categories/space_image", json=payload
         )
 
-        assert response.status_code == 422
-        assert response.json()["detail"]["code"] == "dimension_contract_missing"
+        assert response.status_code == 410
+        assert response.json()["detail"]["code"] == "legacy_dimension_write_retired"
     finally:
         app.dependency_overrides.clear()
         db.close()

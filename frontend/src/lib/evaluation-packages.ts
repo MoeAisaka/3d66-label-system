@@ -168,7 +168,7 @@ export function buildPipelineReadiness(
       description: categoryReady ? `“${category?.display_name}”队列当前可接收任务` : "请选择一个已经启用的类目队列",
       ready: categoryReady,
       action_label: "查看类目设置",
-      action_href: "/workflow/optimization/dimensions",
+      action_href: "/workflow/optimization/category-evaluation-v3-config",
     },
     {
       key: "configuration",

@@ -27,9 +27,6 @@ const PairedRegressionPage = lazy(() =>
 const BaselineRegressionPage = lazy(() =>
   import("@/pages/baseline-regression-page").then((module) => ({ default: module.BaselineRegressionPage })),
 )
-const DimensionManagerPage = lazy(() =>
-  import("@/pages/dimension-manager-page").then((module) => ({ default: module.DimensionManagerPage })),
-)
 const ReviewPage = lazy(() =>
   import("@/pages/review-page").then((module) => ({ default: module.ReviewPage })),
 )
@@ -132,7 +129,6 @@ export default function App() {
             <Route path="workflow/optimization/automation" element={<Suspense fallback={<RouteLoading />}><AutomationControlPage /></Suspense>} />
             <Route path="workflow/optimization/feedback" element={<Suspense fallback={<RouteLoading />}><ProductionFeedbackPage /></Suspense>} />
             <Route path="workflow/optimization/candidates" element={<Suspense fallback={<RouteLoading />}><PromptCandidatesPage /></Suspense>} />
-            <Route path="workflow/optimization/dimensions" element={<Suspense fallback={<RouteLoading />}><DimensionManagerPage /></Suspense>} />
             <Route path="workflow/optimization/category-evaluation-preview" element={<Suspense fallback={<RouteLoading />}><CategoryEvaluationPreviewPage /></Suspense>} />
             <Route path="workflow/optimization/category-evaluation-v3-config" element={<Suspense fallback={<RouteLoading />}><CategoryEvaluationV3ConfigPage /></Suspense>} />
             <Route path="workflow/optimization/paired-regression" element={<Suspense fallback={<RouteLoading />}><PairedRegressionPage user={user} /></Suspense>} />

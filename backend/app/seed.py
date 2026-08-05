@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -229,7 +230,7 @@ def seed_defaults(db: Session) -> None:
         )
     _seed_inspiration_image_prompts(db, settings)
     _seed_inspiration_image_v3_config(db)
-    _seed_legacy_placeholder_v3_configs(db)
+    _seed_v3_only_category_clones(db)
     # Existing grade-era rows are upgraded in place; fresh rows are already in
     # rule form so this converges without an extra revision bump.
     from .migrations.upgrade_v3_to_rule_deduction import (
@@ -292,17 +293,13 @@ def _seed_inspiration_image_prompts(db: Session, settings) -> None:
 
 
 def _seed_inspiration_image_v3_config(db: Session) -> None:
-    """Seed or replace the active v3 config when the frozen spec version changes.
+    """Seed the inspiration template used by all v3-only categories.
 
     Idempotent within one ``spec_version``.  A deliberately bumped frozen seed spec
     replaces the prior inspiration config exactly once and increments revision;
     otherwise startup does not overwrite later operator edits to the same spec.
-    The v3 authoritative worker branch only fires for categories that have an
-    ``active`` config here; this makes inspiration_image use v3 out of the box
-    while every legacy category (space_image / material_image / pdf_text) keeps
-    running the untouched v1 engine.  The three artifacts come from the frozen
-    seed builders and are validated by the same deterministic validators the
-    CRUD API uses before persisting.
+    The artifacts are validated by the same deterministic validators the CRUD
+    API uses, then cloned by the v3-only seed migration.
     """
     from .category_evaluation_contract import (
         canonical_contract_hash,
@@ -378,53 +375,166 @@ def _seed_inspiration_image_v3_config(db: Session) -> None:
     )
 
 
-def _seed_legacy_placeholder_v3_configs(db: Session) -> None:
-    """Seed **draft** 8-dim placeholder v3 configs for legacy categories.
 
-    产品决策（2026-08-04）：老类目（space_image / material_image / pdf_text）转 v3
-    时不预定义维度，先落一份 8 维占位 config、``status=draft``，上线后由实验台使用者
-    在前端自由增删维度/红线/赛道，补齐后自行激活。
+def _seed_v3_only_category_clones(db: Session) -> None:
+    """Seed category-safe active v3 clones from the calibrated inspiration contract.
 
-    幂等：已存在（任意 status）则跳过，绝不覆盖使用者编辑。**draft 状态下 worker 的 v3
-    权威闸门返回 None**，老类目继续走未改动的 v1 引擎——建占位=零生产风险，激活是
-    使用者的显式操作。三件套经与 CRUD API 相同的确定性校验器校验。
+    The three legacy categories start from the currently active inspiration
+    contract and its A/B prompts, but receive independent category keys,
+    versions and provenance.  Existing system-generated 8-dimension draft
+    placeholders are upgraded exactly once.  Any other existing config is
+    treated as an operator-owned edit and is never overwritten on startup.
     """
-    from .category_evaluation_contract import canonical_contract_hash
-    from .dimension_schema_registry import canonical_json
-    from .dimension_deduction_bridge import extract_dimension_deduction_rules
-    from .legacy_v3_placeholder import build_placeholder_v3_config
 
-    legacy_categories = {
-        "space_image": "空间图片",
-        "material_image": "材质图",
-        "pdf_text": "PDF 方案文本",
+    from .category_evaluation_contract import (
+        canonical_contract_hash,
+        validate_category_evaluation_contract,
+    )
+    from .dimension_composition import validate_subcategory_dimensions
+    from .dimension_deduction_bridge import extract_dimension_deduction_rules
+    from .dimension_schema_registry import canonical_json
+    from .subcategory_resolver import validate_classification_map
+
+    db.flush()
+    source = db.scalar(
+        select(CategoryEvaluationV3Config).where(
+            CategoryEvaluationV3Config.category_key == "inspiration_image",
+            CategoryEvaluationV3Config.status == "active",
+        )
+    )
+    if source is None:
+        raise RuntimeError("缺少 active 灵感图 v3 合同，无法生成其他类目初版")
+
+    source_contract = json.loads(source.contract_json)
+    source_classification = json.loads(source.classification_map_json)
+    source_dimensions = json.loads(source.subcategory_dimensions_json)
+    bindings = source_contract.get("prompt_bindings")
+    if not isinstance(bindings, dict):
+        raise RuntimeError("灵感图 v3 合同缺少 A/B prompt_bindings")
+    source_prompts: dict[str, PromptVersion] = {}
+    for stage, key in (("A", "call_a_version"), ("B", "call_b_version")):
+        version = bindings.get(key)
+        prompt = db.scalar(
+            select(PromptVersion).where(
+                PromptVersion.category_key == "inspiration_image",
+                PromptVersion.stage == stage,
+                PromptVersion.version == version,
+            )
+        )
+        if prompt is None:
+            raise RuntimeError(f"灵感图 v3 合同绑定的调用 {stage} prompt 不存在")
+        source_prompts[stage] = prompt
+
+    category_specs = {
+        "space_image": ("空间图片", "space-image"),
+        "material_image": ("材质图", "material-image"),
+        "pdf_text": ("PDF 方案文本", "pdf-text"),
     }
-    for category_key, display_name in legacy_categories.items():
-        if db.scalar(
+    for category_key, (display_name, slug) in category_specs.items():
+        prompt_versions = {
+            "A": f"{slug}-a-v3-initial-20260805",
+            "B": f"{slug}-b-v3-initial-20260805",
+        }
+        for stage, version in prompt_versions.items():
+            existing_prompt = db.scalar(
+                select(PromptVersion).where(PromptVersion.version == version)
+            )
+            if existing_prompt is not None:
+                if (
+                    existing_prompt.category_key != category_key
+                    or existing_prompt.stage != stage
+                ):
+                    raise RuntimeError(
+                        f"v3 seed prompt {version} 与类目或阶段不匹配"
+                    )
+                continue
+            template = source_prompts[stage]
+            db.add(
+                PromptVersion(
+                    stage=stage,
+                    category_key=category_key,
+                    pipeline_scope="shared",
+                    name=f"{display_name} v3 初版调用 {stage}",
+                    version=version,
+                    system_prompt=template.system_prompt,
+                    user_prompt=template.user_prompt,
+                    rubric_version=template.rubric_version,
+                    status="published",
+                    source="v3_seed_clone",
+                    change_note=(
+                        "2026-08-05 初版：复制灵感图人工校准 prompt，"
+                        "已按类目隔离版本；等待人工后续修改"
+                    ),
+                    created_by="system:v3-only-seed",
+                )
+            )
+
+        contract = deepcopy(source_contract)
+        contract["category_key"] = category_key
+        contract["spec_version"] = (
+            f"{slug}-v3-initial-from-inspiration-20260805"
+        )
+        contract["prompt_bindings"] = {
+            "call_a_version": prompt_versions["A"],
+            "call_b_version": prompt_versions["B"],
+        }
+        classification_map = deepcopy(source_classification)
+        subcategory_dimensions = deepcopy(source_dimensions)
+
+        validate_category_evaluation_contract(contract)
+        track_keys = {
+            track["key"]
+            for track in contract["track_classification"]["tracks"]
+        }
+        validate_classification_map(
+            classification_map, valid_track_keys=track_keys
+        )
+        for config in subcategory_dimensions.values():
+            validate_subcategory_dimensions(config)
+
+        persisted = {
+            "display_name": display_name,
+            "status": "active",
+            "contract_json": canonical_json(contract),
+            "classification_map_json": canonical_json(classification_map),
+            "subcategory_dimensions_json": canonical_json(
+                subcategory_dimensions
+            ),
+            "dimension_deduction_rules_json": canonical_json(
+                extract_dimension_deduction_rules(subcategory_dimensions)
+            ),
+            "media_penalty_enabled": source.media_penalty_enabled,
+            "contract_hash": canonical_contract_hash(contract),
+            "created_by": "system:v3-only-seed",
+        }
+        existing = db.scalar(
             select(CategoryEvaluationV3Config).where(
                 CategoryEvaluationV3Config.category_key == category_key
             )
-        ) is not None:
-            continue
-        built = build_placeholder_v3_config(category_key)
-        db.add(
-            CategoryEvaluationV3Config(
-                category_key=category_key,
-                display_name=display_name,
-                status="draft",
-                contract_json=canonical_json(built["contract"]),
-                classification_map_json=canonical_json(built["classification_map"]),
-                subcategory_dimensions_json=canonical_json(
-                    built["subcategory_dimensions"]
-                ),
-                dimension_deduction_rules_json=canonical_json(
-                    extract_dimension_deduction_rules(
-                        built["subcategory_dimensions"]
-                    )
-                ),
-                media_penalty_enabled=False,
-                revision=1,
-                contract_hash=canonical_contract_hash(built["contract"]),
-                created_by="system",
-            )
         )
+        if existing is None:
+            db.add(
+                CategoryEvaluationV3Config(
+                    category_key=category_key,
+                    revision=1,
+                    **persisted,
+                )
+            )
+            continue
+
+        try:
+            existing_contract = json.loads(existing.contract_json or "{}")
+        except (json.JSONDecodeError, TypeError):
+            existing_contract = {}
+        if existing_contract.get("spec_version") == contract["spec_version"]:
+            continue
+        is_system_placeholder = (
+            existing.created_by == "system"
+            and existing.status == "draft"
+            and existing_contract.get("category_key") == category_key
+        )
+        if not is_system_placeholder:
+            continue
+        for field, value in persisted.items():
+            setattr(existing, field, value)
+        existing.revision += 1

@@ -47,6 +47,7 @@ from app.models import (
     PromptVersion,
     User,
 )
+from tests.v3_contract_fixtures import add_active_v3_contract
 
 
 def test_baseline_run_selection_uses_frozen_v3_contract_dimension_counts() -> None:
@@ -197,6 +198,7 @@ def test_baseline_api_freezes_truth_reports_and_enqueues_idempotently() -> None:
     )
     Base.metadata.create_all(engine)
     db = Session(engine, expire_on_commit=False)
+    add_active_v3_contract(db)
     user = User(username="tester", password_hash="unused", display_name="测试员")
     asset = Asset(
         original_name="baseline.jpg", stored_name="baseline.jpg", mime_type="image/jpeg",
@@ -406,6 +408,7 @@ def test_baseline_whole_package_supports_10000_items_and_jobs() -> None:
     )
     Base.metadata.create_all(engine)
     db = Session(engine, expire_on_commit=False)
+    add_active_v3_contract(db)
     user = User(username="bulk-tester", password_hash="unused", display_name="批量测试员")
     model = ModelConfig(
         name="bulk-model",
@@ -520,6 +523,7 @@ def test_cancel_jobs_finishes_baseline_run_and_allows_next_run() -> None:
     )
     Base.metadata.create_all(engine)
     db = Session(engine, expire_on_commit=False)
+    add_active_v3_contract(db)
     user = User(
         username="baseline-cancel-tester",
         password_hash="unused",
@@ -700,6 +704,7 @@ def test_baseline_run_can_freeze_manual_prompt_pair_and_reserves_dimension_choic
     )
     Base.metadata.create_all(engine)
     db = Session(engine, expire_on_commit=False)
+    add_active_v3_contract(db)
     user = User(
         username="tester",
         password_hash="unused",
@@ -861,8 +866,8 @@ def test_baseline_run_can_freeze_manual_prompt_pair_and_reserves_dimension_choic
             f"/api/baseline-sets/{set_id}/runs",
             json={"dimension_schema_id": 99991},
         )
-        assert reserved_dimension.status_code == 404
-        assert "维度版本不存在" in reserved_dimension.text
+        assert reserved_dimension.status_code == 410
+        assert reserved_dimension.json()["detail"]["code"] == "legacy_dimension_write_retired"
 
         missing = client.post(
             f"/api/baseline-sets/{set_id}/runs",
@@ -887,7 +892,6 @@ def test_baseline_run_can_freeze_manual_prompt_pair_and_reserves_dimension_choic
             json={
                 "prompt_a_id": draft_a.id,
                 "prompt_b_id": draft_b.id,
-                "dimension_mode": "none",
             },
         )
         assert response.status_code == 200
@@ -896,12 +900,8 @@ def test_baseline_run_can_freeze_manual_prompt_pair_and_reserves_dimension_choic
         assert payload["selection"]["prompt_a"]["version"] == "A-draft"
         assert payload["selection"]["prompt_b"]["id"] == draft_b.id
         assert payload["selection"]["prompt_b"]["version"] == "B-draft"
-        assert payload["selection"]["dimension"]["mode"] == "none"
-        assert payload["selection"]["dimension"]["effective_keys"] == []
-        assert (
-            payload["selection"]["dimension"]["manual_selection_supported"]
-            is True
-        )
+        assert payload["selection"]["dimension"]["v3_contract"] is not None
+        assert payload["selection"]["dimension"]["v3_contract"]["tracks"]
 
         run = db.get(BaselineRegressionRun, payload["id"])
         assert run is not None
@@ -958,11 +958,10 @@ def test_baseline_run_can_freeze_manual_prompt_pair_and_reserves_dimension_choic
         scoring = json.loads(result.scoring_json)
         assert completed_job.status == "completed"
         assert completed_item.status == "completed"
-        assert result.level is None
-        assert result.score is None
-        assert scoring["interpretation_status"] == "manual_required"
-        assert len(calls) == 2
-        assert "A 自由结论" in calls[1]
+        assert result.level is not None
+        assert result.score is not None
+        assert scoring["scoring_mode"] == "v3_authoritative"
+        assert calls == ["draft user a"]
 
         detail = client.get(
             f"/api/baseline-regressions/{run.id}"
@@ -972,11 +971,9 @@ def test_baseline_run_can_freeze_manual_prompt_pair_and_reserves_dimension_choic
             detail.json()["summary"]["selection"]["prompt_b"]["version"]
             == "B-draft"
         )
-        assert detail.json()["items"][0]["interpretation"] == {
-            "status": "manual_required",
-            "raw_text_a": "A 自由结论",
-            "raw_text_b": "B 自由结论，已参考 A 自由结论",
-        }
+        interpretation = detail.json()["items"][0]["interpretation"]
+        assert interpretation["status"] == "scored"
+        assert "调用B失败" in interpretation["raw_text_b"]
         set_detail = client.get(f"/api/baseline-sets/{set_id}")
         assert (
             set_detail.json()["runs"][0]["selection"]["prompt_a"]["version"]
@@ -998,6 +995,7 @@ def test_category_dimension_snapshot_and_isolated_correction_retry(
     )
     Base.metadata.create_all(engine)
     db = Session(engine, expire_on_commit=False)
+    add_active_v3_contract(db, "material_image")
     user = User(
         username="baseline-analysis-tester",
         password_hash="unused",
@@ -1089,11 +1087,8 @@ def test_category_dimension_snapshot_and_isolated_correction_retry(
         assert run is not None
         assert run.category_key == "material_image"
         selection = created_run.json()["selection"]["dimension"]
-        assert selection["mode"] == "selected"
-        assert selection["effective_keys"] == [
-            "color_material",
-            "detail_completion",
-        ]
+        assert selection["v3_contract"] is not None
+        assert selection["v3_contract"]["tracks"]
         job = db.get(EvaluationJob, run.items[0].job_id)
         assert job is not None
         assert job.category_key == "material_image"
@@ -1235,16 +1230,8 @@ def test_category_dimension_snapshot_and_isolated_correction_retry(
             f"/api/baseline-sets/{created_set.json()['id']}/runs",
             json={"prompt_id": prompt.id, "dimension_mode": "none"},
         )
-        assert prompt_only.status_code == 200
-        assert prompt_only.json()["selection"]["dimension"]["mode"] == "none"
-        assert prompt_only.json()["selection"]["dimension"]["prompt_only"] is True
-        prompt_only_run = db.get(BaselineRegressionRun, prompt_only.json()["id"])
-        assert prompt_only_run is not None
-        prompt_only_job = db.get(EvaluationJob, prompt_only_run.items[0].job_id)
-        assert prompt_only_job is not None
-        prompt_only_snapshot = json.loads(prompt_only_job.category_profile_snapshot_json)
-        assert prompt_only_snapshot["dimension_contract"] is None
-        assert prompt_only_snapshot["dimension_selection"]["effective_keys"] == []
+        assert prompt_only.status_code == 410
+        assert prompt_only.json()["detail"]["code"] == "legacy_dimension_write_retired"
     finally:
         app.dependency_overrides.clear()
         db.close()

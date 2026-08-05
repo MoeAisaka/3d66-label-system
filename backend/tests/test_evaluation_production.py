@@ -37,6 +37,7 @@ from app.strategy_bundle import (
     build_evaluation_strategy_snapshot,
     get_or_create_bundle,
 )
+from tests.v3_contract_fixtures import add_active_v3_contract
 
 
 @contextmanager
@@ -130,6 +131,7 @@ def _context(
         )
         profile.dimension_schema_key = SPACE_SCHEMA_KEY
         profile.dimension_schema_version = ACTIVE_V13_VERSION
+        add_active_v3_contract(db)
         db.commit()
 
     def override_db() -> Iterator[Session]:
@@ -493,6 +495,7 @@ def test_reconcile_links_real_final_package_without_approving_or_publishing() ->
         profile.model_config_id = fixture["model"].id
         profile.dimension_schema_key = SPACE_SCHEMA_KEY
         profile.dimension_schema_version = ACTIVE_V13_VERSION
+        add_active_v3_contract(db)
         db.commit()
         created = _create(client, material.id, "production-final-package")
         assert created.status_code == 200, created.text

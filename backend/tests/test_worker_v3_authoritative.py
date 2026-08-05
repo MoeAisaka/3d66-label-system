@@ -1,20 +1,12 @@
-"""ADR-0033 Task 2b tests: v3 引擎权威化路由（仅 inspiration_image 新类目，直接换）。
+"""ADR-0033 v3-only authoritative worker tests.
 
-Exercises ``worker_v3_authoritative`` directly against an isolated in-memory
-SQLite engine (StaticPool) — no worker, no queue, no real DB, no real network
-(a fake client supplies 调用B).  Sticks to the repo ``asyncio.run`` convention.
+Exercises ``worker_v3_authoritative`` against isolated in-memory SQLite with
+no queue, real database, or network.
 
 Coverage:
-1. ``v3_authoritative_category``: no active config → None; active config →
-   assembled bundle; corrupt config json → None (fail-closed).
-2. ``evaluate_v3_authoritative``: redline hit → hard_reject / L5 / score≤49;
-   normal in_scope → score(0-100) + level + level_semantics_version=
-   doc-l5-worst-v1 + track_key; common grade unavailable → V3AuthoritativeError;
-   specific 调用B error → V3AuthoritativeError.
-3. 非侵入证明: a space_image (no v3 config) → v3_authoritative_category None and
-   the old calculate_score path produces byte-identical scoring.
-4. score direction: 高质量 → 高 score + 低 L (L1/L2); 低质量 → 低 score + 高 L
-   (L4/L5).  "score 越高越好" 与 "L5 最差" 并存不矛盾.
+1. Missing/corrupt active configs and invalid frozen bundles fail closed.
+2. Redline, normal scoring, missing grades, and 调用B errors are deterministic.
+3. Higher quality maps to higher score and lower L; L5 remains worst.
 """
 
 from __future__ import annotations
@@ -99,9 +91,9 @@ def _seed_active_config(db: Session, category_key: str = _CATEGORY_KEY) -> int:
 
 def test_baseline_job_prefers_frozen_v3_bundle(sessions) -> None:
     frozen = {
-        "contract": {"schema_version": "frozen-contract"},
-        "classification_map": {"format_version": "frozen-map"},
-        "subcategory_dimensions": {"class_one": {"common_group": {}}},
+        "contract": build_inspiration_v3_contract(),
+        "classification_map": build_inspiration_classification_map(),
+        "subcategory_dimensions": build_inspiration_subcategory_dimensions(),
         "config_revision": 17,
     }
     job = SimpleNamespace(
@@ -251,12 +243,14 @@ def _class_two_precheck(confidence: float = 0.95) -> dict[str, Any]:
 # --------------------------------------------------------------------------- #
 
 
-def test_no_active_config_returns_none(sessions: sessionmaker[Session]) -> None:
+def test_no_active_config_fails_closed(sessions: sessionmaker[Session]) -> None:
     with sessions() as db:
-        assert v3_authoritative_category(db, _CATEGORY_KEY) is None
+        with pytest.raises(V3AuthoritativeError) as excinfo:
+            v3_authoritative_category(db, _CATEGORY_KEY)
+        assert excinfo.value.code == "v3_active_config_missing"
 
 
-def test_non_active_config_returns_none(sessions: sessionmaker[Session]) -> None:
+def test_non_active_config_fails_closed(sessions: sessionmaker[Session]) -> None:
     with sessions() as db:
         db.add(
             CategoryEvaluationV3Config(
@@ -273,7 +267,9 @@ def test_non_active_config_returns_none(sessions: sessionmaker[Session]) -> None
             )
         )
         db.commit()
-        assert v3_authoritative_category(db, _CATEGORY_KEY) is None
+        with pytest.raises(V3AuthoritativeError) as excinfo:
+            v3_authoritative_category(db, _CATEGORY_KEY)
+        assert excinfo.value.code == "v3_active_config_missing"
 
 
 def test_active_config_returns_bundle(sessions: sessionmaker[Session]) -> None:
@@ -290,7 +286,7 @@ def test_active_config_returns_bundle(sessions: sessionmaker[Session]) -> None:
     assert isinstance(bundle["subcategory_dimensions"], dict)
 
 
-def test_corrupt_config_json_returns_none(sessions: sessionmaker[Session]) -> None:
+def test_corrupt_config_json_fails_closed(sessions: sessionmaker[Session]) -> None:
     with sessions() as db:
         db.add(
             CategoryEvaluationV3Config(
@@ -303,10 +299,12 @@ def test_corrupt_config_json_returns_none(sessions: sessionmaker[Session]) -> No
             )
         )
         db.commit()
-        assert v3_authoritative_category(db, _CATEGORY_KEY) is None
+        with pytest.raises(V3AuthoritativeError) as excinfo:
+            v3_authoritative_category(db, _CATEGORY_KEY)
+        assert excinfo.value.code == "v3_active_config_invalid"
 
 
-def test_empty_json_blocks_return_none(sessions: sessionmaker[Session]) -> None:
+def test_empty_json_blocks_fail_closed(sessions: sessionmaker[Session]) -> None:
     with sessions() as db:
         db.add(
             CategoryEvaluationV3Config(
@@ -319,16 +317,20 @@ def test_empty_json_blocks_return_none(sessions: sessionmaker[Session]) -> None:
             )
         )
         db.commit()
-        assert v3_authoritative_category(db, _CATEGORY_KEY) is None
+        with pytest.raises(V3AuthoritativeError) as excinfo:
+            v3_authoritative_category(db, _CATEGORY_KEY)
+        assert excinfo.value.code == "v3_active_config_invalid"
 
 
 @pytest.mark.parametrize("bad_key", [None, "", 123])
-def test_invalid_category_key_returns_none(
+def test_invalid_category_key_fails_closed(
     sessions: sessionmaker[Session], bad_key: Any
 ) -> None:
     with sessions() as db:
         _seed_active_config(db)
-        assert v3_authoritative_category(db, bad_key) is None
+        with pytest.raises(V3AuthoritativeError) as excinfo:
+            v3_authoritative_category(db, bad_key)
+        assert excinfo.value.code == "v3_category_key_invalid"
 
 
 # --------------------------------------------------------------------------- #
@@ -624,9 +626,10 @@ def test_space_image_no_v3_config_routes_to_none(
     gate returns None even when an unrelated inspiration_image config is active."""
     with sessions() as db:
         _seed_active_config(db, category_key=_CATEGORY_KEY)  # 不同类目的 active config
-        assert v3_authoritative_category(db, "space_image") is None
-        assert v3_authoritative_category(db, "material_image") is None
-        assert v3_authoritative_category(db, "pdf_text") is None
+        for category_key in ("space_image", "material_image", "pdf_text"):
+            with pytest.raises(V3AuthoritativeError) as excinfo:
+                v3_authoritative_category(db, category_key)
+            assert excinfo.value.code == "v3_active_config_missing"
 
 
 def test_old_category_calculate_score_byte_identical(
@@ -649,7 +652,9 @@ def test_old_category_calculate_score_byte_identical(
     # scoring dict.  (Comparing canonical JSON proves byte-identity.)
     with sessions() as db:
         _seed_active_config(db, category_key=_CATEGORY_KEY)
-        assert v3_authoritative_category(db, "space_image") is None
+        with pytest.raises(V3AuthoritativeError) as excinfo:
+            v3_authoritative_category(db, "space_image")
+        assert excinfo.value.code == "v3_active_config_missing"
     with_v3_present = calculate_score(_v1_precheck(), _v1_aesthetic(4))
 
     assert json.dumps(with_v3_present, ensure_ascii=False, sort_keys=True) == json.dumps(
@@ -671,8 +676,63 @@ def test_routing_gate_issues_no_writes(sessions: sessionmaker[Session]) -> None:
 
         for _ in range(3):
             v3_authoritative_category(db, _CATEGORY_KEY)
-            v3_authoritative_category(db, "space_image")
+            with pytest.raises(V3AuthoritativeError):
+                v3_authoritative_category(db, "space_image")
 
         after = db.scalars(select(CategoryEvaluationV3Config)).all()
         assert len(after) == count_before
         assert after[0].revision == rev_before
+
+
+def test_missing_active_config_fails_closed_instead_of_returning_v1_route(
+    sessions: sessionmaker[Session],
+) -> None:
+    with sessions() as db:
+        with pytest.raises(V3AuthoritativeError) as excinfo:
+            v3_authoritative_category(db, "space_image")
+    assert excinfo.value.code == "v3_active_config_missing"
+    assert "缺少 active v3 合同" in str(excinfo.value)
+
+
+def test_corrupt_active_config_fails_closed_instead_of_returning_v1_route(
+    sessions: sessionmaker[Session],
+) -> None:
+    with sessions() as db:
+        db.add(
+            CategoryEvaluationV3Config(
+                category_key="space_image",
+                display_name="空间图片",
+                status="active",
+                contract_json="{broken",
+                classification_map_json="{}",
+                subcategory_dimensions_json="{}",
+            )
+        )
+        db.commit()
+        with pytest.raises(V3AuthoritativeError) as excinfo:
+            v3_authoritative_category(db, "space_image")
+    assert excinfo.value.code == "v3_active_config_invalid"
+    assert "active v3 合同无效" in str(excinfo.value)
+
+
+def test_frozen_bundle_with_mismatched_category_fails_closed(
+    sessions: sessionmaker[Session],
+) -> None:
+    frozen = {
+        "contract": build_inspiration_v3_contract(),
+        "classification_map": build_inspiration_classification_map(),
+        "subcategory_dimensions": build_inspiration_subcategory_dimensions(),
+        "config_revision": 3,
+    }
+    job = SimpleNamespace(
+        category_key="space_image",
+        baseline_regression_item_id=None,
+        category_profile_snapshot_json=json.dumps(
+            {"v3_authoritative_bundle": frozen}, ensure_ascii=False
+        ),
+    )
+    with sessions() as db:
+        with pytest.raises(V3AuthoritativeError) as excinfo:
+            v3_authoritative_for_job(db, job)
+    assert excinfo.value.code == "v3_frozen_config_invalid"
+    assert "类目不匹配" in str(excinfo.value)

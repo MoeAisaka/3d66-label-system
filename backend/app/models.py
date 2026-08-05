@@ -359,14 +359,11 @@ class EvaluationCategoryProfile(Base):
 
 
 class CategoryEvaluationV3Config(Base):
-    """Persisted ADR-0033 v3 category-evaluation contract (isolated from v1).
+    """Persisted ADR-0033 category-evaluation contract.
 
-    This is a standalone store for the v3 contract assembled by
-    ``inspiration_category_seed`` (红线 + 子类目赛道 + 共性/特有维度组 +
-    分类映射).  It deliberately shares **nothing** with the v1
-    ``EvaluationCategoryProfile`` pipeline: separate table, separate key space,
-    separate CRUD.  Nothing here is wired into the worker / scoring path — rows
-    are draft configs awaiting canary/regression validation before any线上接入.
+    Every new full or baseline run freezes the category's active row. Its
+    contract and subcategory dimensions are the sole runtime authority; legacy
+    profile dimension fields remain historical metadata.
     """
 
     __tablename__ = "category_evaluation_v3_configs"
@@ -928,6 +925,10 @@ class StrategyBundle(Base):
 
 class DimensionSchema(Base):
     __tablename__ = "dimension_schemas"
+    """Legacy immutable registry retained for historical reads.
+
+    New evaluation runs never resolve this table as an execution contract.
+    """
     __table_args__ = (
         CheckConstraint(
             "length(trim(schema_key)) > 0",

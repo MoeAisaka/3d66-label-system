@@ -1,3 +1,8 @@
+"""Canonical helpers plus the historical read-only v1 dimension registry.
+
+Registry rows/builders are compatibility-only, not authoritative for new runs.
+"""
+
 from __future__ import annotations
 
 import hashlib

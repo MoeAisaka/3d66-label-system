@@ -406,102 +406,32 @@ def test_read_only_dimension_schema_registry_api(engine) -> None:
         app.dependency_overrides.clear()
 
 
-def test_admin_dimension_schema_api_manages_drafts_and_preserves_published_versions(
-    engine,
-) -> None:
+def test_admin_dimension_schema_write_api_is_retired(engine) -> None:
     session_factory = sessionmaker(bind=engine, expire_on_commit=False)
 
     def override_db():
         with session_factory() as db:
             yield db
 
-    admin = User(
-        id=91,
-        username="dimension-admin",
-        password_hash="unused",
-        role="admin",
-        is_admin=True,
-    )
     app.dependency_overrides[get_db] = override_db
-    app.dependency_overrides[current_user] = lambda: admin
+    app.dependency_overrides[current_user] = lambda: User(
+        id=91, username="dimension-admin", password_hash="unused",
+        role="admin", is_admin=True,
+    )
     client = TestClient(app)
     try:
         source = client.get(
-            f"/api/dimension-schemas/{SPACE_SCHEMA_KEY}"
-            f"/versions/{ACTIVE_V13_VERSION}"
+            f"/api/dimension-schemas/{SPACE_SCHEMA_KEY}/versions/{ACTIVE_V13_VERSION}"
         ).json()
-        definition = _managed_definition(source["definition"])
-        definition["package_version"] = "managed-draft-v1"
-        created = client.post(
-            "/api/dimension-schemas",
-            json={
-                "schema_key": "test.managed",
-                "version": "1.0.0",
-                "schema_type": "family_pack",
-                "family_key": "space",
-                "display_name": "可管理草稿",
-                "definition": definition,
-                "parent_schema_id": source["id"],
-                "core_schema_id": None,
-            },
-        )
-        assert created.status_code == 201, created.text
-        draft = created.json()
-        assert draft["status"] == "draft"
-
-        definition["package_version"] = "managed-draft-v2"
-        updated = client.put(
-            f"/api/dimension-schemas/{draft['id']}",
-            json={
-                "display_name": "已编辑草稿",
-                "definition": definition,
-                "parent_schema_id": source["id"],
-                "core_schema_id": None,
-            },
-        )
-        assert updated.status_code == 200, updated.text
-        assert updated.json()["display_name"] == "已编辑草稿"
-
-        published = client.post(
-            f"/api/dimension-schemas/{draft['id']}/publish"
-        )
-        assert published.status_code == 200, published.text
-        assert published.json()["status"] == "published"
-
-        assert client.put(
-            f"/api/dimension-schemas/{draft['id']}",
-            json={
-                "display_name": "禁止覆盖",
-                "definition": definition,
-                "parent_schema_id": source["id"],
-                "core_schema_id": None,
-            },
-        ).status_code == 409
-        assert client.delete(
-            f"/api/dimension-schemas/{draft['id']}"
-        ).status_code == 409
-
-        definition["package_version"] = "temporary-delete-v1"
-        temporary = client.post(
-            "/api/dimension-schemas",
-            json={
-                "schema_key": "test.temporary",
-                "version": "1.0.0",
-                "schema_type": "family_pack",
-                "family_key": "space",
-                "display_name": "待删除草稿",
-                "definition": definition,
-            },
-        )
-        assert temporary.status_code == 201, temporary.text
-        deleted = client.delete(
-            f"/api/dimension-schemas/{temporary.json()['id']}"
-        )
-        assert deleted.status_code == 200, deleted.text
-        assert deleted.json() == {"ok": True}
+        response = client.post("/api/dimension-schemas", json={
+            "schema_key": "test.retired", "version": "1.0.0",
+            "schema_type": "family_pack", "family_key": "space",
+            "display_name": "旧写入口", "definition": source["definition"],
+        })
+        assert response.status_code == 410
+        assert response.json()["detail"]["code"] == "legacy_dimension_write_retired"
     finally:
         app.dependency_overrides.clear()
-
 
 def test_dimension_schema_write_requires_admin(engine) -> None:
     session_factory = sessionmaker(bind=engine, expire_on_commit=False)
@@ -542,9 +472,7 @@ def test_dimension_schema_write_requires_admin(engine) -> None:
         app.dependency_overrides.clear()
 
 
-def test_admin_dimension_schema_crud_creates_new_version_and_freezes_publish(
-    engine,
-) -> None:
+def test_admin_dimension_schema_mutations_are_all_retired(engine) -> None:
     session_factory = sessionmaker(bind=engine, expire_on_commit=False)
 
     def override_db():
@@ -553,144 +481,15 @@ def test_admin_dimension_schema_crud_creates_new_version_and_freezes_publish(
 
     app.dependency_overrides[get_db] = override_db
     app.dependency_overrides[current_user] = lambda: User(
-        id=1,
-        username="schema-admin",
-        password_hash="unused",
-        is_admin=True,
-        role="admin",
+        id=1, username="schema-admin", password_hash="unused",
+        is_admin=True, role="admin",
     )
     client = TestClient(app)
     try:
-        with session_factory() as db:
-            definition = _managed_definition(
-                _definition_by_version(db, ACTIVE_V13_VERSION)
-            )
-        invalid_definition = json.loads(json.dumps(definition))
-        invalid_definition["dimensions"][0]["key"] = "Invalid-Key"
-        invalid = client.post(
-            "/api/dimension-schemas",
-            json={
-                "schema_key": "space.invalid-managed-test",
-                "version": "1.0.0",
-                "schema_type": "family_pack",
-                "family_key": "space",
-                "display_name": "无效维度管理测试",
-                "definition": invalid_definition,
-            },
-        )
-        assert invalid.status_code == 422
-        assert "key" in invalid.json()["detail"]
-
-        missing_metadata = json.loads(json.dumps(definition))
-        missing_metadata["dimensions"][0]["description"] = ""
-        rejected_metadata = client.post(
-            "/api/dimension-schemas",
-            json={
-                "schema_key": "space.missing-managed-metadata",
-                "version": "1.0.0",
-                "schema_type": "family_pack",
-                "family_key": "space",
-                "display_name": "缺少评审元数据",
-                "definition": missing_metadata,
-            },
-        )
-        assert rejected_metadata.status_code == 422
-        assert "评审说明" in rejected_metadata.json()["detail"]
-
-        missing_anchor = json.loads(json.dumps(definition))
-        missing_anchor["dimensions"][0]["anchors"].pop("2")
-        rejected_anchor = client.post(
-            "/api/dimension-schemas",
-            json={
-                "schema_key": "space.missing-managed-anchor",
-                "version": "1.0.0",
-                "schema_type": "family_pack",
-                "family_key": "space",
-                "display_name": "缺少维度锚点",
-                "definition": missing_anchor,
-            },
-        )
-        assert rejected_anchor.status_code == 422
-        assert "1-5 级锚点" in rejected_anchor.json()["detail"]
-
-        definition["package_version"] = "managed-v1"
-        created = client.post(
-            "/api/dimension-schemas",
-            json={
-                "schema_key": "space.managed-test",
-                "version": "1.0.0",
-                "schema_type": "family_pack",
-                "family_key": "space",
-                "display_name": "空间管理测试",
-                "definition": definition,
-            },
-        )
-        assert created.status_code == 201, created.text
-        schema_id = created.json()["id"]
-        assert created.json()["status"] == "draft"
-        assert created.json()["definition"] == definition
-
-        # Replacing one dimension proves that a draft can both remove an old
-        # key and add a new category-specific key.  It does not mutate either
-        # published built-in schema.
-        managed = json.loads(json.dumps(definition))
-        removed_key = managed["dimensions"][-1]["key"]
-        added_key = "material_authenticity"
-        managed["dimensions"][-1]["key"] = added_key
-        managed["dimensions"][-1]["label"] = "材质真实性"
-        remaining_keys = [item["key"] for item in managed["dimensions"]]
-        managed["output_contract"]["dimension_output_keys"] = remaining_keys
-        managed["risk_review"]["dimension_keys"] = remaining_keys
-        managed["core_dimension_keys"] = [
-            added_key if key == removed_key else key
-            for key in managed["core_dimension_keys"]
-        ]
-        updated = client.put(
-            f"/api/dimension-schemas/{schema_id}",
-            json={
-                "display_name": "空间管理测试｜自定义维度",
-                "definition": managed,
-            },
-        )
-        assert updated.status_code == 200, updated.text
-        managed_keys = {
-            item["key"] for item in updated.json()["definition"]["dimensions"]
-        }
-        assert added_key in managed_keys
-        assert removed_key not in managed_keys
-
-        published = client.post(
-            f"/api/dimension-schemas/{schema_id}/publish"
-        )
-        assert published.status_code == 200, published.text
-        assert published.json()["status"] == "published"
-        assert published.json()["canonical_hash"] == canonical_hash(managed)
-
-        immutable_update = client.put(
-            f"/api/dimension-schemas/{schema_id}",
-            json={
-                "display_name": "不允许覆盖",
-                "definition": definition,
-            },
-        )
-        assert immutable_update.status_code == 409
-        immutable_delete = client.delete(
-            f"/api/dimension-schemas/{schema_id}"
-        )
-        assert immutable_delete.status_code == 409
-
-        detail = client.get(
-            "/api/dimension-schemas/space.managed-test/versions/1.0.0"
-        )
-        assert detail.status_code == 200
-        detail_keys = {
-            item["key"] for item in detail.json()["definition"]["dimensions"]
-        }
-        assert added_key in detail_keys
-        assert removed_key not in detail_keys
-        with session_factory() as db:
-            assert len(
-                _definition_by_version(db, ACTIVE_V13_VERSION)["dimensions"]
-            ) == 8
+        for method, path in (("put", "/api/dimension-schemas/999"), ("delete", "/api/dimension-schemas/999"), ("post", "/api/dimension-schemas/999/publish")):
+            body = {"display_name": "旧维度", "definition": {}} if method == "put" else None
+            response = client.request(method, path, json=body)
+            assert response.status_code == 410
+            assert response.json()["detail"]["code"] == "legacy_dimension_write_retired"
     finally:
         app.dependency_overrides.clear()

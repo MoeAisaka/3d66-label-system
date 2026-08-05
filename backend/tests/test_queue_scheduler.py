@@ -49,6 +49,7 @@ from app.queue_scheduler import (
     reserved_capacities,
     retry_delay_seconds,
 )
+from tests.v3_contract_fixtures import add_active_v3_contract
 
 
 def test_default_reserved_shares_and_small_concurrency_guarantees() -> None:
@@ -706,6 +707,7 @@ def test_enqueue_compatibility_manual_canary_queue_status_and_breaker_api() -> N
         published_at=datetime.now(timezone.utc),
     )
     db.add_all([user, asset, prompt_a, prompt_b, model, dimension_schema])
+    add_active_v3_contract(db)
     db.commit()
 
     def test_db():

@@ -35,6 +35,7 @@ from app.models import (
 )
 from app.scoring import ENGINE_VERSION
 from app.strategy_bundle import build_strategy_snapshot, get_or_create_bundle
+from tests.v3_contract_fixtures import add_active_v3_contract
 
 
 def _attempt(
@@ -1586,6 +1587,7 @@ def test_worker_rejects_frozen_bundle_prompt_drift(monkeypatch) -> None:
         rubric_version="R-v1",
     )
     db.add_all([asset, model, prompt_a, prompt_b])
+    add_active_v3_contract(db)
     db.flush()
     bundle = get_or_create_bundle(
         db,

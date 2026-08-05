@@ -198,8 +198,6 @@ export const baselineRegressionApi = {
     prompt_a_id?: number
     prompt_b_id?: number
     execution_mode?: "freeform" | "structured"
-    dimension_schema_id?: number
-    dimension_mode?: "category_default" | "all" | "none"
   } = {}) => api<BaselineRegressionRun & { job_ids: number[] }>(
     `/api/baseline-sets/${setId}/runs`,
     { method: "POST", ...jsonBody(payload) },

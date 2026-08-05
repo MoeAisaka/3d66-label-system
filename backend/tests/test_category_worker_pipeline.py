@@ -14,10 +14,7 @@ from app import worker
 from app.category_pipeline import default_pipeline
 from app.database import Base
 from app.doubao import DoubaoResponse
-from app.main import (
-    _category_execution_snapshot,
-    _evaluation_dimension_schema_payload,
-)
+from app.main import _category_execution_snapshot
 from app.media import PdfPreprocessResult
 from app.models import (
     Asset,
@@ -27,7 +24,7 @@ from app.models import (
     ModelConfig,
     PromptVersion,
 )
-from app.review_panel import _model_truth
+from tests.v3_contract_fixtures import add_active_v3_contract
 
 
 def _combined_payload() -> dict[str, object]:
@@ -224,11 +221,13 @@ def test_pdf_worker_summarizes_before_single_prompt_evaluation(
     )
     db.add_all([asset, prompt, model, profile])
     db.flush()
+    v3_bundle = add_active_v3_contract(db, "pdf_text")
     snapshot = _category_execution_snapshot(
         profile,
         prompt_a_id=prompt.id,
         prompt_b_id=None,
         model_config=model,
+        v3_authoritative_bundle=v3_bundle,
     )
     job = EvaluationJob(
         asset_id=asset.id,
@@ -307,10 +306,11 @@ def test_pdf_worker_summarizes_before_single_prompt_evaluation(
     )
     try:
         asyncio.run(worker.evaluate_job(job.id))
-        assert len(calls) == 2
+        assert len(calls) == 3
         assert "多模态前处理器" in calls[0][0]
         assert "这是客厅材质与照明方案" in calls[1][1]
         assert "客厅照明与材质说明" in calls[1][1]
+        assert "hit_rules" in calls[2][1]
         db.expire_all()
         completed_job = db.get(EvaluationJob, job.id)
         result = db.query(EvaluationResult).filter_by(job_id=job.id).one()
@@ -323,12 +323,12 @@ def test_pdf_worker_summarizes_before_single_prompt_evaluation(
         assert preprocess["category_key"] == "pdf_text"
         assert preprocess["multimodal_summary"]["status"] == "completed"
         assert preprocess["multimodal_summary"]["model_id"] == "vision-v1"
-        assert aesthetic is None
-        assert scoring["scoring_mode"] == "prompt_only"
+        assert isinstance(aesthetic, dict)
+        assert scoring["scoring_mode"] == "v3_authoritative"
         assert scoring["dimension_mode"] == "none"
-        assert scoring["formal"] is False
-        assert scoring["experimental"] is True
-        assert scoring["dimension_points"] == {}
+        assert scoring["formal"] is True
+        assert scoring["dimension_scoring_mode"] == "rule_deduction"
+        assert scoring["v3_context"]["contract"]["category_key"] == "pdf_text"
         assert "dimensions" not in raw_response_a
         assert "不得返回 dimensions" in calls[1][1]
     finally:
@@ -337,25 +337,18 @@ def test_pdf_worker_summarizes_before_single_prompt_evaluation(
 
 
 @pytest.mark.parametrize(
-    ("mode", "selected_keys", "expected_calls", "expected_keys"),
+    ("mode", "selected_keys"),
     [
-        ("all", [], 2, None),
-        (
-            "selected",
-            ["composition_viewpoint", "color_material"],
-            2,
-            {"composition_viewpoint", "color_material"},
-        ),
-        ("none", [], 1, set()),
+        ("all", []),
+        ("selected", ["composition_viewpoint", "color_material"]),
+        ("none", []),
     ],
 )
-def test_worker_executes_frozen_dimension_mode(
+def test_worker_uses_v3_contract_despite_legacy_dimension_mode(
     monkeypatch,
     tmp_path,
     mode,
     selected_keys,
-    expected_calls,
-    expected_keys,
 ) -> None:
     engine = create_engine(
         "sqlite://",
@@ -416,11 +409,13 @@ def test_worker_executes_frozen_dimension_mode(
     )
     db.add_all([asset, prompt_a, prompt_b, model, profile])
     db.flush()
+    v3_bundle = add_active_v3_contract(db)
     snapshot = _category_execution_snapshot(
         profile,
         prompt_a_id=prompt_a.id,
         prompt_b_id=None if mode == "none" else prompt_b.id,
         model_config=model,
+        v3_authoritative_bundle=v3_bundle,
     )
     job = EvaluationJob(
         asset_id=asset.id,
@@ -479,49 +474,22 @@ def test_worker_executes_frozen_dimension_mode(
         db.expire_all()
         result = db.query(EvaluationResult).filter_by(job_id=job.id).one()
         scoring = json.loads(result.scoring_json)
-        dimension_schema = _evaluation_dimension_schema_payload(result)
-        review_truth = _model_truth(result)
         aesthetic = (
             json.loads(result.aesthetic_json)
             if result.aesthetic_json
             else None
         )
         assert db.get(EvaluationJob, job.id).status == "completed"
-        assert len(calls) == expected_calls
+        assert len(calls) == 2
+        assert "hit_rules" in calls[1]
         assert scoring["dimension_mode"] == mode
         assert scoring["dimension_selection"]["mode"] == mode
-        assert dimension_schema["status"] == "resolved"
-        assert set(dimension_schema["dimension_keys"]) == (
-            set(scoring["dimension_points"])
-        )
-        assert set(review_truth["dimensions"]) == set(
-            scoring["dimension_points"]
-        )
-        if mode == "none":
-            assert aesthetic is None
-            assert result.score == 68
-            assert result.level == "L3"
-            assert scoring["scoring_mode"] == "prompt_only"
-            assert scoring["formal"] is False
-            assert scoring["experimental"] is True
-            assert scoring["dimension_points"] == {}
-            assert "模型直接预测" in scoring["not_formal_reason"]
-            assert "关闭维度评测" in calls[0]
-            assert result.prompt_b_version is None
-        else:
-            assert aesthetic is not None
-            actual_keys = set(aesthetic["dimensions"])
-            if expected_keys is None:
-                assert len(actual_keys) == 8
-            else:
-                assert actual_keys == expected_keys
-                assert "不得包含其他维度" in calls[1]
-            assert set(scoring["dimension_points"]) == actual_keys
-            assert sum(
-                item["weight"]
-                for item in scoring["dimension_points"].values()
-            ) == pytest.approx(1.0)
-            assert result.level in {"L1", "L2", "L3", "L4", "L5"}
+        assert scoring["scoring_mode"] == "v3_authoritative"
+        assert scoring["formal"] is True
+        assert scoring["dimension_scoring_mode"] == "rule_deduction"
+        assert scoring["v3_context"]["contract"]["category_key"] == "space_image"
+        assert isinstance(aesthetic, dict)
+        assert result.level in {"L1", "L2", "L3", "L4", "L5"}
     finally:
         db.close()
         engine.dispose()

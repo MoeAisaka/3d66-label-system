@@ -24,7 +24,6 @@ import type {
   BaselineCorrectionRun,
   BaselineRegressionItem,
   BaselineRegressionRun,
-  DimensionSchemaRegistryItem,
   EvaluationCategoryProfile,
   MaterialPackage,
   PromptVersion,
@@ -43,7 +42,6 @@ const levelNames: Record<BaselineLevel, string> = {
   L5: "过滤",
 }
 
-type DimensionChoice = "category_default" | "none" | `schema:${number}`
 const ASSET_PAGE_SIZE = 200
 const RUN_PAGE_SIZE = 200
 
@@ -64,17 +62,12 @@ export function BaselineRegressionPage() {
   const [selectedPromptAId, setSelectedPromptAId] = useState(0)
   const [selectedPromptBId, setSelectedPromptBId] = useState(0)
   const [executionMode, setExecutionMode] = useState<"freeform" | "structured">("freeform")
-  const [dimensionChoice, setDimensionChoice] = useState<DimensionChoice>("category_default")
   const [assetPage, setAssetPage] = useState(0)
   const [runPage, setRunPage] = useState(0)
 
   const categories = useQuery({
     queryKey: ["evaluation-categories"],
     queryFn: () => api<{ items: EvaluationCategoryProfile[] }>("/api/evaluation-categories"),
-  })
-  const dimensionSchemas = useQuery({
-    queryKey: ["dimension-schemas"],
-    queryFn: () => api<{ items: DimensionSchemaRegistryItem[] }>("/api/dimension-schemas"),
   })
 
   const assets = useQuery({
@@ -160,14 +153,6 @@ export function BaselineRegressionPage() {
       ? selectedPromptBId
       : publishedPromptB?.id ?? promptBOptions[0]?.id ?? 0
     : publishedPromptB?.id ?? 0
-  const selectableDimensionSchemas = useMemo(
-    () => (dimensionSchemas.data?.items ?? []).filter((schema) => (
-      schema.status === "published"
-      && selectedCategory?.dimension_schema_key
-      && schema.schema_key === selectedCategory.dimension_schema_key
-    )),
-    [dimensionSchemas.data?.items, selectedCategory?.dimension_schema_key],
-  )
 
   useEffect(() => {
     if (!activeCategories.length) return
@@ -321,17 +306,8 @@ export function BaselineRegressionPage() {
               prompt_b_id: effectivePromptBId,
             }
           : {}
-      const dimensionPayload = dimensionChoice === "none"
-        ? { dimension_mode: "none" as const }
-        : dimensionChoice.startsWith("schema:")
-          ? {
-              dimension_mode: "all" as const,
-              dimension_schema_id: Number(dimensionChoice.slice("schema:".length)),
-            }
-          : { dimension_mode: "category_default" as const }
       return baselineRegressionApi.createRun(selectedSetId, {
         ...promptPayload,
-        ...dimensionPayload,
         execution_mode: executionMode,
       })
     },
@@ -384,7 +360,6 @@ export function BaselineRegressionPage() {
     setExpectedByAsset({})
     setSelectedSetId(0)
     setSelectedRunId(0)
-    setDimensionChoice("category_default")
   }
 
   return (
@@ -392,7 +367,7 @@ export function BaselineRegressionPage() {
       <PageHeader
         index="03.7"
         title="基准回归"
-        description="按类目冻结素材与 L1–L5 期望等级，可独立选择提示词和维度版本重复运行；回归结果与后续纠偏分析互相隔离，均不会自动发布。"
+        description="按类目冻结素材与 L1–L5 期望等级，可独立选择提示词重复运行；每轮只使用启动时冻结的 active v3 合同，回归结果与后续纠偏分析互相隔离。"
         actions={
           <>
             <input
@@ -802,26 +777,10 @@ export function BaselineRegressionPage() {
                     disabled={promptSelectionMode !== "manual"}
                     onChange={setSelectedPromptBId}
                   />
-                  <label>
-                    <span className="mb-2 block text-xs font-semibold">维度版本{executionMode === "freeform" ? "（可选）" : ""}</span>
-                    <select
-                      className="h-11 w-full rounded-[4px] border border-[var(--line-strong)] bg-white px-3 text-sm"
-                      value={dimensionChoice}
-                      onChange={(event) => setDimensionChoice(event.target.value as DimensionChoice)}
-                    >
-                      <option value="category_default">跟随类目当前配置</option>
-                      {selectableDimensionSchemas.map((schema) => (
-                        <option key={schema.id} value={`schema:${schema.id}`}>
-                          {schema.display_name} · {schema.version}（已发布）
-                        </option>
-                      ))}
-                      <option value="none">
-                        {executionMode === "freeform"
-                          ? "关闭维度 · 仅保留模型原始结果"
-                          : "关闭维度 · 仅提示词评级"}
-                      </option>
-                    </select>
-                  </label>
+                  <div className="border border-[var(--line-strong)] bg-white px-3 py-2.5 text-sm">
+                    <span className="block text-xs font-semibold">评测合同</span>
+                    <span className="mt-1 block text-[var(--muted)]">启动时冻结当前类目的 active v3 合同</span>
+                  </div>
                   <Button
                     disabled={
                       createRun.isPending
@@ -849,11 +808,7 @@ export function BaselineRegressionPage() {
                       ? "本轮会冻结所选 A/B 的完整内容，不会改变线上发布指针。"
                       : "本轮启动时自动冻结当时的已发布 A/B；以后发布新版本也不会改写历史 run。"}
                   {" "}
-                  {dimensionChoice === "none"
-                    ? "维度评测关闭，本轮不会生成逐维分数或进入维度纠偏。"
-                    : dimensionChoice === "category_default"
-                      ? "维度使用当前类目配置并在启动时冻结。"
-                      : "所选已发布维度版本会独立冻结，不改变类目现役配置。"}
+                  本轮维度与分类赛道只读取启动时冻结的 active v3 合同；缺少合同时服务端拒绝启动。
                 </p>
               </div>
 

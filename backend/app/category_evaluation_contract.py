@@ -1,8 +1,7 @@
-"""ADR-0033 v3 evaluation contract skeleton (framework-first phase).
+"""ADR-0033 v3 evaluation contract definition and validation.
 
 Pure **definition + validation** only.  This module performs no IO, no
-network, no database and no model calls.  It does not execute evaluation and
-is not wired into the worker path in this phase.
+network, no database and no model calls. Workers consume validated persisted contracts.
 
 The v3 contract (``evaluation-category-profile-v3``) is carried as a ``dict``
 and extends v2 with three additional blocks — ``redline_policy`` (delegated to

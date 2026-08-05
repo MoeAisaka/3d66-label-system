@@ -1,21 +1,11 @@
-"""ADR-0033 Task 2b：v3 引擎**权威化**路由（仅对有 active v3 config 的新类目生效）。
+"""ADR-0033 v3-only authoritative category evaluation.
 
-Owner 拍板「直接换」（Path B）：为 ``inspiration_image`` 这一 **v1 里根本不存在** 的
-新类目新增一条分支，直接用 v3 引擎产出权威 ``score``(0-100 越高越好) + ``level``；下游
-直接取 ``score`` 百分值。这条分支**只**对 DB 里有 active v3 config 的类目生效，老类目
-（space_image / material_image / pdf_text）一个字节都不碰。
+All production categories must resolve an active or frozen v3 contract.
+Missing, inactive, malformed, or category-mismatched contracts raise
+V3AuthoritativeError before execution; v1 fallback is forbidden.
 
-与 ``worker_v3_shadow`` 影子模块的关键区别（**fail-closed，绝不降级**）：
-
-- 影子失败 → skip / None，不影响权威 v1 分。
-- 权威路径若共性 / 特有 grade 拿不齐、或引擎任意异常 → 抛 ``V3AuthoritativeError``，
-  由 worker 侧转成「人工复核 + score/level=None」，**绝不静默降级成老引擎给出误导性
-  分数**。
-
-本模块自身是纯函数 + 一个 async 编排函数，完全隔离、可脱离 worker 单测。它复用（不另造）
-影子模块里已有的 grade 映射与特有维度调用B 机件，只是把它们从「旁挂影子」提升为「权威
-路径」。``v3_authoritative_category`` 只读、绝不 raise；能力接线好但 DB 无 active config
-时行为必须与现状完全一致（返回 ``None`` → 老引擎）。
+Scoring failures become manual review with score/level=None. Deterministic
+grade and deduction helpers remain shared with the former shadow path.
 """
 
 from __future__ import annotations
@@ -29,6 +19,10 @@ from sqlalchemy.orm import Session
 from .level_semantics import LEVEL_SEMANTICS_V3_L5_WORST
 
 # 复用影子模块已有的只读加载与 grade 映射机件（不另造）。
+from .category_evaluation_contract import validate_category_evaluation_contract
+from .dimension_composition import validate_subcategory_dimensions
+from .subcategory_resolver import validate_classification_map
+
 from .worker_v3_shadow import (
     _common_grades_from_aesthetic,
     _dimension_defs,
@@ -53,30 +47,25 @@ class V3AuthoritativeError(RuntimeError):
         self.code = code
 
 
-def v3_authoritative_category(db: Session, category_key: Any) -> dict | None:
-    """只读判定：``category_key`` 是否走 v3 权威引擎；是则装配并返回 bundle。
+def v3_authoritative_category(db: Session, category_key: Any) -> dict:
+    """Load and validate the active v3 authoritative bundle.
 
-    查 ``_load_active_v3_config``（只读 active 记录）。有 active config 且能从它的三个
-    json 字段解析出合法的 ``contract`` / ``classification_map`` /
-    ``subcategory_dimensions`` → 返回 ``{"contract", "classification_map",
-    "subcategory_dimensions", "config_revision"}``；否则（无 config / json 损坏 / 任意
-    异常）返回 ``None``，让 worker fail-closed 到老引擎。
-
-    **绝不 raise**：这是接线「能力」的只读闸门——DB 里没有 active config 时行为必须与
-    现状逐字节一致。只发只读 SELECT，写任何东西都不做。
+    Read-only; any missing or invalid state raises a stable fail-closed error.
     """
+    if not isinstance(category_key, str) or not category_key:
+        raise V3AuthoritativeError("v3_category_key_invalid", "评测类目标识无效")
+    config = _load_active_v3_config(db, category_key)
+    if config is None:
+        raise V3AuthoritativeError(
+            "v3_active_config_missing",
+            f"类目 {category_key} 缺少 active v3 合同，已拒绝回退 v1",
+        )
     try:
-        if not isinstance(category_key, str) or not category_key:
-            return None
-        config = _load_active_v3_config(db, category_key)
-        if config is None:
-            return None
-
         contract = json.loads(config.contract_json or "{}")
         classification_map = json.loads(config.classification_map_json or "{}")
         subcategory_dimensions = json.loads(config.subcategory_dimensions_json or "{}")
 
-        # 结构最低限度自检：三块都必须是非空对象，否则视为不可用（fail-closed → None）。
+        # 三块都必须是非空对象，否则 fail-closed。
         if (
             not isinstance(contract, dict)
             or not contract
@@ -85,7 +74,25 @@ def v3_authoritative_category(db: Session, category_key: Any) -> dict | None:
             or not isinstance(subcategory_dimensions, dict)
             or not subcategory_dimensions
         ):
-            return None
+            raise ValueError("合同、分类映射或赛道维度为空")
+        if contract.get("category_key") != category_key:
+            raise ValueError("合同 category_key 与评测类目不匹配")
+        validate_category_evaluation_contract(contract)
+        track_keys = {
+            track["key"]
+            for track in contract["track_classification"]["tracks"]
+        }
+        validate_classification_map(
+            classification_map, valid_track_keys=track_keys
+        )
+        if set(subcategory_dimensions) != track_keys:
+            raise ValueError("subcategory_dimensions 必须完整覆盖合同赛道")
+        for track_key, dimension_config in subcategory_dimensions.items():
+            validate_subcategory_dimensions(dimension_config)
+            if dimension_config.get("sub_category_key") != track_key:
+                raise ValueError(
+                    f"赛道 {track_key} 的 sub_category_key 不匹配"
+                )
 
         return {
             "contract": contract,
@@ -93,25 +100,27 @@ def v3_authoritative_category(db: Session, category_key: Any) -> dict | None:
             "subcategory_dimensions": subcategory_dimensions,
             "config_revision": config.revision,
         }
-    except Exception as exc:  # noqa: BLE001 — 只读闸门：任何异常都 fail-closed 到老引擎
-        logger.warning(
-            "ADR-0033 v3 authoritative routing probe failed (fail-closed to v1): %s",
+    except V3AuthoritativeError:
+        raise
+    except Exception as exc:  # noqa: BLE001 — 合同异常必须 fail-closed
+        logger.error(
+            "ADR-0033 active v3 contract invalid (v1 fallback forbidden): %s",
             exc,
         )
-        return None
+        raise V3AuthoritativeError(
+            "v3_active_config_invalid",
+            f"类目 {category_key} 的 active v3 合同无效：{exc}",
+        ) from exc
 
 
-def v3_authoritative_for_job(db: Session, job: Any) -> dict | None:
-    """Resolve a job-bound v3 bundle, preferring a frozen baseline snapshot.
+def v3_authoritative_for_job(db: Session, job: Any) -> dict:
+    """Resolve a job-bound v3 bundle, preferring its frozen snapshot.
 
-    Baseline regression is only reproducible when every item sees the same
-    category contract.  New baseline jobs therefore embed the complete v3
-    bundle in ``category_profile_snapshot_json``.  Historical jobs without the
-    marker retain the prior active-config lookup for backward compatibility.
+    Historical jobs without a frozen marker still require an active v3 row.
     """
 
     snapshot_text = getattr(job, "category_profile_snapshot_json", None)
-    if getattr(job, "baseline_regression_item_id", None) is not None and snapshot_text:
+    if snapshot_text:
         try:
             snapshot = json.loads(snapshot_text)
         except (TypeError, json.JSONDecodeError) as exc:
@@ -126,6 +135,12 @@ def v3_authoritative_for_job(db: Session, job: Any) -> dict | None:
             ):
                 raise V3AuthoritativeError(
                     "v3_frozen_config_invalid", "基线作业的冻结 v3 配置不完整"
+                )
+            if bundle["contract"].get("category_key") != getattr(
+                job, "category_key", None
+            ):
+                raise V3AuthoritativeError(
+                    "v3_frozen_config_invalid", "冻结 v3 合同与作业类目不匹配"
                 )
             return bundle
     return v3_authoritative_category(db, getattr(job, "category_key", None))

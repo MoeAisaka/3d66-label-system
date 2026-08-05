@@ -199,7 +199,10 @@ from .category_evaluation_v3_config_api import (
     build_category_evaluation_v3_config_router,
 )
 from .node_correction_api import build_node_correction_router
-from .worker_v3_authoritative import v3_authoritative_category
+from .worker_v3_authoritative import (
+    V3AuthoritativeError,
+    v3_authoritative_category,
+)
 from .evaluation_packages import (
     build_evaluation_package_router,
     publish_evaluation_package,
@@ -2813,6 +2816,7 @@ def _category_execution_snapshot(
     dimension_contract: Any | None = None,
     dimension_mode_override: Literal["all", "none"] | None = None,
     rubric_version_override: str | None = None,
+    v3_authoritative_bundle: dict[str, Any] | None = None,
 ) -> str:
     pipeline = _profile_pipeline(
         profile,
@@ -2888,6 +2892,11 @@ def _category_execution_snapshot(
                 if dimension_contract is not None else None
             ),
             "dimension_selection": dimension_selection,
+            **(
+                {"v3_authoritative_bundle": v3_authoritative_bundle}
+                if v3_authoritative_bundle is not None
+                else {}
+            ),
             "profile_updated_at": (
                 profile.updated_at.isoformat()
                 if profile.updated_at is not None
@@ -2931,6 +2940,38 @@ def _apply_category_update(
             profile.category_key,
             payload.preprocess_config,
         )
+    if profile.id is not None:
+        current_pipeline = _profile_pipeline(profile)
+
+        def dimension_signature(config: dict[str, Any]) -> tuple[bool, str, tuple[str, ...]]:
+            dimensions = config.get("dimensions") or {}
+            raw_keys = (
+                dimensions.get("selected_keys")
+                or dimensions.get("enabled_keys")
+                or []
+            )
+            return (
+                bool(dimensions.get("enabled", dimensions.get("mode") != "none")),
+                str(dimensions.get("mode") or "all"),
+                tuple(sorted(str(key) for key in raw_keys)),
+            )
+
+        changes_legacy_dimensions = (
+            dimension_signature(candidate) != dimension_signature(current_pipeline)
+            or payload.dimension_schema_key != profile.dimension_schema_key
+            or payload.dimension_schema_version != profile.dimension_schema_version
+        )
+        if changes_legacy_dimensions:
+            raise HTTPException(
+                status_code=410,
+                detail={
+                    "code": "legacy_dimension_write_retired",
+                    "message": (
+                        "旧类目维度写入口已下线，请使用"
+                        "“类目评测 v3 合同配置”。"
+                    ),
+                },
+            )
     try:
         raw_mode = str((candidate.get("dimensions") or {}).get("mode") or "all")
         dimension_contract = resolve_published_dimension_contract(
@@ -4179,6 +4220,18 @@ def delete_material_package(
     return {"package_id": package.id, "deleted": True, **result}
 
 
+def _required_active_v3_bundle(db: Session, category_key: str) -> dict[str, Any]:
+    """Resolve the sole authoritative contract for every newly created run."""
+
+    try:
+        return v3_authoritative_category(db, category_key)
+    except V3AuthoritativeError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": exc.code, "message": str(exc)},
+        ) from exc
+
+
 @app.get("/api/evaluations")
 def list_evaluations(
     limit: int = 100,
@@ -4223,49 +4276,8 @@ def _enqueue_jobs(
     commit: bool = True,
 ) -> dict[str, Any]:
     profile = _category_profile(db, payload.category_key, require_active=True)
-    pipeline = _profile_pipeline(profile, db)
-    dimension_mode = pipeline["dimensions"]["mode"]
-    try:
-        dimension_contract = resolve_published_dimension_contract(
-            db,
-            schema_key=profile.dimension_schema_key,
-            version=profile.dimension_schema_version,
-            require_configured=(dimension_mode != "none"),
-        )
-    except ProductionDimensionContractError as exc:
-        raise HTTPException(
-            status_code=409,
-            detail={"code": exc.code, "message": str(exc)},
-        ) from exc
-    try:
-        dimension_selection_payload(
-            pipeline,
-            dimension_options=(
-                dimension_options_from_definition(dimension_contract.definition)
-                if dimension_contract is not None
-                else DIMENSION_OPTIONS
-            ),
-            schema_key=(
-                dimension_contract.schema_key
-                if dimension_contract is not None else None
-            ),
-            schema_version=(
-                dimension_contract.version
-                if dimension_contract is not None else None
-            ),
-            schema_hash=(
-                dimension_contract.canonical_hash
-                if dimension_contract is not None else None
-            ),
-        )
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "code": "dimension_selection_invalid",
-                "message": str(exc),
-            },
-        ) from exc
+    v3_bundle = _required_active_v3_bundle(db, payload.category_key)
+    pipeline = _profile_pipeline(profile)
     assets = db.scalars(
         select(Asset).where(
             Asset.id.in_(payload.asset_ids),
@@ -4427,7 +4439,7 @@ def _enqueue_jobs(
         prompt_b_id=frozen_prompt_b_id,
         model_config=selected_model,
         pdf_summary_model_config=pdf_summary_model,
-        dimension_contract=dimension_contract,
+        v3_authoritative_bundle=v3_bundle,
     )
     jobs = []
     queue_class = (
@@ -8690,6 +8702,21 @@ def create_baseline_run(
     if running is not None:
         raise HTTPException(status_code=409, detail="该基准集上一轮仍在运行")
 
+    frozen_v3_bundle = _required_active_v3_bundle(db, baseline_set.category_key)
+    if (
+        request.dimension_schema_id is not None
+        or request.dimension_mode != "category_default"
+    ):
+        raise HTTPException(
+            status_code=410,
+            detail={
+                "code": "legacy_dimension_write_retired",
+                "message": (
+                    "旧类目维度写入口已下线，请使用"
+                    "“类目评测 v3 合同配置”。"
+                ),
+            },
+        )
     model_config = db.scalar(
         select(ModelConfig)
         .where(ModelConfig.active.is_(True))
@@ -8818,65 +8845,6 @@ def create_baseline_run(
             status_code=409,
             detail="基准回归所选提示词的 rubric 版本不一致",
         )
-    if (
-        request.execution_mode == "structured"
-        and request.dimension_mode == "none"
-        and not single_prompt_mode
-    ):
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "code": "prompt_mode_mismatch",
-                "message": "关闭维度的基准回归必须使用单提示词模式。",
-            },
-        )
-    dimension_schema = (
-        db.get(DimensionSchema, request.dimension_schema_id)
-        if request.dimension_schema_id is not None
-        else None
-    )
-    if request.dimension_schema_id is not None and dimension_schema is None:
-        raise HTTPException(status_code=404, detail="维度版本不存在")
-    if dimension_schema is not None and (
-        profile.dimension_schema_key is None
-        or dimension_schema.schema_key != profile.dimension_schema_key
-    ):
-        raise HTTPException(status_code=422, detail="维度版本不属于当前流水线类目")
-    schema_key = (
-        dimension_schema.schema_key if dimension_schema is not None else profile.dimension_schema_key
-    )
-    schema_version = (
-        dimension_schema.version if dimension_schema is not None else profile.dimension_schema_version
-    )
-    # Preserve the legacy strategy-snapshot path for installations that have
-    # not seeded the registry yet. Once a caller explicitly selects a version,
-    # the contract is mandatory; prompt-only mode intentionally freezes no
-    # scoring contract.
-    require_contract = request.dimension_schema_id is not None or (
-        request.dimension_mode == "category_default"
-        and db.scalar(
-            select(DimensionSchema.id).where(
-                DimensionSchema.schema_key == schema_key,
-                DimensionSchema.version == schema_version,
-            )
-        ) is not None
-    )
-    try:
-        dimension_contract = (
-            resolve_published_dimension_contract(
-                db,
-                schema_key=schema_key,
-                version=schema_version,
-                require_configured=True,
-            )
-            if require_contract and request.dimension_mode != "none"
-            else None
-        )
-    except ProductionDimensionContractError as exc:
-        raise HTTPException(
-            status_code=422,
-            detail={"code": exc.code, "message": str(exc)},
-        ) from exc
     sampling_policy = db.get(SamplingPolicy, 1)
     bundle = get_or_create_bundle(
         db=db,
@@ -8907,25 +8875,14 @@ def create_baseline_run(
         prompt_a_id=prompt_a.id,
         prompt_b_id=prompt_b.id if prompt_b is not None else None,
         model_config=model_config,
-        dimension_contract=dimension_contract,
-        dimension_mode_override=(
-            request.dimension_mode
-            if request.dimension_mode in {"all", "none"}
-            else None
-        ),
         rubric_version_override=(
             prompt_b.rubric_version if prompt_b is not None else prompt_a.rubric_version
         ),
+        v3_authoritative_bundle=frozen_v3_bundle,
     )
     execution_payload = json.loads(execution_snapshot)
     execution_payload["execution_mode"] = request.execution_mode
-    execution_payload["selection_explicit"] = bool(
-        request.dimension_schema_id is not None
-        or request.dimension_mode != "category_default"
-    )
-    frozen_v3_bundle = v3_authoritative_category(db, baseline_set.category_key)
-    if frozen_v3_bundle is not None:
-        execution_payload["v3_authoritative_bundle"] = frozen_v3_bundle
+    execution_payload["selection_explicit"] = False
     execution_snapshot = baseline_canonical_json(execution_payload)
     previous = db.scalar(
         select(BaselineRegressionRun)
@@ -9012,12 +8969,9 @@ def create_baseline_run(
             "execution_mode": request.execution_mode,
             "category_key": baseline_set.category_key,
             "dimension_selection_mode": json.loads(execution_snapshot)["dimension_selection"]["mode"],
-            "dimension_schema_id": dimension_contract.schema_id if dimension_contract else None,
-            "v3_config_revision": (
-                frozen_v3_bundle.get("config_revision")
-                if frozen_v3_bundle is not None
-                else None
-            ),
+            "dimension_schema_id": None,
+            "v3_contract_only": True,
+            "v3_config_revision": frozen_v3_bundle.get("config_revision"),
             "total": run.total,
         },
         event_key=f"baseline-run:{run.id}:created",
@@ -10015,6 +9969,16 @@ def _ensure_dimension_schema_references(
             raise HTTPException(status_code=422, detail=f"维度方案{label}不存在")
 
 
+def _legacy_dimension_write_retired() -> None:
+    raise HTTPException(
+        status_code=410,
+        detail={
+            "code": "legacy_dimension_write_retired",
+            "message": "旧类目维度写入口已下线，请使用“类目评测 v3 合同配置”。",
+        },
+    )
+
+
 @app.get("/api/dimension-schemas")
 def list_dimension_schemas(
     schema_key: str | None = None,
@@ -10070,6 +10034,7 @@ def create_dimension_schema(
     user: User = Depends(admin_user),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
+    _legacy_dimension_write_retired()
     definition_json, definition_hash = _validated_dimension_definition(payload.definition)
     _ensure_dimension_schema_references(
         db,
@@ -10116,6 +10081,7 @@ def update_dimension_schema(
     user: User = Depends(admin_user),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
+    _legacy_dimension_write_retired()
     schema = db.get(DimensionSchema, schema_id)
     if schema is None:
         raise HTTPException(status_code=404, detail="维度方案不存在")
@@ -10157,6 +10123,7 @@ def delete_dimension_schema(
     user: User = Depends(admin_user),
     db: Session = Depends(get_db),
 ) -> dict[str, bool]:
+    _legacy_dimension_write_retired()
     schema = db.get(DimensionSchema, schema_id)
     if schema is None:
         raise HTTPException(status_code=404, detail="维度方案不存在")
@@ -10192,6 +10159,7 @@ def publish_dimension_schema(
     user: User = Depends(admin_user),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
+    _legacy_dimension_write_retired()
     schema = db.get(DimensionSchema, schema_id)
     if schema is None:
         raise HTTPException(status_code=404, detail="维度方案不存在")

@@ -2,6 +2,24 @@
 
 > 最后更新：2026-08-05
 > 本文件只记录“现在做到哪里”；长期原则见 `PRODUCT.md` 和 `AGENTS.md`，历史背景见 `CODEX_HANDOFF.md`。
+## 最新完成：四类目 v3-only 合同迁移（2026-08-05）
+
+- inspiration_image 的人工校准 active v3 合同与 A/B prompt 被作为模板，启动 seed
+  幂等复制到 space_image、material_image、pdf_text；复制项拥有各自 category_key、
+  版本、名称与来源标识，四类目最终均 active，不再创建旧 8 维 draft 占位。
+- 完整评测与基准回归均在创建时强制解析并冻结 active
+  CategoryEvaluationV3Config；worker 只执行冻结/active v3 合同，缺失或损坏时中文
+  fail-closed，禁止回退 v1。
+- DimensionSchema 列表/详情仅供历史记录只读兼容；四个写接口及类目维度修改统一
+  返回 410。旧评测记录与 registry 表不迁移。
+- 前端移除“类目与维度”菜单、lazy import、路由和基准回归旧维度选择/API 参数；
+  “类目评测 v3 合同配置”为唯一配置入口。旧页面文件保留但无路由消费者。
+- 验证：后端全量 `1051 passed, 1 skipped`；前端
+  `contract:v3-only`、维度合同、节点纠偏合同、TypeScript lint 与 Vite
+  production build 全部通过。
+- 迁移/回滚、精确测试与文件范围见
+  `docs/superpowers/plans/2026-08-05-labellab-v3-only-migration.md`。
+
 
 ## 最新完成：基准回归真实维度合同标签（2026-08-05）
 

@@ -1,10 +1,21 @@
 # ADR-0033：按类目高度自定义的评测底座（红线前置过滤 + 分类 + 维度）与 L 等级方向校正
 
-- 状态：Proposed（等 Owner 确认后进入 Accepted 并开工）
+- 状态：Accepted
 - 日期：2026-08-03
 - 关联：ADR-0028（可组合类目流水线）、ADR-0029（统一标签生产消费合同）、ADR-0031（类目维度管理与仅提示词模式）
 - 输入规则：钉钉《【灵感图】-prompt》（快照 `docs/reference/category-inspiration-image-rules-20260803.md`）
 - 讨论稿：`docs/discussion/category-evaluation-base-refactor-20260803.md`
+## 2026-08-05 v3-only 迁移决定
+
+1. inspiration_image 的人工校准 active v3 合同是初版模板；space_image、
+   material_image、pdf_text 幂等复制该合同及各自 A/B prompt，改写 category_key、
+   版本、名称与来源标识，并全部激活。
+2. 完整流水线与基准回归的新任务只读取并冻结 active
+   CategoryEvaluationV3Config。缺失或无效必须中文 fail-closed，禁止回退 v1。
+3. DimensionSchema 和旧 GET 只为历史记录只读兼容保留；旧记录不迁移。
+   DimensionSchema 写接口与类目维度写入返回 410。
+4. “类目评测 v3 合同配置”是唯一可路由配置入口；旧“类目与维度”页面退出路由。
+
 
 ## 背景
 

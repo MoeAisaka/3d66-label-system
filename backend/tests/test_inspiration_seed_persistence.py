@@ -8,14 +8,21 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
+from app.category_evaluation_contract import validate_category_evaluation_contract
 from app.database import Base
+from app.dimension_composition import validate_subcategory_dimensions
 from app.inspiration_category_seed import (
     INSPIRATION_CALL_A_VERSION,
     INSPIRATION_CALL_B_VERSION,
     INSPIRATION_SPEC_VERSION,
 )
 from app.models import CategoryEvaluationV3Config, PromptVersion
-from app.seed import _seed_inspiration_image_prompts, _seed_inspiration_image_v3_config
+from app.seed import (
+    _seed_inspiration_image_prompts,
+    _seed_inspiration_image_v3_config,
+    seed_defaults,
+)
+from app.subcategory_resolver import validate_classification_map
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -97,8 +104,82 @@ def test_existing_inspiration_config_is_replaced_once_and_stays_active() -> None
         assert row.revision == 8
         assert row.media_penalty_enabled is False
         assert json.loads(row.contract_json)["spec_version"] == INSPIRATION_SPEC_VERSION
+
         frozen = row.contract_json
         _seed_inspiration_image_v3_config(db)
         db.commit()
         assert row.revision == 8
         assert row.contract_json == frozen
+
+def test_seed_defaults_clones_active_v3_contract_and_prompts_for_all_categories() -> None:
+    engine = _engine()
+    expected_categories = {
+        "space_image",
+        "inspiration_image",
+        "material_image",
+        "pdf_text",
+    }
+    with Session(engine) as db:
+        seed_defaults(db)
+        rows = db.scalars(
+            select(CategoryEvaluationV3Config).order_by(
+                CategoryEvaluationV3Config.category_key
+            )
+        ).all()
+        assert {row.category_key for row in rows} == expected_categories
+        assert {row.status for row in rows} == {"active"}
+
+        revisions_before = {row.category_key: row.revision for row in rows}
+        prompt_count_before = len(db.scalars(select(PromptVersion)).all())
+        for row in rows:
+            contract = json.loads(row.contract_json)
+            classification_map = json.loads(row.classification_map_json)
+            dimensions_by_track = json.loads(row.subcategory_dimensions_json)
+
+            assert contract["category_key"] == row.category_key
+            if row.category_key == "inspiration_image":
+                assert contract["spec_version"] == INSPIRATION_SPEC_VERSION
+            else:
+                assert row.category_key.replace("_", "-") in contract["spec_version"]
+            assert dimensions_by_track
+            assert {
+                len(config["common_group"]["schema_definition"]["dimensions"])
+                for config in dimensions_by_track.values()
+            } == {5, 6}
+
+            validate_category_evaluation_contract(contract)
+            track_keys = {
+                track["key"]
+                for track in contract["track_classification"]["tracks"]
+            }
+            validate_classification_map(
+                classification_map, valid_track_keys=track_keys
+            )
+            for config in dimensions_by_track.values():
+                validate_subcategory_dimensions(config)
+
+            for stage, binding_key in (
+                ("A", "call_a_version"),
+                ("B", "call_b_version"),
+            ):
+                prompt = db.scalar(
+                    select(PromptVersion).where(
+                        PromptVersion.version
+                        == contract["prompt_bindings"][binding_key]
+                    )
+                )
+                assert prompt is not None
+                assert prompt.stage == stage
+                assert prompt.category_key == row.category_key
+                assert prompt.status == "published"
+                assert prompt.source == (
+                    "imported"
+                    if row.category_key == "inspiration_image"
+                    else "v3_seed_clone"
+                )
+
+        seed_defaults(db)
+        rows_after = db.scalars(select(CategoryEvaluationV3Config)).all()
+        assert len(rows_after) == 4
+        assert {row.category_key: row.revision for row in rows_after} == revisions_before
+        assert len(db.scalars(select(PromptVersion)).all()) == prompt_count_before
