@@ -120,9 +120,10 @@ export function NodeCorrectionEditor({
   const changed = selected ? !valuesEqual(selected.currentValue, normalizedDraft) : false
   const invalidRuleEvidence = selected?.editor === "dimension_rules"
     && normalizeRuleHits(normalizedDraft).some((hit) => !hit.evidence.trim())
-  const canSubmit = Boolean(selected && changed && reason.trim() && !invalidRuleEvidence && !correction.isPending)
+  const canSubmit = Boolean(selected && !selected.readOnly && changed && reason.trim() && !invalidRuleEvidence && !correction.isPending)
   const history = Array.isArray(evaluation.correction_history) ? evaluation.correction_history : []
   const hasReplayContext = Boolean(evaluation.scoring?.v3_context)
+  const readOnlyDimensionCount = nodes.filter((node) => node.stage === 4 && node.readOnly).length
 
   return (
     <section className="mx-auto max-w-[1820px] border-t border-[var(--line-strong)] bg-white" aria-label="节点纠偏工作台">
@@ -160,6 +161,13 @@ export function NodeCorrectionEditor({
           <div><p className="text-sm font-bold">这条旧评测无法节点重放</p><p className="mt-1 text-xs leading-5 text-[var(--muted)]">仍可查看既有历史；请使用当前 v3 配置重新评测后再逐节点纠偏。</p></div>
         </div>
       ) : (
+        <>
+        {readOnlyDimensionCount > 0 && (
+          <div className="flex items-start gap-3 border-b border-[#ead7a5] bg-[#fff9ea] px-5 py-4 md:px-7">
+            <WarningCircle className="mt-0.5 shrink-0 text-[#8a5a00]" size={20} />
+            <div><p className="text-sm font-bold">部分旧维度仅可查看</p><p className="mt-1 text-xs leading-5 text-[var(--muted)]">该结果由旧引擎产出，维度规则版本不一致；已对齐的维度仍可正常纠偏，未对齐维度建议用新引擎重跑后再处理。</p></div>
+          </div>
+        )}
         <div className="grid min-h-[560px] xl:grid-cols-[420px_minmax(0,1fr)]">
           <nav className="border-b border-[var(--line-strong)] xl:border-b-0 xl:border-r" aria-label="判断路径节点">
             {NODE_STAGE_META.map((stage) => {
@@ -192,14 +200,18 @@ export function NodeCorrectionEditor({
                     <p className="font-data text-[0.68rem] text-[var(--muted)]">{NODE_STAGE_META[selected.stage - 1].label} · {NODE_TYPE_LABEL[selected.nodeType]}</p>
                     <h3 className="font-editorial mt-1 text-xl font-bold">{selected.label}</h3>
                   </div>
-                  <Badge tone="active"><PencilSimple />可编辑</Badge>
+                  <Badge tone={selected.readOnly ? "neutral" : "active"}>{selected.readOnly ? "只读" : <><PencilSimple />可编辑</>}</Badge>
                 </div>
 
                 <div className="grid gap-5 py-5 lg:grid-cols-[minmax(0,1fr)_280px]">
                   <div className="min-w-0">
                     <p className="mb-2 text-xs font-bold">节点当前值与新值</p>
-                    <NodeValueEditor node={selected} value={draftValue} onChange={setDraftValue} />
-                    {invalidRuleEvidence && <p className="mt-2 text-xs font-semibold text-[#8d2924]">每条已勾选规则都必须填写可定位的中文证据。</p>}
+                    {selected.readOnly ? (
+                      <div className="border border-[#ead7a5] bg-[#fff9ea] px-4 py-4 text-sm leading-6 text-[#6b4b0b]">{selected.compatibilityMessage}</div>
+                    ) : (
+                      <NodeValueEditor node={selected} value={draftValue} onChange={setDraftValue} />
+                    )}
+                    {!selected.readOnly && invalidRuleEvidence && <p className="mt-2 text-xs font-semibold text-[#8d2924]">每条已勾选规则都必须填写可定位的中文证据。</p>}
                   </div>
                   <aside className="border border-[var(--line)] bg-[#fafbf8] px-4 py-3">
                     <p className="text-xs font-bold">当前证据</p>
@@ -209,6 +221,8 @@ export function NodeCorrectionEditor({
                   </aside>
                 </div>
 
+                {!selected.readOnly && (
+                  <>
                 <div className="grid gap-3 border-t border-[var(--line)] pt-5 md:grid-cols-2">
                   <label><span className="mb-2 block text-xs font-bold">纠偏人（当前登录，服务端记录）</span><Input value={corrector} readOnly /></label>
                   <label><span className="mb-2 block text-xs font-bold">纠偏原因（必填）</span><Input value={reason} onChange={(event) => setReason(event.target.value)} placeholder="说明为什么要改这个节点" maxLength={1000} /></label>
@@ -217,10 +231,13 @@ export function NodeCorrectionEditor({
                   <p className="text-xs leading-5 text-[var(--muted)]">提交后服务端会校验旧值防并发覆盖；除最终等级外，其余节点都会重算下游分数、等级与步骤。</p>
                   <Button onClick={() => correction.mutate()} disabled={!canSubmit}><FloppyDisk weight="bold" />{correction.isPending ? "正在重算" : "提交纠偏并重算"}</Button>
                 </div>
+                  </>
+                )}
               </div>
             ) : <div className="flex min-h-[420px] items-center justify-center text-sm text-[var(--muted)]">当前没有可编辑节点</div>}
           </div>
         </div>
+        </>
       )}
 
       <CorrectionHistory history={history} nodes={nodes} />

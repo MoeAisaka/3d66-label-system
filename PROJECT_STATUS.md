@@ -1,7 +1,24 @@
 # 3d66 标签系统｜当前项目状态
 
-> 最后更新：2026-08-04
+> 最后更新：2026-08-05
 > 本文件只记录“现在做到哪里”；长期原则见 `PRODUCT.md` 和 `AGENTS.md`，历史背景见 `CODEX_HANDOFF.md`。
+
+## 最新完成：基准回归页节点纠偏集成与新旧维度规则兼容（2026-08-05）
+
+- 基准回归“逐张预测对照”审核页已复用主评测页的节点纠偏编辑器，规则扣分模式下
+  展示调用 A 字段、红线、赛道、逐维规则和最终等级；提交继续走既有
+  `POST /api/evaluation-results/{id}/correct-node`，并保留确认结果、退回复核能力。
+- 维度定义优先读取 v2 的
+  `common_group/specific_group.schema_definition.dimensions`，同时兼容旧版
+  `common_group/specific_group.dimensions`。
+- 历史结果与当前配置只部分对齐时，仅把不兼容维度降级为只读并给出友好提示；
+  已对齐维度仍可逐条勾选规则、填写置信度和证据，不再用红字全局禁止纠偏。
+- 根因复核确认：旧基准回归页从未集成节点编辑器，红字来自旧
+  `ReviewCorrectionForm` 对 `evaluation.dimension_schema` 的依赖；主节点编辑器在当前
+  基线已能读取新路径，但缺少旧直连路径和逐维局部降级兼容。
+- 验证：后端全量 `1021 passed, 1 skipped`；前端 lint、节点纠偏契约、
+  维度契约、TypeScript/Vite 构建通过。部署与真机证据见
+  `/Users/Shared/OpenClaw/120-验收-基准回归页节点纠偏集成修复-20260805/`。
 
 ## 最新完成：节点纠偏置信度与中文界面修复（2026-08-04）
 

@@ -73,6 +73,8 @@ export type CorrectionNode = {
     exemptions: string[]
   }
   ruleDefinitions?: RuleDefinition[]
+  readOnly?: boolean
+  compatibilityMessage?: string
 }
 
 type EvaluationLike = {
@@ -217,7 +219,11 @@ function definitionsForTrack(config: unknown): Array<{ key: string; label: strin
   for (const groupName of ["common_group", "specific_group"]) {
     const group = config[groupName]
     const schema = isRecord(group) ? group.schema_definition : null
-    const dimensions = isRecord(schema) ? schema.dimensions : null
+    const schemaDimensions = isRecord(schema) ? schema.dimensions : null
+    const legacyDimensions = isRecord(group) ? group.dimensions : null
+    const dimensions = Array.isArray(schemaDimensions)
+      ? schemaDimensions
+      : legacyDimensions
     if (!Array.isArray(dimensions)) continue
     for (const dimension of dimensions) {
       if (!isRecord(dimension) || typeof dimension.key !== "string") continue
@@ -320,12 +326,22 @@ export function buildCorrectionNodes(evaluation: EvaluationLike): CorrectionNode
     options: trackOptions,
   })
 
+  const hasDimensionConfig = isRecord(context.subcategory_dimensions)
   const dimensionsByTrack = isRecord(context.subcategory_dimensions) ? context.subcategory_dimensions : {}
   const config = trackKey ? dimensionsByTrack[trackKey] : null
   const currentDimensions = dimensionMap(evaluation.aesthetic)
-  for (const definition of definitionsForTrack(config)) {
-    const hits = normalizeRuleHits(currentDimensions[definition.key]?.hit_rules)
-    const evidenceLines = hits.length
+  const definitions = definitionsForTrack(config)
+  const definitionKeys = new Set(definitions.map((definition) => definition.key))
+  const compatibilityMessage = "该结果由旧引擎产出，维度规则版本不一致，建议用新引擎重跑后再逐维纠偏。"
+  for (const definition of definitions) {
+    const currentDimension = currentDimensions[definition.key]
+    const hits = normalizeRuleHits(currentDimension?.hit_rules)
+    const configuredRuleIds = new Set(definition.rules.map((rule) => rule.rule_id))
+    const unknownRuleIds = hits.filter((hit) => !configuredRuleIds.has(hit.rule_id))
+    const aligned = Boolean(currentDimension) && definition.rules.length > 0 && unknownRuleIds.length === 0
+    const evidenceLines = !aligned
+      ? [compatibilityMessage]
+      : hits.length
       ? hits.map((hit) => `${hit.rule_id} · 置信度${confidenceLabel(hit.confidence)} · ${hit.evidence}`)
       : ["当前未命中任何扣分规则"]
     nodes.push({
@@ -339,6 +355,30 @@ export function buildCorrectionNodes(evaluation: EvaluationLike): CorrectionNode
       currentValue: hits,
       editor: "dimension_rules",
       ruleDefinitions: definition.rules,
+      readOnly: !aligned,
+      compatibilityMessage: aligned ? undefined : compatibilityMessage,
+    })
+  }
+
+  for (const [dimensionKey, dimension] of hasDimensionConfig ? Object.entries(currentDimensions) : []) {
+    if (definitionKeys.has(dimensionKey)) continue
+    const hits = normalizeRuleHits(dimension.hit_rules)
+    nodes.push({
+      id: `dimension:${dimensionKey}`,
+      stage: 4,
+      nodeType: "dimension_rule",
+      nodePath: `dimension.${dimensionKey}.hit_rules`,
+      label: dimensionKey,
+      summary: "仅可查看（历史维度）",
+      evidenceLines: [
+        compatibilityMessage,
+        ...hits.map((hit) => `${hit.rule_id} · 置信度${confidenceLabel(hit.confidence)} · ${hit.evidence}`),
+      ],
+      currentValue: hits,
+      editor: "dimension_rules",
+      ruleDefinitions: [],
+      readOnly: true,
+      compatibilityMessage,
     })
   }
 

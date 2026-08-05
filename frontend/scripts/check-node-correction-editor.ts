@@ -1,4 +1,5 @@
 import assert from "node:assert/strict"
+import { readFileSync } from "node:fs"
 
 import {
   buildCorrectionNodes,
@@ -130,5 +131,66 @@ assert.deepEqual(
   [...new Set(buildCorrectionNodes({ ...evaluation, scoring: { score: 70 } }).map((node) => node.stage))],
   [1, 3, 5],
 )
+
+const legacyPathEvaluation = structuredClone(evaluation)
+legacyPathEvaluation.scoring.v3_context.subcategory_dimensions.class_one.common_group = {
+  dimensions: [{
+    key: "visual_structure",
+    label: "视觉结构（旧路径）",
+    deduction_rules: [
+      { rule_id: "r1", description: "旧路径主体结构明显失衡", deduction: 20 },
+    ],
+  }],
+}
+const legacyPathNodes = buildCorrectionNodes(legacyPathEvaluation)
+assert.equal(
+  legacyPathNodes.find((node) => node.id === "dimension:visual_structure")?.label,
+  "视觉结构（旧路径）",
+)
+
+const mismatchedEvaluation = structuredClone(evaluation)
+mismatchedEvaluation.aesthetic.dimensions = {
+  legacy_only: {
+    hit_rules: [{ rule_id: "legacy-rule", confidence: "medium", evidence: "旧规则证据" }],
+  },
+}
+const mismatchedNodes = buildCorrectionNodes(mismatchedEvaluation)
+const configuredButMissing = mismatchedNodes.find((node) => node.id === "dimension:visual_structure")
+assert(configuredButMissing)
+assert.equal(configuredButMissing.readOnly, true)
+assert.match(configuredButMissing.compatibilityMessage ?? "", /旧引擎产出/)
+const resultOnlyDimension = mismatchedNodes.find((node) => node.id === "dimension:legacy_only")
+assert(resultOnlyDimension)
+assert.equal(resultOnlyDimension.readOnly, true)
+assert.match(resultOnlyDimension.compatibilityMessage ?? "", /版本不一致/)
+
+const unknownRuleEvaluation = structuredClone(evaluation)
+unknownRuleEvaluation.aesthetic.dimensions.visual_structure.hit_rules = [{
+  rule_id: "unknown-rule",
+  confidence: "medium",
+  evidence: "历史未知规则",
+}]
+const unknownRuleNode = buildCorrectionNodes(unknownRuleEvaluation)
+  .find((node) => node.id === "dimension:visual_structure")
+assert(unknownRuleNode)
+assert.equal(unknownRuleNode.readOnly, true)
+
+const alignedDimension = nodes.find((node) => node.id === "dimension:visual_structure")
+assert(alignedDimension)
+assert.notEqual(alignedDimension.readOnly, true)
+
+const baselineSource = readFileSync(
+  new URL("../src/pages/baseline-regression-page.tsx", import.meta.url),
+  "utf8",
+)
+assert.match(
+  baselineSource,
+  /import \{ NodeCorrectionEditor \} from "@\/pages\/node-correction-editor"/,
+)
+assert.match(
+  baselineSource,
+  /evaluation\.scoring\?\.dimension_scoring_mode === "rule_deduction"/,
+)
+assert.match(baselineSource, /<NodeCorrectionEditor/)
 
 console.log("node correction editor frontend contract: ok")

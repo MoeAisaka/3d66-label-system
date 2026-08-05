@@ -31,6 +31,7 @@ import type {
   ReviewCorrection,
   User,
 } from "@/lib/types"
+import { NodeCorrectionEditor } from "@/pages/node-correction-editor"
 import { ReviewCorrectionForm } from "@/pages/review-correction-form"
 
 const levels: BaselineLevel[] = ["L1", "L2", "L3", "L4", "L5"]
@@ -1324,21 +1325,36 @@ function RegressionResults({
                               </div>
                             )}
                           </div>
-                          <ReviewCorrectionForm
-                            key={`${evaluation.id}-${evaluation.review_revision}`}
-                            dimensions={evaluation.aesthetic?.dimensions ?? {}}
-                            precheck={evaluation.precheck ?? {}}
-                            dimensionSchema={evaluation.dimension_schema}
-                            scoring={evaluation.scoring ?? {}}
-                            pending={reviewResult.isPending}
-                            editable={evaluation.review_stage !== "completed"}
-                            onSubmit={({ note, corrections }) => reviewResult.mutate({
-                              item,
-                              decision: "corrected",
-                              note,
-                              corrections,
-                            })}
-                          />
+                          {evaluation.scoring?.dimension_scoring_mode === "rule_deduction" ? (
+                            <NodeCorrectionEditor
+                              key={`${evaluation.id}-${evaluation.review_revision}`}
+                              evaluation={evaluation}
+                              corrector={me.data?.username ?? ""}
+                              onCorrected={async () => {
+                                await Promise.all([
+                                  queryClient.invalidateQueries({ queryKey: ["baseline-regression", run.id] }),
+                                  queryClient.invalidateQueries({ queryKey: ["evaluations"] }),
+                                  queryClient.invalidateQueries({ queryKey: ["dashboard"] }),
+                                ])
+                              }}
+                            />
+                          ) : (
+                            <ReviewCorrectionForm
+                              key={`${evaluation.id}-${evaluation.review_revision}`}
+                              dimensions={evaluation.aesthetic?.dimensions ?? {}}
+                              precheck={evaluation.precheck ?? {}}
+                              dimensionSchema={evaluation.dimension_schema}
+                              scoring={evaluation.scoring ?? {}}
+                              pending={reviewResult.isPending}
+                              editable={evaluation.review_stage !== "completed"}
+                              onSubmit={({ note, corrections }) => reviewResult.mutate({
+                                item,
+                                decision: "corrected",
+                                note,
+                                corrections,
+                              })}
+                            />
+                          )}
                         </div>
                       )}
                     </div>
