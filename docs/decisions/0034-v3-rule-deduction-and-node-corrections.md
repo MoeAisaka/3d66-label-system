@@ -9,6 +9,34 @@
 “组内权重和为 1”合同和新“原始业务权重”合同，禁止把新权重再次归一化到 1。
 冻结手算样例 `[80,70,60,90,50,40]` 必须得到维度池 38、总分 78。
 
+
+
+## 2026-08-05 rev4 决定性信号与硬伤分级
+
+inspiration_image 新增独立 active rev4：
+inspiration-v2-hard-defect-recall-rev4-20260805。rev3
+inspiration-v2-human-calibrated-20260805 与其调用 A prompt 保持冻结，历史任务继续由
+common-modifiers-v1 重放；rev4 才启用 common-modifiers-v2，因此不会改写 run #14
+的解释结果。
+
+- Tier A：blurry_grayish、invalid_black_border、fisheye_distortion、遮挡主体水印、
+  大面积水印，执行 min(当前分, 20)，进入 L5。
+- Tier B：色彩艳俗、严重偏色、材质虚假、大面积死黑、畸形视角、敷衍构图，保守执行
+  min(当前分, 60)；同图命中至少三个不同 Tier B 时升级 Tier A。
+- 角落小水印只记录；known_real_photo_defect 仅作修饰符，继承同图最强 tier 并取消豁免。
+- tier、动作、封顶、来源和升级规则全部放在 versioned contract，不在聚合器内硬编码。
+  聚合器只解释合同并无条件取最小值，消除 79/80 边界的非单调行为。
+
+调用 A 新版本 inspiration-a-v3-hard-defect-recall-rev4-20260805 追加
+reason、image_defects、逐信号 decisive_evidence、decision_status 和
+uncertain_fields。adapter 保留原始 hard/image defects，验证 reason 与四红线双向一致，
+并核对每个命中与证据；缺失、不确定或冲突会标记 needs_review。只有同时满足
+category_key=inspiration_image 与 rev4 capability 的权威链路才强制该校验，另外三个
+克隆类目不继承 capability。
+
+动态调用 B 继续使用冻结维度规则，但每次生成的真实 system/user prompt 都保存模板版本
+和 SHA-256；成功与 fail-open 结果均留痕。新 seed 只追加 prompt、只提升灵感图 revision，
+不会覆盖既有 PromptVersion，也不会重写其他类目的 active revision。
 ## 决策
 
 新评测不再让多模态模型为维度打 1–5 分。调用 B 只判定每个维度命中了

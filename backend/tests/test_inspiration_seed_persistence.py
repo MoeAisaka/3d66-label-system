@@ -14,6 +14,7 @@ from app.dimension_composition import validate_subcategory_dimensions
 from app.inspiration_category_seed import (
     INSPIRATION_CALL_A_VERSION,
     INSPIRATION_CALL_B_VERSION,
+    INSPIRATION_REV3_CALL_A_VERSION,
     INSPIRATION_SPEC_VERSION,
 )
 from app.models import CategoryEvaluationV3Config, PromptVersion
@@ -66,6 +67,21 @@ def test_new_b_prompt_is_appended_without_overwriting_old_version() -> None:
         ).all()
         assert [prompt.version for prompt in prompts].count(INSPIRATION_CALL_B_VERSION) == 1
         assert [prompt.version for prompt in prompts].count(INSPIRATION_CALL_A_VERSION) == 1
+        legacy_a = db.scalar(
+            select(PromptVersion).where(
+                PromptVersion.version == INSPIRATION_REV3_CALL_A_VERSION
+            )
+        )
+        active_a = db.scalar(
+            select(PromptVersion).where(
+                PromptVersion.version == INSPIRATION_CALL_A_VERSION
+            )
+        )
+        assert legacy_a is not None and active_a is not None
+        assert legacy_a.system_prompt == (
+            PROJECT_ROOT / "prompts" / "inspiration_image_call_a_rev3.txt"
+        ).read_text(encoding="utf-8").strip()
+        assert active_a.system_prompt != legacy_a.system_prompt
         assert db.scalar(
             select(PromptVersion.system_prompt).where(
                 PromptVersion.version == "inspiration-b-v1"
@@ -141,6 +157,9 @@ def test_seed_defaults_clones_active_v3_contract_and_prompts_for_all_categories(
                 assert contract["spec_version"] == INSPIRATION_SPEC_VERSION
             else:
                 assert row.category_key.replace("_", "-") in contract["spec_version"]
+                assert contract["common_modifiers"]["format_version"] == "common-modifiers-v1"
+                assert "authoritative_precheck_contract" not in contract
+                assert row.revision == 1
             assert dimensions_by_track
             assert {
                 len(config["common_group"]["schema_definition"]["dimensions"])

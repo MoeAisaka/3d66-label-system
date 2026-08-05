@@ -188,6 +188,42 @@ export type EvaluationDimensionSchema = {
   error: string | null
 }
 
+export type InspirationHardDefect =
+  | "blurry_grayish"
+  | "careless_composition"
+  | "garish_color"
+  | "large_dead_black"
+  | "distorted_viewpoint"
+  | "fake_material"
+  | "fisheye_distortion"
+  | "invalid_black_border"
+  | "severe_color_cast"
+  | "known_real_photo_defect"
+
+export type InspirationImageDefect =
+  | "corner_small_watermark"
+  | "subject_obscuring_watermark"
+  | "large_area_watermark"
+
+export type InspirationAuthoritativePrecheck = {
+  redline_triggered: Record<
+    "screenshot" | "casual_photo" | "text_heavy" | "qr_code_heavy",
+    boolean
+  >
+  reason: string[]
+  hard_defects: InspirationHardDefect[]
+  image_defects: InspirationImageDefect[]
+  decisive_evidence: {
+    redline_triggered: Record<string, string[]>
+    hard_defects: Array<{ key: InspirationHardDefect; evidence: string }>
+    image_defects: Array<{ key: InspirationImageDefect; evidence: string }>
+  }
+  decision_status: "complete" | "uncertain"
+  uncertain_fields: string[]
+  decisive_signal_validation?: { status: "valid" | "needs_review"; reasons: string[] }
+  needs_review?: boolean
+}
+
 export type Evaluation = {
   id: number
   asset_id: number
@@ -222,7 +258,7 @@ export type Evaluation = {
     }
     text_excerpt?: string
   } | null
-  precheck: Record<string, any>
+  precheck: Record<string, any> & Partial<InspirationAuthoritativePrecheck>
   aesthetic: Record<string, any> | null
   dimension_schema: EvaluationDimensionSchema
   scoring: Record<string, any>

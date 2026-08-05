@@ -204,6 +204,7 @@ def _aesthetic(common_grade: int) -> dict[str, Any]:
 def _redline_precheck() -> dict[str, Any]:
     """Precheck that trips the '是截图' redline (needs no grades)."""
     return {
+        "decisive_signal_validation": {"status": "valid", "reasons": []},
         "classification": {"scope_status": "in_scope", "primary_confidence": 0.9},
         "production_fields": {"reason": ["是截图"]},
     }
@@ -212,6 +213,7 @@ def _redline_precheck() -> dict[str, Any]:
 def _class_one_precheck(confidence: float = 0.95) -> dict[str, Any]:
     """Precheck resolving to class_one (建筑设计 → class_one), real_photo, no defects."""
     return {
+        "decisive_signal_validation": {"status": "valid", "reasons": []},
         "classification": {
             "scope_status": "in_scope",
             "primary_confidence": confidence,
@@ -229,6 +231,7 @@ def _class_two_precheck(confidence: float = 0.95) -> dict[str, Any]:
     media penalty — a clean high/low direction spread without media trickery.
     """
     return {
+        "decisive_signal_validation": {"status": "valid", "reasons": []},
         "classification": {
             "scope_status": "in_scope",
             "primary_confidence": confidence,
@@ -389,6 +392,30 @@ def _bundle_with_specific(db: Session) -> dict:
     return bundle
 
 
+
+def test_rev4_invalid_decisive_precheck_fails_closed(
+    sessions: sessionmaker[Session],
+) -> None:
+    with sessions() as db:
+        bundle = _bundle(db)
+    precheck = _class_one_precheck()
+    precheck["decisive_signal_validation"] = {
+        "status": "needs_review",
+        "reasons": ["missing:image_defects"],
+    }
+    with pytest.raises(V3AuthoritativeError) as excinfo:
+        asyncio.run(
+            evaluate_v3_authoritative(
+                _FakeClient(),
+                "img.jpg",
+                "image/jpeg",
+                v3_bundle=bundle,
+                precheck=precheck,
+                aesthetic=_aesthetic(common_grade=5),
+            )
+        )
+    assert excinfo.value.code == "decisive_precheck_invalid"
+
 def test_redline_hit_hard_reject(sessions: sessionmaker[Session]) -> None:
     with sessions() as db:
         bundle = _bundle(db)
@@ -427,6 +454,16 @@ def test_normal_in_scope_produces_score(sessions: sessionmaker[Session]) -> None
     assert result["level"] in {"L1", "L2", "L3", "L4", "L5"}
     assert result["track_key"] == "class_one"
     assert result["level_semantics_version"] == "doc-l5-worst-v1"
+    identity = result["dimension_deduction_output"]["prompt_identity"]
+    assert identity["template_version"] == "dimension-deduction-prompt-v1"
+    assert len(identity["system_sha256"]) == 64
+    assert len(identity["user_sha256"]) == 64
+    scoring = build_v3_authoritative_scoring(
+        result, precheck=_class_one_precheck()
+    )
+    assert scoring["dimension_deduction_output"]["prompt_identity"] == identity
+    assert scoring["_dimension_deduction_raw_payload"]["prompt_identity"] == identity
+    assert "provider_payload" in scoring["_dimension_deduction_raw_payload"]
 
 
 def test_common_grade_unavailable_raises(sessions: sessionmaker[Session]) -> None:

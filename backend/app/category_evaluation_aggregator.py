@@ -26,6 +26,7 @@ from typing import Any
 
 from .category_evaluation_contract import (
     CategoryEvaluationContractError,
+    COMMON_MODIFIERS_V2_FORMAT_VERSION,
     validate_category_evaluation_contract,
 )
 from .redline_policy import evaluate_redlines
@@ -234,6 +235,8 @@ def _apply_dimension_deductions(
     if isinstance(dimension_result.get("dimension_deductions"), dict):
         evidence["dimension_deductions"] = dimension_result["dimension_deductions"]
     warning = dimension_result.get("warning")
+    if isinstance(dimension_result.get("prompt_identity"), dict):
+        evidence["prompt_identity"] = dimension_result["prompt_identity"]
     if isinstance(warning, str) and warning:
         evidence["warning"] = warning
     evidence["mode"] = (
@@ -242,6 +245,96 @@ def _apply_dimension_deductions(
         else "grade_fallback"
     )
     return score_after, evidence
+
+
+def _apply_v2_hard_defect_policy(
+    *,
+    precheck: dict[str, Any],
+    veto: dict[str, Any],
+    score: float,
+) -> tuple[float, dict[str, Any]]:
+    """Resolve source-qualified rev4 defects and apply the strongest action."""
+    source_values: dict[str, set[str]] = {}
+    for source in ("hard_defects", "image_defects"):
+        raw_values = precheck.get(source)
+        source_values[source] = (
+            {
+                item
+                for item in raw_values
+                if isinstance(item, str) and item
+            }
+            if isinstance(raw_values, list)
+            else set()
+        )
+    matched: list[dict[str, Any]] = []
+    modifiers: list[dict[str, Any]] = []
+    for rule in veto["rules"]:
+        if rule["key"] not in source_values[rule["source"]]:
+            continue
+        if rule.get("kind", "defect") == "modifier":
+            modifiers.append(rule)
+        else:
+            matched.append(rule)
+
+    tiers = veto["tiers"]
+    tier_counts: dict[str, int] = {}
+    for rule in matched:
+        tier = rule["severity"]
+        tier_counts[tier] = tier_counts.get(tier, 0) + 1
+
+    escalation = veto["escalation"]
+    escalated = (
+        tier_counts.get(escalation["source_tier"], 0)
+        >= escalation["minimum_distinct_hits"]
+    )
+    resolved_tier: str | None = None
+    if escalated:
+        resolved_tier = escalation["target_tier"]
+    else:
+        capping_tiers = {
+            rule["severity"]
+            for rule in matched
+            if tiers[rule["severity"]]["action"] == "cap"
+        }
+        if capping_tiers:
+            resolved_tier = min(
+                capping_tiers,
+                key=lambda tier: tiers[tier]["cap_to"],
+            )
+        elif matched:
+            resolved_tier = "record_only"
+
+    cap_to = (
+        tiers[resolved_tier]["cap_to"]
+        if resolved_tier is not None
+        and tiers[resolved_tier]["action"] == "cap"
+        else None
+    )
+    modifier_applied = bool(modifiers and matched)
+    action = {
+        "policy_version": veto["policy_version"],
+        "matched_rules": [
+            {
+                "key": rule["key"],
+                "source": rule["source"],
+                "tier": rule["severity"],
+            }
+            for rule in matched
+        ],
+        "matched_modifiers": [rule["key"] for rule in modifiers],
+        "tier_counts": tier_counts,
+        "resolved_tier": resolved_tier,
+        "cap_to": cap_to,
+        "escalated": escalated,
+        "modifier_applied": modifier_applied,
+        "cancel_exemption": bool(
+            modifier_applied
+            and any(rule.get("cancel_exemption") is True for rule in modifiers)
+        ),
+    }
+    if veto.get("enabled", True) and cap_to is not None:
+        return min(score, float(cap_to)), action
+    return score, action
 
 
 def aggregate_category_evaluation(
@@ -363,42 +456,69 @@ def aggregate_category_evaluation(
         score_after_media = score_after_dimensions
         steps.append(_step("media_skipped", score_after_media, "媒介降权已关闭，节点 penalty=0"))
 
-    # Step 6 — high-score veto (一票压分).
+    # Step 6 — hard-defect policy. v1 is replay-only; v2 is monotonic.
     veto = contract["common_modifiers"]["high_score_veto"]
-    veto_enabled = veto.get("enabled", True)
-    veto_threshold = veto["threshold"]
-    veto_cap_to = veto["cap_to"]
-    hard_defects = precheck.get("hard_defects")
-    configured_rules = veto.get("rules")
-    configured_hard_defects = (
-        {rule["key"] for rule in configured_rules}
-        if isinstance(configured_rules, list)
-        else None
-    )
-    has_hard_defects = isinstance(hard_defects, list) and any(
-        isinstance(item, str)
-        and (configured_hard_defects is None or item in configured_hard_defects)
-        for item in hard_defects
-    )
-    score_after_veto = score_after_media
-    if veto_enabled and score_after_media >= veto_threshold and has_hard_defects:
-        score_after_veto = min(score_after_media, float(veto_cap_to))
-        caps.append({
-            "cap": "high_score_veto",
-            "reason": f"分数 {score_after_media} 达到 {veto_threshold} 且命中硬伤"
-            f" {hard_defects}，强制压至 {veto_cap_to}",
-        })
-        steps.append(_step(
-            "veto",
-            score_after_veto,
-            f"高分一票压分触发：封顶至 {veto_cap_to}",
-        ))
+    hard_defect_action: dict[str, Any] | None = None
+    if contract["common_modifiers"]["format_version"] == COMMON_MODIFIERS_V2_FORMAT_VERSION:
+        score_after_veto, hard_defect_action = _apply_v2_hard_defect_policy(
+            precheck=precheck,
+            veto=veto,
+            score=score_after_media,
+        )
+        if hard_defect_action["cap_to"] is not None:
+            caps.append({
+                "cap": "hard_defect_severity",
+                "reason": (
+                    f"命中 {hard_defect_action['matched_rules']}，"
+                    f"按 tier {hard_defect_action['resolved_tier']} "
+                    f"无条件 min(当前分, {hard_defect_action['cap_to']})"
+                ),
+            })
+            steps.append(_step(
+                "veto",
+                score_after_veto,
+                f"硬伤 tier {hard_defect_action['resolved_tier']}："
+                f"封顶至 {hard_defect_action['cap_to']}",
+            ))
+        elif hard_defect_action["resolved_tier"] == "record_only":
+            steps.append(_step("veto", score_after_veto, "仅命中记录型缺陷，不压分"))
+        else:
+            steps.append(_step("veto", score_after_veto, "无配置内硬伤信号"))
     else:
-        steps.append(_step(
-            "veto",
-            score_after_veto,
-            "高分一票压分未触发（已关闭、未达阈值或无配置内硬伤信号）",
-        ))
+        veto_enabled = veto.get("enabled", True)
+        veto_threshold = veto["threshold"]
+        veto_cap_to = veto["cap_to"]
+        hard_defects = precheck.get("hard_defects")
+        configured_rules = veto.get("rules")
+        configured_hard_defects = (
+            {rule["key"] for rule in configured_rules}
+            if isinstance(configured_rules, list)
+            else None
+        )
+        has_hard_defects = isinstance(hard_defects, list) and any(
+            isinstance(item, str)
+            and (configured_hard_defects is None or item in configured_hard_defects)
+            for item in hard_defects
+        )
+        score_after_veto = score_after_media
+        if veto_enabled and score_after_media >= veto_threshold and has_hard_defects:
+            score_after_veto = min(score_after_media, float(veto_cap_to))
+            caps.append({
+                "cap": "high_score_veto",
+                "reason": f"分数 {score_after_media} 达到 {veto_threshold} 且命中硬伤"
+                f" {hard_defects}，强制压至 {veto_cap_to}",
+            })
+            steps.append(_step(
+                "veto",
+                score_after_veto,
+                f"高分一票压分触发：封顶至 {veto_cap_to}",
+            ))
+        else:
+            steps.append(_step(
+                "veto",
+                score_after_veto,
+                "高分一票压分未触发（已关闭、未达阈值或无配置内硬伤信号）",
+            ))
 
     # Step 7 — track cap, then clamp to integer [0, 100].
     capped = min(score_after_veto, float(track_cap))
@@ -431,6 +551,7 @@ def aggregate_category_evaluation(
         "score": score,
         "level": level,
         "raw_level": raw_level,
+        "hard_defect_action": hard_defect_action,
         "hit_rules": list(redline["hit_rules"]),
         "dimension_evidence": dim_evidence,
         "media_penalty_enabled": bool(media_enabled),

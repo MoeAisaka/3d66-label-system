@@ -30,6 +30,7 @@ from .redline_policy import (
 CATEGORY_EVALUATION_CONTRACT_VERSION = "evaluation-category-profile-v3"
 TRACK_CLASSIFICATION_FORMAT_VERSION = "track-classification-v1"
 COMMON_MODIFIERS_FORMAT_VERSION = "common-modifiers-v1"
+COMMON_MODIFIERS_V2_FORMAT_VERSION = "common-modifiers-v2"
 
 _TRACK_KEY_PATTERN = re.compile(r"^[a-z][a-z0-9_]{2,39}$")
 _MEDIA_PENALTY_KEYS = frozenset({"real_photo", "render_3d", "ai_image", "other"})
@@ -237,10 +238,11 @@ def _validate_common_modifiers(block: Any) -> None:
         raise CategoryEvaluationContractError(
             "common_modifiers_not_object", "common_modifiers 必须是对象"
         )
-    if block.get("format_version") != COMMON_MODIFIERS_FORMAT_VERSION:
+    format_version = block.get("format_version")
+    if format_version not in {COMMON_MODIFIERS_FORMAT_VERSION, COMMON_MODIFIERS_V2_FORMAT_VERSION}:
         raise CategoryEvaluationContractError(
             "common_modifiers_version",
-            f"common_modifiers 版本必须是 {COMMON_MODIFIERS_FORMAT_VERSION}",
+            "common_modifiers 版本不受支持",
         )
 
     media = block.get("media_type_penalty")
@@ -285,6 +287,86 @@ def _validate_common_modifiers(block: Any) -> None:
         raise CategoryEvaluationContractError(
             "veto_enabled", "high_score_veto.enabled 必须是布尔值"
         )
+    if format_version == COMMON_MODIFIERS_V2_FORMAT_VERSION:
+        policy_version = veto.get("policy_version")
+        if not isinstance(policy_version, str) or not policy_version.strip():
+            raise CategoryEvaluationContractError(
+                "veto_policy_version", "high_score_veto.policy_version 必须是非空字符串"
+            )
+        tiers = veto.get("tiers")
+        if not isinstance(tiers, dict) or set(tiers) != {"A", "B", "record_only"}:
+            raise CategoryEvaluationContractError(
+                "veto_tiers_invalid", "high_score_veto.tiers 必须定义 A、B、record_only"
+            )
+        for tier_key, tier in tiers.items():
+            if not isinstance(tier, dict):
+                raise CategoryEvaluationContractError(
+                    "veto_tier_invalid", f"硬伤 tier {tier_key} 必须是对象"
+                )
+            action = tier.get("action")
+            cap_to = tier.get("cap_to")
+            if tier_key == "record_only":
+                if action != "record_only" or cap_to is not None:
+                    raise CategoryEvaluationContractError(
+                        "veto_tier_invalid", "record_only 必须只记录且不得配置 cap_to"
+                    )
+            elif action != "cap" or not _is_int(cap_to) or not 0 <= cap_to <= 100:
+                raise CategoryEvaluationContractError(
+                    "veto_tier_invalid", f"硬伤 tier {tier_key} 必须配置 0 至 100 的 cap_to"
+                )
+            if not isinstance(tier.get("target_band"), str) or not tier["target_band"].strip():
+                raise CategoryEvaluationContractError(
+                    "veto_tier_invalid", f"硬伤 tier {tier_key}.target_band 必须是非空字符串"
+                )
+        rules = veto.get("rules")
+        if not isinstance(rules, list) or not rules:
+            raise CategoryEvaluationContractError(
+                "veto_rules_invalid", "high_score_veto.rules 必须是非空数组"
+            )
+        seen_keys: set[str] = set()
+        for rule in rules:
+            if not isinstance(rule, dict):
+                raise CategoryEvaluationContractError(
+                    "veto_rule_invalid", "high_score_veto.rules 每项必须是对象"
+                )
+            key = rule.get("key")
+            source = rule.get("source")
+            kind = rule.get("kind", "defect")
+            severity = rule.get("severity")
+            if not isinstance(key, str) or not key.strip() or key in seen_keys:
+                raise CategoryEvaluationContractError(
+                    "veto_rule_invalid", "硬伤 key 必须非空且不可重复"
+                )
+            seen_keys.add(key)
+            if source not in {"hard_defects", "image_defects"}:
+                raise CategoryEvaluationContractError(
+                    "veto_rule_source", f"硬伤 {key} 的 source 不受支持"
+                )
+            if kind == "modifier":
+                if severity != "inherit" or rule.get("inherits_strongest") is not True:
+                    raise CategoryEvaluationContractError(
+                        "veto_modifier_invalid", f"修饰符 {key} 必须继承最强 tier"
+                    )
+            elif kind != "defect" or severity not in tiers:
+                raise CategoryEvaluationContractError(
+                    "veto_rule_severity", f"硬伤 {key} 的 severity 不受支持"
+                )
+            if not isinstance(rule.get("description"), str) or not rule["description"].strip():
+                raise CategoryEvaluationContractError(
+                    "veto_rule_invalid", f"硬伤 {key} 缺少说明"
+                )
+        escalation = veto.get("escalation")
+        if (
+            not isinstance(escalation, dict)
+            or escalation.get("source_tier") not in tiers
+            or escalation.get("target_tier") not in tiers
+            or not _is_int(escalation.get("minimum_distinct_hits"))
+            or escalation["minimum_distinct_hits"] < 2
+        ):
+            raise CategoryEvaluationContractError(
+                "veto_escalation_invalid", "high_score_veto.escalation 无效"
+            )
+        return
     threshold = veto.get("threshold")
     cap_to = veto.get("cap_to")
     for name, value in (("threshold", threshold), ("cap_to", cap_to)):

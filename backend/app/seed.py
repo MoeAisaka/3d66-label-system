@@ -255,14 +255,24 @@ def _seed_inspiration_image_prompts(db: Session, settings) -> None:
             "stage": "A",
             "name": "灵感图人工校准版预检（红线/赛道/媒介/硬伤）",
             "version": "inspiration-a-v2-human-calibrated-20260805",
+            "filename": "inspiration_image_call_a_rev3.txt",
+            "pipeline_scope": "full_pipeline",
+            "note": "2026-08-05 rev3 冻结版：同步十条硬伤与 trait 直出字段",
+        },
+        {
+            "stage": "A",
+            "name": "灵感图 rev4 决定性信号高召回前检",
+            "version": "inspiration-a-v3-hard-defect-recall-rev4-20260805",
             "filename": "inspiration_image_call_a.txt",
-            "note": "2026-08-05 人工校准版：同步十条硬伤与 trait 直出字段",
+            "pipeline_scope": "shared",
+            "note": "2026-08-05 rev4：新增 image_defects、证据与缺失/不确定 fail-closed",
         },
         {
             "stage": "B",
             "name": "灵感图人工校准版全赛道评审",
             "version": "inspiration-b-v2-human-calibrated-20260805",
             "filename": "inspiration_image_call_b.txt",
+            "pipeline_scope": "full_pipeline",
             "note": "2026-08-05 人工校准版：完整红线/赛道/维度/压分/等级/标签合同",
         },
     )
@@ -279,7 +289,7 @@ def _seed_inspiration_image_prompts(db: Session, settings) -> None:
             PromptVersion(
                 stage=item["stage"],
                 category_key="inspiration_image",
-                pipeline_scope="full_pipeline",
+                pipeline_scope=item["pipeline_scope"],
                 name=item["name"],
                 version=item["version"],
                 system_prompt=system_prompt,
@@ -393,6 +403,11 @@ def _seed_v3_only_category_clones(db: Session) -> None:
     from .dimension_composition import validate_subcategory_dimensions
     from .dimension_deduction_bridge import extract_dimension_deduction_rules
     from .dimension_schema_registry import canonical_json
+    from .inspiration_category_seed import (
+        build_inspiration_classification_map,
+        build_inspiration_subcategory_dimensions,
+        build_inspiration_v3_rev3_contract,
+    )
     from .subcategory_resolver import validate_classification_map
 
     db.flush()
@@ -405,9 +420,9 @@ def _seed_v3_only_category_clones(db: Session) -> None:
     if source is None:
         raise RuntimeError("缺少 active 灵感图 v3 合同，无法生成其他类目初版")
 
-    source_contract = json.loads(source.contract_json)
-    source_classification = json.loads(source.classification_map_json)
-    source_dimensions = json.loads(source.subcategory_dimensions_json)
+    source_contract = build_inspiration_v3_rev3_contract()
+    source_classification = build_inspiration_classification_map()
+    source_dimensions = build_inspiration_subcategory_dimensions()
     bindings = source_contract.get("prompt_bindings")
     if not isinstance(bindings, dict):
         raise RuntimeError("灵感图 v3 合同缺少 A/B prompt_bindings")

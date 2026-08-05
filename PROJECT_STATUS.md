@@ -1578,3 +1578,23 @@ npm.cmd run build
 - 公司测试环境 `192.168.1.35` 只能从 MacBook-Company 内网访问；当前执行面无法获得该
   节点 shell 且 Mac mini 无路由，因此数据库黄金集、真实模型全量 run、共享环境部署和
   commit 一致性仍待在 MacBook 执行交付 bundle 后验收，不得虚报为完成。
+
+
+## 最新完成：灵感图 rev4 硬伤分级与决定性信号召回（2026-08-05）
+
+- 新 active spec 为 inspiration-v2-hard-defect-recall-rev4-20260805；rev3 builder 与
+  inspiration_image_call_a_rev3.txt 独立冻结，run #14 的 72/79/79/79 四张硬伤载荷
+  仍严格回放。
+- common-modifiers-v2 将 Tier A 封顶 20、Tier B 保守封顶 60、角落小水印仅记录；
+  三个不同 Tier B 升级 Tier A。所有映射、动作、来源和升级规则均由合同承载。
+- 新调用 A 版本追加 reason、三类 image_defects、逐信号 evidence 与
+  complete/uncertain 状态；adapter 对红线/reason 与命中/evidence 做双向校验，
+  缺失、不确定或冲突一律 needs_review，rev4 权威链路 fail-closed。
+- 动态调用 B 的实际 system/user prompt 保存模板版本和双 SHA-256；成功和 fallback
+  都保留身份，raw/provider 与归一化输出不混写。
+- seed 只追加新 PromptVersion、只更新 inspiration_image；space_image、material_image、
+  pdf_text 继续使用 legacy capability，既有 active revision 不重写。
+- TDD RED 日志保存在 /tmp/labellab-path-b-red-*.log；相关集合 130 passed。最终实现态
+  后端全量 1070 passed, 1 skipped，前端三项合同、lint、build 均通过。
+- 共享测试环境部署和固定 100 张基线的真实结果写入外部验收报告
+  /Users/Shared/OpenClaw/125-实现-标签实验台硬伤分级与召回修复-20260805/README.md。

@@ -4,3 +4,5 @@
 *.jpg binary
 *.jpeg binary
 *.webp binary
+# Frozen rev3 prompt must remain byte-identical, including legacy trailing whitespace.
+prompts/inspiration_image_call_a_rev3.txt whitespace=-trailing-space

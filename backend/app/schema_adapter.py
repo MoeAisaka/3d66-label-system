@@ -74,25 +74,153 @@ _INSPIRATION_MEDIA_TRAIT_MAP = {
     "ai_generated": "AI图",
     "other": "其它",
 }
+_INSPIRATION_HARD_DEFECT_VALUES = {
+    "blurry_grayish",
+    "careless_composition",
+    "garish_color",
+    "large_dead_black",
+    "distorted_viewpoint",
+    "fake_material",
+    "fisheye_distortion",
+    "invalid_black_border",
+    "severe_color_cast",
+    "known_real_photo_defect",
+}
+_INSPIRATION_IMAGE_DEFECT_VALUES = {
+    "corner_small_watermark",
+    "subject_obscuring_watermark",
+    "large_area_watermark",
+}
+_INSPIRATION_DECISIVE_FIELDS = (
+    "redline_triggered",
+    "reason",
+    "hard_defects",
+    "image_defects",
+    "decisive_evidence",
+    "decision_status",
+    "uncertain_fields",
+)
 
 
 def adapt_inspiration_call_a_precheck(precheck: dict[str, Any]) -> dict[str, Any]:
-    """把灵感图专用调用 A 输出适配为 v3 聚合器冻结的事实合同。
-
-    已是标准 ``classification`` 结构的载荷原样返回；专用 A 的红线布尔值、一级分类、
-    置信度和媒介字段则确定性投影到 ``production_fields.reason/trait`` 与
-    ``classification``。模型分数或人工真值均不参与该适配。
-    """
+    """Normalize inspiration Call-A facts and audit every decisive signal."""
     if not isinstance(precheck, dict) or isinstance(precheck.get("classification"), dict):
         return precheck
     redlines = precheck.get("redline_triggered")
     if not isinstance(redlines, dict) or "track_classification" not in precheck:
         return precheck
-    reasons = [
+
+    review_reasons = [
+        f"missing:{field}"
+        for field in _INSPIRATION_DECISIVE_FIELDS
+        if field not in precheck
+    ]
+    derived_reasons = [
         reason
         for key, reason in _INSPIRATION_REDLINE_REASON_MAP.items()
         if redlines.get(key) is True
     ]
+    native_reasons = precheck.get("reason")
+    if not isinstance(native_reasons, list) or any(
+        item not in PRODUCTION_REASON_VALUES for item in native_reasons
+    ):
+        if "reason" in precheck:
+            review_reasons.append("invalid:reason")
+        reasons = derived_reasons
+    else:
+        reasons = list(native_reasons)
+
+    for key, reason in _INSPIRATION_REDLINE_REASON_MAP.items():
+        flag = redlines.get(key)
+        if not isinstance(flag, bool):
+            review_reasons.append(f"invalid:redline_triggered:{key}")
+            continue
+        if flag != (reason in reasons):
+            review_reasons.append(f"redline_reason_conflict:{key}")
+
+    hard_defects = precheck.get("hard_defects")
+    if not isinstance(hard_defects, list) or any(
+        not isinstance(item, str) or item not in _INSPIRATION_HARD_DEFECT_VALUES
+        for item in hard_defects
+    ):
+        if "hard_defects" in precheck:
+            review_reasons.append("invalid:hard_defects")
+        hard_hits: set[str] = set()
+    else:
+        hard_hits = set(hard_defects)
+        if hard_hits == {"known_real_photo_defect"}:
+            review_reasons.append(
+                "modifier_without_defect:known_real_photo_defect"
+            )
+
+    image_defects = precheck.get("image_defects")
+    if not isinstance(image_defects, list) or any(
+        not isinstance(item, str) or item not in _INSPIRATION_IMAGE_DEFECT_VALUES
+        for item in image_defects
+    ):
+        if "image_defects" in precheck:
+            review_reasons.append("invalid:image_defects")
+        image_hits: set[str] = set()
+    else:
+        image_hits = set(image_defects)
+
+    evidence = precheck.get("decisive_evidence")
+    redline_evidence: dict[str, Any] = {}
+    evidenced_hits = {"hard_defects": set(), "image_defects": set()}
+    if isinstance(evidence, dict):
+        raw_redline_evidence = evidence.get("redline_triggered")
+        if isinstance(raw_redline_evidence, dict):
+            redline_evidence = raw_redline_evidence
+        else:
+            review_reasons.append("invalid:evidence:redline_triggered")
+        for source in ("hard_defects", "image_defects"):
+            entries = evidence.get(source)
+            if not isinstance(entries, list):
+                review_reasons.append(f"invalid:evidence:{source}")
+                continue
+            for entry in entries:
+                if (
+                    not isinstance(entry, dict)
+                    or not isinstance(entry.get("key"), str)
+                    or not isinstance(entry.get("evidence"), str)
+                    or not entry["evidence"].strip()
+                ):
+                    review_reasons.append(f"invalid:evidence:{source}")
+                    continue
+                evidenced_hits[source].add(entry["key"])
+    elif "decisive_evidence" in precheck:
+        review_reasons.append("invalid:decisive_evidence")
+
+    for key in _INSPIRATION_REDLINE_REASON_MAP:
+        entries = redline_evidence.get(key)
+        if not isinstance(entries, list) or any(
+            not isinstance(item, str) or not item.strip() for item in entries
+        ):
+            review_reasons.append(f"invalid:evidence:redline:{key}")
+            continue
+        if redlines.get(key) is True and not entries:
+            review_reasons.append(f"missing_evidence:redline:{key}")
+        if redlines.get(key) is False and entries:
+            review_reasons.append(f"evidence_conflict:redline:{key}")
+
+    for source, hits in (("hard_defects", hard_hits), ("image_defects", image_hits)):
+        for key in sorted(hits - evidenced_hits[source]):
+            review_reasons.append(f"missing_evidence:{source}:{key}")
+        for key in sorted(evidenced_hits[source] - hits):
+            review_reasons.append(f"evidence_without_hit:{source}:{key}")
+
+    if precheck.get("decision_status") != "complete":
+        if "decision_status" in precheck:
+            review_reasons.append("decision_status:not_complete")
+    uncertain_fields = precheck.get("uncertain_fields")
+    if not isinstance(uncertain_fields, list) or any(
+        not isinstance(item, str) or not item.strip() for item in uncertain_fields
+    ):
+        if "uncertain_fields" in precheck:
+            review_reasons.append("invalid:uncertain_fields")
+    elif uncertain_fields:
+        review_reasons.extend(f"uncertain:{item}" for item in uncertain_fields)
+
     trait = precheck.get("trait")
     if trait not in PRODUCTION_TRAIT_VALUES:
         trait = _INSPIRATION_MEDIA_TRAIT_MAP.get(str(precheck.get("media_type")), "其它")
@@ -101,6 +229,7 @@ def adapt_inspiration_call_a_precheck(precheck: dict[str, Any]) -> dict[str, Any
         confidence = precheck.get("track_confidence")
     if not isinstance(confidence, (int, float)) or isinstance(confidence, bool):
         confidence = 0.0
+
     normalized = deepcopy(precheck)
     normalized["classification"] = {
         "scope_status": "in_scope",
@@ -111,7 +240,29 @@ def adapt_inspiration_call_a_precheck(precheck: dict[str, Any]) -> dict[str, Any
     if not isinstance(production, dict):
         production = {}
     production.update({"reason": reasons, "trait": trait})
+    if isinstance(image_defects, list):
+        production["image_defects"] = "有水印" if image_defects else ""
     normalized["production_fields"] = production
+    existing_review_reasons = precheck.get("review_reasons")
+    if not isinstance(existing_review_reasons, list):
+        existing_review_reasons = []
+    normalized["review_reasons"] = list(
+        dict.fromkeys(
+            [
+                *(
+                    item
+                    for item in existing_review_reasons
+                    if isinstance(item, str) and item
+                ),
+                *review_reasons,
+            ]
+        )
+    )
+    normalized["needs_review"] = bool(precheck.get("needs_review") is True or normalized["review_reasons"])
+    normalized["decisive_signal_validation"] = {
+        "status": "needs_review" if normalized["needs_review"] else "valid",
+        "reasons": list(normalized["review_reasons"]),
+    }
     return normalized
 
 

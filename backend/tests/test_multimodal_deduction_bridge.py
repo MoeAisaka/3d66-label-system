@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 
 from app.dimension_deduction_bridge import (
+    DEDUCTION_PROMPT_TEMPLATE_VERSION,
     FALLBACK_WARNING,
     call_multimodal_for_dimension_deductions,
 )
@@ -49,6 +51,11 @@ def test_bridge_normalizes_rule_hits_and_uses_chinese_prompt() -> None:
     assert first["hit_rules"][0]["evidence"] == "图中主体偏移"
     assert "不打1-5分" in client.system
     assert "扣" in client.user
+    assert output["prompt_identity"] == {
+        "template_version": DEDUCTION_PROMPT_TEMPLATE_VERSION,
+        "system_sha256": hashlib.sha256(client.system.encode("utf-8")).hexdigest(),
+        "user_sha256": hashlib.sha256(client.user.encode("utf-8")).hexdigest(),
+    }
 
 
 def test_bridge_provider_failure_returns_empty_hits_and_warning() -> None:
@@ -60,3 +67,7 @@ def test_bridge_provider_failure_returns_empty_hits_and_warning() -> None:
     )
     assert output["warning"] == FALLBACK_WARNING
     assert all(item["hit_rules"] == [] for item in output["dimensions"].values())
+    identity = output["prompt_identity"]
+    assert identity["template_version"] == DEDUCTION_PROMPT_TEMPLATE_VERSION
+    assert len(identity["system_sha256"]) == 64
+    assert len(identity["user_sha256"]) == 64

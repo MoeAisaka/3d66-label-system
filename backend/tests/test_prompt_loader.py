@@ -112,6 +112,23 @@ def test_inspiration_a_human_calibrated_prompt_syncs_trait_and_hard_defects() ->
         encoding="utf-8"
     )
     assert '"trait": "实景照片"' in prompt
-    assert "材质廉价" in prompt
     assert "比例严重失调" in prompt
     assert "主体被遮挡" in prompt
+    for field in (
+        '"reason"',
+        '"image_defects"',
+        '"decisive_evidence"',
+        '"decision_status"',
+        '"uncertain_fields"',
+    ):
+        assert field in prompt
+    assert "未命中与不确定严格区分" in prompt
+    assert "corner_small_watermark" in prompt
+    assert "subject_obscuring_watermark" in prompt
+    assert "large_area_watermark" in prompt
+
+    rev3 = (PROJECT_ROOT / "prompts" / "inspiration_image_call_a_rev3.txt").read_text(
+        encoding="utf-8"
+    )
+    assert "凡最终得分 ≥80 且命中任意硬伤者，一律压至 79 分" in rev3
+    assert '"image_defects"' not in rev3

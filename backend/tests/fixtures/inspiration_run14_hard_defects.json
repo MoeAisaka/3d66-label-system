@@ -1,0 +1,127 @@
+{
+  "7987": {
+    "call_a": {
+      "redline_triggered": {"screenshot": false, "casual_photo": false, "text_heavy": false, "qr_code_heavy": false},
+      "hard_defects": ["blurry_grayish"],
+      "track_classification": "class_two",
+      "track_confidence": 0.95,
+      "media_type": "real_photo",
+      "media_confidence": 0.9,
+      "trait": "实景照片",
+      "primary_category": "产品设计",
+      "secondary_category": "家居照明吊扇",
+      "classification_confidence": 0.9
+    },
+    "call_b": {
+      "dimensions": {
+        "visual_structure": {
+          "dimension_key": "visual_structure",
+          "hit_rules": [{"rule_id": "r1", "confidence": "high", "evidence": "吊扇主体偏离画面中心，重心明显向右侧偏移"}]
+        },
+        "color_aesthetics": {
+          "dimension_key": "color_aesthetics",
+          "hit_rules": [{"rule_id": "r2", "confidence": "high", "evidence": "整体暖黄偏色明显，白色构件和窗外高光失真"}]
+        },
+        "emotional_expression": {"dimension_key": "emotional_expression", "hit_rules": []},
+        "design_aesthetics": {"dimension_key": "design_aesthetics", "hit_rules": []},
+        "originality": {"dimension_key": "originality", "hit_rules": []},
+        "design_trendiness": {"dimension_key": "design_trendiness", "hit_rules": []}
+      },
+      "overall_evidence": ["吊扇主体清晰，但构图偏移和暖黄偏色影响专业呈现"]
+    },
+    "expected_rev3": {"score": 72, "level": "L2"}
+  },
+  "8000": {
+    "call_a": {
+      "redline_triggered": {"screenshot": false, "casual_photo": false, "text_heavy": false, "qr_code_heavy": false},
+      "hard_defects": ["invalid_black_border"],
+      "track_classification": "class_one",
+      "track_confidence": 0.98,
+      "media_type": "real_photo",
+      "media_confidence": 0.99,
+      "trait": "实景照片",
+      "primary_category": "建筑设计",
+      "secondary_category": "欧洲古典历史建筑",
+      "classification_confidence": 0.95
+    },
+    "call_b": {
+      "dimensions": {
+        "visual_structure": {
+          "dimension_key": "visual_structure",
+          "hit_rules": [{"rule_id": "r1", "confidence": "high", "evidence": "画面底部存在大面积无效黑边，破坏建筑主体完整呈现"}]
+        },
+        "color_aesthetics": {"dimension_key": "color_aesthetics", "hit_rules": []},
+        "emotional_expression": {"dimension_key": "emotional_expression", "hit_rules": []},
+        "design_aesthetics": {"dimension_key": "design_aesthetics", "hit_rules": []},
+        "originality": {"dimension_key": "originality", "hit_rules": []},
+        "design_trendiness": {"dimension_key": "design_trendiness", "hit_rules": []}
+      },
+      "overall_evidence": ["建筑主体明确，但底部无效黑边属于致命呈现缺陷"]
+    },
+    "expected_rev3": {"score": 79, "level": "L2"}
+  },
+  "8001": {
+    "call_a": {
+      "redline_triggered": {"screenshot": false, "casual_photo": false, "text_heavy": false, "qr_code_heavy": false},
+      "hard_defects": ["fisheye_distortion"],
+      "track_classification": "class_one",
+      "track_confidence": 0.95,
+      "media_type": "real_photo",
+      "media_confidence": 0.98,
+      "trait": "实景照片",
+      "primary_category": "公共空间",
+      "secondary_category": "博物馆大厅",
+      "classification_confidence": 0.9
+    },
+    "call_b": {
+      "dimensions": {
+        "visual_structure": {
+          "dimension_key": "visual_structure",
+          "hit_rules": [
+            {"rule_id": "r1", "confidence": "high", "evidence": "鱼眼超广角使边缘柱体明显弯曲，垂直线失真"},
+            {"rule_id": "r3", "confidence": "high", "evidence": "夸张透视导致前后尺度关系异常，空间比例失真"}
+          ]
+        },
+        "color_aesthetics": {"dimension_key": "color_aesthetics", "hit_rules": []},
+        "emotional_expression": {"dimension_key": "emotional_expression", "hit_rules": []},
+        "design_aesthetics": {"dimension_key": "design_aesthetics", "hit_rules": []},
+        "originality": {"dimension_key": "originality", "hit_rules": []},
+        "design_trendiness": {"dimension_key": "design_trendiness", "hit_rules": []}
+      },
+      "overall_evidence": ["空间主题可辨识，但严重鱼眼畸变破坏真实比例"]
+    },
+    "expected_rev3": {"score": 79, "level": "L2"}
+  },
+  "8003": {
+    "call_a": {
+      "redline_triggered": {"screenshot": false, "casual_photo": false, "text_heavy": false, "qr_code_heavy": false},
+      "hard_defects": ["blurry_grayish"],
+      "track_classification": "class_one",
+      "track_confidence": 0.95,
+      "media_type": "real_photo",
+      "media_confidence": 0.9,
+      "trait": "实景照片",
+      "primary_category": "居住空间",
+      "secondary_category": "现代自然风独栋住宅室内",
+      "classification_confidence": 0.9
+    },
+    "call_b": {
+      "dimensions": {
+        "visual_structure": {
+          "dimension_key": "visual_structure",
+          "hit_rules": [{"rule_id": "r1", "confidence": "high", "evidence": "室内主体层次发灰，家具边缘和材质纹理模糊"}]
+        },
+        "color_aesthetics": {
+          "dimension_key": "color_aesthetics",
+          "hit_rules": [{"rule_id": "r2", "confidence": "high", "evidence": "全画面灰黄色偏色，白墙和木材质失去真实色彩"}]
+        },
+        "emotional_expression": {"dimension_key": "emotional_expression", "hit_rules": []},
+        "design_aesthetics": {"dimension_key": "design_aesthetics", "hit_rules": []},
+        "originality": {"dimension_key": "originality", "hit_rules": []},
+        "design_trendiness": {"dimension_key": "design_trendiness", "hit_rules": []}
+      },
+      "overall_evidence": ["住宅设计主题清晰，但低清发灰与偏色构成严重画质硬伤"]
+    },
+    "expected_rev3": {"score": 79, "level": "L2"}
+  }
+}

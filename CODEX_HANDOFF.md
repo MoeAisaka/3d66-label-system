@@ -757,3 +757,18 @@ npm.cmd run build
   向本执行器开放 shell。接手者应在 MacBook 拉取 hub main 或交付 bundle，运行迁移、
   建集、真实小批、2285 全量 baseline，再用固定 deploy 命令发布；全量准确率必须来自
   该真实 run，不能用 20 张 OpenClaw 兜底样本替代。
+
+
+## 17. 2026-08-05 灵感图 rev4 硬伤分级交接
+
+- active rev4 为 inspiration-v2-hard-defect-recall-rev4-20260805；历史 rev3 由
+  build_inspiration_v3_rev3_contract 与 inspiration_image_call_a_rev3.txt 冻结重放。
+- common-modifiers-v2 只对 inspiration_image 生效：Tier A cap20，Tier B cap60，
+  corner_small_watermark record-only，三个 Tier B 升级 A。
+- 调用 A rev4 必须给 reason、hard_defects、image_defects、decisive_evidence、
+  decision_status、uncertain_fields。adapter 产生 decisive_signal_validation；
+  非 valid 在 rev4 authoritative path 中 fail-closed。
+- 新 PromptVersion 只追加，禁止覆盖 run #14 的 id31/32。其它三个类目不继承 rev4
+  capability，seed 不更新它们的 revision。
+- 固定 100 张复跑必须显式选择新 A 与 run #14 原 B，并把 run、指标、15 张严重误判、
+  误报护栏和检出率写入 125 号外部验收报告。

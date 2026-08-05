@@ -194,6 +194,20 @@ media_form 下每一项都必须包含 status（yes/no/uncertain）、confidence
 """
 
 
+INSPIRATION_AUTHORITATIVE_PRECHECK_PROMPT_CONTRACT = """
+
+灵感图权威前检合同（只返回可审计事实，不评分）：
+- redline_triggered：必须完整返回 screenshot、casual_photo、text_heavy、qr_code_heavy 四个布尔值。
+- reason：必须返回字符串数组，并与四个布尔值双向一致。
+- hard_defects：必须返回枚举数组，不得省略或用 known_real_photo_defect 单独代替具体硬伤。
+- image_defects：必须返回数组，只能选 corner_small_watermark、subject_obscuring_watermark、large_area_watermark；未命中返回[]。
+- decisive_evidence：必须分别返回 redline_triggered（四键证据数组）、hard_defects（key/evidence 对象数组）、image_defects（key/evidence 对象数组）。
+- decision_status：只能为 complete 或 uncertain；uncertain_fields 必须为字符串数组。
+- 任一决定性字段缺失、不确定或与证据冲突都会进入人工复核，禁止把缺失默认为 false/[]。
+- 仍须完整返回 track_classification、track_confidence、media_type、media_confidence、primary_category、secondary_category、classification_confidence。
+"""
+
+
 def _is_inspiration_baseline_job(job: EvaluationJob) -> bool:
     """Exclude an unrelated legacy payload from inspiration truth runs.
 
@@ -1312,10 +1326,11 @@ async def evaluate_job(job_id: int) -> None:
         "{{image_metadata}}", json.dumps(metadata, ensure_ascii=False)
     ) + category_prompt_context
     inspiration_baseline_job = _is_inspiration_baseline_job(job)
-    if (
+    if inspiration_baseline_job and not freeform_mode:
+        user_a += INSPIRATION_AUTHORITATIVE_PRECHECK_PROMPT_CONTRACT
+    elif (
         job.baseline_regression_item_id is not None
         and not freeform_mode
-        and not inspiration_baseline_job
     ):
         user_a += PRODUCTION_FIELDS_PROMPT_CONTRACT
     if single_mode:

@@ -1,5 +1,6 @@
 from app.models import EvaluationJob
 from app.worker import (
+    INSPIRATION_AUTHORITATIVE_PRECHECK_PROMPT_CONTRACT,
     _is_inspiration_baseline_job,
     aesthetic_grade_collapse,
 )
@@ -54,3 +55,17 @@ def test_inspiration_baseline_excludes_legacy_production_fields_contract() -> No
     assert _is_inspiration_baseline_job(inspiration) is True
     assert _is_inspiration_baseline_job(ordinary_inspiration) is False
     assert _is_inspiration_baseline_job(space_baseline) is False
+
+
+def test_inspiration_baseline_uses_minimum_authoritative_precheck_contract() -> None:
+    prompt = INSPIRATION_AUTHORITATIVE_PRECHECK_PROMPT_CONTRACT
+    for field in (
+        "redline_triggered",
+        "hard_defects",
+        "image_defects",
+        "decisive_evidence",
+        "decision_status",
+        "uncertain_fields",
+    ):
+        assert field in prompt
+    assert "title" not in prompt and "seotitle" not in prompt and "tags" not in prompt

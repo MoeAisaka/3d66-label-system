@@ -32,6 +32,7 @@ from .category_evaluation_aggregator import aggregate_category_evaluation
 from .category_evaluation_contract import (
     CATEGORY_EVALUATION_CONTRACT_VERSION,
     COMMON_MODIFIERS_FORMAT_VERSION,
+    COMMON_MODIFIERS_V2_FORMAT_VERSION,
     TRACK_CLASSIFICATION_FORMAT_VERSION,
     validate_category_evaluation_contract,
 )
@@ -50,10 +51,12 @@ from .subcategory_resolver import (
 )
 
 
-INSPIRATION_SEED_VERSION = "inspiration-category-seed-v2-human-calibrated"
-INSPIRATION_SPEC_VERSION = "inspiration-v2-human-calibrated-20260805"
-INSPIRATION_CALL_A_VERSION = "inspiration-a-v2-human-calibrated-20260805"
+INSPIRATION_SEED_VERSION = "inspiration-category-seed-v3-hard-defect-recall"
+INSPIRATION_SPEC_VERSION = "inspiration-v2-hard-defect-recall-rev4-20260805"
+INSPIRATION_CALL_A_VERSION = "inspiration-a-v3-hard-defect-recall-rev4-20260805"
 INSPIRATION_CALL_B_VERSION = "inspiration-b-v2-human-calibrated-20260805"
+INSPIRATION_REV3_SPEC_VERSION = "inspiration-v2-human-calibrated-20260805"
+INSPIRATION_REV3_CALL_A_VERSION = "inspiration-a-v2-human-calibrated-20260805"
 
 # The three inspiration-image tracks (子类目) — score base / dimension full-marks
 # / track cap follow the DingTalk rules: 一类 40+60=100, 二类 20+60=80, 三类
@@ -223,7 +226,52 @@ def _common_modifiers() -> dict[str, Any]:
     }
 
 
-def build_inspiration_v3_contract() -> dict[str, Any]:
+def _common_modifiers_v2() -> dict[str, Any]:
+    """Versioned hard-defect severity policy for inspiration rev4."""
+    return {
+        "format_version": COMMON_MODIFIERS_V2_FORMAT_VERSION,
+        "media_type_penalty": {
+            "enabled": False,
+            "baseline": "real_photo",
+            "penalties": {"real_photo": 0, "render_3d": -5, "ai_image": -15, "other": 0},
+        },
+        "high_score_veto": {
+            "enabled": True,
+            "policy_version": "hard-defect-severity-v1",
+            "tiers": {
+                "A": {"action": "cap", "cap_to": 20, "target_band": "L5"},
+                "B": {"action": "cap", "cap_to": 60, "target_band": "L3-L4"},
+                "record_only": {"action": "record_only", "cap_to": None, "target_band": "record_only"},
+            },
+            "escalation": {"source_tier": "B", "minimum_distinct_hits": 3, "target_tier": "A"},
+            "rules": [
+                {"key": "blurry_grayish", "source": "hard_defects", "severity": "A", "description": "模糊发灰/低分辨率/压缩痕迹/噪点"},
+                {"key": "invalid_black_border", "source": "hard_defects", "severity": "A", "description": "大面积无效黑边/生硬裁切线/主体被遮挡"},
+                {"key": "fisheye_distortion", "source": "hard_defects", "severity": "A", "description": "鱼眼超广角畸变/垂直线倾斜/边缘扭曲"},
+                {"key": "subject_obscuring_watermark", "source": "image_defects", "severity": "A", "description": "水印遮挡主体"},
+                {"key": "large_area_watermark", "source": "image_defects", "severity": "A", "description": "大面积水印"},
+                {"key": "garish_color", "source": "hard_defects", "severity": "B", "description": "色彩艳俗/过饱和/灯光刺眼/假白失真"},
+                {"key": "severe_color_cast", "source": "hard_defects", "severity": "B", "description": "色调严重偏色/光影违和/违背真实质感"},
+                {"key": "fake_material", "source": "hard_defects", "severity": "B", "description": "材质虚假/反光失真/纹理模糊/细节缺失"},
+                {"key": "large_dead_black", "source": "hard_defects", "severity": "B", "description": "大面积死黑/暗部缺失/明暗断层/光影矛盾"},
+                {"key": "distorted_viewpoint", "source": "hard_defects", "severity": "B", "description": "视角怪异/透视畸形/主体严重裁切"},
+                {"key": "careless_composition", "source": "hard_defects", "severity": "B", "description": "构图敷衍/元素堆砌/无设计逻辑/比例严重失调"},
+                {"key": "corner_small_watermark", "source": "image_defects", "severity": "record_only", "description": "角落小水印，仅记录不压分"},
+                {
+                    "key": "known_real_photo_defect",
+                    "source": "hard_defects",
+                    "kind": "modifier",
+                    "severity": "inherit",
+                    "inherits_strongest": True,
+                    "cancel_exemption": True,
+                    "description": "知名落地实拍素材命中其它硬伤时取消豁免",
+                },
+            ],
+        },
+    }
+
+
+def build_inspiration_v3_rev3_contract() -> dict[str, Any]:
     """Build the complete, self-consistent inspiration-image v3 contract.
 
     Assembles the three v3 blocks (``redline_policy`` / ``track_classification`` /
@@ -232,6 +280,33 @@ def build_inspiration_v3_contract() -> dict[str, Any]:
     returning — an illegal assembly raises from the shared validator rather than
     yielding a broken contract.  Pure and JSON-serializable.
     """
+    contract = {
+        "schema_version": CATEGORY_EVALUATION_CONTRACT_VERSION,
+        "spec_version": INSPIRATION_REV3_SPEC_VERSION,
+        "category_key": "inspiration_image",
+        "level_semantics_version": "doc-l5-worst-v1",
+        "level_thresholds": [
+            {"min_score": 81, "level": "L1"},
+            {"min_score": 61, "level": "L2"},
+            {"min_score": 41, "level": "L3"},
+            {"min_score": 21, "level": "L4"},
+            {"min_score": 0, "level": "L5"},
+        ],
+        "prompt_bindings": {
+            "call_a_version": INSPIRATION_REV3_CALL_A_VERSION,
+            "call_b_version": INSPIRATION_CALL_B_VERSION,
+        },
+        "redline_policy": _redline_policy(),
+        "track_classification": _track_classification(),
+        "common_modifiers": _common_modifiers(),
+    }
+    # Self-check: fail closed here if any block drifts out of spec.
+    validate_category_evaluation_contract(contract)
+    return contract
+
+
+def build_inspiration_v3_contract() -> dict[str, Any]:
+    """Build active inspiration rev4 without mutating the rev3 contract."""
     contract = {
         "schema_version": CATEGORY_EVALUATION_CONTRACT_VERSION,
         "spec_version": INSPIRATION_SPEC_VERSION,
@@ -248,11 +323,14 @@ def build_inspiration_v3_contract() -> dict[str, Any]:
             "call_a_version": INSPIRATION_CALL_A_VERSION,
             "call_b_version": INSPIRATION_CALL_B_VERSION,
         },
+        "authoritative_precheck_contract": {
+            "format_version": "inspiration-authoritative-precheck-v1",
+            "required_validation_status": "valid",
+        },
         "redline_policy": _redline_policy(),
         "track_classification": _track_classification(),
-        "common_modifiers": _common_modifiers(),
+        "common_modifiers": _common_modifiers_v2(),
     }
-    # Self-check: fail closed here if any block drifts out of spec.
     validate_category_evaluation_contract(contract)
     return contract
 

@@ -13,6 +13,7 @@ fails closed before any provider call.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 from typing import Any
@@ -29,6 +30,7 @@ from .dimension_grade_bridge import (
 
 
 DEDUCTION_BRIDGE_VERSION = "dimension-deduction-bridge-v2"
+DEDUCTION_PROMPT_TEMPLATE_VERSION = "dimension-deduction-prompt-v1"
 RULE_COMPOSITION_VERSION = "dimension-rule-composition-v1"
 FALLBACK_WARNING = "调用B失败，维度分按满分通过（安全兜底）"
 _WEIGHT_TOLERANCE = 1e-9
@@ -92,10 +94,12 @@ def has_deduction_rules(config: Any) -> bool:
 
 
 def empty_deduction_output(
-    config: dict[str, Any], *, warning: str | None = None
+    config: dict[str, Any], *, warning: str | None = None,
+    prompt_identity: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     return {
         "bridge_version": DEDUCTION_BRIDGE_VERSION,
+        "prompt_identity": prompt_identity,
         "dimensions": {
             dimension["key"]: {"hit_rules": []}
             for dimension in dimension_definitions(config)
@@ -254,6 +258,14 @@ def build_dimension_deduction_prompt(
     return system, user
 
 
+def _deduction_prompt_identity(system_prompt: str, user_prompt: str) -> dict[str, str]:
+    return {
+        "template_version": DEDUCTION_PROMPT_TEMPLATE_VERSION,
+        "system_sha256": hashlib.sha256(system_prompt.encode("utf-8")).hexdigest(),
+        "user_sha256": hashlib.sha256(user_prompt.encode("utf-8")).hexdigest(),
+    }
+
+
 async def call_multimodal_for_dimension_deductions(
     image: Any,
     contract: dict[str, Any],
@@ -273,6 +285,7 @@ async def call_multimodal_for_dimension_deductions(
     system_prompt, user_prompt = build_dimension_deduction_prompt(
         contract, precheck=precheck
     )
+    prompt_identity = _deduction_prompt_identity(system_prompt, user_prompt)
     try:
         response = await client.chat_json(
             system_prompt,
@@ -282,10 +295,13 @@ async def call_multimodal_for_dimension_deductions(
         )
         parsed = response.parsed if hasattr(response, "parsed") else response
         normalized = normalize_dimension_deduction_output(parsed, contract)
+        normalized["prompt_identity"] = prompt_identity
         normalized["raw_payload"] = getattr(response, "raw_payload", parsed)
         return normalized
     except Exception:  # noqa: BLE001 - approved subjective-node fail-open policy
-        return empty_deduction_output(contract, warning=FALLBACK_WARNING)
+        return empty_deduction_output(
+            contract, warning=FALLBACK_WARNING, prompt_identity=prompt_identity
+        )
 
 
 def compose_rule_deductions(
@@ -366,6 +382,7 @@ def compose_rule_deductions(
         "evidence": evidence,
         "warning": dimension_output.get("warning"),
         "overall_note": normalized.get("overall_note", ""),
+        "prompt_identity": dimension_output.get("prompt_identity"),
     }
 
 

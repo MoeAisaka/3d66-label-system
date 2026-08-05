@@ -29,6 +29,7 @@ from app.inspiration_category_seed import (
     build_inspiration_classification_map,
     build_inspiration_subcategory_dimensions,
     build_inspiration_v3_contract,
+    build_inspiration_v3_rev3_contract,
     evaluate_one,
 )
 
@@ -88,9 +89,9 @@ def _precheck(*, reason=None, trait="实景照片", category="建筑设计", con
     return precheck
 
 
-def _run(precheck: dict) -> dict:
+def _run(precheck: dict, *, contract: dict | None = None) -> dict:
     return evaluate_one(
-        contract=build_inspiration_v3_contract(),
+        contract=contract or build_inspiration_v3_contract(),
         classification_map=build_inspiration_classification_map(),
         subcategory_dimensions=build_inspiration_subcategory_dimensions(),
         precheck=precheck,
@@ -141,7 +142,7 @@ def test_each_subcategory_dimensions_passes_existing_validator():
 
 
 def test_seed_version_constant():
-    assert INSPIRATION_SEED_VERSION == "inspiration-category-seed-v2-human-calibrated"
+    assert INSPIRATION_SEED_VERSION == "inspiration-category-seed-v3-hard-defect-recall"
 
 
 # --------------------------------------------------------------------------- #
@@ -276,9 +277,9 @@ def test_class_three_has_five_real_dimensions_with_raw_business_weights():
         assert abs(d["weight"] - 0.06) <= _WEIGHT_TOLERANCE
 
 
-def test_contract_freezes_human_calibrated_level_boundaries_and_veto_rules():
+def test_contract_freezes_level_boundaries_and_versions_rev3_rev4_actions():
     contract = build_inspiration_v3_contract()
-    assert contract["spec_version"] == "inspiration-v2-human-calibrated-20260805"
+    assert contract["spec_version"] == "inspiration-v2-hard-defect-recall-rev4-20260805"
     assert contract["level_thresholds"] == [
         {"min_score": 81, "level": "L1"},
         {"min_score": 61, "level": "L2"},
@@ -287,11 +288,19 @@ def test_contract_freezes_human_calibrated_level_boundaries_and_veto_rules():
         {"min_score": 0, "level": "L5"},
     ]
     modifiers = contract["common_modifiers"]
+    assert modifiers["format_version"] == "common-modifiers-v2"
     assert modifiers["media_type_penalty"]["enabled"] is False
     veto = modifiers["high_score_veto"]
-    assert veto["enabled"] is True
-    assert (veto["threshold"], veto["cap_to"]) == (80, 79)
-    assert len(veto["rules"]) == 10
+    assert veto["policy_version"] == "hard-defect-severity-v1"
+    assert veto["tiers"]["A"]["cap_to"] == 20
+    assert veto["tiers"]["B"]["cap_to"] == 60
+    assert veto["tiers"]["record_only"]["action"] == "record_only"
+
+    rev3 = build_inspiration_v3_rev3_contract()
+    assert rev3["spec_version"] == "inspiration-v2-human-calibrated-20260805"
+    legacy_veto = rev3["common_modifiers"]["high_score_veto"]
+    assert (legacy_veto["threshold"], legacy_veto["cap_to"]) == (80, 79)
+    assert len(legacy_veto["rules"]) == 10
 
 
 def test_level_mapping_boundaries_80_is_l2_and_81_is_l1():
@@ -307,15 +316,16 @@ def test_level_mapping_boundaries_80_is_l2_and_81_is_l1():
     assert (score_81["score"], score_81["level"]) == (81, "L1")
 
 
-def test_high_score_veto_class_one_hard_defects_caps_to_79():
-    # 一类全 grade5 real_photo 本应 100/L1；命中硬伤 → 达到 80 阈值被压至 79。
+def test_rev3_high_score_veto_replays_cap_79():
+    # 历史 rev3 一类全 grade5 命中硬伤仍按冻结行为压至 79。
     result = _run(
         _precheck(
             category="建筑设计",
             trait="实景照片",
             confidence=0.95,
             hard_defects=["garish_color"],
-        )
+        ),
+        contract=build_inspiration_v3_rev3_contract(),
     )
     agg = result["result"]
     assert agg["track_key"] == TRACK_CLASS_ONE

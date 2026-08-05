@@ -1,13 +1,20 @@
 from __future__ import annotations
 
+import json
 from copy import deepcopy
+from pathlib import Path
 
 from app.category_evaluation_aggregator import aggregate_category_evaluation
 from app.dimension_deduction_bridge import compose_rule_deductions, empty_deduction_output
 from app.inspiration_category_seed import (
     build_inspiration_subcategory_dimensions,
     build_inspiration_v3_contract,
+    build_inspiration_v3_rev3_contract,
 )
+from app.schema_adapter import adapt_inspiration_call_a_precheck
+
+
+FIXTURE_PATH = Path(__file__).parent / "fixtures" / "inspiration_run14_hard_defects.json"
 
 
 def _precheck() -> dict:
@@ -88,3 +95,134 @@ def test_raw_business_weights_reproduce_manual_example_as_78() -> None:
     )
     assert sum(composed["deductions"].values()) == 22
     assert result["score"] == 78
+
+
+def test_run14_hard_defect_fixtures_replay_rev3_exactly() -> None:
+    fixtures = json.loads(FIXTURE_PATH.read_text(encoding="utf-8"))
+    contract = build_inspiration_v3_rev3_contract()
+    dimensions = build_inspiration_subcategory_dimensions()
+
+    for item_id, fixture in fixtures.items():
+        call_a = fixture["call_a"]
+        track_key = call_a["track_classification"]
+        precheck = adapt_inspiration_call_a_precheck(call_a)
+        composed = compose_rule_deductions(
+            config=dimensions[track_key],
+            dimension_output=fixture["call_b"],
+        )
+        result = aggregate_category_evaluation(
+            contract, precheck, composed, track_key=track_key
+        )
+        expected = fixture["expected_rev3"]
+        assert (result["score"], result["level"]) == (
+            expected["score"],
+            expected["level"],
+        ), item_id
+
+def _deductions(total: int) -> dict:
+    return {"deductions": {"fixture": total}}
+
+
+def _defect_precheck(
+    *,
+    hard_defects: list[str] | None = None,
+    image_defects: list[str] | None = None,
+) -> dict:
+    precheck = _precheck()
+    precheck["hard_defects"] = hard_defects or []
+    precheck["image_defects"] = image_defects or []
+    return precheck
+
+
+def test_run14_tier_a_defects_are_l5_only_under_rev4() -> None:
+    fixtures = json.loads(FIXTURE_PATH.read_text(encoding="utf-8"))
+    contract = build_inspiration_v3_contract()
+    dimensions = build_inspiration_subcategory_dimensions()
+
+    for item_id, fixture in fixtures.items():
+        call_a = fixture["call_a"]
+        track_key = call_a["track_classification"]
+        composed = compose_rule_deductions(
+            config=dimensions[track_key],
+            dimension_output=fixture["call_b"],
+        )
+        result = aggregate_category_evaluation(
+            contract,
+            adapt_inspiration_call_a_precheck(call_a),
+            composed,
+            track_key=track_key,
+        )
+        assert (result["score"], result["level"]) == (20, "L5"), item_id
+        assert result["hard_defect_action"]["resolved_tier"] == "A"
+
+
+def test_rev4_veto_is_monotonic_and_escalates_three_tier_b_hits() -> None:
+    contract = build_inspiration_v3_contract()
+    one_b = _defect_precheck(hard_defects=["severe_color_cast"])
+    at_80 = aggregate_category_evaluation(
+        contract, one_b, _deductions(20), track_key="class_one"
+    )
+    at_79 = aggregate_category_evaluation(
+        contract, one_b, _deductions(21), track_key="class_one"
+    )
+    assert at_80["score"] == at_79["score"] == 60
+    assert at_80["hard_defect_action"]["resolved_tier"] == "B"
+    assert at_79["hard_defect_action"]["resolved_tier"] == "B"
+
+    escalated = aggregate_category_evaluation(
+        contract,
+        _defect_precheck(
+            hard_defects=["severe_color_cast", "fake_material", "garish_color"]
+        ),
+        _deductions(0),
+        track_key="class_one",
+    )
+    assert (escalated["score"], escalated["level"]) == (20, "L5")
+    assert escalated["hard_defect_action"]["escalated"] is True
+
+
+def test_rev4_watermark_actions_and_known_photo_modifier() -> None:
+    contract = build_inspiration_v3_contract()
+    corner = aggregate_category_evaluation(
+        contract,
+        _defect_precheck(image_defects=["corner_small_watermark"]),
+        _deductions(0),
+        track_key="class_one",
+    )
+    assert (corner["score"], corner["level"]) == (100, "L1")
+    assert corner["hard_defect_action"]["resolved_tier"] == "record_only"
+
+    for watermark in ("subject_obscuring_watermark", "large_area_watermark"):
+        result = aggregate_category_evaluation(
+            contract,
+            _defect_precheck(image_defects=[watermark]),
+            _deductions(0),
+            track_key="class_one",
+        )
+        assert (result["score"], result["level"]) == (20, "L5")
+
+    modifier = aggregate_category_evaluation(
+        contract,
+        _defect_precheck(
+            hard_defects=["known_real_photo_defect", "careless_composition"]
+        ),
+        _deductions(0),
+        track_key="class_one",
+    )
+    assert modifier["score"] == 60
+    assert modifier["hard_defect_action"]["modifier_applied"] is True
+
+
+def test_rev4_high_quality_guardrail_and_four_redlines() -> None:
+    contract = build_inspiration_v3_contract()
+    good = aggregate_category_evaluation(
+        contract, _defect_precheck(), _deductions(0), track_key="class_one"
+    )
+    assert (good["score"], good["level"]) == (100, "L1")
+    for reason in ("是截图", "是随手拍", "有大面积文字说明", "有二维码"):
+        precheck = _defect_precheck()
+        precheck["production_fields"]["reason"] = [reason]
+        result = aggregate_category_evaluation(
+            contract, precheck, _deductions(0), track_key="class_one"
+        )
+        assert (result["score"], result["level"]) == (20, "L5")

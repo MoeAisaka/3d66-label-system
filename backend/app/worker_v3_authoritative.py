@@ -236,6 +236,25 @@ async def evaluate_v3_authoritative(
     classification_map = v3_bundle["classification_map"]
     subcategory_dimensions = v3_bundle["subcategory_dimensions"]
     precheck_obj = precheck if isinstance(precheck, dict) else {}
+    authoritative_precheck = contract.get("authoritative_precheck_contract")
+    if (
+        contract.get("category_key") == "inspiration_image"
+        and isinstance(authoritative_precheck, dict)
+    ):
+        if authoritative_precheck.get("format_version") != (
+            "inspiration-authoritative-precheck-v1"
+        ):
+            raise V3AuthoritativeError(
+                "decisive_precheck_contract_invalid",
+                "v3 权威前检合同版本无效",
+            )
+        validation = precheck_obj.get("decisive_signal_validation")
+        if not isinstance(validation, dict) or validation.get("status") != (
+            authoritative_precheck.get("required_validation_status")
+        ):
+            raise V3AuthoritativeError(
+                "decisive_precheck_invalid", "调用A决定性信号缺失、不确定或证据冲突"
+            )
 
     common_grades_by_track: dict[str, dict[str, int]] = {}
     specific_grades_by_track: dict[str, dict[str, int]] = {}
@@ -401,7 +420,10 @@ def build_v3_authoritative_scoring(v3_result: dict, *, precheck: Any) -> dict:
     caps = v3_result.get("caps") or []
     dimension_output = v3_result.get("dimension_deduction_output")
     raw_dimension_payload = (
-        dimension_output.get("raw_payload")
+        {
+            "provider_payload": dimension_output.get("raw_payload"),
+            "prompt_identity": dimension_output.get("prompt_identity"),
+        }
         if isinstance(dimension_output, dict)
         else None
     )
@@ -435,6 +457,7 @@ def build_v3_authoritative_scoring(v3_result: dict, *, precheck: Any) -> dict:
         "caps": list(caps),
         "review_reasons": list(dict.fromkeys(review_reasons)),
         "hard_reject": hard_reject,
+        "hard_defect_action": v3_result.get("hard_defect_action"),
         "hit_rules": list(hit_rules),
         "track_key": v3_result.get("track_key"),
         "steps": v3_result.get("steps") or [],
