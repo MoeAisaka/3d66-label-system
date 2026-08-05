@@ -121,7 +121,12 @@ class NodeCorrection(BaseModel):
 
     correction_key: str | None = None
     node_type: Literal[
-        "precheck_field", "redline", "track", "dimension_rule", "final_level"
+        "call_a_field",
+        "precheck_field",
+        "redline",
+        "track",
+        "dimension_rule",
+        "final_level",
     ]
     node_path: str
     old_value: Any

@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 
+import pytest
 from fastapi import FastAPI
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
@@ -44,6 +46,63 @@ def _precheck() -> dict:
         },
         "production_fields": {"reason": [], "trait": "实景照片"},
     }
+
+
+def _full_call_a_precheck() -> dict:
+    precheck = _precheck()
+    precheck["production_fields"] = {
+        "title": "现代住宅",
+        "seotitle": "现代住宅空间设计参考",
+        "category": "居住空间,大平层",
+        "style": "现代简约",
+        "tags": ["住宅", "客厅", "木饰面", "自然光"],
+        "cons": "局部层次略显单薄",
+        "design": "以自然光和材质层次组织空间",
+        "score": 70,
+        "reason": [],
+        "image_defects": "",
+        "trait": "实景照片",
+    }
+    return precheck
+
+
+def _result_for_call_a(sessions: sessionmaker) -> int:
+    context = _context()
+    precheck = _full_call_a_precheck()
+    dimension_output = empty_deduction_output(
+        context["subcategory_dimensions"]["class_one"]
+    )
+    aggregate = recompute_qualified_v3(
+        v3_context=context,
+        precheck=precheck,
+        dimension_output=dimension_output,
+    )
+    scoring = build_v3_authoritative_scoring(aggregate, precheck=precheck)
+    scoring.pop("_dimension_deduction_raw_payload", None)
+    scoring["v3_context"] = context
+    scoring["score"] = 70
+    scoring["level"] = "L2"
+    with sessions() as db:
+        row = EvaluationResult(
+            asset_id=1,
+            job_id=1,
+            precheck_json=json.dumps(precheck, ensure_ascii=False),
+            aesthetic_json=json.dumps(dimension_output, ensure_ascii=False),
+            scoring_json=json.dumps(scoring, ensure_ascii=False),
+            correction_history_json="[]",
+            raw_response_a='{"immutable":"provider payload"}',
+            score=70,
+            level="L2",
+            confidence=scoring["confidence"],
+            needs_review=False,
+            model_id="fake",
+            prompt_a_version="a",
+            rubric_version="r",
+            engine_version="e",
+        )
+        db.add(row)
+        db.commit()
+        return int(row.id)
 
 
 def test_correct_dimension_rule_appends_evidence_and_recomputes_downstream() -> None:
@@ -337,4 +396,258 @@ def test_correct_precheck_redline_track_and_final_level_replays_full_path() -> N
     assert final["correction"]["downstream_recomputed"] is False
     assert final["correction"]["corrector"] == "审核员"
     assert len(final["correction_history"]) == 5
+    engine.dispose()
+
+
+def test_call_a_business_fields_persist_without_changing_score() -> None:
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    sessions = sessionmaker(bind=engine, expire_on_commit=False)
+    result_id = _result_for_call_a(sessions)
+
+    corrections = [
+        ("title", "现代住宅", "光影住宅"),
+        ("seotitle", "现代住宅空间设计参考", "光影住宅室内设计灵感"),
+        ("style", "现代简约", "侘寂风"),
+        ("cons", "局部层次略显单薄", "入口转折略显生硬"),
+        ("design", "以自然光和材质层次组织空间", "以连续拱券组织空间序列"),
+        ("category", "居住空间,大平层", "酒店民宿,度假酒店"),
+        ("tags", ["住宅", "客厅", "木饰面", "自然光"], ["酒店", "大堂", "石材", "灯光"]),
+        ("trait", "实景照片", "3D数字效果图"),
+        ("reason", [], ["是截图"]),
+        ("image_defects", "", "有水印"),
+    ]
+    with sessions() as db:
+        row = db.get(EvaluationResult, result_id)
+        assert row is not None
+        raw_before = row.raw_response_a
+        for index, (field, old_value, new_value) in enumerate(corrections, 1):
+            response = apply_node_correction(
+                db,
+                result=row,
+                payload=CorrectNodeRequest(
+                    correction_key=f"call-a-field-{index}",
+                    node_type="call_a_field",
+                    node_path=f"call_a.{field}",
+                    old_value=old_value,
+                    new_value=new_value,
+                    evidence=[],
+                    reason=f"人工核对{field}",
+                ),
+                corrector="审核员",
+            )
+            assert response["score"] == 70
+            assert response["level"] == "L2"
+
+        db.commit()
+        production = json.loads(row.precheck_json)["production_fields"]
+        assert production["title"] == "光影住宅"
+        assert production["seotitle"] == "光影住宅室内设计灵感"
+        assert production["style"] == "侘寂风"
+        assert production["cons"] == "入口转折略显生硬"
+        assert production["design"] == "以连续拱券组织空间序列"
+        assert production["category"] == "酒店民宿,度假酒店"
+        assert production["tags"] == ["酒店", "大堂", "石材", "灯光"]
+        assert production["trait"] == "3D数字效果图"
+        assert production["reason"] == ["是截图"]
+        assert production["image_defects"] == "有水印"
+        assert row.raw_response_a == raw_before
+        history = json.loads(row.correction_history_json)
+        assert [item["node_path"] for item in history] == [
+            "call_a.title",
+            "call_a.seotitle",
+            "call_a.style",
+            "call_a.cons",
+            "call_a.design",
+            "call_a.category",
+            "call_a.tags",
+            "call_a.trait",
+            "call_a.reason",
+            "call_a.image_defects",
+        ]
+        assert history[-1]["node_type"] == "call_a_field"
+        assert history[-1]["old_value"] == ""
+        assert history[-1]["new_value"] == "有水印"
+        assert history[-1]["corrector"] == "审核员"
+        assert history[-1]["reason"] == "人工核对image_defects"
+        assert history[-1]["corrected_at"].endswith("Z")
+        assert history[-1]["downstream_recomputed"] is False
+    engine.dispose()
+
+
+@pytest.mark.parametrize(
+    ("score", "expected_grade"),
+    [(100, "L1"), (81, "L1"), (80, "L2"), (61, "L2"), (60, "L3"),
+     (41, "L3"), (40, "L4"), (21, "L4"), (20, "L5"), (0, "L5")],
+)
+def test_call_a_score_recomputes_grade(score: int, expected_grade: str) -> None:
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    sessions = sessionmaker(bind=engine, expire_on_commit=False)
+    result_id = _result_for_call_a(sessions)
+    with sessions() as db:
+        row = db.get(EvaluationResult, result_id)
+        assert row is not None
+        response = apply_node_correction(
+            db,
+            result=row,
+            payload=CorrectNodeRequest(
+                correction_key=f"call-a-score-{score}",
+                node_type="call_a_field",
+                node_path="call_a.score",
+                old_value=70,
+                new_value=score,
+                evidence=[],
+                reason="人工校准综合评分",
+            ),
+            corrector="审核员",
+        )
+        db.commit()
+        assert response["score"] == score
+        assert response["level"] == expected_grade
+        assert row.score == score
+        assert row.level == expected_grade
+        assert json.loads(row.precheck_json)["production_fields"]["score"] == score
+        scoring = json.loads(row.scoring_json)
+        assert scoring["score"] == score
+        assert scoring["level"] == expected_grade
+        assert scoring["manual_call_a_score"] == score
+        history = json.loads(row.correction_history_json)
+        assert history[-1]["downstream_recomputed"] is True
+    engine.dispose()
+
+
+def test_call_a_grade_is_manual_override_and_keeps_score() -> None:
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    sessions = sessionmaker(bind=engine, expire_on_commit=False)
+    result_id = _result_for_call_a(sessions)
+    with sessions() as db:
+        row = db.get(EvaluationResult, result_id)
+        assert row is not None
+        response = apply_node_correction(
+            db,
+            result=row,
+            payload=CorrectNodeRequest(
+                correction_key="call-a-grade-manual",
+                node_type="call_a_field",
+                node_path="call_a.grade",
+                old_value="L2",
+                new_value="L4",
+                evidence=[],
+                reason="人工等级结论优先",
+            ),
+            corrector="审核员",
+        )
+        db.commit()
+        assert response["score"] == 70
+        assert response["level"] == "L4"
+        assert row.score == 70
+        assert row.level == "L4"
+        scoring = json.loads(row.scoring_json)
+        assert scoring["manual_call_a_grade"] == "L4"
+        history = json.loads(row.correction_history_json)
+        assert history[-1]["downstream_recomputed"] is False
+    engine.dispose()
+
+
+def test_call_a_manual_score_and_grade_survive_later_node_replay() -> None:
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    sessions = sessionmaker(bind=engine, expire_on_commit=False)
+    result_id = _result_for_call_a(sessions)
+    with sessions() as db:
+        row = db.get(EvaluationResult, result_id)
+        assert row is not None
+
+        def correct(key: str, node_type: str, node_path: str, old: object, new: object):
+            return apply_node_correction(
+                db,
+                result=row,
+                payload=CorrectNodeRequest(
+                    correction_key=key,
+                    node_type=node_type,
+                    node_path=node_path,
+                    old_value=old,
+                    new_value=new,
+                    evidence=[],
+                    reason="连续纠偏一致性测试",
+                ),
+                corrector="审核员",
+            )
+
+        correct("manual-score", "call_a_field", "call_a.score", 70, 82)
+        replay_after_score = correct(
+            "replay-after-score",
+            "precheck_field",
+            "precheck.production_fields.trait",
+            "实景照片",
+            "AI图",
+        )
+        assert replay_after_score["score"] == 82
+        assert replay_after_score["level"] == "L1"
+
+        correct("manual-grade", "call_a_field", "call_a.grade", "L1", "L4")
+        replay_after_grade = correct(
+            "replay-after-grade",
+            "precheck_field",
+            "precheck.production_fields.trait",
+            "AI图",
+            "其它",
+        )
+        assert replay_after_grade["score"] == 82
+        assert replay_after_grade["level"] == "L4"
+        scoring = json.loads(row.scoring_json)
+        assert scoring["manual_call_a_score"] == 82
+        assert scoring["manual_call_a_grade"] == "L4"
+    engine.dispose()
+
+
+def test_call_a_missing_legacy_field_fails_safely() -> None:
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    sessions = sessionmaker(bind=engine, expire_on_commit=False)
+    result_id = _result_for_call_a(sessions)
+    with sessions() as db:
+        row = db.get(EvaluationResult, result_id)
+        assert row is not None
+        precheck = json.loads(row.precheck_json)
+        del precheck["production_fields"]["design"]
+        row.precheck_json = json.dumps(precheck, ensure_ascii=False)
+        with pytest.raises(HTTPException) as caught:
+            apply_node_correction(
+                db,
+                result=row,
+                payload=CorrectNodeRequest(
+                    node_type="call_a_field",
+                    node_path="call_a.design",
+                    old_value=None,
+                    new_value="补录设计理念",
+                    evidence=[],
+                    reason="旧记录补录尝试",
+                ),
+                corrector="审核员",
+            )
+        assert caught.value.status_code == 409
+        assert caught.value.detail["code"] == "call_a_field_missing"
     engine.dispose()

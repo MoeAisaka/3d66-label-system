@@ -1,4 +1,5 @@
 export type NodeCorrectionType =
+  | "call_a_field"
   | "precheck_field"
   | "redline"
   | "track"
@@ -64,8 +65,10 @@ export type CorrectionNode = {
   summary: string
   evidenceLines: string[]
   currentValue: unknown
-  editor: "value" | "redline" | "track" | "dimension_rules" | "level"
-  valueKind?: "text" | "number" | "string_list" | "enum"
+  editor: "value" | "category" | "tags" | "redline" | "track" | "dimension_rules" | "level"
+  valueKind?: "text" | "multiline" | "number" | "score" | "string_list" | "enum"
+  group?: "rating" | "copy" | "classification" | "defect"
+  maxLength?: number
   options?: Array<{ value: string; label: string }>
   redlineRule?: {
     key: string
@@ -81,6 +84,7 @@ type EvaluationLike = {
   precheck?: Record<string, unknown> | null
   aesthetic?: Record<string, unknown> | null
   scoring?: Record<string, unknown> | null
+  score?: number | null
   level?: string | null
 }
 
@@ -92,19 +96,91 @@ export const NODE_STAGE_META = [
   { stage: 5, label: "最终等级", description: "L1 最好，L5 最差" },
 ] as const
 
+export const CALL_A_GROUP_META = [
+  { key: "rating", label: "评分类", description: "综合评分与等级" },
+  { key: "copy", label: "文案类", description: "标题、风格与说明" },
+  { key: "classification", label: "分类类", description: "分类、标签与媒介" },
+  { key: "defect", label: "缺陷类", description: "红线与水印缺陷" },
+] as const
+
+const PRIMARY_CATEGORIES = [
+  "建筑设计", "景观设计", "规划设计", "居住空间", "酒店民宿", "办公空间",
+  "商业空间", "公共空间", "展示设计", "软装设计", "硬装结构", "意向图",
+  "视觉设计", "产品设计", "美术类", "游戏设计", "其它",
+]
+
+const CALL_A_FIELD_META: Array<{
+  field: string
+  label: string
+  group: NonNullable<CorrectionNode["group"]>
+  editor: CorrectionNode["editor"]
+  valueKind: NonNullable<CorrectionNode["valueKind"]>
+  maxLength?: number
+  options?: Array<{ value: string; label: string }>
+}> = [
+  { field: "score", label: "综合评分", group: "rating", editor: "value", valueKind: "score" },
+  {
+    field: "grade",
+    label: "等级",
+    group: "rating",
+    editor: "level",
+    valueKind: "enum",
+    options: ["L1", "L2", "L3", "L4", "L5"].map((value) => ({ value, label: value })),
+  },
+  { field: "title", label: "专业标题", group: "copy", editor: "value", valueKind: "text", maxLength: 10 },
+  { field: "seotitle", label: "中文SEO标题", group: "copy", editor: "value", valueKind: "text", maxLength: 28 },
+  { field: "style", label: "风格", group: "copy", editor: "value", valueKind: "text", maxLength: 80 },
+  { field: "cons", label: "犀利点评缺点", group: "copy", editor: "value", valueKind: "multiline", maxLength: 1000 },
+  { field: "design", label: "设计理念说明", group: "copy", editor: "value", valueKind: "multiline", maxLength: 1000 },
+  {
+    field: "category",
+    label: "分类",
+    group: "classification",
+    editor: "category",
+    valueKind: "text",
+    maxLength: 120,
+    options: PRIMARY_CATEGORIES.map((value) => ({ value, label: value })),
+  },
+  { field: "tags", label: "主要标签", group: "classification", editor: "tags", valueKind: "string_list" },
+  {
+    field: "trait",
+    label: "媒介类型",
+    group: "classification",
+    editor: "value",
+    valueKind: "enum",
+    options: ["AI图", "实景照片", "3D数字效果图", "其它"].map((value) => ({ value, label: value })),
+  },
+  {
+    field: "reason",
+    label: "红线短语",
+    group: "defect",
+    editor: "value",
+    valueKind: "string_list",
+    options: [
+      { value: "是截图", label: "截图" },
+      { value: "有大面积文字说明", label: "大面积文字说明" },
+      { value: "是多拼图", label: "多拼图" },
+      { value: "有二维码", label: "二维码" },
+      { value: "是随手拍", label: "随手拍" },
+      { value: "是颠倒图", label: "颠倒图" },
+    ],
+  },
+  {
+    field: "image_defects",
+    label: "图片缺陷",
+    group: "defect",
+    editor: "value",
+    valueKind: "enum",
+    options: [{ value: "", label: "无" }, { value: "有水印", label: "有水印" }],
+  },
+]
+
 const FIELD_META: Array<{
   path: string
   label: string
   valueKind: CorrectionNode["valueKind"]
   options?: Array<{ value: string; label: string }>
 }> = [
-  {
-    path: "production_fields.trait",
-    label: "媒介类型",
-    valueKind: "enum",
-    options: ["实景照片", "3D数字效果图", "AI图", "其它"].map((value) => ({ value, label: value })),
-  },
-  { path: "production_fields.category", label: "调用A分类", valueKind: "text" },
   { path: "classification.primary_category", label: "主分类信号", valueKind: "text" },
   { path: "classification.primary_confidence", label: "主分类置信度", valueKind: "number" },
   {
@@ -115,13 +191,6 @@ const FIELD_META: Array<{
       { value: "in_scope", label: "范围内" },
       { value: "out_of_scope", label: "范围外" },
     ],
-  },
-  {
-    path: "production_fields.reason",
-    label: "调用A判定信号",
-    valueKind: "string_list",
-    options: ["是截图", "有大面积文字说明", "是多拼图", "有二维码", "是随手拍", "是颠倒图"]
-      .map((value) => ({ value, label: value })),
   },
   { path: "hard_defects", label: "高分硬伤信号", valueKind: "string_list" },
 ]
@@ -253,6 +322,41 @@ export function buildCorrectionNodes(evaluation: EvaluationLike): CorrectionNode
   const context = isRecord(scoring.v3_context) ? scoring.v3_context : {}
   const contract = isRecord(context.contract) ? context.contract : {}
   const nodes: CorrectionNode[] = []
+
+  const productionFields = isRecord(precheck.production_fields) ? precheck.production_fields : {}
+  for (const field of CALL_A_FIELD_META) {
+    const currentValue = field.field === "score"
+      ? evaluation.score
+      : field.field === "grade"
+        ? evaluation.level
+        : productionFields[field.field]
+    const missing = currentValue === undefined || currentValue === null
+    nodes.push({
+      id: `call-a:${field.field}`,
+      stage: 1,
+      nodeType: "call_a_field",
+      nodePath: `call_a.${field.field}`,
+      label: field.label,
+      summary: missing ? "未存储" : correctionValueLabel(currentValue),
+      evidenceLines: missing
+        ? ["该旧评测未存储此调用A字段，当前仅显示为空；请使用当前配置重跑后再纠偏。"]
+        : field.field === "score"
+          ? ["修改后按 L1 81-100 / L2 61-80 / L3 41-60 / L4 21-40 / L5 0-20 自动重算等级。"]
+          : field.field === "grade"
+            ? ["直接修改等级时以人工等级为准，综合评分保持不变并单独留痕。"]
+            : ["来自调用A规范化输出；修改只更新该字段，不改变综合评分。"],
+      currentValue: missing ? null : cloneJson(currentValue),
+      editor: field.editor,
+      valueKind: field.valueKind,
+      group: field.group,
+      maxLength: field.maxLength,
+      options: field.options,
+      readOnly: missing,
+      compatibilityMessage: missing
+        ? "该旧评测未存储此调用A字段，当前仅显示为空；请使用当前配置重跑后再纠偏。"
+        : undefined,
+    })
+  }
 
   for (const field of FIELD_META) {
     const currentValue = getPath(precheck, field.path)

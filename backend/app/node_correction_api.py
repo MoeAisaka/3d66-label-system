@@ -19,7 +19,24 @@ from .category_evaluation_contract import (
 from .database import get_db
 from .evaluation_v3_pipeline import V3PipelineError, recompute_qualified_v3
 from .models import EvaluationResult
+from .schema_adapter import validate_production_correction
 from .worker_v3_authoritative import build_v3_authoritative_scoring
+
+
+CALL_A_FIELDS = {
+    "score",
+    "grade",
+    "title",
+    "seotitle",
+    "category",
+    "style",
+    "tags",
+    "cons",
+    "design",
+    "reason",
+    "image_defects",
+    "trait",
+}
 
 
 class CorrectNodeRequest(BaseModel):
@@ -37,7 +54,12 @@ class CorrectNodeRequest(BaseModel):
     @classmethod
     def _node_type(cls, value: str) -> str:
         allowed = {
-            "precheck_field", "redline", "track", "dimension_rule", "final_level"
+            "call_a_field",
+            "precheck_field",
+            "redline",
+            "track",
+            "dimension_rule",
+            "final_level",
         }
         if value not in allowed:
             raise ValueError(f"node_type 必须是 {sorted(allowed)} 之一")
@@ -89,6 +111,29 @@ def _set_dict_path(root: dict[str, Any], parts: list[str], value: Any) -> None:
     if not isinstance(current, dict) or parts[-1] not in current:
         raise _coded(400, "node_path_not_found", f"节点路径不存在：{'.'.join(parts)}")
     current[parts[-1]] = value
+
+
+def _grade_for_score(score: int) -> str:
+    if score >= 81:
+        return "L1"
+    if score >= 61:
+        return "L2"
+    if score >= 41:
+        return "L3"
+    if score >= 21:
+        return "L4"
+    return "L5"
+
+
+def _call_a_field(path: str) -> str:
+    parts = _path_parts(path, prefix="call_a.")
+    if not path.startswith("call_a.") or len(parts) != 1 or parts[0] not in CALL_A_FIELDS:
+        raise _coded(
+            400,
+            "node_path_invalid",
+            "调用A字段路径必须是 call_a.<字段名>",
+        )
+    return parts[0]
 
 
 def _dimension_node(
@@ -199,9 +244,8 @@ def apply_node_correction(
     """
 
     scoring = _json_value(result.scoring_json, {})
-    context = scoring.get("v3_context") if isinstance(scoring, dict) else None
-    if not isinstance(context, dict):
-        raise _coded(409, "not_v3_rule_result", "该结果不含可重放的 v3 冻结上下文")
+    if not isinstance(scoring, dict):
+        scoring = {}
     history = _json_value(result.correction_history_json, [])
     if payload.correction_key:
         previous = next(
@@ -216,6 +260,95 @@ def apply_node_correction(
             return _response(result, previous)
 
     precheck = _json_value(result.precheck_json, {})
+    if not isinstance(precheck, dict):
+        precheck = {}
+
+    if payload.node_type == "call_a_field":
+        field = _call_a_field(payload.node_path)
+        production_fields = precheck.get("production_fields")
+        if not isinstance(production_fields, dict):
+            production_fields = {}
+
+        if field == "score":
+            old_value = result.score
+        elif field == "grade":
+            old_value = result.level
+        else:
+            if field not in production_fields:
+                raise _coded(
+                    409,
+                    "call_a_field_missing",
+                    f"旧评测未存储调用A字段 {field}，请重跑后再纠偏",
+                )
+            old_value = production_fields[field]
+
+        if old_value != payload.old_value:
+            raise _coded(409, "node_value_conflict", "节点当前值已变化，请刷新后重试")
+
+        downstream_recomputed = False
+        if field == "score":
+            try:
+                validate_production_correction(
+                    "production_fields.score", payload.new_value
+                )
+            except ValueError as exc:
+                raise _coded(400, "call_a_field_invalid", str(exc)) from exc
+            new_score = int(payload.new_value)
+            new_grade = _grade_for_score(new_score)
+            result.score = new_score
+            result.level = new_grade
+            result.needs_review = False
+            scoring["score"] = new_score
+            scoring["level"] = new_grade
+            scoring["manual_call_a_score"] = new_score
+            scoring.pop("manual_call_a_grade", None)
+            result.scoring_json = json.dumps(scoring, ensure_ascii=False)
+            if "score" in production_fields:
+                production_fields["score"] = new_score
+            downstream_recomputed = True
+        elif field == "grade":
+            if payload.new_value not in {"L1", "L2", "L3", "L4", "L5"}:
+                raise _coded(400, "level_invalid", "新等级必须是 L1-L5")
+            result.level = payload.new_value
+            result.needs_review = False
+            scoring["level"] = payload.new_value
+            scoring["manual_call_a_grade"] = payload.new_value
+            result.scoring_json = json.dumps(scoring, ensure_ascii=False)
+        else:
+            try:
+                validate_production_correction(
+                    f"production_fields.{field}", payload.new_value
+                )
+            except ValueError as exc:
+                raise _coded(400, "call_a_field_invalid", str(exc)) from exc
+            production_fields[field] = payload.new_value
+
+        if production_fields:
+            precheck["production_fields"] = production_fields
+            result.precheck_json = json.dumps(precheck, ensure_ascii=False)
+
+        correction = NodeCorrection(
+            correction_key=payload.correction_key,
+            node_type=payload.node_type,
+            node_path=payload.node_path,
+            old_value=old_value,
+            new_value=payload.new_value,
+            evidence=payload.evidence,
+            reason=payload.reason,
+            corrector=corrector,
+            corrector_confidence=corrector_confidence,
+            corrector_policy=corrector_policy,
+            corrected_at=datetime.now(timezone.utc),
+            downstream_recomputed=downstream_recomputed,
+        ).model_dump(mode="json")
+        history.append(correction)
+        result.correction_history_json = json.dumps(history, ensure_ascii=False)
+        db.flush()
+        return _response(result, correction)
+
+    context = scoring.get("v3_context")
+    if not isinstance(context, dict):
+        raise _coded(409, "not_v3_rule_result", "该结果不含可重放的 v3 冻结上下文")
     dimension_output = _json_value(result.aesthetic_json, {})
     previous_scoring = dict(scoring)
     track_override: str | None = None
@@ -272,6 +405,19 @@ def apply_node_correction(
         scoring["v3_config_revision"] = context.get("config_revision")
         scoring["dimension_mode"] = previous_scoring.get("dimension_mode", "all")
         scoring["dimension_selection"] = previous_scoring.get("dimension_selection")
+        manual_score = previous_scoring.get("manual_call_a_score")
+        if (
+            isinstance(manual_score, int)
+            and not isinstance(manual_score, bool)
+            and 0 <= manual_score <= 100
+        ):
+            scoring["manual_call_a_score"] = manual_score
+            scoring["score"] = manual_score
+            scoring["level"] = _grade_for_score(manual_score)
+        manual_grade = previous_scoring.get("manual_call_a_grade")
+        if manual_grade in {"L1", "L2", "L3", "L4", "L5"}:
+            scoring["manual_call_a_grade"] = manual_grade
+            scoring["level"] = manual_grade
         if isinstance(replayed.get("dimension_deduction_output"), dict):
             dimension_output = replayed["dimension_deduction_output"]
         result.precheck_json = json.dumps(precheck, ensure_ascii=False)
@@ -284,6 +430,7 @@ def apply_node_correction(
     else:
         scoring["level"] = payload.new_value
         scoring["manual_final_level"] = payload.new_value
+        scoring["manual_call_a_grade"] = payload.new_value
         result.scoring_json = json.dumps(scoring, ensure_ascii=False)
         result.level = payload.new_value
         result.needs_review = False

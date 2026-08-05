@@ -12,6 +12,7 @@ import {
 } from "../src/lib/node-correction.ts"
 
 const evaluation = {
+  score: 70,
   level: "L2",
   precheck: {
     classification: {
@@ -19,7 +20,19 @@ const evaluation = {
       primary_category: "建筑设计",
       primary_confidence: 0.96,
     },
-    production_fields: { trait: "实景照片", reason: [] },
+    production_fields: {
+      title: "现代住宅",
+      seotitle: "现代住宅空间设计参考",
+      category: "居住空间,大平层",
+      style: "现代简约",
+      tags: ["住宅", "客厅", "木饰面", "自然光"],
+      cons: "局部层次略显单薄",
+      design: "以自然光和材质层次组织空间",
+      score: 70,
+      reason: [],
+      image_defects: "",
+      trait: "实景照片",
+    },
   },
   aesthetic: {
     bridge_version: "dimension-deduction-bridge-v2",
@@ -72,7 +85,24 @@ const evaluation = {
 
 const nodes = buildCorrectionNodes(evaluation)
 assert.deepEqual([...new Set(nodes.map((node) => node.stage))], [1, 2, 3, 4, 5])
-assert.equal(nodes.find((node) => node.id === "precheck:production_fields.trait")?.label, "媒介类型")
+const callAFields = [
+  "score", "grade", "title", "seotitle", "style", "cons", "design",
+  "category", "tags", "trait", "reason", "image_defects",
+]
+const callANodes = nodes.filter((node) => node.nodeType === "call_a_field")
+assert.deepEqual(callANodes.map((node) => node.nodePath), callAFields.map((field) => `call_a.${field}`))
+assert.equal(callANodes.length, 12)
+assert.deepEqual([...new Set(callANodes.map((node) => node.group))], ["rating", "copy", "classification", "defect"])
+assert.equal(nodes.find((node) => node.id === "call-a:score")?.valueKind, "score")
+assert.equal(nodes.find((node) => node.id === "call-a:grade")?.editor, "level")
+assert.equal(nodes.find((node) => node.id === "call-a:title")?.maxLength, 10)
+assert.equal(nodes.find((node) => node.id === "call-a:seotitle")?.maxLength, 28)
+assert.equal(nodes.find((node) => node.id === "call-a:category")?.editor, "category")
+assert.equal(nodes.find((node) => node.id === "call-a:tags")?.editor, "tags")
+assert.equal(nodes.find((node) => node.id === "call-a:cons")?.valueKind, "multiline")
+assert.equal(nodes.find((node) => node.id === "call-a:reason")?.options?.length, 6)
+assert.equal(nodes.find((node) => node.id === "call-a:image_defects")?.options?.length, 2)
+assert.equal(nodes.find((node) => node.id === "call-a:trait")?.label, "媒介类型")
 assert.equal(nodes.find((node) => node.id === "redline:screenshot")?.summary, "未命中")
 assert.equal(nodes.find((node) => node.id === "track:track_key")?.summary, "一类（建筑/室内/景观/规划）")
 
@@ -179,6 +209,15 @@ const alignedDimension = nodes.find((node) => node.id === "dimension:visual_stru
 assert(alignedDimension)
 assert.notEqual(alignedDimension.readOnly, true)
 
+const legacyCallAEvaluation = structuredClone(evaluation)
+delete legacyCallAEvaluation.precheck.production_fields.title
+delete legacyCallAEvaluation.precheck.production_fields.tags
+const legacyCallANodes = buildCorrectionNodes(legacyCallAEvaluation)
+assert.equal(legacyCallANodes.filter((node) => node.nodeType === "call_a_field").length, 12)
+assert.equal(legacyCallANodes.find((node) => node.id === "call-a:title")?.readOnly, true)
+assert.match(legacyCallANodes.find((node) => node.id === "call-a:title")?.compatibilityMessage ?? "", /旧评测未存储/)
+assert.equal(legacyCallANodes.find((node) => node.id === "call-a:tags")?.summary, "未存储")
+
 const baselineSource = readFileSync(
   new URL("../src/pages/baseline-regression-page.tsx", import.meta.url),
   "utf8",
@@ -192,5 +231,14 @@ assert.match(
   /evaluation\.scoring\?\.dimension_scoring_mode === "rule_deduction"/,
 )
 assert.match(baselineSource, /<NodeCorrectionEditor/)
+
+const editorSource = readFileSync(
+  new URL("../src/pages/node-correction-editor.tsx", import.meta.url),
+  "utf8",
+)
+assert.match(editorSource, /一级分类/)
+assert.match(editorSource, /二级分类/)
+assert.match(editorSource, /添加标签/)
+assert.match(editorSource, /最多 \{node\.maxLength\} 个字/)
 
 console.log("node correction editor frontend contract: ok")
