@@ -37,6 +37,23 @@ with SessionLocal() as db:
         if run is not None
         else {}
     )
+    error_samples = (
+        db.execute(
+            select(
+                BaselineRegressionItem.id,
+                BaselineRegressionItem.asset_id,
+                BaselineRegressionItem.error_message,
+            )
+            .where(
+                BaselineRegressionItem.run_id == run.id,
+                BaselineRegressionItem.status == "failed",
+            )
+            .order_by(BaselineRegressionItem.id)
+            .limit(10)
+        ).all()
+        if run is not None
+        else []
+    )
     print(
         json.dumps(
             {
@@ -52,6 +69,14 @@ with SessionLocal() as db:
                         "valid_predictions": run.valid_predictions,
                         "failed": run.failed,
                         "item_status": item_status,
+                        "error_samples": [
+                            {
+                                "item_id": item_id,
+                                "asset_id": asset_id,
+                                "error": error,
+                            }
+                            for item_id, asset_id, error in error_samples
+                        ],
                         "metrics": json.loads(run.metrics_json),
                     }
                     if run is not None

@@ -232,7 +232,7 @@ with SessionLocal() as db:
             "id": running.id,
             "status": running.status,
             "total": running.total,
-            "job_ids": [item.job_id for item in running.items],
+            "job_count": len(running.items),
             "idempotent": True,
         }
         if running is not None
@@ -255,6 +255,9 @@ with SessionLocal() as db:
                 "excluded_candidate_ids": [
                     asset.id for asset, _rating, _level in excluded
                 ],
+                "candidate_selection": (
+                    "ascending_asset_id_per_rating_until_frozen_quota"
+                ),
                 "source_category_distribution": Counter(
                     asset.category_key for asset, _rating, _level in selected
                 ),
@@ -269,5 +272,6 @@ with SessionLocal() as db:
             },
             ensure_ascii=False,
             sort_keys=True,
+            default=str,
         )
     )

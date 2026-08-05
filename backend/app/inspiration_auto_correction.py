@@ -180,6 +180,9 @@ def ensure_inspiration_golden_set(
             "fingerprint": fingerprint,
             "candidate_distribution": candidate_distribution,
             "excluded_candidate_ids": [asset.id for asset, _rating, _level in excluded],
+            "candidate_selection": (
+                "ascending_asset_id_per_rating_until_frozen_quota"
+            ),
         }
 
     baseline_set = BaselineSet(
@@ -187,6 +190,7 @@ def ensure_inspiration_golden_set(
         name=name,
         description=(
             "图片级人工真值；仅由文件名人工评级前缀生成。"
+            "候选超出冻结逐级规模时按 asset_id 升序截取并审计排除项。"
             "原始 asset.category_key 保持不变。"
         ),
         default_expected_level="L3",
@@ -251,6 +255,9 @@ def ensure_inspiration_golden_set(
             "asset_category_mutations": 0,
             "candidate_distribution": candidate_distribution,
             "excluded_candidate_ids": [asset.id for asset, _rating, _level in excluded],
+            "candidate_selection": (
+                "ascending_asset_id_per_rating_until_frozen_quota"
+            ),
         },
         event_key=f"inspiration-golden-set:{fingerprint}",
     )
@@ -264,6 +271,7 @@ def ensure_inspiration_golden_set(
         "fingerprint": fingerprint,
         "candidate_distribution": candidate_distribution,
         "excluded_candidate_ids": [asset.id for asset, _rating, _level in excluded],
+        "candidate_selection": "ascending_asset_id_per_rating_until_frozen_quota",
     }
 
 

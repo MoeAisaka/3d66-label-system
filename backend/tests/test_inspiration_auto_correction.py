@@ -60,6 +60,14 @@ def test_golden_set_references_cross_category_assets_without_mutation() -> None:
                     category_key="space_image",
                 ),
                 Asset(
+                    original_name="后续候选/好_3.jpeg",
+                    stored_name="late.jpeg",
+                    mime_type="image/jpeg",
+                    size_bytes=1,
+                    sha256="d" * 64,
+                    category_key="space_image",
+                ),
+                Asset(
                     original_name="说明.pdf",
                     stored_name="c.pdf",
                     mime_type="application/pdf",
@@ -92,6 +100,7 @@ def test_golden_set_references_cross_category_assets_without_mutation() -> None:
         assert report["item_count"] == 3
         assert report["distribution"]["好"] == 2
         assert report["distribution"]["过滤"] == 1
+        assert len(report["excluded_candidate_ids"]) == 1
         assert db.scalars(select(Asset).order_by(Asset.id)).all()[0].category_key == "space_image"
         snapshots = [
             json.loads(item.asset_snapshot_json)
