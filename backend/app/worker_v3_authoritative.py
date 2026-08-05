@@ -47,6 +47,42 @@ class V3AuthoritativeError(RuntimeError):
         self.code = code
 
 
+def _validate_v3_bundle(
+    *,
+    category_key: str,
+    contract: Any,
+    classification_map: Any,
+    subcategory_dimensions: Any,
+) -> None:
+    """Apply the authoritative v3 validators to active and frozen bundles."""
+    if (
+        not isinstance(contract, dict)
+        or not contract
+        or not isinstance(classification_map, dict)
+        or not classification_map
+        or not isinstance(subcategory_dimensions, dict)
+        or not subcategory_dimensions
+    ):
+        raise ValueError("合同、分类映射或赛道维度为空")
+    if contract.get("category_key") != category_key:
+        raise ValueError("合同 category_key 与评测类目不匹配")
+    validate_category_evaluation_contract(contract)
+    track_keys = {
+        track["key"] for track in contract["track_classification"]["tracks"]
+    }
+    validate_classification_map(
+        classification_map, valid_track_keys=track_keys
+    )
+    if set(subcategory_dimensions) != track_keys:
+        raise ValueError("subcategory_dimensions 必须完整覆盖合同赛道")
+    for track_key, dimension_config in subcategory_dimensions.items():
+        validate_subcategory_dimensions(dimension_config)
+        if dimension_config.get("sub_category_key") != track_key:
+            raise ValueError(
+                f"赛道 {track_key} 的 sub_category_key 不匹配"
+            )
+
+
 def v3_authoritative_category(db: Session, category_key: Any) -> dict:
     """Load and validate the active v3 authoritative bundle.
 
@@ -65,35 +101,12 @@ def v3_authoritative_category(db: Session, category_key: Any) -> dict:
         classification_map = json.loads(config.classification_map_json or "{}")
         subcategory_dimensions = json.loads(config.subcategory_dimensions_json or "{}")
 
-        # 三块都必须是非空对象，否则 fail-closed。
-        if (
-            not isinstance(contract, dict)
-            or not contract
-            or not isinstance(classification_map, dict)
-            or not classification_map
-            or not isinstance(subcategory_dimensions, dict)
-            or not subcategory_dimensions
-        ):
-            raise ValueError("合同、分类映射或赛道维度为空")
-        if contract.get("category_key") != category_key:
-            raise ValueError("合同 category_key 与评测类目不匹配")
-        validate_category_evaluation_contract(contract)
-        track_keys = {
-            track["key"]
-            for track in contract["track_classification"]["tracks"]
-        }
-        validate_classification_map(
-            classification_map, valid_track_keys=track_keys
+        _validate_v3_bundle(
+            category_key=category_key,
+            contract=contract,
+            classification_map=classification_map,
+            subcategory_dimensions=subcategory_dimensions,
         )
-        if set(subcategory_dimensions) != track_keys:
-            raise ValueError("subcategory_dimensions 必须完整覆盖合同赛道")
-        for track_key, dimension_config in subcategory_dimensions.items():
-            validate_subcategory_dimensions(dimension_config)
-            if dimension_config.get("sub_category_key") != track_key:
-                raise ValueError(
-                    f"赛道 {track_key} 的 sub_category_key 不匹配"
-                )
-
         return {
             "contract": contract,
             "classification_map": classification_map,
@@ -142,6 +155,22 @@ def v3_authoritative_for_job(db: Session, job: Any) -> dict:
                 raise V3AuthoritativeError(
                     "v3_frozen_config_invalid", "冻结 v3 合同与作业类目不匹配"
                 )
+            try:
+                _validate_v3_bundle(
+                    category_key=getattr(job, "category_key", None),
+                    contract=bundle["contract"],
+                    classification_map=bundle["classification_map"],
+                    subcategory_dimensions=bundle["subcategory_dimensions"],
+                )
+            except Exception as exc:  # noqa: BLE001 — 冻结合同必须 fail-closed
+                logger.error(
+                    "ADR-0033 frozen v3 contract invalid "
+                    "(v1 fallback forbidden): %s",
+                    type(exc).__name__,
+                )
+                raise V3AuthoritativeError(
+                    "v3_frozen_config_invalid", "基线作业的冻结 v3 配置无效"
+                ) from exc
             return bundle
     return v3_authoritative_category(db, getattr(job, "category_key", None))
 

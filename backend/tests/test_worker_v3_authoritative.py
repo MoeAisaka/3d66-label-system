@@ -736,3 +736,81 @@ def test_frozen_bundle_with_mismatched_category_fails_closed(
             v3_authoritative_for_job(db, job)
     assert excinfo.value.code == "v3_frozen_config_invalid"
     assert "类目不匹配" in str(excinfo.value)
+
+
+def _valid_frozen_bundle() -> dict[str, Any]:
+    return {
+        "contract": build_inspiration_v3_contract(),
+        "classification_map": build_inspiration_classification_map(),
+        "subcategory_dimensions": build_inspiration_subcategory_dimensions(),
+        "config_revision": 3,
+    }
+
+
+def _assert_invalid_frozen_bundle(
+    sessions: sessionmaker[Session], frozen: dict[str, Any]
+) -> V3AuthoritativeError:
+    job = SimpleNamespace(
+        category_key=_CATEGORY_KEY,
+        baseline_regression_item_id=None,
+        category_profile_snapshot_json=json.dumps(
+            {"v3_authoritative_bundle": frozen}, ensure_ascii=False
+        ),
+    )
+    with sessions() as db:
+        with pytest.raises(V3AuthoritativeError) as excinfo:
+            v3_authoritative_for_job(db, job)
+    assert excinfo.value.code == "v3_frozen_config_invalid"
+    return excinfo.value
+
+
+def test_frozen_bundle_with_empty_contract_tracks_fails_closed(
+    sessions: sessionmaker[Session],
+) -> None:
+    frozen = _valid_frozen_bundle()
+    frozen["contract"]["track_classification"]["tracks"] = []
+
+    error = _assert_invalid_frozen_bundle(sessions, frozen)
+
+    assert str(error) == "基线作业的冻结 v3 配置无效"
+
+
+@pytest.mark.parametrize("corruption", ["invalid_structure", "unknown_target"])
+def test_frozen_bundle_with_invalid_classification_map_fails_closed(
+    sessions: sessionmaker[Session], corruption: str
+) -> None:
+    frozen = _valid_frozen_bundle()
+    if corruption == "invalid_structure":
+        frozen["classification_map"]["category_to_subcategory"] = []
+    else:
+        frozen["classification_map"]["category_to_subcategory"][
+            "建筑设计"
+        ] = "payload-must-not-leak"
+
+    error = _assert_invalid_frozen_bundle(sessions, frozen)
+
+    assert str(error) == "基线作业的冻结 v3 配置无效"
+    assert "payload-must-not-leak" not in str(error)
+
+
+@pytest.mark.parametrize(
+    "corruption",
+    ["invalid_structure", "missing_track", "incomplete_dimension_reference"],
+)
+def test_frozen_bundle_with_invalid_subcategory_dimensions_fails_closed(
+    sessions: sessionmaker[Session], corruption: str
+) -> None:
+    frozen = _valid_frozen_bundle()
+    dimensions = frozen["subcategory_dimensions"]
+    if corruption == "invalid_structure":
+        dimensions["class_one"]["format_version"] = "broken"
+    elif corruption == "missing_track":
+        dimensions.pop("class_three")
+    else:
+        dimensions["class_one"]["common_group"]["schema_definition"][
+            "dimensions"
+        ][0].pop("key")
+
+    error = _assert_invalid_frozen_bundle(sessions, frozen)
+
+    assert str(error) == "基线作业的冻结 v3 配置无效"
