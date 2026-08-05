@@ -8,7 +8,12 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
-from PIL import Image, UnidentifiedImageError
+from PIL import Image, ImageOps, UnidentifiedImageError
+
+
+MODEL_IMAGE_MAX_SIDE = 4096
+MODEL_IMAGE_MAX_BYTES = 8 * 1024 * 1024
+MODEL_IMAGE_JPEG_QUALITIES = (88, 80, 72, 64)
 
 
 @dataclass(frozen=True)
@@ -33,13 +38,23 @@ def prepare_model_image(
     worker sends a deterministic contact sheet of up to four timeline frames.
     """
     if mime_type != "image/gif":
-        return source_path, mime_type
+        return _prepare_provider_safe_still(
+            source_path,
+            mime_type=mime_type,
+            content_sha256=content_sha256,
+            cache_dir=cache_dir,
+        )
     if not 1 <= max_frames <= 24:
         raise RuntimeError("动图关键帧数量超出允许范围")
     cache_dir.mkdir(parents=True, exist_ok=True)
     preview_path = cache_dir / f"{content_sha256}-{max_frames}.png"
     if preview_path.exists():
-        return preview_path, "image/png"
+        return _prepare_provider_safe_still(
+            preview_path,
+            mime_type="image/png",
+            content_sha256=f"{content_sha256}-{max_frames}",
+            cache_dir=cache_dir,
+        )
 
     try:
         with Image.open(source_path) as animation:
@@ -87,7 +102,97 @@ def prepare_model_image(
             except OSError:
                 pass
         raise RuntimeError("动图评测预览写入失败") from exc
-    return preview_path, "image/png"
+    return _prepare_provider_safe_still(
+        preview_path,
+        mime_type="image/png",
+        content_sha256=f"{content_sha256}-{max_frames}",
+        cache_dir=cache_dir,
+    )
+
+
+def _prepare_provider_safe_still(
+    source_path: Path,
+    *,
+    mime_type: str,
+    content_sha256: str,
+    cache_dir: Path,
+) -> tuple[Path, str]:
+    """Create a deterministic model-only JPEG when provider limits require it.
+
+    The original asset stays byte-for-byte untouched.  Static images under the
+    byte and dimension limits keep their original path and MIME type; only
+    oversized payloads are EXIF-normalized, bounded, and atomically cached.
+    """
+    try:
+        source_bytes = source_path.stat().st_size
+        with Image.open(source_path) as opened:
+            source_size = opened.size
+    except (OSError, UnidentifiedImageError) as exc:
+        raise RuntimeError("图片素材无法生成模型评测预览") from exc
+    if (
+        source_bytes <= MODEL_IMAGE_MAX_BYTES
+        and max(source_size) <= MODEL_IMAGE_MAX_SIDE
+    ):
+        return source_path, mime_type
+
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    preview_path = cache_dir / f"{content_sha256}-provider-safe-v1.jpg"
+    if preview_path.exists() and preview_path.stat().st_size <= MODEL_IMAGE_MAX_BYTES:
+        return preview_path, "image/jpeg"
+
+    temporary_path: str | None = None
+    try:
+        with Image.open(source_path) as opened:
+            image = ImageOps.exif_transpose(opened)
+            if image.mode in {"RGBA", "LA"} or (
+                image.mode == "P" and "transparency" in image.info
+            ):
+                rgba = image.convert("RGBA")
+                background = Image.new("RGBA", rgba.size, (255, 255, 255, 255))
+                background.alpha_composite(rgba)
+                image = background.convert("RGB")
+            else:
+                image = image.convert("RGB")
+            image.thumbnail(
+                (MODEL_IMAGE_MAX_SIDE, MODEL_IMAGE_MAX_SIDE),
+                Image.Resampling.LANCZOS,
+            )
+            with tempfile.NamedTemporaryFile(
+                dir=cache_dir,
+                prefix=f".{content_sha256}.",
+                suffix=".tmp",
+                delete=False,
+            ) as temporary:
+                temporary_path = temporary.name
+            for quality in MODEL_IMAGE_JPEG_QUALITIES:
+                image.save(
+                    temporary_path,
+                    format="JPEG",
+                    quality=quality,
+                    optimize=True,
+                )
+                if Path(temporary_path).stat().st_size <= MODEL_IMAGE_MAX_BYTES:
+                    break
+                image.thumbnail(
+                    (
+                        max(512, image.width * 3 // 4),
+                        max(512, image.height * 3 // 4),
+                    ),
+                    Image.Resampling.LANCZOS,
+                )
+            if Path(temporary_path).stat().st_size > MODEL_IMAGE_MAX_BYTES:
+                raise RuntimeError("模型评测预览仍超过安全体积上限")
+        os.replace(temporary_path, preview_path)
+        temporary_path = None
+    except (OSError, UnidentifiedImageError) as exc:
+        raise RuntimeError("图片素材无法生成模型评测预览") from exc
+    finally:
+        if temporary_path:
+            try:
+                Path(temporary_path).unlink()
+            except OSError:
+                pass
+    return preview_path, "image/jpeg"
 
 
 def prepare_pdf_model_input(

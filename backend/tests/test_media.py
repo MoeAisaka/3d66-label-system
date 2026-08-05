@@ -5,7 +5,11 @@ import io
 import pytest
 from PIL import Image
 
-from app.media import prepare_model_image, prepare_pdf_model_input
+from app.media import (
+    MODEL_IMAGE_MAX_BYTES,
+    prepare_model_image,
+    prepare_pdf_model_input,
+)
 
 
 def _gif_bytes() -> bytes:
@@ -53,6 +57,52 @@ def test_gif_model_preview_is_deterministic_and_keeps_source_animated(tmp_path) 
     )
     assert cached_preview == preview
     assert cached_mime == "image/png"
+
+
+def test_oversized_static_image_uses_bounded_cached_preview(tmp_path) -> None:
+    source = tmp_path / "oversized.png"
+    Image.new("RGB", (4200, 32), (12, 34, 56)).save(source, format="PNG")
+    original = source.read_bytes()
+    cache_dir = tmp_path / "derived"
+
+    preview, mime_type = prepare_model_image(
+        source,
+        mime_type="image/png",
+        content_sha256="d" * 64,
+        cache_dir=cache_dir,
+    )
+
+    assert preview != source
+    assert mime_type == "image/jpeg"
+    assert preview.stat().st_size <= MODEL_IMAGE_MAX_BYTES
+    assert source.read_bytes() == original
+    with Image.open(preview) as image:
+        assert image.format == "JPEG"
+        assert max(image.size) <= 4096
+
+    cached, cached_mime = prepare_model_image(
+        source,
+        mime_type="image/png",
+        content_sha256="d" * 64,
+        cache_dir=cache_dir,
+    )
+    assert cached == preview
+    assert cached_mime == "image/jpeg"
+
+
+def test_small_static_image_keeps_original_payload(tmp_path) -> None:
+    source = tmp_path / "small.png"
+    Image.new("RGBA", (12, 10), (1, 2, 3, 4)).save(source, format="PNG")
+
+    prepared, mime_type = prepare_model_image(
+        source,
+        mime_type="image/png",
+        content_sha256="e" * 64,
+        cache_dir=tmp_path / "derived",
+    )
+
+    assert prepared == source
+    assert mime_type == "image/png"
 
 
 def test_pdf_preprocess_extracts_text_renders_contact_sheet_and_caches(tmp_path) -> None:
