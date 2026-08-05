@@ -1380,6 +1380,10 @@ async def evaluate_job(job_id: int) -> None:
     else:
         precheck = response_a.parsed
         aesthetic = None
+    if job.category_key == "inspiration_image":
+        from .schema_adapter import adapt_inspiration_call_a_precheck
+
+        precheck = adapt_inspiration_call_a_precheck(precheck)
     try:
         precheck = normalize_precheck_business_rules(precheck)
         if not inspiration_baseline_job:

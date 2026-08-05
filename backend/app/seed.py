@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -238,10 +240,10 @@ def seed_defaults(db: Session) -> None:
 
 
 def _seed_inspiration_image_prompts(db: Session, settings) -> None:
-    """Seed the ADR-0033 inspiration_image A/B ``PromptVersion`` rows (idempotent).
+    """Seed versioned inspiration_image A/B ``PromptVersion`` rows idempotently.
 
-    Task 3b (方案 A): the two real-contract prompts —调用A 预检（红线/赛道/媒介/
-    hard_defects）与调用B 6/5 维度评级—live as plain single-block prompt files under
+    调用 A 预检（红线/赛道/媒介/hard_defects）与人工校准版调用 B live as plain
+    single-block prompt files under
     ``prompts/``.  Each file is loaded wholesale as ``system_prompt`` (they carry
     no ``### System Prompt`` split markers); ``user_prompt`` is empty since the
     per-image context is injected by the worker at call time.  Only inserted when
@@ -250,17 +252,17 @@ def _seed_inspiration_image_prompts(db: Session, settings) -> None:
     prompt_specs = (
         {
             "stage": "A",
-            "name": "灵感图预检（红线/赛道/媒介/硬伤）",
-            "version": "inspiration-a-v1",
+            "name": "灵感图人工校准版预检（红线/赛道/媒介/硬伤）",
+            "version": "inspiration-a-v2-human-calibrated-20260805",
             "filename": "inspiration_image_call_a.txt",
-            "note": "ADR-0033 Task3b 方案A：灵感图调用A 预检，含 hard_defects 硬伤信号",
+            "note": "2026-08-05 人工校准版：同步十条硬伤与 trait 直出字段",
         },
         {
             "stage": "B",
-            "name": "灵感图 6/5 维度评级",
-            "version": "inspiration-b-v1",
+            "name": "灵感图人工校准版全赛道评审",
+            "version": "inspiration-b-v2-human-calibrated-20260805",
             "filename": "inspiration_image_call_b.txt",
-            "note": "ADR-0033 Task3b 方案A：灵感图调用B 真实 6/5 维度 1-5 档评级",
+            "note": "2026-08-05 人工校准版：完整红线/赛道/维度/压分/等级/标签合同",
         },
     )
     for item in prompt_specs:
@@ -290,10 +292,11 @@ def _seed_inspiration_image_prompts(db: Session, settings) -> None:
 
 
 def _seed_inspiration_image_v3_config(db: Session) -> None:
-    """Seed + activate the ADR-0033 v3 evaluation config for ``inspiration_image``.
+    """Seed or replace the active v3 config when the frozen spec version changes.
 
-    Idempotent: only inserts when the row is absent, so re-running seed_defaults
-    (on every init) never duplicates or overwrites an operator-edited config.
+    Idempotent within one ``spec_version``.  A deliberately bumped frozen seed spec
+    replaces the prior inspiration config exactly once and increments revision;
+    otherwise startup does not overwrite later operator edits to the same spec.
     The v3 authoritative worker branch only fires for categories that have an
     ``active`` config here; this makes inspiration_image use v3 out of the box
     while every legacy category (space_image / material_image / pdf_text) keeps
@@ -316,12 +319,11 @@ def _seed_inspiration_image_v3_config(db: Session) -> None:
     from .subcategory_resolver import validate_classification_map
 
     category_key = "inspiration_image"
-    if db.scalar(
+    existing = db.scalar(
         select(CategoryEvaluationV3Config).where(
             CategoryEvaluationV3Config.category_key == category_key
         )
-    ) is not None:
-        return
+    )
 
     contract = build_inspiration_v3_contract()
     classification_map = build_inspiration_classification_map()
@@ -340,21 +342,38 @@ def _seed_inspiration_image_v3_config(db: Session) -> None:
     for config in subcategory_dimensions.values():
         validate_subcategory_dimensions(config)
 
+    persisted = {
+        "display_name": "灵感图",
+        "status": "active",
+        "contract_json": canonical_json(contract),
+        "classification_map_json": canonical_json(classification_map),
+        "subcategory_dimensions_json": canonical_json(subcategory_dimensions),
+        "dimension_deduction_rules_json": canonical_json(
+            extract_dimension_deduction_rules(subcategory_dimensions)
+        ),
+        "media_penalty_enabled": False,
+        "contract_hash": canonical_contract_hash(contract),
+    }
+    if existing is not None:
+        try:
+            existing_spec = json.loads(existing.contract_json or "{}").get(
+                "spec_version"
+            )
+        except (json.JSONDecodeError, TypeError, AttributeError):
+            existing_spec = None
+        if existing_spec == contract["spec_version"]:
+            return
+        for field, value in persisted.items():
+            setattr(existing, field, value)
+        existing.revision += 1
+        return
+
     db.add(
         CategoryEvaluationV3Config(
             category_key=category_key,
-            display_name="灵感图",
-            status="active",
-            contract_json=canonical_json(contract),
-            classification_map_json=canonical_json(classification_map),
-            subcategory_dimensions_json=canonical_json(subcategory_dimensions),
-            dimension_deduction_rules_json=canonical_json(
-                extract_dimension_deduction_rules(subcategory_dimensions)
-            ),
-            media_penalty_enabled=True,
+            **persisted,
             revision=1,
-            contract_hash=canonical_contract_hash(contract),
-            created_by="system",
+            created_by="system:inspiration-v2-human-calibrated",
         )
     )
 

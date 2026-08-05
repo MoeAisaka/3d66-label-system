@@ -14,6 +14,7 @@ import json
 
 import pytest
 
+from app.category_evaluation_aggregator import aggregate_category_evaluation
 from app.category_evaluation_contract import (
     CATEGORY_EVALUATION_CONTRACT_VERSION,
     validate_category_evaluation_contract,
@@ -140,7 +141,7 @@ def test_each_subcategory_dimensions_passes_existing_validator():
 
 
 def test_seed_version_constant():
-    assert INSPIRATION_SEED_VERSION == "inspiration-category-seed-v1"
+    assert INSPIRATION_SEED_VERSION == "inspiration-category-seed-v2-human-calibrated"
 
 
 # --------------------------------------------------------------------------- #
@@ -157,7 +158,7 @@ def test_redline_hit_screenshot_short_circuits():
     assert agg["hard_reject"] is True
     assert agg["terminated_at"] == "redline"
     assert agg["level"] == "L5"
-    assert agg["score"] == 49
+    assert agg["score"] == 20
     _assert_json_serializable(result)
 
 
@@ -186,7 +187,7 @@ def test_product_grade5_class_two_capped_80():
     # 20 + 60 = 80, at (and never above) the class_two track cap of 80.
     assert agg["score"] <= 80
     assert agg["score"] == 80
-    assert agg["level"] == "L1"
+    assert agg["level"] == "L2"
     _assert_json_serializable(result)
 
 
@@ -207,19 +208,18 @@ def test_low_confidence_falls_back_to_class_three_default():
     _assert_json_serializable(result)
 
 
-def test_ai_image_media_penalty_minus_15_visible():
+def test_media_type_penalty_is_disabled_for_new_inspiration_contract():
     real = _run(_precheck(category="建筑设计", trait="实景照片", confidence=0.95))
     ai = _run(_precheck(category="建筑设计", trait="AI图", confidence=0.95))
     # Both resolve to class_one; only the media type differs.
     assert real["result"]["track_key"] == TRACK_CLASS_ONE
     assert ai["result"]["track_key"] == TRACK_CLASS_ONE
-    # AI image incurs the fixed -15 relative to the real-photo baseline.
+    # 新体系只保留 trait 供下游消费，不按媒介扣分。
     assert real["result"]["score"] == 100
-    assert ai["result"]["score"] == 85
-    assert real["result"]["score"] - ai["result"]["score"] == 15
-    # The penalty is explainable in the media step evidence.
-    media_step = next(s for s in ai["result"]["steps"] if s["step"] == "media")
-    assert "-15" in media_step["note"]
+    assert ai["result"]["score"] == 100
+    assert real["result"]["score"] == ai["result"]["score"]
+    assert ai["result"]["media_penalty_enabled"] is False
+    assert any(s["step"] == "media_skipped" for s in ai["result"]["steps"])
     _assert_json_serializable(ai)
 
 
@@ -247,7 +247,7 @@ def _common_dims(config: dict) -> list[dict]:
     return config["common_group"]["schema_definition"]["dimensions"]
 
 
-def test_class_one_two_have_six_real_dimensions_weights_sum_to_one():
+def test_class_one_two_have_six_real_dimensions_with_raw_business_weights():
     configs = build_inspiration_subcategory_dimensions()
     for track_key in (TRACK_CLASS_ONE, TRACK_CLASS_TWO):
         config = configs[track_key]
@@ -257,22 +257,54 @@ def test_class_one_two_have_six_real_dimensions_weights_sum_to_one():
         # 全部维度在 common_group，specific_group 为空。
         assert config["common_group"]["group_weight"] == 1.0
         assert _common_dims and not config["specific_group"]["schema_definition"]["dimensions"]
-        assert abs(sum(d["weight"] for d in dims) - 1.0) <= _WEIGHT_TOLERANCE
+        assert [d["weight"] for d in dims] == [0.10, 0.10, 0.05, 0.10, 0.10, 0.15]
+        assert abs(sum(d["weight"] for d in dims) - 0.60) <= _WEIGHT_TOLERANCE
         for d in dims:
             assert d["grade_points"] == {"1": 0.0, "2": 25.0, "3": 50.0, "4": 75.0, "5": 100.0}
 
 
-def test_class_three_has_five_real_dimensions_weights_sum_to_one():
+def test_class_three_has_five_real_dimensions_with_raw_business_weights():
     config = build_inspiration_subcategory_dimensions()[TRACK_CLASS_THREE]
     dims = _common_dims(config)
     assert [d["key"] for d in dims] == list(_CLASS_THREE_KEYS)
     assert config["dimension_max"] == 30
     assert config["common_group"]["group_weight"] == 1.0
     assert not config["specific_group"]["schema_definition"]["dimensions"]
-    assert abs(sum(d["weight"] for d in dims) - 1.0) <= _WEIGHT_TOLERANCE
-    # 每维满分 6 / 30 = 0.2。
+    assert abs(sum(d["weight"] for d in dims) - 0.30) <= _WEIGHT_TOLERANCE
+    # 业务权重每维 0.06，对应 100 分维度分中的 6 分。
     for d in dims:
-        assert abs(d["weight"] - 0.2) <= _WEIGHT_TOLERANCE
+        assert abs(d["weight"] - 0.06) <= _WEIGHT_TOLERANCE
+
+
+def test_contract_freezes_human_calibrated_level_boundaries_and_veto_rules():
+    contract = build_inspiration_v3_contract()
+    assert contract["spec_version"] == "inspiration-v2-human-calibrated-20260805"
+    assert contract["level_thresholds"] == [
+        {"min_score": 81, "level": "L1"},
+        {"min_score": 61, "level": "L2"},
+        {"min_score": 41, "level": "L3"},
+        {"min_score": 21, "level": "L4"},
+        {"min_score": 0, "level": "L5"},
+    ]
+    modifiers = contract["common_modifiers"]
+    assert modifiers["media_type_penalty"]["enabled"] is False
+    veto = modifiers["high_score_veto"]
+    assert veto["enabled"] is True
+    assert (veto["threshold"], veto["cap_to"]) == (80, 79)
+    assert len(veto["rules"]) == 10
+
+
+def test_level_mapping_boundaries_80_is_l2_and_81_is_l1():
+    contract = build_inspiration_v3_contract()
+    precheck = _precheck(category="建筑设计", trait="实景照片")
+    score_80 = aggregate_category_evaluation(
+        contract, precheck, {"deductions": {"d": 20}}, track_key=TRACK_CLASS_ONE
+    )
+    score_81 = aggregate_category_evaluation(
+        contract, precheck, {"deductions": {"d": 19}}, track_key=TRACK_CLASS_ONE
+    )
+    assert (score_80["score"], score_80["level"]) == (80, "L2")
+    assert (score_81["score"], score_81["level"]) == (81, "L1")
 
 
 def test_high_score_veto_class_one_hard_defects_caps_to_79():

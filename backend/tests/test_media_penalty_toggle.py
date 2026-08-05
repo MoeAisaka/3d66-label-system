@@ -11,9 +11,9 @@ def _precheck() -> dict:
 
 
 def test_media_penalty_enabled_and_disabled_paths() -> None:
-    enabled_contract = build_inspiration_v3_contract()
-    disabled_contract = deepcopy(enabled_contract)
-    disabled_contract["common_modifiers"]["media_type_penalty"]["enabled"] = False
+    disabled_contract = build_inspiration_v3_contract()
+    enabled_contract = deepcopy(disabled_contract)
+    enabled_contract["common_modifiers"]["media_type_penalty"]["enabled"] = True
     dimension_result = {"deductions": {}, "mode": "rule_deduction"}
 
     enabled = aggregate_category_evaluation(

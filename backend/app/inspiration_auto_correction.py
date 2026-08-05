@@ -39,7 +39,7 @@ from .node_correction_api import CorrectNodeRequest, apply_node_correction
 
 
 GOLDEN_SET_NAME = "灵感图人工评级黄金集-20260724-v2"
-TRUTH_SOURCE = "灵感图人工评级集-20260724"
+TRUTH_SOURCE = "灵感图人工评级前缀"
 AUTO_CORRECTOR = "auto-corrector-v1"
 AUTO_CORRECTOR_POLICY = "level-confusion-calibration-v1"
 RATING_TO_LEVEL = {

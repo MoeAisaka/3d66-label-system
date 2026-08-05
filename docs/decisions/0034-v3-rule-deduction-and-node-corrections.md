@@ -3,6 +3,12 @@
 日期：2026-08-04
 状态：已实施
 
+2026-08-05 人工校准版补充：`inspiration_image` 已直接切换到
+`inspiration-v2-human-calibrated-20260805`，不经过 shadow。媒介降权关闭；一/二类
+六维原始权重和为 `0.60`，三类五维原始权重和为 `0.30`。聚合器同时兼容历史
+“组内权重和为 1”合同和新“原始业务权重”合同，禁止把新权重再次归一化到 1。
+冻结手算样例 `[80,70,60,90,50,40]` 必须得到维度池 38、总分 78。
+
 ## 决策
 
 新评测不再让多模态模型为维度打 1–5 分。调用 B 只判定每个维度命中了
@@ -23,8 +29,15 @@
 ## 数据与迁移
 
 `category_evaluation_v3_configs` 增加规则镜像和媒介开关，`evaluation_results` 增加
-节点纠偏历史。数据升级脚本幂等：灵感图保持 active/媒介开，三个老类目保持
+节点纠偏历史。数据升级脚本幂等：灵感图保持 active；人工校准版将媒介开关关闭，三个老类目保持
 draft/媒介关。只更新四条 v3 配置，旧 `EvaluationResult` 不回溯重算。
+
+人工校准版调用 A/B 使用新 published 版本
+`inspiration-a-v2-human-calibrated-20260805` / `inspiration-b-v2-human-calibrated-20260805`
+并由 active config 显式绑定。调用 A 的专用红线、分类、媒介输出会确定性投影到 v3
+`classification` 与 `production_fields.reason/trait`，不读取模型分数或人工真值。黄金集真值
+只来自原始文件名评级前缀，来源固定记录为“灵感图人工评级前缀”；黄金集只通过
+`asset_id` 引用，不改写历史素材 `category_key`，模型结果不得回喂真值。
 
 共享测试环境的真实全链路金丝雀还暴露出一项历史数据缺口：已启用的灵感图 v3
 配置对应的生产类目合同可能尚未绑定维度 schema。迁移 56 仅在该类目两个 schema

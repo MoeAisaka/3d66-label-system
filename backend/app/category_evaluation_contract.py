@@ -276,6 +276,11 @@ def _validate_common_modifiers(block: Any) -> None:
         raise CategoryEvaluationContractError(
             "veto_not_object", "high_score_veto 必须是对象"
         )
+    veto_enabled = veto.get("enabled", True)
+    if not isinstance(veto_enabled, bool):
+        raise CategoryEvaluationContractError(
+            "veto_enabled", "high_score_veto.enabled 必须是布尔值"
+        )
     threshold = veto.get("threshold")
     cap_to = veto.get("cap_to")
     for name, value in (("threshold", threshold), ("cap_to", cap_to)):
@@ -288,6 +293,33 @@ def _validate_common_modifiers(block: Any) -> None:
         raise CategoryEvaluationContractError(
             "veto_inconsistent", "high_score_veto.cap_to 必须小于 threshold"
         )
+    rules = veto.get("rules")
+    if rules is not None:
+        if not isinstance(rules, list) or not rules:
+            raise CategoryEvaluationContractError(
+                "veto_rules_invalid", "high_score_veto.rules 必须是非空数组"
+            )
+        seen_keys: set[str] = set()
+        for rule in rules:
+            if not isinstance(rule, dict):
+                raise CategoryEvaluationContractError(
+                    "veto_rule_invalid", "high_score_veto.rules 每项必须是对象"
+                )
+            key = rule.get("key")
+            description = rule.get("description")
+            if not isinstance(key, str) or not key.strip():
+                raise CategoryEvaluationContractError(
+                    "veto_rule_invalid", "高分硬伤 key 必须是非空字符串"
+                )
+            if not isinstance(description, str) or not description.strip():
+                raise CategoryEvaluationContractError(
+                    "veto_rule_invalid", "高分硬伤 description 必须是非空中文说明"
+                )
+            if key in seen_keys:
+                raise CategoryEvaluationContractError(
+                    "veto_rule_duplicate", f"高分硬伤 key 重复：{key}"
+                )
+            seen_keys.add(key)
 
 
 def validate_deduction_rules(rules: Any, *, dimension_key: str) -> None:

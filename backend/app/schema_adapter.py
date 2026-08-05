@@ -62,6 +62,58 @@ PRODUCTION_FIELD_KEYS = (
     "trait",
 )
 
+_INSPIRATION_REDLINE_REASON_MAP = {
+    "screenshot": "是截图",
+    "casual_photo": "是随手拍",
+    "text_heavy": "有大面积文字说明",
+    "qr_code_heavy": "有二维码",
+}
+_INSPIRATION_MEDIA_TRAIT_MAP = {
+    "real_photo": "实景照片",
+    "3d_render": "3D数字效果图",
+    "ai_generated": "AI图",
+    "other": "其它",
+}
+
+
+def adapt_inspiration_call_a_precheck(precheck: dict[str, Any]) -> dict[str, Any]:
+    """把灵感图专用调用 A 输出适配为 v3 聚合器冻结的事实合同。
+
+    已是标准 ``classification`` 结构的载荷原样返回；专用 A 的红线布尔值、一级分类、
+    置信度和媒介字段则确定性投影到 ``production_fields.reason/trait`` 与
+    ``classification``。模型分数或人工真值均不参与该适配。
+    """
+    if not isinstance(precheck, dict) or isinstance(precheck.get("classification"), dict):
+        return precheck
+    redlines = precheck.get("redline_triggered")
+    if not isinstance(redlines, dict) or "track_classification" not in precheck:
+        return precheck
+    reasons = [
+        reason
+        for key, reason in _INSPIRATION_REDLINE_REASON_MAP.items()
+        if redlines.get(key) is True
+    ]
+    trait = precheck.get("trait")
+    if trait not in PRODUCTION_TRAIT_VALUES:
+        trait = _INSPIRATION_MEDIA_TRAIT_MAP.get(str(precheck.get("media_type")), "其它")
+    confidence = precheck.get("classification_confidence")
+    if not isinstance(confidence, (int, float)) or isinstance(confidence, bool):
+        confidence = precheck.get("track_confidence")
+    if not isinstance(confidence, (int, float)) or isinstance(confidence, bool):
+        confidence = 0.0
+    normalized = deepcopy(precheck)
+    normalized["classification"] = {
+        "scope_status": "in_scope",
+        "primary_category": precheck.get("primary_category", "其它"),
+        "primary_confidence": max(0.0, min(1.0, float(confidence))),
+    }
+    production = normalized.get("production_fields")
+    if not isinstance(production, dict):
+        production = {}
+    production.update({"reason": reasons, "trait": trait})
+    normalized["production_fields"] = production
+    return normalized
+
 
 def _required_text(value: Any, *, field: str, limit: int) -> str:
     if not isinstance(value, str) or not value.strip():

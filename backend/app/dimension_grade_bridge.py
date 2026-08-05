@@ -53,6 +53,38 @@ class DimensionGradeBridgeError(ValueError):
         self.code = code
 
 
+def resolve_dimension_weight_scale(
+    dimensions: list[dict[str, Any]], dimension_max: int | float
+) -> tuple[float, str]:
+    """兼容旧归一化权重与新业务原始权重，返回 share 的乘数。
+
+    - 旧合同：``sum(weight)=1``，share = weight × dimension_max。
+    - 人工校准合同：``sum(weight)=dimension_max/100``，share = weight × 100。
+
+    两种口径的 share 总和都严格等于 dimension_max，避免把 0.60/0.30
+    业务权重再次重归一化后改变 ``Σ(维度分×原始权重)`` 的含义。
+    """
+    weight_sum = 0.0
+    for dimension in dimensions:
+        weight = dimension.get("weight")
+        if not _is_number(weight) or weight < 0:
+            raise DimensionGradeBridgeError(
+                "weight_invalid",
+                f"维度 {dimension['key']} 的 weight 必须是 >=0 的数值",
+            )
+        weight_sum += float(weight)
+    if abs(weight_sum - 1.0) <= _WEIGHT_SUM_TOLERANCE:
+        return float(dimension_max), "legacy_normalized"
+    business_sum = float(dimension_max) / 100.0
+    if abs(weight_sum - business_sum) <= _WEIGHT_SUM_TOLERANCE:
+        return 100.0, "raw_business"
+    raise DimensionGradeBridgeError(
+        "weights_not_normalized",
+        "维度 weights 求和必须严格=1（旧合同）或="
+        f"dimension_max/100={business_sum}（业务原始权重），实际 {weight_sum}",
+    )
+
+
 def _is_int(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
 
@@ -182,20 +214,9 @@ def grades_to_deductions(
             f"dimension_grades 的 key 必须与 Schema 完全一致（缺失 {missing}，多余 {extra}）",
         )
 
-    weight_sum = 0.0
-    for dimension in dimensions:
-        weight = dimension.get("weight")
-        if not _is_number(weight) or weight < 0:
-            raise DimensionGradeBridgeError(
-                "weight_invalid",
-                f"维度 {dimension['key']} 的 weight 必须是 >=0 的数值",
-            )
-        weight_sum += float(weight)
-    if abs(weight_sum - 1.0) > _WEIGHT_SUM_TOLERANCE:
-        raise DimensionGradeBridgeError(
-            "weights_not_normalized",
-            f"维度 weights 求和必须严格=1（实际 {weight_sum}）",
-        )
+    weight_scale, weight_mode = resolve_dimension_weight_scale(
+        dimensions, dimension_max
+    )
 
     deductions: dict[str, float] = {}
     evidence: dict[str, dict[str, Any]] = {}
@@ -206,7 +227,7 @@ def grades_to_deductions(
 
         min_points = grade_points[str(_MIN_GRADE)]
         max_points = grade_points[str(_MAX_GRADE)]
-        share = float(dimension["weight"]) * float(dimension_max)
+        share = float(dimension["weight"]) * weight_scale
         ratio = (grade_points[str(grade)] - min_points) / (max_points - min_points)
         deduction = round(share * (1.0 - ratio), _DEDUCTION_DIGITS)
         # round() may yield -0.0 for a full-marks dimension; normalize to 0.0.
@@ -218,6 +239,7 @@ def grades_to_deductions(
             "grade": grade,
             "ratio": round(ratio, _EVIDENCE_DIGITS),
             "share": round(share, _EVIDENCE_DIGITS),
+            "weight_mode": weight_mode,
             "deduction": deduction,
         }
 

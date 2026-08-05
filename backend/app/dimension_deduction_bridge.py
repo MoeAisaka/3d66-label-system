@@ -22,6 +22,10 @@ from .category_evaluation_contract import (
     DimensionDeductionOutput,
 )
 from .dimension_composition import validate_subcategory_dimensions
+from .dimension_grade_bridge import (
+    DimensionGradeBridgeError,
+    resolve_dimension_weight_scale,
+)
 
 
 DEDUCTION_BRIDGE_VERSION = "dimension-deduction-bridge-v2"
@@ -322,13 +326,13 @@ def compose_rule_deductions(
     dimension_max = float(config["dimension_max"])
     for group_name, group in non_empty_groups:
         schema_dimensions = group["schema_definition"]["dimensions"]
-        dimension_weight_total = sum(float(item.get("weight", 0)) for item in schema_dimensions)
-        if abs(dimension_weight_total - 1.0) > _WEIGHT_TOLERANCE:
-            raise DimensionDeductionBridgeError(
-                "weights_not_normalized",
-                f"{group_name} 维度 weight 求和必须严格=1（实际 {dimension_weight_total}）",
-            )
         effective_max = float(group["group_weight"]) / weight_total * dimension_max
+        try:
+            weight_scale, weight_mode = resolve_dimension_weight_scale(
+                schema_dimensions, effective_max
+            )
+        except DimensionGradeBridgeError as exc:
+            raise DimensionDeductionBridgeError(exc.code, str(exc)) from exc
         for dimension in schema_dimensions:
             key = dimension["key"]
             configured_rules = rules_by_dimension[key]
@@ -338,12 +342,13 @@ def compose_rule_deductions(
             )
             applied_rule_deduction = min(100.0, float(raw_rule_deduction))
             dimension_score = max(0.0, 100.0 - applied_rule_deduction)
-            share = float(dimension["weight"]) * effective_max
+            share = float(dimension["weight"]) * weight_scale
             point_deduction = round(share * applied_rule_deduction / 100.0, 4)
             deductions[key] = point_deduction
             evidence[key] = {
                 "group": group_name,
                 "share": round(share, 6),
+                "weight_mode": weight_mode,
                 "raw_rule_deduction": float(raw_rule_deduction),
                 "applied_rule_deduction": applied_rule_deduction,
                 "dimension_score": dimension_score,

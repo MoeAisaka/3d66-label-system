@@ -365,12 +365,23 @@ def aggregate_category_evaluation(
 
     # Step 6 — high-score veto (一票压分).
     veto = contract["common_modifiers"]["high_score_veto"]
+    veto_enabled = veto.get("enabled", True)
     veto_threshold = veto["threshold"]
     veto_cap_to = veto["cap_to"]
     hard_defects = precheck.get("hard_defects")
-    has_hard_defects = isinstance(hard_defects, list) and len(hard_defects) > 0
+    configured_rules = veto.get("rules")
+    configured_hard_defects = (
+        {rule["key"] for rule in configured_rules}
+        if isinstance(configured_rules, list)
+        else None
+    )
+    has_hard_defects = isinstance(hard_defects, list) and any(
+        isinstance(item, str)
+        and (configured_hard_defects is None or item in configured_hard_defects)
+        for item in hard_defects
+    )
     score_after_veto = score_after_media
-    if score_after_media >= veto_threshold and has_hard_defects:
+    if veto_enabled and score_after_media >= veto_threshold and has_hard_defects:
         score_after_veto = min(score_after_media, float(veto_cap_to))
         caps.append({
             "cap": "high_score_veto",
@@ -386,7 +397,7 @@ def aggregate_category_evaluation(
         steps.append(_step(
             "veto",
             score_after_veto,
-            "高分一票压分未触发（未达阈值或无硬伤信号）",
+            "高分一票压分未触发（已关闭、未达阈值或无配置内硬伤信号）",
         ))
 
     # Step 7 — track cap, then clamp to integer [0, 100].

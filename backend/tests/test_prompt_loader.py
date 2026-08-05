@@ -85,3 +85,33 @@ def test_v14_lite2_calibration_caps_snapshot_and_damaged_quality_at_l2() -> None
     assert "casual_snapshot.status=yes" in calibration
     assert "slight|moderate|severe|unusable" in calibration
     assert "最高为 `L2`" in calibration
+
+
+def test_inspiration_b_human_calibrated_prompt_contains_frozen_contract() -> None:
+    prompt = (PROJECT_ROOT / "prompts" / "inspiration_image_call_b.txt").read_text(
+        encoding="utf-8"
+    )
+    assert "从业10年以上" in prompt
+    assert "红点/IF/普利兹克" in prompt
+    assert "截图" in prompt and "文字标注占画面≥40%" in prompt
+    assert "视觉结构(权重0.10)" in prompt
+    assert "设计流行度(权重0.15)" in prompt
+    assert "主题清晰(权重0.06)" in prompt
+    assert "enabled=true,threshold=80,cap_to=79" in prompt
+    assert "L1=81-100" in prompt and "L5=0-20" in prompt
+    for field in (
+        '"score"', '"grade"', '"title"', '"seotitle"', '"category"',
+        '"style"', '"tags"', '"cons"', '"design"', '"reason"',
+        '"image_defects"', '"trait"',
+    ):
+        assert field in prompt
+
+
+def test_inspiration_a_human_calibrated_prompt_syncs_trait_and_hard_defects() -> None:
+    prompt = (PROJECT_ROOT / "prompts" / "inspiration_image_call_a.txt").read_text(
+        encoding="utf-8"
+    )
+    assert '"trait": "实景照片"' in prompt
+    assert "材质廉价" in prompt
+    assert "比例严重失调" in prompt
+    assert "主体被遮挡" in prompt

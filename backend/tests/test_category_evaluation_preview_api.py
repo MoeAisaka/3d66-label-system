@@ -137,7 +137,7 @@ def test_get_contract_returns_assembled_config(client: TestClient) -> None:
         "seed_version",
     }
     assert body["contract"]["schema_version"] == "evaluation-category-profile-v3"
-    assert body["seed_version"] == "inspiration-category-seed-v1"
+    assert body["seed_version"] == "inspiration-category-seed-v2-human-calibrated"
     # The read-only endpoint returns exactly what the seed builders assemble.
     assert body["contract"] == build_inspiration_v3_contract()
     assert body["classification_map"] == build_inspiration_classification_map()
@@ -165,7 +165,7 @@ def test_evaluate_redline_hit_short_circuits(client: TestClient) -> None:
     assert result["hard_reject"] is True
     assert result["terminated_at"] == "redline"
     assert result["level"] == "L5"
-    assert result["score"] == 49
+    assert result["score"] == 20
 
 
 def test_evaluate_architecture_grade5_real_photo_class_one(

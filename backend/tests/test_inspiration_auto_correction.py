@@ -107,9 +107,9 @@ def test_golden_set_references_cross_category_assets_without_mutation() -> None:
             for item in db.scalars(select(BaselineSetItem).order_by(BaselineSetItem.id))
         ]
         assert [item["truth_updated_by"] for item in snapshots] == [
-            "灵感图人工评级集-20260724",
-            "灵感图人工评级集-20260724",
-            "灵感图人工评级集-20260724",
+            "灵感图人工评级前缀",
+            "灵感图人工评级前缀",
+            "灵感图人工评级前缀",
         ]
         assert [item["asset_source_category_key"] for item in snapshots] == [
             "space_image",

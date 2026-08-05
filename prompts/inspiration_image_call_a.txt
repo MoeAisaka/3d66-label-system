@@ -24,16 +24,16 @@
 
 10 条硬伤枚举（命中即把对应枚举值放进 `hard_defects` 数组）：
 
-1. `blurry_grayish`：画面模糊发灰、分辨率偏低、压缩痕迹重、噪点明显
-2. `careless_composition`：构图敷衍、元素堆砌、无清晰设计逻辑
-3. `garish_color`：色彩艳俗、饱和度过高
-4. `large_dead_black`：画面大面积死黑、暗部缺失细节、明暗断层
-5. `distorted_viewpoint`：渲染/拍摄视角怪异、透视畸形
-6. `fake_material`：材质表现虚假、反光失真、纹理模糊
-7. `fisheye_distortion`：鱼眼/超广角造成画面严重畸变、建筑垂直线条大幅倾斜
-8. `invalid_black_border`：画面存在大面积无效黑边、生硬非自然裁切线
-9. `severe_color_cast`：整体色调严重偏色，违背真实材质/空间原生质感
-10. `known_real_photo_defect`：知名实拍硬伤（明显的实拍缺陷，如逆光死黑、手抖糊片等）
+1. `blurry_grayish`：模糊发灰/低分辨率/压缩痕迹/噪点/材质廉价
+2. `careless_composition`：构图敷衍/元素堆砌/无设计逻辑/比例严重失调
+3. `garish_color`：色彩艳俗/过饱和/灯光刺眼/假白失真
+4. `large_dead_black`：大面积死黑/暗部缺失/明暗断层/光影矛盾
+5. `distorted_viewpoint`：视角怪异/透视畸形/主体严重裁切
+6. `fake_material`：材质虚假/反光失真/纹理模糊/细节缺失
+7. `fisheye_distortion`：鱼眼超广角畸变/垂直线倾斜/边缘扭曲
+8. `invalid_black_border`：大面积无效黑边/生硬裁切线/主体被遮挡
+9. `severe_color_cast`：色调严重偏色/光影违和/违背真实质感
+10. `known_real_photo_defect`：知名落地实拍建筑素材出现以上硬伤同样无豁免
 
 **输出**：`hard_defects` 数组，元素为上述枚举值（0 到多个）。无任何硬伤时输出空数组 `[]`。
 
@@ -63,6 +63,7 @@
 **输出**：
 - `media_type`: `real_photo` | `3d_render` | `ai_generated` | `other`
 - `media_confidence`: 0.0-1.0（判定置信度）
+- `trait`: `实景照片` | `3D数字效果图` | `AI图` | `其它`，与 `media_type` 一一对应并直出下游
 
 ---
 
@@ -101,6 +102,7 @@
   "track_confidence": 0.95,
   "media_type": "real_photo",
   "media_confidence": 0.90,
+  "trait": "实景照片",
   "primary_category": "建筑设计",
   "secondary_category": "商业建筑",
   "classification_confidence": 0.85
@@ -112,5 +114,6 @@
 - `hard_defects` 必须是数组，元素为一之二节的 10 条枚举值之一，无命中时为空数组 `[]`
 - `track_classification` 必须是 `class_one`/`class_two`/`class_three` 之一
 - `media_type` 必须是 `real_photo`/`3d_render`/`ai_generated`/`other` 之一
+- `trait` 必须是 `实景照片`/`3D数字效果图`/`AI图`/`其它` 之一，并与 `media_type` 一致
 - `primary_category` 必须精确匹配 17 个枚举之一（含中文全角标点）
 - 任意红线触发时，其余分类字段（含 `hard_defects`）仍需正常输出（后续流程会根据红线直接判定低分）

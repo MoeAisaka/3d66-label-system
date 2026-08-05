@@ -53,6 +53,10 @@ def _metrics(run: Any) -> dict[str, Any]:
 
     rows: list[dict[str, Any]] = []
     by_rating: dict[str, dict[str, Any]] = {}
+    valid_total = 0
+    rank_delta_sum = 0
+    system_higher_better = 0
+    system_lower_worse = 0
     for item in run.items:
         snapshot = json.loads(item.result_snapshot_json or "{}")
         predicted = snapshot.get("predicted_level")
@@ -82,6 +86,10 @@ def _metrics(run: Any) -> dict[str, Any]:
             expected_rank = LEVELS.index(item.expected_level)
             predicted_rank = LEVELS.index(predicted)
             delta = predicted_rank - expected_rank
+            valid_total += 1
+            rank_delta_sum += delta
+            system_higher_better += int(delta < 0)
+            system_lower_worse += int(delta > 0)
             bucket["rank_delta_sum"] += delta
             bucket["exact"] += int(delta == 0)
             bucket["system_higher_better"] += int(delta < 0)
@@ -97,7 +105,66 @@ def _metrics(run: Any) -> dict[str, Any]:
             if bucket["rank_delta_sum"] < 0
             else "无净偏差"
         )
-    return {"overall": compute_level_metrics(rows), "by_rating": by_rating}
+    return {
+        "overall": compute_level_metrics(rows),
+        "by_rating": by_rating,
+        "systematic_bias": {
+            "valid": valid_total,
+            "mean_rank_delta": rank_delta_sum / valid_total if valid_total else None,
+            "system_higher_better": system_higher_better,
+            "system_lower_worse": system_lower_worse,
+            "direction": (
+                "系统整体偏低（判得更差）"
+                if rank_delta_sum > 0
+                else "系统整体偏高（判得更好）"
+                if rank_delta_sum < 0
+                else "无净偏差"
+            ),
+        },
+    }
+
+
+def _sample_details(run: Any, *, per_level: int) -> dict[str, Any]:
+    """按人工等级稳定抽取实际评分明细，不改结果、不触发纠偏。"""
+    from app.baseline_regression import LEVELS
+
+    selected: list[dict[str, Any]] = []
+    counts = {level: 0 for level in LEVELS}
+    for item in sorted(run.items, key=lambda value: value.id):
+        if item.status != "completed" or counts.get(item.expected_level, per_level) >= per_level:
+            continue
+        snapshot = json.loads(item.result_snapshot_json or "{}")
+        scoring = (
+            json.loads(item.evaluation.scoring_json or "{}")
+            if item.evaluation is not None
+            else {}
+        )
+        asset = json.loads(item.baseline_set_item.asset_snapshot_json or "{}")
+        selected.append(
+            {
+                "baseline_item_id": item.id,
+                "asset_id": item.asset_id,
+                "name": asset.get("name"),
+                "human_rating": asset.get("human_rating"),
+                "expected_level": item.expected_level,
+                "predicted_level": snapshot.get("predicted_level"),
+                "score": snapshot.get("authoritative_score"),
+                "track_key": scoring.get("track_key"),
+                "dimension_scoring_mode": scoring.get("dimension_scoring_mode"),
+                "dimension_evidence": scoring.get("dimension_evidence") or {},
+                "caps": scoring.get("caps") or [],
+                "needs_review": snapshot.get("needs_review"),
+                "versions": snapshot.get("versions") or {},
+            }
+        )
+        counts[item.expected_level] += 1
+    return {
+        "run_id": run.id,
+        "selection": "baseline_item_id_ascending_per_expected_level",
+        "per_level": per_level,
+        "counts": counts,
+        "items": selected,
+    }
 
 
 def main() -> int:
@@ -118,6 +185,10 @@ def main() -> int:
     metrics = subparsers.add_parser("metrics")
     metrics.add_argument("--run-id", type=int, required=True)
     metrics.add_argument("--output")
+    samples = subparsers.add_parser("sample-report")
+    samples.add_argument("--run-id", type=int, required=True)
+    samples.add_argument("--per-level", type=int, default=4)
+    samples.add_argument("--output")
     for name in ("apply-auto", "drift-test"):
         command = subparsers.add_parser(name)
         command.add_argument("--run-id", type=int, required=True)
@@ -176,6 +247,8 @@ def main() -> int:
             )
         elif args.command == "metrics":
             _emit({"run_id": run.id, **_metrics(run)}, args.output)
+        elif args.command == "sample-report":
+            _emit(_sample_details(run, per_level=max(1, args.per_level)), args.output)
         elif args.command == "apply-auto":
             _emit(
                 apply_auto_correction_to_run(db, run=run, policy=_policy(args)),

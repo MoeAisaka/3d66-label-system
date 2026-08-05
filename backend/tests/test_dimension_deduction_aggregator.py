@@ -56,3 +56,35 @@ def test_dimension_rule_sum_is_clamped_at_zero_score() -> None:
     assert evidence["raw_rule_deduction"] == 160
     assert evidence["applied_rule_deduction"] == 100
     assert evidence["dimension_score"] == 0
+
+
+def test_raw_business_weights_reproduce_manual_example_as_78() -> None:
+    """一类 [80,70,60,90,50,40] → 维度池38 → 40+38=78。"""
+    contract = build_inspiration_v3_contract()
+    config = deepcopy(build_inspiration_subcategory_dimensions()["class_one"])
+    dimensions = config["common_group"]["schema_definition"]["dimensions"]
+    desired_scores = [80, 70, 60, 90, 50, 40]
+    output = empty_deduction_output(config)
+    for dimension, desired_score in zip(dimensions, desired_scores, strict=True):
+        deduction = 100 - desired_score
+        dimension["deduction_rules"] = [
+            {
+                "rule_id": "manual_example",
+                "description": "手算样例命中",
+                "deduction": deduction,
+                "tags": ["手算验证"],
+            }
+        ]
+        output["dimensions"][dimension["key"]]["hit_rules"] = [
+            {
+                "rule_id": "manual_example",
+                "confidence": "high",
+                "evidence": "手算样例",
+            }
+        ]
+    composed = compose_rule_deductions(config=config, dimension_output=output)
+    result = aggregate_category_evaluation(
+        contract, _precheck(), composed, track_key="class_one"
+    )
+    assert sum(composed["deductions"].values()) == 22
+    assert result["score"] == 78

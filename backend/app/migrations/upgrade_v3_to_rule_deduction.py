@@ -2,8 +2,8 @@
 
 Existing EvaluationResult rows are deliberately untouched.  Only the four v3
 config rows are upgraded in place: every existing dimension receives generic
-placeholder rules when absent; inspiration keeps media penalty enabled and the
-three legacy draft categories default it off.  Re-running after convergence is
+placeholder rules when absent; the human-calibrated inspiration contract and
+three legacy draft categories keep media penalty off.  Re-running after convergence is
 a no-op and does not bump revisions.
 """
 
@@ -29,7 +29,7 @@ from ..models import CategoryEvaluationV3Config
 
 
 TARGET_MEDIA_ENABLED = {
-    "inspiration_image": True,
+    "inspiration_image": False,
     "space_image": False,
     "material_image": False,
     "pdf_text": False,

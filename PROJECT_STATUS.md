@@ -1511,3 +1511,24 @@ npm.cmd run build
 - 本机全量回归：`1003 passed, 1 skipped`（已排除用户的 Synology 冲突副本）；
   前端 build、compileall、diff check 通过。三平台/共享测试环境结果见本次验收报告。
 - 架构决策见 ADR-0034。
+
+## 最新完成：灵感图 v2 人工校准合同（2026-08-05）
+
+- `inspiration_image` active v3 合同已替换为
+  `inspiration-v2-human-calibrated-20260805`：4 条红线封顶 20/L5、三赛道
+  `40+60/20+60/40+30`、一二类 6 维、三类 5 维、10 条高分硬伤、
+  `81/61/41/21/0` 等级边界；媒介降权关闭。
+- 新原始业务权重不再被组内归一化；手算样例已由自动测试冻结为 78。历史权重和为 1
+  的配置继续按旧口径读取，旧结果不重算。
+- 调用 A/B 新版本 `inspiration-a-v2-human-calibrated-20260805` /
+  `inspiration-b-v2-human-calibrated-20260805` 均为 published，并由新 config 绑定。
+  调用 A 专用输出已适配为 v3 分类、红线 reason 与中文 trait。既有 config 在种子阶段按 `spec_version` 幂等替换、保持 active，revision
+  递增；三个占位类目仍为 draft。
+- 黄金集工具按“目录/前缀_文件名”解析人工真值，只写 baseline item 的 `asset_id` 引用，
+  不修改 2305 条资产的 `category_key`；真值来源固定为“灵感图人工评级前缀”。
+- 本机 Docker active 状态与 Prompt 版本已验证。20 张去标签小批使用 OpenClaw 视觉兜底
+  跑通，精确等级命中 35%（7/20），明显偏高；该样本不能替代生产 Doubao/ARK 的 2285
+  张全量基线。
+- 公司测试环境 `192.168.1.35` 只能从 MacBook-Company 内网访问；当前执行面无法获得该
+  节点 shell 且 Mac mini 无路由，因此数据库黄金集、真实模型全量 run、共享环境部署和
+  commit 一致性仍待在 MacBook 执行交付 bundle 后验收，不得虚报为完成。

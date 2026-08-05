@@ -737,3 +737,23 @@ npm.cmd run build
   规则模式不再错误执行旧 grade 完整率或同分坍缩检查。
 - 新增五个指定测试文件均已落地，迁移、provider 失败、幂等纠偏和旧 fallback
   均有回归。
+
+## 16. 2026-08-05 灵感图人工校准版交接
+
+- active spec：`inspiration-v2-human-calibrated-20260805`；调用 A/B：
+  `inspiration-a-v2-human-calibrated-20260805` / `inspiration-b-v2-human-calibrated-20260805`
+  （published）。调用 A 专用载荷由 `adapt_inspiration_call_a_precheck` 投影为 v3 事实合同；
+  不要覆盖旧 PromptVersion，
+  seed 只在 spec 不一致时替换 active config 并提升 revision。
+- 新维度的 `weight` 是原始业务权重：一/二类合计 0.60，三类合计 0.30。
+  `resolve_dimension_weight_scale` 同时支持旧 normalized 权重和新 raw 权重；修改时必须保留
+  `[80,70,60,90,50,40] -> 78` 回归。
+- `media_type_penalty.enabled=false`；10 条高分硬伤只在未压分分数达到 80 时封顶 79；
+  红线命中直接 20/L5；80 是 L2，81 是 L1。
+- 黄金集命令仍由 `scripts/inspiration_golden_workflow.py` 驱动。只认人工文件名前缀，
+  `truth_updated_by` 固定为“灵感图人工评级前缀”，严禁修改素材类目或用模型结果回喂。
+  `sample-report` 可从完成的 baseline run 导出确定性小批明细。
+- 当前 Mac mini 验证链已完成，但无法路由到公司测试环境；MacBook-Company 节点在线却未
+  向本执行器开放 shell。接手者应在 MacBook 拉取 hub main 或交付 bundle，运行迁移、
+  建集、真实小批、2285 全量 baseline，再用固定 deploy 命令发布；全量准确率必须来自
+  该真实 run，不能用 20 张 OpenClaw 兜底样本替代。

@@ -50,7 +50,10 @@ from .subcategory_resolver import (
 )
 
 
-INSPIRATION_SEED_VERSION = "inspiration-category-seed-v1"
+INSPIRATION_SEED_VERSION = "inspiration-category-seed-v2-human-calibrated"
+INSPIRATION_SPEC_VERSION = "inspiration-v2-human-calibrated-20260805"
+INSPIRATION_CALL_A_VERSION = "inspiration-a-v2-human-calibrated-20260805"
+INSPIRATION_CALL_B_VERSION = "inspiration-b-v2-human-calibrated-20260805"
 
 # The three inspiration-image tracks (子类目) — score base / dimension full-marks
 # / track cap follow the DingTalk rules: 一类 40+60=100, 二类 20+60=80, 三类
@@ -59,9 +62,9 @@ TRACK_CLASS_ONE = "class_one"
 TRACK_CLASS_TWO = "class_two"
 TRACK_CLASS_THREE = "class_three"
 
-# Redline hit action per the doc: 命中 → L5（最差/废图档）、hard_reject、总分 ≤49.
+# Redline hit action per the human-calibrated spec: 命中即终止，L5，总分 ≤20。
 _REDLINE_HIT_LEVEL = "L5"
-_REDLINE_HIT_SCORE_CAP = 49
+_REDLINE_HIT_SCORE_CAP = 20
 
 # Classifier gate: below this 调用A confidence we fall back to the default track.
 _MIN_CONFIDENCE = 0.6
@@ -157,11 +160,11 @@ def _track_classification() -> dict[str, Any]:
 
 
 def _common_modifiers() -> dict[str, Any]:
-    """Media penalty (real_photo baseline, render_3d -5, ai_image -15) + 80→79 veto."""
+    """媒介不降权；达到 80 且命中任一冻结硬伤时压至 79。"""
     return {
         "format_version": COMMON_MODIFIERS_FORMAT_VERSION,
         "media_type_penalty": {
-            "enabled": True,
+            "enabled": False,
             "baseline": "real_photo",
             "penalties": {
                 "real_photo": 0,
@@ -170,7 +173,53 @@ def _common_modifiers() -> dict[str, Any]:
                 "other": 0,
             },
         },
-        "high_score_veto": {"threshold": 80, "cap_to": 79},
+        "high_score_veto": {
+            "enabled": True,
+            "threshold": 80,
+            "cap_to": 79,
+            "rules": [
+                {
+                    "key": "blurry_grayish",
+                    "description": "模糊发灰/低分辨率/压缩痕迹/噪点/材质廉价",
+                },
+                {
+                    "key": "careless_composition",
+                    "description": "构图敷衍/元素堆砌/无设计逻辑/比例严重失调",
+                },
+                {
+                    "key": "garish_color",
+                    "description": "色彩艳俗/过饱和/灯光刺眼/假白失真",
+                },
+                {
+                    "key": "large_dead_black",
+                    "description": "大面积死黑/暗部缺失/明暗断层/光影矛盾",
+                },
+                {
+                    "key": "distorted_viewpoint",
+                    "description": "视角怪异/透视畸形/主体严重裁切",
+                },
+                {
+                    "key": "fake_material",
+                    "description": "材质虚假/反光失真/纹理模糊/细节缺失",
+                },
+                {
+                    "key": "fisheye_distortion",
+                    "description": "鱼眼超广角畸变/垂直线倾斜/边缘扭曲",
+                },
+                {
+                    "key": "invalid_black_border",
+                    "description": "大面积无效黑边/生硬裁切线/主体被遮挡",
+                },
+                {
+                    "key": "severe_color_cast",
+                    "description": "色调严重偏色/光影违和/违背真实质感",
+                },
+                {
+                    "key": "known_real_photo_defect",
+                    "description": "知名落地实拍建筑素材出现以上硬伤同样无豁免",
+                },
+            ],
+        },
     }
 
 
@@ -185,8 +234,20 @@ def build_inspiration_v3_contract() -> dict[str, Any]:
     """
     contract = {
         "schema_version": CATEGORY_EVALUATION_CONTRACT_VERSION,
+        "spec_version": INSPIRATION_SPEC_VERSION,
         "category_key": "inspiration_image",
         "level_semantics_version": "doc-l5-worst-v1",
+        "level_thresholds": [
+            {"min_score": 81, "level": "L1"},
+            {"min_score": 61, "level": "L2"},
+            {"min_score": 41, "level": "L3"},
+            {"min_score": 21, "level": "L4"},
+            {"min_score": 0, "level": "L5"},
+        ],
+        "prompt_bindings": {
+            "call_a_version": INSPIRATION_CALL_A_VERSION,
+            "call_b_version": INSPIRATION_CALL_B_VERSION,
+        },
         "redline_policy": _redline_policy(),
         "track_classification": _track_classification(),
         "common_modifiers": _common_modifiers(),
@@ -254,27 +315,129 @@ def build_inspiration_classification_map() -> dict[str, Any]:
 # 线性锚点：grade5=满分（不扣该维度 share），grade1=0（全扣该维度 share）。
 _LINEAR_GRADE_POINTS = {"1": 0.0, "2": 25.0, "3": 50.0, "4": 75.0, "5": 100.0}
 
-# 一类/二类共用 6 维度（dimension_max=60）：(key, label, 满分)。weight=满分/60。
-_CLASS_ONE_TWO_DIMENSIONS: list[tuple[str, str, int]] = [
-    ("visual_structure", "视觉结构", 10),
-    ("color_aesthetics", "色彩美学", 10),
-    ("emotional_expression", "情感表达", 5),
-    ("design_aesthetics", "设计美学", 10),
-    ("originality", "原创设计感", 10),
-    ("design_trendiness", "设计流行度", 15),
+def _rule(rule_id: str, description: str, deduction: int) -> dict[str, Any]:
+    return {
+        "rule_id": rule_id,
+        "description": description,
+        "deduction": deduction,
+        "tags": [],
+    }
+
+
+# 直接存业务原始权重（池占总分比例），不把 0.60/0.30 重归一化为 1。
+_CLASS_ONE_TWO_DIMENSIONS: list[dict[str, Any]] = [
+    {
+        "key": "visual_structure",
+        "label": "视觉结构",
+        "weight": 0.10,
+        "rules": [
+            _rule("r1", "边缘次要构件裁切/主体小幅偏移", 30),
+            _rule("r2", "核心设计部位被截断/主体严重偏移", 50),
+            _rule("r3", "透视错乱/画面层次混乱", 100),
+        ],
+    },
+    {
+        "key": "color_aesthetics",
+        "label": "色彩美学",
+        "weight": 0.10,
+        "rules": [
+            _rule("r1", "轻微色温饱和度偏差", 30),
+            _rule("r2", "肉眼明显偏色/过艳发灰", 50),
+            _rule("r3", "渲染脏斑/杂色/颜色溢出", 100),
+        ],
+    },
+    {
+        "key": "emotional_expression",
+        "label": "情感表达",
+        "weight": 0.05,
+        "rules": [
+            _rule("r1", "空间氛围平淡空洞/场景缺叙事逻辑", 50),
+            _rule("r2", "场景僵硬冰冷/环境无情绪", 100),
+        ],
+    },
+    {
+        "key": "design_aesthetics",
+        "label": "设计美学",
+        "weight": 0.10,
+        "rules": [
+            _rule("r1", "局部尺度轻微失调/空间略局促", 30),
+            _rule("r2", "尺度错误明显/配比违和", 50),
+            _rule("r3", "严重比例失真/形体畸形/空间逻辑不合理", 100),
+        ],
+    },
+    {
+        "key": "originality",
+        "label": "原创设计感",
+        "weight": 0.10,
+        "rules": [
+            _rule("r1", "局部造型复刻/辨识度不足", 30),
+            _rule("r2", "无颠覆创新/差异化弱", 50),
+            _rule("r3", "重度同质化/高度复刻", 100),
+        ],
+    },
+    {
+        "key": "design_trendiness",
+        "label": "设计流行度",
+        "weight": 0.15,
+        "rules": [
+            _rule("r1", "少量元素不符主流审美", 30),
+            _rule("r2", "整体过时网红制式/风格老旧", 50),
+            _rule("r3", "全面淘汰老旧模板/过时造型", 100),
+        ],
+    },
 ]
 
-# 三类 5 维度（dimension_max=30，每维满分 6）：weight=6/30=0.2 each。
-_CLASS_THREE_DIMENSIONS: list[tuple[str, str, int]] = [
-    ("subject_focus", "主题清晰焦点", 6),
-    ("mood_atmosphere", "情绪氛围可感知", 6),
-    ("composition_lighting", "构图光影专业章法", 6),
-    ("reference_value", "内容借鉴价值", 6),
-    ("visual_impact", "强视觉冲击力", 6),
+_CLASS_THREE_DIMENSIONS: list[dict[str, Any]] = [
+    {
+        "key": "subject_focus",
+        "label": "主题清晰",
+        "weight": 0.06,
+        "rules": [
+            _rule("r1", "主体模糊/对焦失效", 50),
+            _rule("r2", "主体被边缘裁切/核心区缺失", 50),
+        ],
+    },
+    {
+        "key": "mood_atmosphere",
+        "label": "情绪氛围",
+        "weight": 0.06,
+        "rules": [
+            _rule("r1", "色彩杂乱/大面积脏斑/异常色偏/色彩溢出", 100),
+            _rule("r2", "光源逻辑冲突/光影方向矛盾", 100),
+        ],
+    },
+    {
+        "key": "composition_lighting",
+        "label": "构图结构",
+        "weight": 0.06,
+        "rules": [
+            _rule("r1", "主体严重偏移/主次层级颠倒", 100),
+            _rule("r2", "透视扭曲倾斜/空间结构错乱", 100),
+        ],
+    },
+    {
+        "key": "reference_value",
+        "label": "内容借鉴价值",
+        "weight": 0.06,
+        "rules": [
+            _rule("r1", "局部元素与线上素材重合", 50),
+            _rule("r2", "全网通用网红素材仅轻微改动", 100),
+        ],
+    },
+    {
+        "key": "visual_impact",
+        "label": "视觉冲击力",
+        "weight": 0.06,
+        "rules": [
+            _rule("r1", "基础画质完好但表现力普通/记忆点弱", 40),
+            _rule("r2", "观感平淡乏味/缺吸引力", 50),
+            _rule("r3", "画质瑕疵严重且毫无表现力", 100),
+        ],
+    },
 ]
 
 # 每赛道的维度定义（满分）与 dimension_max。一类/二类共用同一套 6 维度。
-_TRACK_DIMENSION_SPECS: dict[str, list[tuple[str, str, int]]] = {
+_TRACK_DIMENSION_SPECS: dict[str, list[dict[str, Any]]] = {
     TRACK_CLASS_ONE: _CLASS_ONE_TWO_DIMENSIONS,
     TRACK_CLASS_TWO: _CLASS_ONE_TWO_DIMENSIONS,
     TRACK_CLASS_THREE: _CLASS_THREE_DIMENSIONS,
@@ -313,27 +476,24 @@ def placeholder_deduction_rules(label: str) -> list[dict[str, Any]]:
 
 
 def _dimensions_from_specs(
-    specs: list[tuple[str, str, int]], dimension_max: int
+    specs: list[dict[str, Any]], dimension_max: int
 ) -> list[dict[str, Any]]:
-    """把 (key, label, 满分) 规格转成带 weight(=满分/dimension_max) 的维度定义。
-
-    末位维度吸收浮点漂移，使组内 weight 之和严格 = 1（grade bridge 要求
-    ``abs(sum-1)<=1e-9``）。每个维度携带线性 grade_points。
-    """
+    """把人工校准规格转成业务原始权重维度定义。"""
     dimensions: list[dict[str, Any]] = []
-    for key, label, full_marks in specs:
+    for spec in specs:
         dimensions.append({
-            "key": key,
-            "label": label,
-            "weight": float(full_marks) / float(dimension_max),
-            "deduction_rules": placeholder_deduction_rules(label),
+            "key": spec["key"],
+            "label": spec["label"],
+            "weight": spec["weight"],
+            "deduction_rules": [dict(rule) for rule in spec["rules"]],
             # @deprecated: retained only for configs created before the rule
             # deduction migration and for explicit legacy fallback tests.
             "grade_points": dict(_LINEAR_GRADE_POINTS),
         })
-    # 末位吸收浮点漂移，组内权重和严格 = 1。
-    drift = 1.0 - sum(dimension["weight"] for dimension in dimensions)
-    dimensions[-1]["weight"] += drift
+    expected = float(dimension_max) / 100.0
+    actual = sum(float(dimension["weight"]) for dimension in dimensions)
+    if abs(actual - expected) > 1e-9:
+        raise ValueError(f"维度业务权重和必须为 {expected}，实际 {actual}")
     return dimensions
 
 

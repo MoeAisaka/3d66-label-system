@@ -84,7 +84,7 @@ def test_data_upgrade_is_idempotent_and_preserves_lifecycle_state() -> None:
         assert first["changed_keys"] == ["inspiration_image"]
         assert row.status == "active"
         assert row.revision == 8
-        assert row.media_penalty_enabled is True
+        assert row.media_penalty_enabled is False
         assert json.loads(row.dimension_deduction_rules_json)
         second = upgrade_v3_to_rule_deduction(db)
         db.commit()

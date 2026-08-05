@@ -283,8 +283,9 @@ def test_correct_precheck_redline_track_and_final_level_replays_full_path() -> N
         "实景照片",
         "AI图",
     )
-    assert media["score"] == original_score - 15
-    assert media["scoring"]["media_key"] == "ai_image"
+    assert media["score"] == original_score
+    assert media["scoring"]["media_key"] is None
+    assert media["scoring"]["media_penalty_enabled"] is False
 
     redline = correct(
         "ui-redline-on",
@@ -293,7 +294,7 @@ def test_correct_precheck_redline_track_and_final_level_replays_full_path() -> N
         [],
         ["是截图"],
     )
-    assert redline["score"] == 49
+    assert redline["score"] == 20
     assert redline["level"] == "L5"
     assert redline["scoring"]["hit_rules"] == ["screenshot"]
 
@@ -313,8 +314,8 @@ def test_correct_precheck_redline_track_and_final_level_replays_full_path() -> N
         "class_one",
         "class_three",
     )
-    assert track["score"] == 55
-    assert track["level"] == "L3"
+    assert track["score"] == 70
+    assert track["level"] == "L2"
     assert track["scoring"]["track_key"] == "class_three"
     assert set(track["aesthetic"]["dimensions"]) == {
         "subject_focus",
@@ -328,7 +329,7 @@ def test_correct_precheck_redline_track_and_final_level_replays_full_path() -> N
         "ui-final-level",
         "final_level",
         "final_level",
-        "L3",
+        "L2",
         "L4",
     )
     assert final["score"] == track["score"]
