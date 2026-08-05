@@ -131,7 +131,7 @@ def main() -> int:
     if args.data_dir:
         os.environ["DATA_DIR"] = str(Path(args.data_dir).expanduser().resolve())
 
-    from app.database import SessionLocal, init_db
+    from app.database import SessionLocal, init_database
     from app.inspiration_auto_correction import (
         apply_auto_correction_to_run,
         build_drift_report,
@@ -139,7 +139,7 @@ def main() -> int:
     )
     from app.models import BaselineRegressionRun
 
-    init_db()
+    init_database()
     with SessionLocal() as db:
         if args.command == "create-golden":
             golden, report = ensure_inspiration_golden_set(db)
