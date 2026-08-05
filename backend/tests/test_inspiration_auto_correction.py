@@ -167,6 +167,48 @@ def test_calibration_decision_uses_only_frozen_mapping_and_confidence_gate() -> 
     assert manual["action"] == "manual_review"
 
 
+def test_calibration_prefers_observable_score_track_cell_over_ambiguous_level() -> None:
+    policy = AutoCorrectionPolicy(
+        confidence_threshold=0.85,
+        minimum_support=30,
+        coverage_rate=1.0,
+        calibration_fraction=1.0,
+        maximum_level_shift=1,
+    )
+    rows = [
+        {
+            "asset_id": index,
+            "expected_level": "L1" if index <= 95 else "L2",
+            "predicted_level": "L2",
+            "authoritative_score": 70,
+            "track_key": "class_one",
+        }
+        for index in range(1, 101)
+    ] + [
+        {
+            "asset_id": index,
+            "expected_level": "L2",
+            "predicted_level": "L2",
+            "authoritative_score": 65,
+            "track_key": "class_one",
+        }
+        for index in range(101, 201)
+    ]
+    calibration = fit_level_calibration(rows, policy=policy)
+    assert calibration["mappings"]["L2"]["target_level"] == "L2"
+    decision = decide_level_correction(
+        asset_id=999,
+        predicted_level="L2",
+        authoritative_score=70,
+        track_key="class_one",
+        calibration=calibration,
+        policy=policy,
+    )
+    assert decision["action"] == "auto_apply"
+    assert decision["target_level"] == "L1"
+    assert decision["calibration_key"] == "score-track:L2:class_one:70"
+
+
 def test_drift_report_counts_fixes_and_new_errors_on_independent_holdout() -> None:
     items = [
         SimpleNamespace(

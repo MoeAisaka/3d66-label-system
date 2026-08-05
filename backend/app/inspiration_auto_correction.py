@@ -96,6 +96,42 @@ def is_calibration_asset(asset_id: int, fraction: float) -> bool:
     return _stable_fraction("inspiration-calibration-v1", asset_id) < fraction
 
 
+def _score_bucket(value: Any) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return int(math.floor(float(value) / 5.0) * 5)
+
+
+def _track_key(value: Any) -> str | None:
+    text = str(value or "").strip()
+    return text if text in {"class_one", "class_two", "class_three"} else None
+
+
+def _calibration_feature_keys(
+    *,
+    predicted_level: str,
+    authoritative_score: Any = None,
+    track_key: Any = None,
+) -> list[str]:
+    """Return most-specific-first observable calibration keys.
+
+    These features are frozen model outputs, never human truth.  Five-point
+    score buckets avoid one-off cells while preserving the engine's strongest
+    systematic error signal; progressively broader fallbacks keep older rows
+    and sparse tracks usable without weakening the confidence gate.
+    """
+
+    track = _track_key(track_key)
+    score = _score_bucket(authoritative_score)
+    keys: list[str] = []
+    if track is not None and score is not None:
+        keys.append(f"score-track:{predicted_level}:{track}:{score}")
+    if track is not None:
+        keys.append(f"track:{predicted_level}:{track}")
+    keys.append(f"level:{predicted_level}")
+    return keys
+
+
 def ensure_inspiration_golden_set(
     db: Session,
     *,
@@ -295,7 +331,7 @@ def fit_level_calibration(
     """Fit predicted-level to human-level mapping on a stable train partition."""
 
     policy.validate()
-    counts = {predicted: {expected: 0 for expected in LEVELS} for predicted in LEVELS}
+    feature_counts: dict[str, dict[str, int]] = {}
     training_count = 0
     for row in rows:
         asset_id = int(row["asset_id"])
@@ -307,12 +343,20 @@ def fit_level_calibration(
             or not is_calibration_asset(asset_id, policy.calibration_fraction)
         ):
             continue
-        counts[predicted][expected] += 1
+        for feature_key in _calibration_feature_keys(
+            predicted_level=predicted,
+            authoritative_score=row.get("authoritative_score"),
+            track_key=row.get("track_key"),
+        ):
+            distribution = feature_counts.setdefault(
+                feature_key, {level: 0 for level in LEVELS}
+            )
+            distribution[expected] += 1
         training_count += 1
 
-    mappings: dict[str, Any] = {}
-    for predicted in LEVELS:
-        distribution = counts[predicted]
+    feature_mappings: dict[str, Any] = {}
+    for feature_key, distribution in sorted(feature_counts.items()):
+        predicted = feature_key.split(":", 2)[1]
         support = sum(distribution.values())
         target = min(
             LEVELS,
@@ -323,7 +367,8 @@ def fit_level_calibration(
             ),
         )
         successes = distribution[target]
-        mappings[predicted] = {
+        feature_mappings[feature_key] = {
+            "feature_key": feature_key,
             "predicted_level": predicted,
             "target_level": target,
             "support": support,
@@ -332,11 +377,33 @@ def fit_level_calibration(
             "confidence_lower_bound": _wilson_lower_bound(successes, support),
             "expected_distribution": distribution,
         }
+    mappings = {
+        predicted: feature_mappings.get(
+            f"level:{predicted}",
+            {
+                "feature_key": f"level:{predicted}",
+                "predicted_level": predicted,
+                "target_level": predicted,
+                "support": 0,
+                "successes": 0,
+                "empirical_confidence": 0.0,
+                "confidence_lower_bound": 0.0,
+                "expected_distribution": {level: 0 for level in LEVELS},
+            },
+        )
+        for predicted in LEVELS
+    }
     frozen = {
-        "schema_version": "inspiration-level-calibration-v1",
+        "schema_version": "inspiration-level-calibration-v2",
         "policy": asdict(policy),
         "training_count": training_count,
         "mappings": mappings,
+        "feature_mappings": feature_mappings,
+        "feature_contract": {
+            "order": ["score_track", "track", "level"],
+            "score_bucket_width": 5,
+            "truth_features_forbidden": True,
+        },
     }
     frozen["calibration_hash"] = hashlib.sha256(
         canonical_json(frozen).encode("utf-8")
@@ -350,56 +417,86 @@ def decide_level_correction(
     predicted_level: str | None,
     calibration: Mapping[str, Any],
     policy: AutoCorrectionPolicy,
+    authoritative_score: Any = None,
+    track_key: Any = None,
 ) -> dict[str, Any]:
     """Decide without access to the evaluated item's expected human level."""
 
     policy.validate()
     if predicted_level not in LEVELS:
         return {"action": "manual_review", "reason": "prediction_missing"}
-    mapping = (calibration.get("mappings") or {}).get(predicted_level)
-    if not isinstance(mapping, Mapping):
+    feature_mappings = calibration.get("feature_mappings") or {}
+    candidates = [
+        feature_mappings.get(feature_key)
+        for feature_key in _calibration_feature_keys(
+            predicted_level=predicted_level,
+            authoritative_score=authoritative_score,
+            track_key=track_key,
+        )
+    ]
+    candidates = [
+        candidate
+        for candidate in candidates
+        if isinstance(candidate, Mapping)
+    ]
+    if not candidates:
+        fallback = (calibration.get("mappings") or {}).get(predicted_level)
+        if isinstance(fallback, Mapping):
+            candidates = [fallback]
+    if not candidates:
         return {"action": "manual_review", "reason": "mapping_missing"}
-    target = str(mapping.get("target_level") or "")
-    support = int(mapping.get("support") or 0)
-    confidence = float(mapping.get("confidence_lower_bound") or 0.0)
-    if target == predicted_level:
-        return {
-            "action": "keep",
-            "reason": "calibrated_level_unchanged",
-            "target_level": target,
-            "confidence": confidence,
-            "support": support,
-        }
-    shift = abs(LEVELS.index(target) - LEVELS.index(predicted_level))
-    if (
-        support < policy.minimum_support
-        or confidence < policy.confidence_threshold
-        or shift > policy.maximum_level_shift
-    ):
-        return {
-            "action": "manual_review",
-            "reason": "confidence_gate_not_met",
+    for mapping in candidates:
+        target = str(mapping.get("target_level") or "")
+        if target not in LEVELS:
+            continue
+        support = int(mapping.get("support") or 0)
+        confidence = float(mapping.get("confidence_lower_bound") or 0.0)
+        shift = abs(LEVELS.index(target) - LEVELS.index(predicted_level))
+        if (
+            support < policy.minimum_support
+            or confidence < policy.confidence_threshold
+            or shift > policy.maximum_level_shift
+        ):
+            continue
+        common = {
             "target_level": target,
             "confidence": confidence,
             "support": support,
             "shift": shift,
+            "calibration_key": mapping.get("feature_key"),
         }
-    if _stable_fraction("inspiration-auto-coverage-v1", asset_id) >= policy.coverage_rate:
+        if target == predicted_level:
+            return {
+                "action": "keep",
+                "reason": "calibrated_level_unchanged",
+                **common,
+            }
+        if _stable_fraction("inspiration-auto-coverage-v1", asset_id) >= policy.coverage_rate:
+            return {
+                "action": "holdback",
+                "reason": "coverage_holdback",
+                **common,
+            }
         return {
-            "action": "holdback",
-            "reason": "coverage_holdback",
-            "target_level": target,
-            "confidence": confidence,
-            "support": support,
-            "shift": shift,
+            "action": "auto_apply",
+            "reason": "high_confidence_calibration",
+            **common,
         }
+    mapping = candidates[0]
+    target = str(mapping.get("target_level") or predicted_level)
+    shift = (
+        abs(LEVELS.index(target) - LEVELS.index(predicted_level))
+        if target in LEVELS
+        else None
+    )
     return {
-        "action": "auto_apply",
-        "reason": "high_confidence_calibration",
+        "action": "manual_review",
+        "reason": "confidence_gate_not_met",
         "target_level": target,
-        "confidence": confidence,
-        "support": support,
+        "confidence": float(mapping.get("confidence_lower_bound") or 0.0),
+        "support": int(mapping.get("support") or 0),
         "shift": shift,
+        "calibration_key": mapping.get("feature_key"),
     }
 
 
@@ -413,6 +510,12 @@ def _raw_rows(run: BaselineRegressionRun) -> list[dict[str, Any]]:
                 "asset_id": item.asset_id,
                 "expected_level": item.expected_level,
                 "predicted_level": snapshot.get("predicted_level"),
+                "authoritative_score": snapshot.get("authoritative_score"),
+                "track_key": (
+                    (snapshot.get("stage_a") or {}).get("track_classification")
+                    if isinstance(snapshot.get("stage_a"), dict)
+                    else None
+                ),
                 "status": item.status,
             }
         )
@@ -488,6 +591,8 @@ def apply_auto_correction_to_run(
             predicted_level=row["predicted_level"],
             calibration=calibration,
             policy=policy,
+            authoritative_score=row["authoritative_score"],
+            track_key=row["track_key"],
         )
         action = decision["action"]
         counts[action] += 1
@@ -513,7 +618,8 @@ def apply_auto_correction_to_run(
             reason=(
                 "人工黄金集校准："
                 f"support={decision['support']}, "
-                f"wilson_lower={decision['confidence']:.4f}"
+                f"wilson_lower={decision['confidence']:.4f}, "
+                f"key={decision.get('calibration_key')}"
             ),
         )
         apply_node_correction(
@@ -532,6 +638,7 @@ def apply_auto_correction_to_run(
                 "from": row["predicted_level"],
                 "to": decision["target_level"],
                 "confidence": decision["confidence"],
+                "calibration_key": decision.get("calibration_key"),
             }
         )
     append_audit_event(
