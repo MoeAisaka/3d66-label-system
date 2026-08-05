@@ -8172,6 +8172,71 @@ def _create_regression_runs(
     return run_ids
 
 
+def _frozen_v3_dimension_summary(execution: dict[str, Any]) -> dict[str, Any] | None:
+    """Return the human-facing dimension contract frozen with a baseline run.
+
+    ``dimension_schema_ref`` remains in the v3 track contract for routing and
+    historical traceability.  Its key count is not the number of dimensions
+    that the v3 engine actually scores, so UI labels must use the frozen
+    ``subcategory_dimensions`` payload instead.
+    """
+
+    bundle = execution.get("v3_authoritative_bundle")
+    if not isinstance(bundle, dict):
+        return None
+    contract = bundle.get("contract")
+    dimensions_by_track = bundle.get("subcategory_dimensions")
+    if not isinstance(contract, dict) or not isinstance(dimensions_by_track, dict):
+        return None
+    spec_version = contract.get("spec_version")
+    classification = contract.get("track_classification")
+    tracks = classification.get("tracks") if isinstance(classification, dict) else None
+    if not isinstance(spec_version, str) or not spec_version.strip() or not isinstance(tracks, list):
+        return None
+
+    track_summaries: list[dict[str, Any]] = []
+    for track in tracks:
+        if not isinstance(track, dict):
+            continue
+        track_key = track.get("key")
+        track_config = dimensions_by_track.get(track_key)
+        if not isinstance(track_key, str) or not isinstance(track_config, dict):
+            continue
+        dimension_keys: set[str] = set()
+        anonymous_dimensions = 0
+        for group_key in ("common_group", "specific_group"):
+            group = track_config.get(group_key)
+            if not isinstance(group, dict):
+                continue
+            schema_definition = group.get("schema_definition")
+            definitions = (
+                schema_definition.get("dimensions")
+                if isinstance(schema_definition, dict)
+                else group.get("dimensions")
+            )
+            if not isinstance(definitions, list):
+                continue
+            for definition in definitions:
+                if not isinstance(definition, dict):
+                    continue
+                dimension_key = definition.get("key")
+                if isinstance(dimension_key, str) and dimension_key.strip():
+                    dimension_keys.add(dimension_key.strip())
+                else:
+                    anonymous_dimensions += 1
+        label = track.get("label")
+        track_summaries.append(
+            {
+                "key": track_key,
+                "label": label if isinstance(label, str) and label.strip() else track_key,
+                "dimension_count": len(dimension_keys) + anonymous_dimensions,
+            }
+        )
+    if not track_summaries:
+        return None
+    return {"spec_version": spec_version.strip(), "tracks": track_summaries}
+
+
 def _baseline_run_selection(
     run: BaselineRegressionRun,
 ) -> dict[str, Any]:
@@ -8200,6 +8265,7 @@ def _baseline_run_selection(
         execution = {}
     frozen_selection = execution.get("dimension_selection")
     frozen_contract = execution.get("dimension_contract")
+    frozen_v3_contract = _frozen_v3_dimension_summary(execution)
     if isinstance(frozen_selection, dict):
         return {
             "schema_version": "baseline-run-selection-v2",
@@ -8212,6 +8278,7 @@ def _baseline_run_selection(
                 **frozen_selection,
                 "manual_selection_supported": True,
                 "contract": frozen_contract if isinstance(frozen_contract, dict) else None,
+                "v3_contract": frozen_v3_contract,
             },
         }
     dimension_set = strategy.get("dimension_schema_set")
@@ -8239,6 +8306,7 @@ def _baseline_run_selection(
         "dimension": {
             "mode": "strategy_snapshot",
             "manual_selection_supported": False,
+            "v3_contract": frozen_v3_contract,
             "route_policy_id": strategy.get(
                 "dimension_route_policy_id"
             ),

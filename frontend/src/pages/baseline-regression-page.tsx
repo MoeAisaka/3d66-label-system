@@ -1676,15 +1676,20 @@ function priorityName(priority: string) {
 
 function dimensionSelectionName(selection: BaselineRegressionRun["selection"]["dimension"]) {
   if (selection.mode === "none" || selection.prompt_only) return "已关闭 · 仅提示词评级"
-  if (selection.source_schema?.version) {
-    const count = selection.effective_keys?.length
-    return `${selection.source_schema.version}${typeof count === "number" ? ` · ${count} 维` : ""}`
+  const contract = selection.v3_contract
+  if (!contract?.spec_version || !contract.tracks.length) return "未知版本"
+  const trackNames: Record<string, string> = {
+    class_one: "一类",
+    class_two: "二类",
+    class_three: "三类",
   }
-  const schemas = selection.schemas ?? []
-  if (schemas.length) {
-    return schemas.map((schema) => schema.version ?? schema.schema_key ?? "未知").join(" / ")
-  }
-  return "跟随旧版策略快照"
+  const dimensions = contract.tracks
+    .map((track) => {
+      const fallbackName = track.label.split("（", 1)[0]?.trim() || track.key
+      return `${trackNames[track.key] ?? fallbackName}${track.dimension_count}维`
+    })
+    .join("/")
+  return `${contract.spec_version} · ${dimensions}`
 }
 
 function correctionStatusName(run: BaselineCorrectionRun) {

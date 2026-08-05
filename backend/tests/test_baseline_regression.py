@@ -29,7 +29,7 @@ from app.dimension_schema_registry import (
     space_schema_definition_for_version,
 )
 from app.doubao import DoubaoResponse
-from app.main import app, current_user
+from app.main import _baseline_run_selection, app, current_user
 from app.models import (
     Asset,
     BaselineCorrectionRun,
@@ -47,6 +47,82 @@ from app.models import (
     PromptVersion,
     User,
 )
+
+
+def test_baseline_run_selection_uses_frozen_v3_contract_dimension_counts() -> None:
+    run = SimpleNamespace(
+        strategy_snapshot_json="{}",
+        execution_snapshot_json=json.dumps(
+            {
+                "category_key": "inspiration_image",
+                "dimension_selection": {
+                    "mode": "category_default",
+                    "source_schema": {
+                        "schema_key": "space_aesthetic",
+                        "version": "1.3.0",
+                        "canonical_hash": "legacy-eight-dimension-label",
+                    },
+                    "effective_keys": [f"legacy_{index}" for index in range(8)],
+                },
+                "v3_authoritative_bundle": {
+                    "contract": {
+                        "spec_version": "inspiration-v2-human-calibrated-20260805",
+                        "track_classification": {
+                            "tracks": [
+                                {"key": "class_one", "label": "一类（建筑/室内）"},
+                                {"key": "class_three", "label": "三类（其它杂图）"},
+                            ]
+                        },
+                    },
+                    "subcategory_dimensions": {
+                        "class_one": {
+                            "common_group": {
+                                "schema_definition": {
+                                    "dimensions": [{"key": "a"}, {"key": "b"}]
+                                }
+                            },
+                            "specific_group": {
+                                "schema_definition": {"dimensions": [{"key": "c"}]}
+                            },
+                        },
+                        "class_three": {
+                            "common_group": {
+                                "schema_definition": {"dimensions": [{"key": "x"}]}
+                            },
+                            "specific_group": None,
+                        },
+                    },
+                },
+            }
+        ),
+    )
+
+    selection = _baseline_run_selection(run)
+
+    assert selection["dimension"]["v3_contract"] == {
+        "spec_version": "inspiration-v2-human-calibrated-20260805",
+        "tracks": [
+            {"key": "class_one", "label": "一类（建筑/室内）", "dimension_count": 3},
+            {"key": "class_three", "label": "三类（其它杂图）", "dimension_count": 1},
+        ],
+    }
+
+
+def test_baseline_run_selection_marks_missing_v3_contract_unknown() -> None:
+    run = SimpleNamespace(
+        strategy_snapshot_json="{}",
+        execution_snapshot_json=json.dumps(
+            {
+                "dimension_selection": {
+                    "mode": "category_default",
+                    "source_schema": {"schema_key": "space_aesthetic", "version": "1.3.0"},
+                    "effective_keys": [f"legacy_{index}" for index in range(8)],
+                }
+            }
+        ),
+    )
+
+    assert _baseline_run_selection(run)["dimension"]["v3_contract"] is None
 
 
 def test_filename_level_suggestion_is_advisory_and_conflict_safe() -> None:

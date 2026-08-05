@@ -3,6 +3,17 @@
 > 最后更新：2026-08-05
 > 本文件只记录“现在做到哪里”；长期原则见 `PRODUCT.md` 和 `AGENTS.md`，历史背景见 `CODEX_HANDOFF.md`。
 
+## 最新完成：基准回归真实维度合同标签（2026-08-05）
+
+- “本轮维度版本”不再把 v3 track 中仅用于路由与追溯的遗留
+  `dimension_schema_ref=space_aesthetic@1.3.0` 及其 8 个键展示为当前真实维度数。
+- 后端从每轮 `execution_snapshot_json.v3_authoritative_bundle` 冻结快照中读取
+  `contract.spec_version`，并按 track 合并统计
+  `subcategory_dimensions` 的共性与特有维度；前端展示版本及各 track 真实维度数。
+- 缺少冻结 v3 合同的历史 run 安全展示“未知版本”，不回退臆测旧 schema 数量；
+  关闭维度的仅提示词 run 继续明确展示“已关闭 · 仅提示词评级”。
+- 新增 v3 合同摘要与历史兼容回归测试，前端类型同步更新。
+
 ## 最新完成：基准回归页节点纠偏集成与新旧维度规则兼容（2026-08-05）
 
 - 基准回归“逐张预测对照”审核页已复用主评测页的节点纠偏编辑器，规则扣分模式下

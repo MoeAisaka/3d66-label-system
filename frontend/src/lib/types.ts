@@ -344,6 +344,14 @@ export type BaselineDimensionSelection = {
     canonical_hash: string
   } | null
   contract?: Record<string, unknown> | null
+  v3_contract?: {
+    spec_version: string
+    tracks: Array<{
+      key: string
+      label: string
+      dimension_count: number
+    }>
+  } | null
 }
 
 export type BaselineRegressionRun = {
