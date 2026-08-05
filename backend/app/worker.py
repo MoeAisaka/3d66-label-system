@@ -193,6 +193,21 @@ media_form 下每一项都必须包含 status（yes/no/uncertain）、confidence
 """
 
 
+def _is_inspiration_baseline_job(job: EvaluationJob) -> bool:
+    """Exclude an unrelated legacy payload from inspiration truth runs.
+
+    ``production_fields`` belongs to the old search/recommendation contract and
+    is not an input to authoritative inspiration-image scoring. Requiring it
+    here turns harmless model omissions into P0 failures that open the circuit
+    breaker for the whole frozen run. Other categories keep their historical
+    behavior.
+    """
+    return (
+        job.baseline_regression_item_id is not None
+        and job.category_key == "inspiration_image"
+    )
+
+
 def _pdf_summary_user_prompt(document_context: dict[str, object]) -> str:
     return (
         "请总结这份 PDF 方案。页图以随请求附带的接触表为准。\n\n"
@@ -1311,7 +1326,12 @@ async def evaluate_job(job_id: int) -> None:
     user_a = prompt_a.user_prompt.replace(
         "{{image_metadata}}", json.dumps(metadata, ensure_ascii=False)
     ) + category_prompt_context
-    if job.baseline_regression_item_id is not None and not freeform_mode:
+    inspiration_baseline_job = _is_inspiration_baseline_job(job)
+    if (
+        job.baseline_regression_item_id is not None
+        and not freeform_mode
+        and not inspiration_baseline_job
+    ):
         user_a += PRODUCTION_FIELDS_PROMPT_CONTRACT
     if single_mode:
         _set_job(job_id, stage="single", progress=20)
@@ -1362,12 +1382,14 @@ async def evaluate_job(job_id: int) -> None:
         aesthetic = None
     try:
         precheck = normalize_precheck_business_rules(precheck)
-        precheck = normalize_production_fields(
-            precheck,
-            required=(
-                job.baseline_regression_item_id is not None and not freeform_mode
-            ),
-        )
+        if not inspiration_baseline_job:
+            precheck = normalize_production_fields(
+                precheck,
+                required=(
+                    job.baseline_regression_item_id is not None
+                    and not freeform_mode
+                ),
+            )
     except (AttributeError, TypeError, ValueError):
         if not freeform_mode:
             raise

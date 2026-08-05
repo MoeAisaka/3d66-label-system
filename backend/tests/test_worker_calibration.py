@@ -1,4 +1,8 @@
-from app.worker import aesthetic_grade_collapse
+from app.models import EvaluationJob
+from app.worker import (
+    _is_inspiration_baseline_job,
+    aesthetic_grade_collapse,
+)
 
 
 DIMENSIONS = (
@@ -29,3 +33,24 @@ def test_grade_collapse_detects_uniform_and_seven_to_one_results() -> None:
 
 def test_grade_collapse_allows_evidence_based_spread() -> None:
     assert aesthetic_grade_collapse(aesthetic_with_grades([2, 2, 2, 3, 3, 3, 3, 4])) is False
+
+
+def test_inspiration_baseline_excludes_legacy_production_fields_contract() -> None:
+    inspiration = EvaluationJob(
+        asset_id=1,
+        category_key="inspiration_image",
+        baseline_regression_item_id=10,
+    )
+    ordinary_inspiration = EvaluationJob(
+        asset_id=1,
+        category_key="inspiration_image",
+    )
+    space_baseline = EvaluationJob(
+        asset_id=1,
+        category_key="space_image",
+        baseline_regression_item_id=10,
+    )
+
+    assert _is_inspiration_baseline_job(inspiration) is True
+    assert _is_inspiration_baseline_job(ordinary_inspiration) is False
+    assert _is_inspiration_baseline_job(space_baseline) is False
