@@ -16,6 +16,11 @@ import { PageHeader } from "@/components/app-shell"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
+import {
+  ImageLightbox,
+  ImagePreviewButton,
+  type ImagePreview,
+} from "@/components/image-lightbox"
 import { api, baselineRegressionApi } from "@/lib/api"
 import { submitReviewDecision } from "@/lib/review-submit"
 import type {
@@ -64,6 +69,7 @@ export function BaselineRegressionPage() {
   const [executionMode, setExecutionMode] = useState<"freeform" | "structured">("freeform")
   const [assetPage, setAssetPage] = useState(0)
   const [runPage, setRunPage] = useState(0)
+  const [imagePreview, setImagePreview] = useState<ImagePreview | null>(null)
 
   const categories = useQuery({
     queryKey: ["evaluation-categories"],
@@ -673,10 +679,11 @@ export function BaselineRegressionPage() {
                           </td>
                           <td className="px-3 py-3">
                             <div className="flex min-w-0 items-center gap-3">
-                              <img
+                              <ImagePreviewButton
                                 src={asset.image_url}
-                                alt=""
-                                className="size-12 shrink-0 border border-[var(--line)] object-cover"
+                                alt={asset.name}
+                                imageClassName="size-12"
+                                onPreview={setImagePreview}
                               />
                               <div className="min-w-0">
                                 <p className="file-name max-w-lg truncate text-sm">{asset.name}</p>
@@ -856,6 +863,7 @@ export function BaselineRegressionPage() {
                   page={runPage}
                   onPageChange={setRunPage}
                   loading={runDetail.isLoading}
+                  onPreview={setImagePreview}
                 />
               )}
             </section>
@@ -866,6 +874,12 @@ export function BaselineRegressionPage() {
           )}
         </main>
       </div>
+      <ImageLightbox
+        preview={imagePreview}
+        onOpenChange={(open) => {
+          if (!open) setImagePreview(null)
+        }}
+      />
     </>
   )
 }
@@ -877,6 +891,7 @@ function RegressionResults({
   page,
   onPageChange,
   loading,
+  onPreview,
 }: {
   run: BaselineRegressionRun
   items: BaselineRegressionItem[]
@@ -884,6 +899,7 @@ function RegressionResults({
   page: number
   onPageChange: (page: number) => void
   loading: boolean
+  onPreview: (preview: ImagePreview) => void
 }) {
   const queryClient = useQueryClient()
   const me = useQuery({
@@ -1160,7 +1176,12 @@ function RegressionResults({
                       className="bg-white"
                     >
                       <div className="grid gap-3 px-4 py-4 sm:grid-cols-[64px_minmax(0,1fr)_auto] sm:items-center">
-                        <img src={item.image_url} alt="" className="size-14 border border-[var(--line)] object-cover" />
+                        <ImagePreviewButton
+                          src={item.image_url}
+                          alt={item.asset.name}
+                          imageClassName="size-14"
+                          onPreview={onPreview}
+                        />
                         <div className="min-w-0">
                           <p className="file-name truncate text-sm">{item.asset.name}</p>
                           <p className="font-data mt-1 text-[0.68rem] text-[var(--muted)]">
@@ -1326,7 +1347,12 @@ function RegressionResults({
       </section>
         </>
       ) : (
-        <BaselineCorrectionPanel run={run} items={items} loading={loading} />
+        <BaselineCorrectionPanel
+          run={run}
+          items={items}
+          loading={loading}
+          onPreview={onPreview}
+        />
       )}
     </>
   )
@@ -1336,10 +1362,12 @@ function BaselineCorrectionPanel({
   run,
   items,
   loading,
+  onPreview,
 }: {
   run: BaselineRegressionRun
   items: BaselineRegressionItem[]
   loading: boolean
+  onPreview: (preview: ImagePreview) => void
 }) {
   const queryClient = useQueryClient()
   const deviations = useMemo(
@@ -1453,9 +1481,10 @@ function BaselineCorrectionPanel({
             ) : deviations.length ? (
               <div className="divide-y divide-[var(--line)]">
                 {deviations.map((item) => (
-                  <label key={item.id} className="grid cursor-pointer grid-cols-[auto_52px_minmax(0,1fr)] gap-3 px-4 py-3 hover:bg-[#fafbf8]">
+                  <div key={item.id} className="grid grid-cols-[auto_52px_minmax(0,1fr)] gap-3 px-4 py-3 hover:bg-[#fafbf8]">
                     <input
                       type="checkbox"
+                      aria-label={`选择偏差样本：${item.asset.name}`}
                       className="mt-4 size-4 accent-[#9dbb1c]"
                       checked={selectedIds.has(item.id)}
                       disabled={latest?.status === "processing"}
@@ -1466,7 +1495,12 @@ function BaselineCorrectionPanel({
                         return next
                       })}
                     />
-                    <img src={item.image_url} alt="" className="size-12 border border-[var(--line)] object-cover" />
+                    <ImagePreviewButton
+                      src={item.image_url}
+                      alt={item.asset.name}
+                      imageClassName="size-12"
+                      onPreview={onPreview}
+                    />
                     <div className="min-w-0">
                       <div className="flex flex-wrap items-center gap-2">
                         <p className="file-name min-w-0 truncate text-sm">{item.asset.name}</p>
@@ -1474,7 +1508,7 @@ function BaselineCorrectionPanel({
                       </div>
                       <p className="mt-1 line-clamp-2 text-xs leading-5 text-[var(--muted)]">{levelExplanationSummary(item)}</p>
                     </div>
-                  </label>
+                  </div>
                 ))}
               </div>
             ) : (

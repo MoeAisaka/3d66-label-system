@@ -9,6 +9,7 @@
     "contract:dimensions": "node --experimental-strip-types scripts/check-dimension-schema-contract.ts",
     "contract:v3-only": "node --experimental-strip-types scripts/check-v3-only-contract.ts",
     "contract:node-correction": "node --experimental-strip-types scripts/check-node-correction-editor.ts",
+    "test:lightbox": "node --experimental-strip-types scripts/check-baseline-lightbox.ts",
     "lint": "tsc -b --pretty false",
     "preview": "vite preview --host 0.0.0.0"
   },
