@@ -1469,6 +1469,7 @@ async def evaluate_job(job_id: int) -> None:
             if not freeform_mode:
                 raise
             precheck = response_a.parsed
+    classification = precheck.get("classification")
     scope_status = (
         classification.get("scope_status")
         if isinstance(classification, dict)
