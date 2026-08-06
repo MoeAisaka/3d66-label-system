@@ -62,4 +62,3 @@ def seed_proposal_text_pdf(db:Session)->None:
         current=json.loads(row.contract_json or "{}")
         if current.get("spec_version")!=PROPOSAL_SPEC_VERSION or row.contract_json!=contract_json:
             raise RuntimeError("proposal_text_pdf v3合同已存在冲突版本，拒绝覆盖")
-

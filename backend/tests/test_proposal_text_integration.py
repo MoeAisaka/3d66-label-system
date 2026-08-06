@@ -125,4 +125,3 @@ def test_v3_proposal_dispatch_aggregates_without_extra_model_call() -> None:
     assert scoring["level"] == "L1"
     assert scoring["proposal_aesthetic_score"] == 90
     assert scoring["scoring_mode"] == "v3_authoritative"
-

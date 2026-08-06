@@ -32,4 +32,3 @@ def build_manual_review_precheck(filename:str,page_count:int|None,reason:str)->d
         "红线检查":{"是否命中":None,"命中项":[]},"信息提取":None,
         "待复核项":[reason],"置信度":0.0,
     }
-

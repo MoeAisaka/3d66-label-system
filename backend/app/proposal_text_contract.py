@@ -103,4 +103,3 @@ def validate_proposal_call_b_output(payload:Mapping[str,Any],*,contract:Mapping[
     _text(d.get("reason"),"reason");notes=d.get("evidence_notes")
     if not isinstance(notes,list) or not 1<=len(notes)<=4 or not all(isinstance(x,str) and x.strip() for x in notes): _fail("evidence_notes不合法")
     return deepcopy(dict(d))
-

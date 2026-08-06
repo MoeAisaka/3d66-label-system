@@ -31,4 +31,3 @@ def aggregate_proposal_text_evaluation(contract:Mapping[str,Any],precheck:Mappin
     base=b["visual_score"]+b["narrative_score"]+b["innovation_timeliness_score"];level=_grade(base,cfg["grade_bands"])
     result.update(proposal_aesthetic_score=base,visual_score=b["visual_score"],narrative_score=b["narrative_score"],innovation_timeliness_score=b["innovation_timeliness_score"],score=base,level=level,grade=level,scoring_track=b["scoring_track"],reason=b["reason"],evidence_notes=deepcopy(b["evidence_notes"]))
     return result
-
