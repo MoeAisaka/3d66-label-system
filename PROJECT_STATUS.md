@@ -1,7 +1,27 @@
 # 3d66 标签系统｜当前项目状态
 
-> 最后更新：2026-08-05
+> 最后更新：2026-08-06
 > 本文件只记录“现在做到哪里”；长期原则见 `PRODUCT.md` 和 `AGENTS.md`，历史背景见 `CODEX_HANDOFF.md`。
+
+## 最新完成：灵感图美感分前置合同（2026-08-06）
+
+- 灵感图调用 A 保持 `inspiration-a-v3-hard-defect-recall-rev4-20260805`
+  不变；新增调用 B `inspiration-b-v3-anchor-aesthetic-20260806`，以四张 Owner
+  锚图输出 0–100 整数美感分、冻结八维 grade 与逐维证据，不允许模型输出最终
+  等级或发布字段。
+- `inspiration_aesthetic_score` 在任何 v3 赛道、媒介、硬伤、红线和封顶规则前
+  以独立事务固化；数据库触发器与引擎前后 canonical hash 双重保证规则层不得
+  反写美感基础事实，污染即中文 fail-closed。
+- 初始映射阈值为 L1 90–100、L2 75–89、L3 60–74、L4 0–59，作为待金丝雀
+  校准的合同参数；红线样本由调用 A 直接进入 L5 并跳过调用 B。
+- 新 revision 只对 `inspiration_image` 生效；其他类目、rev4 合同本体与旧提示词
+  均不改写。旧调用 B 仍作为独立不可变版本保留，可通过重新绑定回滚。
+- 新增迁移 58、严格 schema/0值/阈值/封顶/污染测试，并把前置分作为一等字段
+  写入评测结果 API 与前端类型。验证：后端全量 `1132 passed, 1 skipped`；
+  前端 TypeScript 与 Vite production build 通过。
+- 长期约束见 ADR-0036；真实链路金丝雀证据保存于
+  `/Users/Shared/OpenClaw/145-实现-标签实验台美感分前置合同与金丝雀-20260806/`。
+
 ## 最新完成：四类目 v3-only 合同迁移（2026-08-05）
 
 - inspiration_image 的人工校准 active v3 合同与 A/B prompt 被作为模板，启动 seed

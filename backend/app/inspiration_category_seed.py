@@ -50,11 +50,12 @@ from .subcategory_resolver import (
     resolve_subcategory,
 )
 
+from .inspiration_aesthetic_foundation import AESTHETIC_CALL_B_VERSION, ANCHORS, DIMENSION_KEYS, FOUNDATION_VERSION
 
-INSPIRATION_SEED_VERSION = "inspiration-category-seed-v3-hard-defect-recall"
-INSPIRATION_SPEC_VERSION = "inspiration-v2-hard-defect-recall-rev4-20260805"
+INSPIRATION_SEED_VERSION = "inspiration-category-seed-v4-aesthetic-foundation"
+INSPIRATION_SPEC_VERSION = "inspiration-v3-anchor-aesthetic-20260806"
 INSPIRATION_CALL_A_VERSION = "inspiration-a-v3-hard-defect-recall-rev4-20260805"
-INSPIRATION_CALL_B_VERSION = "inspiration-b-v2-human-calibrated-20260805"
+INSPIRATION_CALL_B_VERSION = AESTHETIC_CALL_B_VERSION
 INSPIRATION_REV3_SPEC_VERSION = "inspiration-v2-human-calibrated-20260805"
 INSPIRATION_REV3_CALL_A_VERSION = "inspiration-a-v2-human-calibrated-20260805"
 
@@ -313,11 +314,10 @@ def build_inspiration_v3_contract() -> dict[str, Any]:
         "category_key": "inspiration_image",
         "level_semantics_version": "doc-l5-worst-v1",
         "level_thresholds": [
-            {"min_score": 81, "level": "L1"},
-            {"min_score": 61, "level": "L2"},
-            {"min_score": 41, "level": "L3"},
-            {"min_score": 21, "level": "L4"},
-            {"min_score": 0, "level": "L5"},
+            {"min_score": 90, "level": "L1"},
+            {"min_score": 75, "level": "L2"},
+            {"min_score": 60, "level": "L3"},
+            {"min_score": 0, "level": "L4"},
         ],
         "prompt_bindings": {
             "call_a_version": INSPIRATION_CALL_A_VERSION,
@@ -326,6 +326,19 @@ def build_inspiration_v3_contract() -> dict[str, Any]:
         "authoritative_precheck_contract": {
             "format_version": "inspiration-authoritative-precheck-v1",
             "required_validation_status": "valid",
+        },
+        "aesthetic_foundation": {
+            "format_version": FOUNDATION_VERSION,
+            "call_b_version": AESTHETIC_CALL_B_VERSION,
+            "calibration_status": "temporary_pending_calibration",
+            "boundary_policy": "floor_to_lower_band",
+            "score_thresholds": [
+                {"min_score": 90, "level": "L1"},
+                {"min_score": 75, "level": "L2"},
+                {"min_score": 60, "level": "L3"},
+                {"min_score": 0, "level": "L4"},
+            ],
+            "dimension_keys": list(DIMENSION_KEYS), "anchors": [dict(item) for item in ANCHORS],
         },
         "redline_policy": _redline_policy(),
         "track_classification": _track_classification(),

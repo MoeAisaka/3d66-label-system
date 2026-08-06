@@ -1506,6 +1506,7 @@ def _result_payload(result: EvaluationResult | None) -> dict[str, Any] | None:
         "dimension_schema": _evaluation_dimension_schema_payload(result),
         "scoring": json.loads(result.scoring_json),
         "score": result.score,
+        "inspiration_aesthetic_score": result.inspiration_aesthetic_score,
         "level": result.level,
         "final_level": final_level,
         "final_score": final_score,

@@ -152,7 +152,7 @@ def test_run14_tier_a_defects_are_l5_only_under_rev4() -> None:
             composed,
             track_key=track_key,
         )
-        assert (result["score"], result["level"]) == (20, "L5"), item_id
+        assert (result["score"], result["level"]) == (20, "L4"), item_id
         assert result["hard_defect_action"]["resolved_tier"] == "A"
 
 
@@ -177,7 +177,7 @@ def test_rev4_veto_is_monotonic_and_escalates_three_tier_b_hits() -> None:
         _deductions(0),
         track_key="class_one",
     )
-    assert (escalated["score"], escalated["level"]) == (20, "L5")
+    assert (escalated["score"], escalated["level"]) == (20, "L4")
     assert escalated["hard_defect_action"]["escalated"] is True
 
 
@@ -199,7 +199,7 @@ def test_rev4_watermark_actions_and_known_photo_modifier() -> None:
             _deductions(0),
             track_key="class_one",
         )
-        assert (result["score"], result["level"]) == (20, "L5")
+        assert (result["score"], result["level"]) == (20, "L4")
 
     modifier = aggregate_category_evaluation(
         contract,

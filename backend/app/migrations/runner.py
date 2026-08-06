@@ -6752,6 +6752,42 @@ def _migration_057_bind_inspiration_production_rubric(
         "AND rubric_version='rubric-v2.1'"
     )
 
+def _migration_058_add_inspiration_aesthetic_foundation(connection: Connection) -> None:
+    """Add first-class pre-rule frozen aesthetic fields without rewriting history."""
+    tables = {
+        row[0] for row in connection.exec_driver_sql(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )
+    }
+    if "evaluation_jobs" not in tables or "evaluation_results" not in tables:
+        return
+    job_columns = {row[1] for row in connection.exec_driver_sql("PRAGMA table_info(evaluation_jobs)")}
+    for name, definition in (
+        ("inspiration_aesthetic_score", "INTEGER"),
+        ("inspiration_aesthetic_json", "TEXT"),
+        ("inspiration_aesthetic_sha256", "VARCHAR(64)"),
+        ("inspiration_aesthetic_frozen_at", "DATETIME"),
+    ):
+        if name not in job_columns:
+            connection.exec_driver_sql(f"ALTER TABLE evaluation_jobs ADD COLUMN {name} {definition}")
+    result_columns = {row[1] for row in connection.exec_driver_sql("PRAGMA table_info(evaluation_results)")}
+    if "inspiration_aesthetic_score" not in result_columns:
+        connection.exec_driver_sql("ALTER TABLE evaluation_results ADD COLUMN inspiration_aesthetic_score INTEGER")
+    connection.exec_driver_sql("""
+        CREATE TRIGGER IF NOT EXISTS trg_job_aesthetic_foundation_no_update
+        BEFORE UPDATE OF inspiration_aesthetic_score, inspiration_aesthetic_json,
+                         inspiration_aesthetic_sha256, inspiration_aesthetic_frozen_at
+        ON evaluation_jobs
+        WHEN OLD.inspiration_aesthetic_frozen_at IS NOT NULL
+         AND (NEW.inspiration_aesthetic_score IS NOT OLD.inspiration_aesthetic_score
+          OR NEW.inspiration_aesthetic_json IS NOT OLD.inspiration_aesthetic_json
+          OR NEW.inspiration_aesthetic_sha256 IS NOT OLD.inspiration_aesthetic_sha256
+          OR NEW.inspiration_aesthetic_frozen_at IS NOT OLD.inspiration_aesthetic_frozen_at)
+        BEGIN
+            SELECT RAISE(ABORT, 'inspiration aesthetic foundation is immutable');
+        END
+    """)
+
 
 MIGRATIONS = [
     Migration(1, "add_sample_expected_level", _migration_001_add_sample_expected_level),
@@ -6994,6 +7030,11 @@ MIGRATIONS = [
         57,
         "bind_inspiration_production_rubric",
         _migration_057_bind_inspiration_production_rubric,
+    ),
+    Migration(
+        58,
+        "add_inspiration_aesthetic_foundation",
+        _migration_058_add_inspiration_aesthetic_foundation,
     ),
 ]
 

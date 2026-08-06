@@ -1572,6 +1572,13 @@ async def evaluate_job(job_id: int) -> None:
     v3_rule_deduction_active = proposal_text_active or v3_uses_rule_deductions(
         v3_bundle_for_job, precheck
     )
+    aesthetic_foundation_active = bool(
+        job.category_key == "inspiration_image"
+        and isinstance(v3_bundle_for_job, dict)
+        and v3_bundle_for_job.get("contract", {}).get("category_key")
+        == "inspiration_image"
+        and isinstance(v3_bundle_for_job["contract"].get("aesthetic_foundation"), dict)
+    )
 
     response_b = None
     response_b_attempts: list[object] = []
@@ -1655,7 +1662,16 @@ async def evaluate_job(job_id: int) -> None:
                 include_dimension_rules=not freeform_mode,
                 freeform=freeform_mode,
             )
-            response_b = await (
+            if aesthetic_foundation_active:
+                from .inspiration_aesthetic_foundation import anchor_samples
+                response_b = await client.chat_json_images(
+                    prompt_b.system_prompt,
+                    anchor_samples(settings.upload_dir, model_image_path, model_mime_type),
+                    max_attempts=1,
+                    max_image_count=5,
+                )
+            else:
+                response_b = await (
                 client.chat_text(
                     prompt_b.system_prompt, user_b,
                     image_path=model_image_path, mime_type=model_mime_type,
@@ -1665,10 +1681,21 @@ async def evaluate_job(job_id: int) -> None:
                     prompt_b.system_prompt, user_b,
                     image_path=model_image_path, mime_type=model_mime_type,
                 )
-            )
+                )
         response_b_attempts.append(response_b.raw_payload)
         _ensure_job_processing(job_id)
         aesthetic = response_b.parsed
+        if aesthetic_foundation_active:
+            from .inspiration_aesthetic_foundation import foundation_sha256, validate_aesthetic_output
+            aesthetic = validate_aesthetic_output(aesthetic)
+            # 单独事务先固化，再允许任何v3赛道/封顶规则读取。
+            _set_job(
+                job_id,
+                inspiration_aesthetic_score=aesthetic["aesthetic_score"],
+                inspiration_aesthetic_json=json.dumps(aesthetic, ensure_ascii=False, sort_keys=True),
+                inspiration_aesthetic_sha256=foundation_sha256(aesthetic),
+                inspiration_aesthetic_frozen_at=datetime.now(timezone.utc),
+            )
         if proposal_text_active:
             audit_category = precheck["信息提取"]["项目分类"]["审核类别"]
             try:
@@ -1799,7 +1826,7 @@ async def evaluate_job(job_id: int) -> None:
         "interpretation_status": "manual_required",
     }
     try:
-        if v3_rule_deduction_active:
+        if v3_rule_deduction_active or aesthetic_foundation_active:
             dimension_definition = project_dimension_definition(
                 source_dimension_definition,
                 dimension_selection,
@@ -1841,7 +1868,7 @@ async def evaluate_job(job_id: int) -> None:
             dimension_selection,
         )
         preliminary_scoring = dict(manual_scoring)
-    trigger_reasons = [] if (freeform_unscored or v3_rule_deduction_active) else risk_review_reasons(
+    trigger_reasons = [] if (freeform_unscored or v3_rule_deduction_active or aesthetic_foundation_active) else risk_review_reasons(
         precheck,
         aesthetic,
         preliminary_scoring,
@@ -1854,7 +1881,7 @@ async def evaluate_job(job_id: int) -> None:
             and frozen_bundle.risk_review_version == RISK_REVIEW_VERSION
         )
     if (
-        not v3_rule_deduction_active
+        not v3_rule_deduction_active and not aesthetic_foundation_active
         and risk_review_enabled
         and aesthetic
         and trigger_reasons
@@ -1932,7 +1959,7 @@ async def evaluate_job(job_id: int) -> None:
         "needs_review": False,
         "caps": [],
         "review_reasons": [],
-    } if v3_rule_deduction_active else {
+    } if (v3_rule_deduction_active or aesthetic_foundation_active) else {
         "engine_version": ENGINE_VERSION,
         "scoring_mode": "freeform_manual",
         "formal": False,
@@ -2164,6 +2191,7 @@ async def evaluate_job(job_id: int) -> None:
                 else None
             ),
             score=scoring.get("score"),
+            inspiration_aesthetic_score=scoring.get("inspiration_aesthetic_score"),
             level=scoring.get("level"),
             confidence=scoring.get("confidence"),
             needs_review=bool(scoring.get("needs_review")),

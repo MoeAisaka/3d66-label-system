@@ -71,6 +71,7 @@ MIGRATION_NAMES = [
     "add_rule_deduction_and_node_corrections",
     "bind_inspiration_production_dimension",
     "bind_inspiration_production_rubric",
+    "add_inspiration_aesthetic_foundation",
 ]
 
 

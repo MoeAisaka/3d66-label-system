@@ -374,7 +374,7 @@ def test_correct_precheck_redline_track_and_final_level_replays_full_path() -> N
         "class_three",
     )
     assert track["score"] == 70
-    assert track["level"] == "L2"
+    assert track["level"] == "L3"
     assert track["scoring"]["track_key"] == "class_three"
     assert set(track["aesthetic"]["dimensions"]) == {
         "subject_focus",
@@ -388,7 +388,7 @@ def test_correct_precheck_redline_track_and_final_level_replays_full_path() -> N
         "ui-final-level",
         "final_level",
         "final_level",
-        "L2",
+        "L3",
         "L4",
     )
     assert final["score"] == track["score"]

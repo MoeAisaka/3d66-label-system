@@ -91,7 +91,7 @@ def _precheck(*, reason=None, trait="实景照片", category="建筑设计", con
 
 def _run(precheck: dict, *, contract: dict | None = None) -> dict:
     return evaluate_one(
-        contract=contract or build_inspiration_v3_contract(),
+        contract=contract or build_inspiration_v3_rev3_contract(),
         classification_map=build_inspiration_classification_map(),
         subcategory_dimensions=build_inspiration_subcategory_dimensions(),
         precheck=precheck,
@@ -142,7 +142,7 @@ def test_each_subcategory_dimensions_passes_existing_validator():
 
 
 def test_seed_version_constant():
-    assert INSPIRATION_SEED_VERSION == "inspiration-category-seed-v3-hard-defect-recall"
+    assert INSPIRATION_SEED_VERSION == "inspiration-category-seed-v4-aesthetic-foundation"
 
 
 # --------------------------------------------------------------------------- #
@@ -279,13 +279,12 @@ def test_class_three_has_five_real_dimensions_with_raw_business_weights():
 
 def test_contract_freezes_level_boundaries_and_versions_rev3_rev4_actions():
     contract = build_inspiration_v3_contract()
-    assert contract["spec_version"] == "inspiration-v2-hard-defect-recall-rev4-20260805"
+    assert contract["spec_version"] == "inspiration-v3-anchor-aesthetic-20260806"
     assert contract["level_thresholds"] == [
-        {"min_score": 81, "level": "L1"},
-        {"min_score": 61, "level": "L2"},
-        {"min_score": 41, "level": "L3"},
-        {"min_score": 21, "level": "L4"},
-        {"min_score": 0, "level": "L5"},
+        {"min_score": 90, "level": "L1"},
+        {"min_score": 75, "level": "L2"},
+        {"min_score": 60, "level": "L3"},
+        {"min_score": 0, "level": "L4"},
     ]
     modifiers = contract["common_modifiers"]
     assert modifiers["format_version"] == "common-modifiers-v2"
@@ -304,7 +303,7 @@ def test_contract_freezes_level_boundaries_and_versions_rev3_rev4_actions():
 
 
 def test_level_mapping_boundaries_80_is_l2_and_81_is_l1():
-    contract = build_inspiration_v3_contract()
+    contract = build_inspiration_v3_rev3_contract()
     precheck = _precheck(category="建筑设计", trait="实景照片")
     score_80 = aggregate_category_evaluation(
         contract, precheck, {"deductions": {"d": 20}}, track_key=TRACK_CLASS_ONE

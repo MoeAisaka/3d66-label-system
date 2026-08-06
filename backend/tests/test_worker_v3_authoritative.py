@@ -345,6 +345,16 @@ def _bundle(db: Session) -> dict:
     _seed_active_config(db)
     bundle = v3_authoritative_category(db, _CATEGORY_KEY)
     assert bundle is not None
+    # 本文件回归旧grade/rule-deduction兼容路径；新美感前置路径由
+    # test_inspiration_aesthetic_foundation.py独立覆盖。
+    bundle["contract"].pop("aesthetic_foundation", None)
+    bundle["contract"]["level_thresholds"] = [
+        {"min_score": 81, "level": "L1"},
+        {"min_score": 61, "level": "L2"},
+        {"min_score": 41, "level": "L3"},
+        {"min_score": 21, "level": "L4"},
+        {"min_score": 0, "level": "L5"},
+    ]
     return bundle
 
 

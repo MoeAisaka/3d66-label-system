@@ -11,6 +11,7 @@ from .models import (
     AgentPlanVersion,
     AutomationPolicy,
     CategoryEvaluationV3Config,
+    EvaluationCategoryProfile,
     EvaluationControl,
     ModelConfig,
     OptimizerConfig,
@@ -277,6 +278,14 @@ def _seed_inspiration_image_prompts(db: Session, settings) -> None:
             "pipeline_scope": "full_pipeline",
             "note": "2026-08-05 人工校准版：完整红线/赛道/维度/压分/等级/标签合同",
         },
+        {
+            "stage": "B",
+            "name": "灵感图D锚图美感基础评分器",
+            "version": "inspiration-b-v3-anchor-aesthetic-20260806",
+            "filename": "inspiration_image_call_b_aesthetic_v3.txt",
+            "pipeline_scope": "full_pipeline",
+            "note": "2026-08-06：4张Owner锚图，输出前置美感分+冻结八维；不输出最终等级",
+        },
     )
     for item in prompt_specs:
         exists = db.scalar(
@@ -302,6 +311,22 @@ def _seed_inspiration_image_prompts(db: Session, settings) -> None:
                 change_note=item["note"],
             )
         )
+    db.flush()
+    # 新B只绑定灵感图；A保持rev4不动。已有profile原位切换并递增流水线版本，
+    # 旧PromptVersion仍保留，回滚可重新绑定旧prompt_b_id。
+    new_b = db.scalar(
+        select(PromptVersion).where(
+            PromptVersion.version == "inspiration-b-v3-anchor-aesthetic-20260806"
+        )
+    )
+    profile = db.scalar(
+        select(EvaluationCategoryProfile).where(
+            EvaluationCategoryProfile.category_key == "inspiration_image"
+        )
+    )
+    if new_b is not None and profile is not None and profile.prompt_b_id != new_b.id:
+        profile.prompt_b_id = new_b.id
+        profile.pipeline_revision += 1
 
 
 def _seed_inspiration_image_v3_config(db: Session) -> None:

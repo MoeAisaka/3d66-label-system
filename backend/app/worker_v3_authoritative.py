@@ -192,6 +192,12 @@ def v3_uses_rule_deductions(v3_bundle: Any, precheck: Any) -> bool:
         from .subcategory_resolver import resolve_subcategory
 
         contract = v3_bundle["contract"]
+        if (
+            contract.get("category_key") == "inspiration_image"
+            and isinstance(contract.get("aesthetic_foundation"), dict)
+        ):
+            # 美感前置合同：红线短路B；非红线必须进入新的锚图B。
+            return bool(evaluate_redlines(precheck, policy=contract["redline_policy"]).get("hit"))
         if evaluate_redlines(precheck, policy=contract["redline_policy"]).get("hit"):
             # Redlines terminate before B, but still need to bypass legacy B.
             return True
@@ -275,6 +281,20 @@ async def evaluate_v3_authoritative(
             raise V3AuthoritativeError(
                 "decisive_precheck_invalid", "调用A决定性信号缺失、不确定或证据冲突"
             )
+    if (
+        contract.get("category_key") == "inspiration_image"
+        and isinstance(contract.get("aesthetic_foundation"), dict)
+    ):
+        from .inspiration_aesthetic_foundation import (
+            AestheticFoundationError, apply_aesthetic_v3_rules,
+        )
+        try:
+            return apply_aesthetic_v3_rules(
+                contract=contract, classification_map=classification_map,
+                precheck=precheck_obj, foundation=aesthetic,
+            )
+        except AestheticFoundationError as exc:
+            raise V3AuthoritativeError(exc.code, str(exc)) from exc
 
     common_grades_by_track: dict[str, dict[str, int]] = {}
     specific_grades_by_track: dict[str, dict[str, int]] = {}
@@ -521,6 +541,12 @@ def build_v3_authoritative_scoring(v3_result: dict, *, precheck: Any) -> dict:
         "media_key": v3_result.get("media_key"),
         "media_penalty": v3_result.get("media_penalty"),
         "level_semantics_version": v3_result.get("level_semantics_version"),
+        "inspiration_aesthetic_score": v3_result.get("inspiration_aesthetic_score"),
+        "inspiration_aesthetic_level": v3_result.get("inspiration_aesthetic_level"),
+        "foundation_sha256": v3_result.get("foundation_sha256"),
+        "foundation_before_rules": v3_result.get("foundation_before_rules"),
+        "foundation_after_rules": v3_result.get("foundation_after_rules"),
+        "aesthetic_dimensions": v3_result.get("dimensions"),
     }
 
 

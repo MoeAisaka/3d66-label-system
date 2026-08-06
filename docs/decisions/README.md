@@ -46,6 +46,7 @@
 | [0031](0031-category-dimension-management-and-prompt-only-mode.md) | Accepted | 类目维度管理、不可变版本与仅提示词评测模式 |
 | [0032](0032-production-fields-and-large-baseline-throughput.md) | Accepted | 生产消费字段闭环与 10000 张基准回归吞吐合同 |
 | [0033](0033-category-custom-evaluation-base-and-redline.md) | Accepted | 按类目自定义评测底座（红线+分类+维度）与 L 等级方向校正 |
+| [0036](0036-inspiration-aesthetic-foundation-before-rules.md) | Accepted | 灵感图美感基础事实前置固化，规则层只读定级 |
 
 ## 新增 ADR 的规则
 

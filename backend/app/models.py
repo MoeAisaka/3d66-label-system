@@ -678,6 +678,12 @@ class EvaluationJob(Base):
         nullable=True,
         index=True,
     )
+    inspiration_aesthetic_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    inspiration_aesthetic_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    inspiration_aesthetic_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    inspiration_aesthetic_frozen_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     strategy_bundle_id: Mapped[int | None] = mapped_column(
         ForeignKey("strategy_bundles.id", ondelete="RESTRICT"),
         nullable=True,
@@ -1587,6 +1593,9 @@ class EvaluationResult(Base):
     raw_response_risk_review: Mapped[str | None] = mapped_column(Text, nullable=True)
     risk_review_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # 只读副本；权威前置值已在进入v3规则前固化于EvaluationJob。
+    inspiration_aesthetic_score: Mapped[int | None] = mapped_column(
+        Integer, nullable=True)
     level: Mapped[str | None] = mapped_column(String(10), nullable=True, index=True)
     confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
     needs_review: Mapped[bool] = mapped_column(Boolean, default=False, index=True)

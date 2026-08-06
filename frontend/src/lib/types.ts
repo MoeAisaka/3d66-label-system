@@ -263,6 +263,7 @@ export type Evaluation = {
   dimension_schema: EvaluationDimensionSchema
   scoring: Record<string, any>
   score: number | null
+  inspiration_aesthetic_score: number | null
   level: string | null
   final_level: string | null
   final_score: number | null
