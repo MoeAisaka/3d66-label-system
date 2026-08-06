@@ -253,11 +253,17 @@ def prepare_pdf_model_input(
         raise RuntimeError("PDF 前处理依赖未安装") from exc
 
     try:
-        reader = PdfReader(str(source_path))
-        page_count = len(reader.pages)
+        page_count: int | None = None
         extracted_pages: list[str] = []
-        for page in reader.pages[:max_pages]:
-            extracted_pages.append((page.extract_text() or "").strip())
+        try:
+            reader = PdfReader(str(source_path))
+            page_count = len(reader.pages)
+            for page in reader.pages[:max_pages]:
+                extracted_pages.append((page.extract_text() or "").strip())
+        except Exception:
+            # Metadata unreadable is not an automatic rejection. Fitz may
+            # still render the document so call A can make the fallback check.
+            extracted_pages = []
         document_text = "\n\n".join(
             f"[第 {index + 1} 页]\n{text}" for index, text in enumerate(extracted_pages) if text
         )[:max_text_chars]
@@ -273,7 +279,10 @@ def prepare_pdf_model_input(
                 pixmap = page.get_pixmap(matrix=fitz.Matrix(1.25, 1.25), alpha=False)
                 frame = Image.open(io.BytesIO(pixmap.tobytes("png"))).convert("RGB")
                 rendered.append(frame)
-                if ocr_enabled and len(extracted_pages[index].strip()) < ocr_min_text_chars:
+                extracted_text = (
+                    extracted_pages[index] if index < len(extracted_pages) else ""
+                )
+                if ocr_enabled and len(extracted_text.strip()) < ocr_min_text_chars:
                     ocr_attempts += 1
                     try:
                         import pytesseract  # type: ignore[import-not-found]

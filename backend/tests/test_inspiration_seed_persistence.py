@@ -17,6 +17,7 @@ from app.inspiration_category_seed import (
     INSPIRATION_REV3_CALL_A_VERSION,
     INSPIRATION_SPEC_VERSION,
 )
+from app.proposal_text_contract import validate_proposal_text_contract
 from app.models import CategoryEvaluationV3Config, PromptVersion
 from app.seed import (
     _seed_inspiration_image_prompts,
@@ -134,6 +135,7 @@ def test_seed_defaults_clones_active_v3_contract_and_prompts_for_all_categories(
         "inspiration_image",
         "material_image",
         "pdf_text",
+        "proposal_text_pdf",
     }
     with Session(engine) as db:
         seed_defaults(db)
@@ -153,6 +155,20 @@ def test_seed_defaults_clones_active_v3_contract_and_prompts_for_all_categories(
             dimensions_by_track = json.loads(row.subcategory_dimensions_json)
 
             assert contract["category_key"] == row.category_key
+            if row.category_key == "proposal_text_pdf":
+                validate_proposal_text_contract(contract)
+                assert contract["profile_type"] == "text-proposal-additive-v1"
+                assert dimensions_by_track["profile_type"] == "text-proposal-additive-v1"
+                for stage, version_key in (("A", "call_a_version"), ("B", "call_b_version")):
+                    prompt = db.scalar(select(PromptVersion).where(
+                        PromptVersion.version == contract[version_key]
+                    ))
+                    assert prompt is not None
+                    assert prompt.stage == stage
+                    assert prompt.category_key == row.category_key
+                    assert prompt.status == "published"
+                    assert prompt.source == "imported"
+                continue
             if row.category_key == "inspiration_image":
                 assert contract["spec_version"] == INSPIRATION_SPEC_VERSION
             else:
@@ -199,6 +215,6 @@ def test_seed_defaults_clones_active_v3_contract_and_prompts_for_all_categories(
 
         seed_defaults(db)
         rows_after = db.scalars(select(CategoryEvaluationV3Config)).all()
-        assert len(rows_after) == 4
+        assert len(rows_after) == 5
         assert {row.category_key: row.revision for row in rows_after} == revisions_before
         assert len(db.scalars(select(PromptVersion)).all()) == prompt_count_before

@@ -231,6 +231,8 @@ def seed_defaults(db: Session) -> None:
     _seed_inspiration_image_prompts(db, settings)
     _seed_inspiration_image_v3_config(db)
     _seed_v3_only_category_clones(db)
+    from .proposal_text_seed import seed_proposal_text_pdf
+    seed_proposal_text_pdf(db)
     # Existing grade-era rows are upgraded in place; fresh rows are already in
     # rule form so this converges without an extra revision bump.
     from .migrations.upgrade_v3_to_rule_deduction import (

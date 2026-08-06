@@ -1,0 +1,150 @@
+{
+  "contract_version": "evaluation-category-profile-v3",
+  "profile_type": "text-proposal-additive-v1",
+  "category_key": "proposal_text_pdf",
+  "display_name": "PDF方案文本",
+  "spec_version": "proposal-text-v1-baseline-20260806",
+  "call_a_version": "proposal-text-a-v1-baseline-20260806",
+  "call_b_version": "proposal-text-b-v1-baseline-20260806",
+  "source_standard": "钉钉文档《【标签系统】方案文本提示词》2026-08-06 15:52版",
+
+  "deterministic_prechecks": {
+    "comment": "以下红线由引擎在调用A之前确定性执行，不依赖模型判断；引擎结果与模型结果冲突时以引擎为准",
+    "page_count": {
+      "source": "pdf_metadata.page_count",
+      "rule": "total_pages < 15 => redline:页数不足",
+      "fallback": "PDF元数据不可读时交调用A判断；调用A也无法判断则状态=人工复核"
+    },
+    "file_openable": {
+      "source": "pdf_parser",
+      "rule": "文件无法解析 => 状态=人工复核（不直接淘汰，防误伤）"
+    }
+  },
+
+  "redline_policy": {
+    "format_version": "redline-policy-v1",
+    "enabled": true,
+    "signal": "precheck.红线检查.命中项[].类型",
+    "signal_note": "文本类目红线信号取自调用A的红线检查块，区别于图像类目的 production_fields.reason；接入时需在 redline_policy 评估器上注册该信号源",
+    "hit_level": "L5",
+    "hit_score_cap": 20,
+    "terminal": true,
+    "terminal_note": "红线命中即终止，不执行调用B；对外状态=淘汰，回归统计中按L5档参与五档命中率计算",
+    "rules": [
+      {"rule_key": "page_count_short", "match_any": ["页数不足"], "description": "总页数小于15页"},
+      {"rule_key": "competitor_watermark", "match_any": ["竞品水印"], "description": "出现竞品平台、竞品产品水印、网址、账号或引流标识"},
+      {"rule_key": "content_corrupted", "match_any": ["内容异常"], "description": "乱码、字符缺失、图片或排版损毁导致主体内容无法正常阅读"},
+      {"rule_key": "core_scheme_missing", "match_any": ["核心方案缺失"], "description": "无明确设计主题或缺少完整核心方案、设计策略与成果"},
+      {"rule_key": "category_forbidden", "match_any": ["类目不符或禁用类型"], "description": "主体非环境艺术类，或属读物、课件、模板、纯施工图、纯实景图排版等禁用类型"},
+      {"rule_key": "content_safety", "match_any": ["内容安全违规"], "description": "敏感政治内容、不完整中国地图或高度裸露色情内容"}
+    ]
+  },
+
+  "manual_review_policy": {
+    "trigger": "precheck.预检结果.状态 == 人工复核",
+    "behavior": "fail_closed",
+    "grade_output": null,
+    "note": "人工复核样本不产出自动等级，进入人工队列；基准回归中单列统计人工复核率，不计入五档命中率分母"
+  },
+
+  "track_classification": {
+    "format_version": "track-classification-v1",
+    "source": "precheck.信息提取.项目分类.审核类别",
+    "tracks": {
+      "A": {
+        "display_name": "建筑/公共空间",
+        "members": ["建筑设计", "公共空间", "非文旅规划"],
+        "visual_max": 45, "narrative_max": 45, "innovation_max": 10
+      },
+      "B": {
+        "display_name": "景观/规划",
+        "members": ["景观设计", "文旅专项规划"],
+        "visual_max": 27, "narrative_max": 63, "innovation_max": 10
+      },
+      "C": {
+        "display_name": "住宅/商业/酒店/办公",
+        "members": ["住宅设计", "商业空间", "酒店空间", "办公空间"],
+        "visual_max": 63, "narrative_max": 27, "innovation_max": 10
+      },
+      "balanced": {
+        "display_name": "均衡兜底",
+        "members": [],
+        "visual_max": 45, "narrative_max": 45, "innovation_max": 10
+      }
+    },
+    "other_resolution": {
+      "comment": "审核类别=其他时由调用B按邻近原则选择结构并以scoring_track声明；引擎校验其声明必须属于A|B|C|balanced",
+      "fallback_track": "balanced"
+    }
+  },
+
+  "scoring": {
+    "mode": "additive",
+    "components": ["visual_score", "narrative_score", "innovation_timeliness_score"],
+    "component_bounds": {
+      "visual_score": "0..track.visual_max（整数）",
+      "narrative_score": "0..track.narrative_max（整数）",
+      "innovation_timeliness_score": "0..10（整数）"
+    },
+    "total_formula": "score = visual_score + narrative_score + innovation_timeliness_score",
+    "computed_by": "engine",
+    "model_must_not_output": ["score", "rate", "grade"],
+    "invalid_output_policy": {
+      "checks": [
+        "JSON可解析且无额外字段",
+        "scoring_track ∈ {A,B,C,balanced} 且与审核类别一致（其他类除外）",
+        "三个分项均为整数且在对应上限内"
+      ],
+      "on_violation": "重试1次；仍违规则该样本状态=人工复核（fail-closed），不得截断或改写模型分数"
+    }
+  },
+
+  "aesthetic_base_score": {
+    "field": "proposal_aesthetic_score",
+    "definition": "score原始值（三分项之和，0-100），在任何红线、封顶、等级映射之前固化",
+    "immutable": true,
+    "note": "主线合同要求：美感基础分是一等前置输出字段，合同规则不得反向改写该字段"
+  },
+
+  "grade_bands": {
+    "format": "闭区间",
+    "L1": [90, 100],
+    "L2": [75, 89],
+    "L3": [60, 74],
+    "L4": [21, 59],
+    "L5": [0, 20],
+    "computed_by": "engine",
+    "note": "等级映射由引擎按score确定性执行，消除模型侧rate与score不一致的错误源"
+  },
+
+  "output_fields": {
+    "comment": "对下游发布的固定字段集，全部来自调用A提取与引擎计算，调用B只贡献分项分数与理由",
+    "from_call_a": [
+      "审核类别", "一级分类", "二级分类", "项目名称", "专业标题", "SEO标题",
+      "设计主题", "概念摘要", "风格", "标签", "设计师或设计公司", "所在城市",
+      "项目或文本年份", "项目工期", "效果图数量", "分析图数量", "意向图数量", "内容完整性"
+    ],
+    "from_engine": [
+      "proposal_aesthetic_score", "visual_score", "narrative_score",
+      "innovation_timeliness_score", "score", "grade", "redline_hits", "scoring_track"
+    ],
+    "from_call_b": ["reason", "evidence_notes"]
+  },
+
+  "baseline_regression": {
+    "pipeline": "存量PDF → 确定性预检 → 调用A → (红线/人工复核闸门) → 调用B → 引擎汇总定级 → 对照人工黄金标注",
+    "metrics": [
+      "五档精确命中率（主指标，目标90%）",
+      "分档召回率下限（约束指标，Owner 2026-08-06冻结）：每档召回率≥70%，任何一档不达标即整体不验收，防止押多数档刷总分；黄金集中样本数<10的档先扩样再判，不得用小样本档凑数",
+      "红线召回率与误杀率（红线样本单列）",
+      "人工复核率（fail-closed比例，过高说明A提示词或材料解析有问题）",
+      "各档分布 vs 黄金分布（检查是否出现档位塌陷）",
+      "分项分数方差（同一样本重复2次，检查评分稳定性）"
+    ],
+    "known_risks": [
+      "L4区间宽达21-59分、L5仅0-20分：无红线时L5几乎不可达。若黄金标注存在非红线的L5样本，需先与标注方对齐L5语义（L5是否等价于淘汰档）",
+      "时效性5分依赖A提取的年份/工期，未提取时允许模型酌情评分，是已知噪声源；回归时建议单独统计该分项的稳定性",
+      "分档阈值90/75/60与百分比区间锚点一致，边界±2分样本预计是主要错档来源，回归报告需输出边界样本清单"
+    ]
+  }
+}

@@ -66,6 +66,13 @@ def _validate_v3_bundle(
         raise ValueError("合同、分类映射或赛道维度为空")
     if contract.get("category_key") != category_key:
         raise ValueError("合同 category_key 与评测类目不匹配")
+    if contract.get("profile_type") == "text-proposal-additive-v1":
+        from .proposal_text_contract import validate_proposal_text_contract
+
+        validate_proposal_text_contract(contract)
+        if classification_map.get("profile_type") != "text-proposal-additive-v1":
+            raise ValueError("proposal_text分类映射型材不匹配")
+        return
     validate_category_evaluation_contract(contract)
     track_keys = {
         track["key"] for track in contract["track_classification"]["tracks"]
@@ -236,6 +243,19 @@ async def evaluate_v3_authoritative(
     classification_map = v3_bundle["classification_map"]
     subcategory_dimensions = v3_bundle["subcategory_dimensions"]
     precheck_obj = precheck if isinstance(precheck, dict) else {}
+    if contract.get("profile_type") == "text-proposal-additive-v1":
+        from .proposal_text_aggregator import (
+            ProposalTextAggregationError,
+            aggregate_proposal_text_evaluation,
+        )
+        try:
+            return aggregate_proposal_text_evaluation(
+                contract, precheck_obj, aesthetic if isinstance(aesthetic, dict) else None
+            )
+        except ProposalTextAggregationError as exc:
+            raise V3AuthoritativeError(
+                "proposal_text_engine_failed", f"PDF方案文本权威定级失败：{exc}"
+            ) from exc
     authoritative_precheck = contract.get("authoritative_precheck_contract")
     if (
         contract.get("category_key") == "inspiration_image"
@@ -398,6 +418,35 @@ def build_v3_authoritative_scoring(v3_result: dict, *, precheck: Any) -> dict:
     直接取用。needs_review 依 redline/raw_level 规则：红线命中或高分一票压分导致
     ``raw_level != level`` 时置 True。
     """
+    if v3_result.get("engine_version") == "proposal-text-additive-engine-v1":
+        needs_review = bool(v3_result.get("needs_review"))
+        reason = v3_result.get("reason")
+        review_reasons = [str(reason)] if needs_review and reason else []
+        return {
+            "engine_version": v3_result.get("engine_version"),
+            "scoring_mode": "v3_authoritative",
+            "formal": not needs_review,
+            "experimental": False,
+            "score": v3_result.get("score"),
+            "level": v3_result.get("level"),
+            "raw_level": v3_result.get("level"),
+            "confidence": None,
+            "needs_review": needs_review,
+            "caps": [],
+            "review_reasons": review_reasons,
+            "hard_reject": bool(v3_result.get("hard_reject")),
+            "hit_rules": list(v3_result.get("redline_hits") or []),
+            "track_key": v3_result.get("scoring_track"),
+            "proposal_aesthetic_score": v3_result.get("proposal_aesthetic_score"),
+            "visual_score": v3_result.get("visual_score"),
+            "narrative_score": v3_result.get("narrative_score"),
+            "innovation_timeliness_score": v3_result.get("innovation_timeliness_score"),
+            "reason": reason,
+            "evidence_notes": list(v3_result.get("evidence_notes") or []),
+            "redline_hits": list(v3_result.get("redline_hits") or []),
+            "status": v3_result.get("status"),
+            "level_semantics_version": LEVEL_SEMANTICS_V3_L5_WORST,
+        }
     hard_reject = bool(v3_result.get("hard_reject"))
     level = v3_result.get("level")
     raw_level = v3_result.get("raw_level")

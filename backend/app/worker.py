@@ -126,6 +126,15 @@ from .strategy_bundle import (
     resolve_frozen_dimension_entry,
 )
 from .baseline_regression import complete_baseline_item, fail_baseline_item
+from .proposal_text_contract import (
+    validate_proposal_call_a_output,
+    validate_proposal_call_b_output,
+)
+from .proposal_text_pipeline import (
+    build_deterministic_page_precheck,
+    build_manual_review_precheck,
+    call_validated_json,
+)
 from .worker_v3_shadow import (
     compute_v3_shadow,
     fetch_v3_specific_grades,
@@ -912,6 +921,11 @@ async def evaluate_job(job_id: int) -> None:
         if not job:
             raise RuntimeError("任务不存在")
         v3_bundle_for_job = v3_authoritative_for_job(db, job)
+        proposal_contract = (
+            v3_bundle_for_job.get("contract")
+            if isinstance(v3_bundle_for_job, dict) else None
+        )
+        proposal_text_active = isinstance(proposal_contract, dict) and proposal_contract.get("profile_type") == "text-proposal-additive-v1"
         asset = db.get(Asset, job.asset_id)
         if not asset:
             raise RuntimeError("图片不存在")
@@ -1173,7 +1187,7 @@ async def evaluate_job(job_id: int) -> None:
             category_pipeline_config
         )
     dimension_mode = str(dimension_selection["mode"])
-    if dimension_mode == "none" and not single_mode and not freeform_mode:
+    if dimension_mode == "none" and not single_mode and not freeform_mode and not proposal_text_active:
         raise RuntimeError("关闭维度的仅提示词实验必须使用单提示词模式")
     if prompt_a is None:
         prompt_a = (
@@ -1197,24 +1211,41 @@ async def evaluate_job(job_id: int) -> None:
     if not image_path.exists():
         raise RuntimeError("原始素材文件不存在")
     document_context: dict[str, object] | None = None
+    proposal_precheck: dict[str, object] | None = None
     category_modules = active_modules(category_pipeline_config)
     if "document.pdf_extract" in category_modules:
         pdf_config = processor_config(category_pipeline_config, "document.pdf_extract")
         ocr_config = processor_config(category_pipeline_config, "document.ocr_if_needed")
-        pdf_input = prepare_pdf_model_input(
-            image_path,
-            content_sha256=asset.sha256,
-            cache_dir=settings.upload_dir / ".derived" / "pdf",
-            max_pages=int(pdf_config.get("max_pages", category_preprocess_config.get("max_pages", 4))),
-            max_text_chars=int(
-                pdf_config.get("max_text_chars", category_preprocess_config.get("max_text_chars", 24_000))
-            ),
-            ocr_enabled="document.ocr_if_needed" in category_modules,
-            ocr_min_text_chars=int(ocr_config.get("min_text_chars", 80)),
-        )
-        model_image_path = pdf_input.preview_path
-        model_mime_type = pdf_input.preview_mime_type
-        document_context = pdf_input.context
+        try:
+            pdf_input = prepare_pdf_model_input(
+                image_path,
+                content_sha256=asset.sha256,
+                cache_dir=settings.upload_dir / ".derived" / "pdf",
+                max_pages=int(pdf_config.get("max_pages", category_preprocess_config.get("max_pages", 4))),
+                max_text_chars=int(
+                    pdf_config.get("max_text_chars", category_preprocess_config.get("max_text_chars", 24_000))
+                ),
+                ocr_enabled="document.ocr_if_needed" in category_modules,
+                ocr_min_text_chars=int(ocr_config.get("min_text_chars", 80)),
+            )
+            model_image_path = pdf_input.preview_path
+            model_mime_type = pdf_input.preview_mime_type
+            document_context = pdf_input.context
+            if proposal_text_active:
+                raw_page_count = document_context.get("page_count")
+                page_count = raw_page_count if isinstance(raw_page_count, int) and not isinstance(raw_page_count, bool) else None
+                proposal_precheck = build_deterministic_page_precheck(
+                    asset.original_name, page_count
+                )
+        except RuntimeError:
+            if not proposal_text_active:
+                raise
+            proposal_precheck = build_manual_review_precheck(
+                asset.original_name, None, "PDF文件无法解析，已转人工复核"
+            )
+            document_context = {"page_count": None, "text": "", "parse_status": "failed"}
+            model_image_path = image_path
+            model_mime_type = asset.mime_type
     else:
         animated_config = processor_config(
             category_pipeline_config,
@@ -1318,9 +1349,9 @@ async def evaluate_job(job_id: int) -> None:
         pdf_summary=pdf_summary,
         pipeline_config=category_pipeline_config,
         include_dimension_rules=(
-            not freeform_mode and (single_mode or dimension_mode == "none")
+            not freeform_mode and not proposal_text_active and (single_mode or dimension_mode == "none")
         ),
-        freeform=freeform_mode,
+        freeform=freeform_mode or proposal_text_active,
     )
     user_a = prompt_a.user_prompt.replace(
         "{{image_metadata}}", json.dumps(metadata, ensure_ascii=False)
@@ -1331,6 +1362,7 @@ async def evaluate_job(job_id: int) -> None:
     elif (
         job.baseline_regression_item_id is not None
         and not freeform_mode
+        and not proposal_text_active
     ):
         user_a += PRODUCTION_FIELDS_PROMPT_CONTRACT
     if single_mode:
@@ -1349,21 +1381,59 @@ async def evaluate_job(job_id: int) -> None:
             model_mime_type=model_mime_type,
         )
         return
-    response_a = await (
-        client.chat_text(
-            prompt_a.system_prompt,
-            user_a,
-            image_path=model_image_path,
-            mime_type=model_mime_type,
+    if proposal_text_active:
+        if proposal_precheck is not None:
+            response_a = SimpleNamespace(
+                parsed=validate_proposal_call_a_output(proposal_precheck),
+                raw_text=json.dumps(proposal_precheck, ensure_ascii=False),
+                raw_payload={"engine_precheck": proposal_precheck},
+            )
+        else:
+            async def invoke_proposal_a():
+                return await client.chat_text(
+                    prompt_a.system_prompt,
+                    user_a,
+                    image_path=model_image_path,
+                    mime_type=model_mime_type,
+                    max_attempts=1,
+                )
+            call_a_outcome = await call_validated_json(
+                invoke_proposal_a, validate_proposal_call_a_output
+            )
+            last_a_response = call_a_outcome.responses[-1]
+            if call_a_outcome.value is None:
+                page_count_value = (
+                    document_context.get("page_count")
+                    if isinstance(document_context, dict) else None
+                )
+                parsed_a = build_manual_review_precheck(
+                    asset.original_name,
+                    page_count_value if isinstance(page_count_value, int) else None,
+                    "调用A输出连续2次校验失败，已转人工复核",
+                )
+            else:
+                parsed_a = call_a_outcome.value
+            response_a = SimpleNamespace(
+                parsed=parsed_a,
+                raw_text=last_a_response.raw_text,
+                raw_payload=(
+                    last_a_response.raw_payload
+                    if len(call_a_outcome.responses) == 1
+                    else {"attempts": [item.raw_payload for item in call_a_outcome.responses]}
+                ),
+            )
+    else:
+        response_a = await (
+            client.chat_text(
+                prompt_a.system_prompt, user_a,
+                image_path=model_image_path, mime_type=model_mime_type,
+            )
+            if freeform_mode
+            else client.chat_json(
+                prompt_a.system_prompt, user_a,
+                image_path=model_image_path, mime_type=model_mime_type,
+            )
         )
-        if freeform_mode
-        else client.chat_json(
-            prompt_a.system_prompt,
-            user_a,
-            image_path=model_image_path,
-            mime_type=model_mime_type,
-        )
-    )
     _ensure_job_processing(job_id)
     combined_response = is_combined_aesthetic_response(response_a.parsed)
     if (
@@ -1384,40 +1454,44 @@ async def evaluate_job(job_id: int) -> None:
         from .schema_adapter import adapt_inspiration_call_a_precheck
 
         precheck = adapt_inspiration_call_a_precheck(precheck)
-    try:
-        precheck = normalize_precheck_business_rules(precheck)
-        if not inspiration_baseline_job:
-            precheck = normalize_production_fields(
-                precheck,
-                required=(
-                    job.baseline_regression_item_id is not None
-                    and not freeform_mode
-                ),
-            )
-    except (AttributeError, TypeError, ValueError):
-        if not freeform_mode:
-            raise
-        precheck = response_a.parsed
-    classification = precheck.get("classification")
+    if not proposal_text_active:
+        try:
+            precheck = normalize_precheck_business_rules(precheck)
+            if not inspiration_baseline_job:
+                precheck = normalize_production_fields(
+                    precheck,
+                    required=(
+                        job.baseline_regression_item_id is not None
+                        and not freeform_mode
+                    ),
+                )
+        except (AttributeError, TypeError, ValueError):
+            if not freeform_mode:
+                raise
+            precheck = response_a.parsed
     scope_status = (
         classification.get("scope_status")
         if isinstance(classification, dict)
         else None
     )
-    v3_rule_deduction_active = v3_uses_rule_deductions(
+    v3_rule_deduction_active = proposal_text_active or v3_uses_rule_deductions(
         v3_bundle_for_job, precheck
     )
 
     response_b = None
     response_b_attempts: list[object] = []
     if not single_mode and (
-        freeform_mode
+        (
+            proposal_text_active
+            and precheck.get("预检结果", {}).get("是否进入B") is True
+        )
+        or freeform_mode
         or (
             dimension_mode != "none"
             and not combined_response
             and scope_status == "in_scope"
         )
-    ) and not v3_rule_deduction_active:
+    ) and (proposal_text_active or not v3_rule_deduction_active):
         if prompt_b is None:
             prompt_b = _prompt_for_job("B", prompt_b_id, job.category_key)
         _set_job(job_id, stage="aesthetic", progress=48)
@@ -1437,8 +1511,8 @@ async def evaluate_job(job_id: int) -> None:
             document_context=document_context,
             pdf_summary=pdf_summary,
             pipeline_config=category_pipeline_config,
-            include_dimension_rules=not freeform_mode,
-            freeform=freeform_mode,
+            include_dimension_rules=not freeform_mode and not proposal_text_active,
+            freeform=freeform_mode or proposal_text_active,
         )
         response_b = await (
             client.chat_text(
@@ -1446,8 +1520,9 @@ async def evaluate_job(job_id: int) -> None:
                 user_b,
                 image_path=model_image_path,
                 mime_type=model_mime_type,
+                max_attempts=1 if proposal_text_active else None,
             )
-            if freeform_mode
+            if freeform_mode or proposal_text_active
             else client.chat_json(
                 prompt_b.system_prompt,
                 user_b,
@@ -1458,6 +1533,39 @@ async def evaluate_job(job_id: int) -> None:
         response_b_attempts.append(response_b.raw_payload)
         _ensure_job_processing(job_id)
         aesthetic = response_b.parsed
+        if proposal_text_active:
+            audit_category = precheck["信息提取"]["项目分类"]["审核类别"]
+            try:
+                aesthetic = validate_proposal_call_b_output(
+                    aesthetic, contract=proposal_contract, audit_category=audit_category
+                )
+            except (TypeError, ValueError):
+                response_b = await client.chat_text(
+                    prompt_b.system_prompt,
+                    user_b,
+                    image_path=model_image_path,
+                    mime_type=model_mime_type,
+                    max_attempts=1,
+                )
+                response_b_attempts.append(response_b.raw_payload)
+                _ensure_job_processing(job_id)
+                try:
+                    aesthetic = validate_proposal_call_b_output(
+                        response_b.parsed,
+                        contract=proposal_contract,
+                        audit_category=audit_category,
+                    )
+                except (TypeError, ValueError):
+                    page_count_value = (
+                        document_context.get("page_count")
+                        if isinstance(document_context, dict) else None
+                    )
+                    precheck = build_manual_review_precheck(
+                        asset.original_name,
+                        page_count_value if isinstance(page_count_value, int) else None,
+                        "调用B输出连续2次校验失败，已转人工复核",
+                    )
+                    aesthetic = None
         if (
             not freeform_mode
             and

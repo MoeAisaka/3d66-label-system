@@ -59,6 +59,11 @@ CATEGORY_PROFILE_DEFAULTS: dict[str, dict[str, str]] = {
         "allowed_mime_types_json": '["image/jpeg","image/png","image/webp","image/gif"]',
         "preprocess_config_json": '{"preprocess":"image"}',
     },
+    "proposal_text_pdf": {
+        "display_name": "PDF方案文本",
+        "allowed_mime_types_json": '["application/pdf"]',
+        "preprocess_config_json": '{"preprocess":"pdf","max_pages":20,"max_text_chars":100000,"multimodal_summary":false}',
+    },
 }
 
 

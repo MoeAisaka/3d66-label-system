@@ -148,6 +148,20 @@ DEFAULT_PIPELINES: dict[str, dict[str, Any]] = {
         "dimensions": {"enabled": False, "mode": "none", "enabled_keys": []},
         "model_nodes": {"evaluation_main": True, "pdf_summary": False, "optimization": True, "benchmark": True, "diagnostic": True},
     },
+    "proposal_text_pdf": {
+        "schema_version": "category-pipeline-v1",
+        "input_kind": "pdf",
+        "allowed_suffixes": list(PDF_SUFFIXES),
+        "processors": [
+            _processor("document.pdf_extract", {"max_pages": 20, "max_text_chars": 100000}),
+            _processor("document.ocr_if_needed", {"min_text_chars": 80}),
+            _processor("document.page_contact_sheet"),
+        ],
+        "prompt_mode": "follow",
+        "prompt_context": {"instruction": ""},
+        "dimensions": {"enabled": False, "mode": "none", "enabled_keys": []},
+        "model_nodes": {"evaluation_main": True, "pdf_summary": False, "optimization": True, "benchmark": True, "diagnostic": True},
+    },
 }
 
 
