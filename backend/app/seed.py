@@ -286,6 +286,15 @@ def _seed_inspiration_image_prompts(db: Session, settings) -> None:
             "pipeline_scope": "full_pipeline",
             "note": "2026-08-06：4张Owner锚图，输出前置美感分+冻结八维；不输出最终等级",
         },
+        {
+            "stage": "B",
+            "name": "灵感图逐维证据合同美感基础评分器",
+            "version": "inspiration-b-v4-evidence-contract-20260806",
+            "filename": "inspiration_image_call_b_aesthetic_v4.txt",
+            "relative_path": "backend/prompts/inspiration_image_call_b_aesthetic_v4.txt",
+            "pipeline_scope": "shared",
+            "note": "2026-08-06：完整JSON结构实例，八维证据非空，保留严格校验",
+        },
     )
     for item in prompt_specs:
         exists = db.scalar(
@@ -294,7 +303,8 @@ def _seed_inspiration_image_prompts(db: Session, settings) -> None:
         if exists is not None:
             continue
         system_prompt = (
-            settings.project_root / "prompts" / item["filename"]
+            settings.project_root
+            / item.get("relative_path", f"prompts/{item['filename']}")
         ).read_text(encoding="utf-8").strip()
         db.add(
             PromptVersion(
@@ -321,7 +331,7 @@ def _seed_inspiration_image_prompts(db: Session, settings) -> None:
     )
     new_b = db.scalar(
         select(PromptVersion).where(
-            PromptVersion.version == "inspiration-b-v3-anchor-aesthetic-20260806"
+            PromptVersion.version == "inspiration-b-v4-evidence-contract-20260806"
         )
     )
     profile = db.scalar(

@@ -684,6 +684,16 @@ class EvaluationJob(Base):
     inspiration_aesthetic_frozen_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    trace_response_a_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    trace_usage_a_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    trace_response_b_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    trace_usage_b_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    failure_stage: Mapped[str | None] = mapped_column(
+        String(40), nullable=True, index=True
+    )
+    failure_code: Mapped[str | None] = mapped_column(
+        String(80), nullable=True, index=True
+    )
     strategy_bundle_id: Mapped[int | None] = mapped_column(
         ForeignKey("strategy_bundles.id", ondelete="RESTRICT"),
         nullable=True,

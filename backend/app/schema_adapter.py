@@ -86,6 +86,7 @@ _INSPIRATION_HARD_DEFECT_VALUES = {
     "severe_color_cast",
     "known_real_photo_defect",
 }
+INSPIRATION_HARD_DEFECT_VALUES = frozenset(_INSPIRATION_HARD_DEFECT_VALUES)
 _INSPIRATION_IMAGE_DEFECT_VALUES = {
     "corner_small_watermark",
     "subject_obscuring_watermark",

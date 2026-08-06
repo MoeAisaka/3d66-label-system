@@ -6789,6 +6789,55 @@ def _migration_058_add_inspiration_aesthetic_foundation(connection: Connection) 
     """)
 
 
+def _migration_059_persist_evaluation_job_failure_traces(
+    connection: Connection,
+) -> None:
+    """Persist immutable provider responses/usage before downstream validation."""
+    tables = {
+        row[0]
+        for row in connection.exec_driver_sql(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )
+    }
+    if "evaluation_jobs" not in tables:
+        return
+    columns = {
+        row[1]
+        for row in connection.exec_driver_sql(
+            "PRAGMA table_info(evaluation_jobs)"
+        )
+    }
+    for name, definition in (
+        ("trace_response_a_json", "TEXT"),
+        ("trace_usage_a_json", "TEXT"),
+        ("trace_response_b_json", "TEXT"),
+        ("trace_usage_b_json", "TEXT"),
+        ("failure_stage", "VARCHAR(40)"),
+        ("failure_code", "VARCHAR(80)"),
+    ):
+        if name not in columns:
+            connection.exec_driver_sql(
+                f"ALTER TABLE evaluation_jobs ADD COLUMN {name} {definition}"
+            )
+    connection.exec_driver_sql("""
+        CREATE TRIGGER IF NOT EXISTS trg_job_provider_trace_no_update
+        BEFORE UPDATE OF trace_response_a_json, trace_usage_a_json,
+                         trace_response_b_json, trace_usage_b_json
+        ON evaluation_jobs
+        WHEN (OLD.trace_response_a_json IS NOT NULL
+              AND NEW.trace_response_a_json IS NOT OLD.trace_response_a_json)
+          OR (OLD.trace_usage_a_json IS NOT NULL
+              AND NEW.trace_usage_a_json IS NOT OLD.trace_usage_a_json)
+          OR (OLD.trace_response_b_json IS NOT NULL
+              AND NEW.trace_response_b_json IS NOT OLD.trace_response_b_json)
+          OR (OLD.trace_usage_b_json IS NOT NULL
+              AND NEW.trace_usage_b_json IS NOT OLD.trace_usage_b_json)
+        BEGIN
+            SELECT RAISE(ABORT, 'provider trace is immutable');
+        END
+    """)
+
+
 MIGRATIONS = [
     Migration(1, "add_sample_expected_level", _migration_001_add_sample_expected_level),
     Migration(2, "add_review_corrections", _migration_002_add_review_corrections),
@@ -7035,6 +7084,11 @@ MIGRATIONS = [
         58,
         "add_inspiration_aesthetic_foundation",
         _migration_058_add_inspiration_aesthetic_foundation,
+    ),
+    Migration(
+        59,
+        "persist_evaluation_job_failure_traces",
+        _migration_059_persist_evaluation_job_failure_traces,
     ),
 ]
 

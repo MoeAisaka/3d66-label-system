@@ -819,6 +819,64 @@ def _set_job(job_id: int, **values: object) -> None:
         )
 
 
+_SENSITIVE_TRACE_KEYS = frozenset({
+    "authorization",
+    "api_key",
+    "apikey",
+    "access_token",
+    "refresh_token",
+    "secret",
+})
+
+
+def _sanitize_provider_trace(value: object) -> object:
+    """Redact credential-shaped response fields while retaining provider evidence."""
+    if isinstance(value, dict):
+        return {
+            str(key): (
+                "[REDACTED]"
+                if str(key).lower() in _SENSITIVE_TRACE_KEYS
+                else _sanitize_provider_trace(item)
+            )
+            for key, item in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [_sanitize_provider_trace(item) for item in value]
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    return str(value)
+
+
+def _persist_provider_trace(job_id: int, stage: str, response: object) -> None:
+    """Freeze an A/B provider response before any schema/business validation."""
+    normalized_stage = stage.upper()
+    if normalized_stage not in {"A", "B"}:
+        raise ValueError("provider trace stage must be A or B")
+    response_trace = {
+        "provider_payload": _sanitize_provider_trace(
+            getattr(response, "raw_payload", None)
+        ),
+        "raw_text": getattr(response, "raw_text", None),
+        "upstream_status_code": getattr(response, "upstream_status_code", None),
+        "request_correlation_id": getattr(response, "request_correlation_id", None),
+        "attempt_count": getattr(response, "attempt_count", None),
+    }
+    usage_trace = {
+        "input_tokens": getattr(response, "input_tokens", None),
+        "output_tokens": getattr(response, "output_tokens", None),
+        "total_tokens": getattr(response, "total_tokens", None),
+    }
+    suffix = normalized_stage.lower()
+    _set_job(job_id, **{
+        f"trace_response_{suffix}_json": json.dumps(
+            response_trace, ensure_ascii=False, sort_keys=True
+        ),
+        f"trace_usage_{suffix}_json": json.dumps(
+            usage_trace, ensure_ascii=False, sort_keys=True
+        ),
+    })
+
+
 def _ensure_job_processing(job_id: int) -> None:
     with session_scope() as db:
         status = db.scalar(select(EvaluationJob.status).where(EvaluationJob.id == job_id))
@@ -928,6 +986,7 @@ async def _evaluate_targeted_loop_job(
 async def evaluate_job(job_id: int) -> None:
     production_dimension_contract = None
     v3_bundle_for_job: dict[str, object] | None = None
+    aesthetic_foundation_active = False
     with session_scope() as db:
         job = db.get(EvaluationJob, job_id)
         if not job:
@@ -938,6 +997,12 @@ async def evaluate_job(job_id: int) -> None:
             if isinstance(v3_bundle_for_job, dict) else None
         )
         proposal_text_active = isinstance(proposal_contract, dict) and proposal_contract.get("profile_type") == "text-proposal-additive-v1"
+        aesthetic_foundation_active = bool(
+            job.category_key == "inspiration_image"
+            and isinstance(proposal_contract, dict)
+            and proposal_contract.get("category_key") == "inspiration_image"
+            and isinstance(proposal_contract.get("aesthetic_foundation"), dict)
+        )
         asset = db.get(Asset, job.asset_id)
         if not asset:
             raise RuntimeError("图片不存在")
@@ -1528,6 +1593,8 @@ async def evaluate_job(job_id: int) -> None:
                 image_path=model_image_path, mime_type=model_mime_type,
             )
         )
+    if aesthetic_foundation_active:
+        _persist_provider_trace(job_id, "A", response_a)
     _ensure_job_processing(job_id)
     combined_response = is_combined_aesthetic_response(response_a.parsed)
     if (
@@ -1571,13 +1638,6 @@ async def evaluate_job(job_id: int) -> None:
     )
     v3_rule_deduction_active = proposal_text_active or v3_uses_rule_deductions(
         v3_bundle_for_job, precheck
-    )
-    aesthetic_foundation_active = bool(
-        job.category_key == "inspiration_image"
-        and isinstance(v3_bundle_for_job, dict)
-        and v3_bundle_for_job.get("contract", {}).get("category_key")
-        == "inspiration_image"
-        and isinstance(v3_bundle_for_job["contract"].get("aesthetic_foundation"), dict)
     )
 
     response_b = None
@@ -1682,6 +1742,8 @@ async def evaluate_job(job_id: int) -> None:
                     image_path=model_image_path, mime_type=model_mime_type,
                 )
                 )
+        if aesthetic_foundation_active:
+            _persist_provider_trace(job_id, "B", response_b)
         response_b_attempts.append(response_b.raw_payload)
         _ensure_job_processing(job_id)
         aesthetic = response_b.parsed
@@ -2488,6 +2550,8 @@ def _handle_technical_failure(
                 .values(
                     status="failure_handling",
                     technical_error_type=failure.error_type,
+                    failure_stage=EvaluationJob.stage,
+                    failure_code=str(getattr(exc, "code", failure.error_type))[:80],
                     error_message=f"technical:{failure.error_type}",
                     finished_at=now,
                 )

@@ -15,7 +15,7 @@ from .category_evaluation_aggregator import (
 from .redline_policy import evaluate_redlines
 from .subcategory_resolver import resolve_subcategory
 
-AESTHETIC_CALL_B_VERSION = "inspiration-b-v3-anchor-aesthetic-20260806"
+AESTHETIC_CALL_B_VERSION = "inspiration-b-v4-evidence-contract-20260806"
 FOUNDATION_VERSION = "inspiration-aesthetic-foundation-v1"
 DIMENSION_KEYS = (
     "composition_viewpoint",
@@ -127,6 +127,20 @@ def anchor_samples(upload_dir: Path, target: Path, target_mime: str | None) -> l
 
 def build_prompt() -> str:
     dims = "、".join(DIMENSION_KEYS)
+    output_example = {
+        "contract_version": FOUNDATION_VERSION,
+        "aesthetic_score": 80,
+        "dimensions": {
+            key: {
+                "grade": 3,
+                "evidence": ["必须填写至少一条待评图可见证据"],
+                "shortcomings": [],
+            }
+            for key in DIMENSION_KEYS
+        },
+        "overall_evidence": ["必须填写至少一条整体可见证据"],
+        "confidence": 0.8,
+    }
     return f"""你是3d66灵感图美感基础评分器。四张Owner锚图依次代表L1、L2、L3、L4的相对美感参照；第五张才是待评图片。
 只判断待评图片的视觉美感基础，不执行赛道扣分、红线、封顶、发布标签或最终等级。
 评分从宽，但必须依据可见证据。以四锚作相对比较，输出0-100连续整数 aesthetic_score。
@@ -134,7 +148,9 @@ def build_prompt() -> str:
 每个维度grade只能为1、2、3、4、5；不得输出0、null、缺失或额外维度。即使不典型也必须按可见质量判断。
 只输出一个严格JSON对象，顶层字段必须且只能是 contract_version、aesthetic_score、dimensions、overall_evidence、confidence。
 contract_version固定为{FOUNDATION_VERSION}。dimensions每项必须且只能含grade、evidence、shortcomings；evidence必须非空。
-严禁输出final_level、level、predicted_level、predicted_score、final_score、production_fields、published_fields、tags或任何最终等级/发布字段。"""
+严禁输出final_level、level、predicted_level、predicted_score、final_score、production_fields、published_fields、tags或任何最终等级/发布字段。
+下面是必须逐字段填满的完整JSON结构实例；占位文字必须替换为待评图可见事实，任何维度的evidence不得为空：
+{json.dumps(output_example, ensure_ascii=False)}"""
 
 
 def apply_aesthetic_v3_rules(

@@ -72,6 +72,7 @@ MIGRATION_NAMES = [
     "bind_inspiration_production_dimension",
     "bind_inspiration_production_rubric",
     "add_inspiration_aesthetic_foundation",
+    "persist_evaluation_job_failure_traces",
 ]
 
 

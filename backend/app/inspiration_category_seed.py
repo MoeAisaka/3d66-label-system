@@ -52,8 +52,8 @@ from .subcategory_resolver import (
 
 from .inspiration_aesthetic_foundation import AESTHETIC_CALL_B_VERSION, ANCHORS, DIMENSION_KEYS, FOUNDATION_VERSION
 
-INSPIRATION_SEED_VERSION = "inspiration-category-seed-v4-aesthetic-foundation"
-INSPIRATION_SPEC_VERSION = "inspiration-v3-anchor-aesthetic-20260806"
+INSPIRATION_SEED_VERSION = "inspiration-category-seed-v6-casual-semantics"
+INSPIRATION_SPEC_VERSION = "inspiration-v3-aesthetic-evidence-v3-casual-semantics-20260806"
 INSPIRATION_CALL_A_VERSION = "inspiration-a-v3-hard-defect-recall-rev4-20260805"
 INSPIRATION_CALL_B_VERSION = AESTHETIC_CALL_B_VERSION
 INSPIRATION_REV3_SPEC_VERSION = "inspiration-v2-human-calibrated-20260805"
@@ -101,6 +101,11 @@ def _redline_policy() -> dict[str, Any]:
                 "label": "随手拍（透视杂乱）",
                 "signal": "production_fields.reason",
                 "match_any": ["是随手拍"],
+                "requires_any_hard_defect": [
+                    "careless_composition",
+                    "distorted_viewpoint",
+                    "fisheye_distortion",
+                ],
                 "exemptions": [],
                 "enabled": True,
             },

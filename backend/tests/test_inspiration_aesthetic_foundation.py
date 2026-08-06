@@ -9,6 +9,7 @@ from app.inspiration_aesthetic_foundation import (
     DIMENSION_KEYS,
     AestheticFoundationError,
     apply_aesthetic_v3_rules,
+    build_prompt,
     canonical_foundation,
     validate_aesthetic_output,
 )
@@ -68,6 +69,19 @@ def test_strict_validator_accepts_exact_eight_dimensions() -> None:
     normalized = validate_aesthetic_output(valid_payload())
     assert normalized["aesthetic_score"] == 89
     assert tuple(normalized["dimensions"]) == DIMENSION_KEYS
+
+
+def test_call_b_prompt_contains_a_complete_auditable_json_instance() -> None:
+    prompt = build_prompt()
+    assert AESTHETIC_CALL_B_VERSION == (
+        "inspiration-b-v4-evidence-contract-20260806"
+    )
+    assert '"contract_version": "inspiration-aesthetic-foundation-v1"' in prompt
+    assert '"evidence": ["必须填写至少一条待评图可见证据"]' in prompt
+    assert '"shortcomings": []' in prompt
+    assert '"overall_evidence": ["必须填写至少一条整体可见证据"]' in prompt
+    for key in DIMENSION_KEYS:
+        assert f'"{key}"' in prompt
 
 
 @pytest.mark.parametrize("bad_grade", [0, 6, None, True])
@@ -139,4 +153,32 @@ def test_redline_is_l5_and_does_not_require_call_b() -> None:
     )
     assert result["hard_reject"] is True
     assert result["level"] == "L5"
+    assert result["inspiration_aesthetic_score"] is None
+
+
+def test_casual_signal_without_disorder_does_not_overreject_foundation() -> None:
+    item = precheck(redline="是随手拍")
+    result = apply_aesthetic_v3_rules(
+        contract=build_inspiration_v3_contract(),
+        classification_map=build_inspiration_classification_map(),
+        precheck=item,
+        foundation=valid_payload(61),
+    )
+    assert result["hard_reject"] is False
+    assert result["inspiration_aesthetic_score"] == 61
+    assert result["foundation_before_rules"] == result["foundation_after_rules"]
+
+
+def test_casual_signal_with_disorder_remains_l5_redline() -> None:
+    item = precheck(redline="是随手拍")
+    item["hard_defects"] = ["careless_composition"]
+    result = apply_aesthetic_v3_rules(
+        contract=build_inspiration_v3_contract(),
+        classification_map=build_inspiration_classification_map(),
+        precheck=item,
+        foundation=None,
+    )
+    assert result["hard_reject"] is True
+    assert result["level"] == "L5"
+    assert result["hit_rules"] == ["casual_snapshot"]
     assert result["inspiration_aesthetic_score"] is None

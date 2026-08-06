@@ -142,7 +142,7 @@ def test_each_subcategory_dimensions_passes_existing_validator():
 
 
 def test_seed_version_constant():
-    assert INSPIRATION_SEED_VERSION == "inspiration-category-seed-v4-aesthetic-foundation"
+    assert INSPIRATION_SEED_VERSION == "inspiration-category-seed-v6-casual-semantics"
 
 
 # --------------------------------------------------------------------------- #
@@ -279,7 +279,7 @@ def test_class_three_has_five_real_dimensions_with_raw_business_weights():
 
 def test_contract_freezes_level_boundaries_and_versions_rev3_rev4_actions():
     contract = build_inspiration_v3_contract()
-    assert contract["spec_version"] == "inspiration-v3-anchor-aesthetic-20260806"
+    assert contract["spec_version"] == "inspiration-v3-aesthetic-evidence-v3-casual-semantics-20260806"
     assert contract["level_thresholds"] == [
         {"min_score": 90, "level": "L1"},
         {"min_score": 75, "level": "L2"},

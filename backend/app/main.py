@@ -903,6 +903,11 @@ class BaselineSetCreateRequest(BaseModel):
         return self
 
 
+class BaselineRunCategoryContext(BaseModel):
+    source: Literal["baseline_set"]
+    category_key: str = Field(pattern=r"^[a-z][a-z0-9_]{2,39}$")
+
+
 class BaselineRunCreateRequest(BaseModel):
     prompt_id: int | None = Field(default=None, ge=1)
     prompt_a_id: int | None = Field(default=None, ge=1)
@@ -910,6 +915,10 @@ class BaselineRunCreateRequest(BaseModel):
     dimension_schema_id: int | None = Field(default=None, ge=1)
     dimension_mode: Literal["category_default", "all", "none"] = "category_default"
     execution_mode: Literal["freeform", "structured"] = "freeform"
+    baseline_item_ids: list[int] | None = Field(
+        default=None, min_length=1, max_length=1000
+    )
+    category_context: BaselineRunCategoryContext | None = None
 
     @model_validator(mode="after")
     def validate_prompt_pair(self) -> "BaselineRunCreateRequest":
@@ -919,6 +928,10 @@ class BaselineRunCreateRequest(BaseModel):
             raise ValueError("单提示词模式不能同时指定 A 与 B 提示词版本")
         if (self.prompt_a_id is None) != (self.prompt_b_id is None):
             raise ValueError("手动选择提示词时必须同时指定 A 与 B 版本")
+        if self.baseline_item_ids is not None and len(self.baseline_item_ids) != len(
+            set(self.baseline_item_ids)
+        ):
+            raise ValueError("基准回归子集不能包含重复 item")
         return self
 
 
@@ -8693,6 +8706,62 @@ def create_baseline_run(
         raise HTTPException(status_code=404, detail="基准集不存在")
     if not baseline_set.items:
         raise HTTPException(status_code=409, detail="空基准集不能创建 run")
+    all_frozen_items = list(baseline_set.items)
+    if request.baseline_item_ids is not None:
+        item_by_id = {item.id: item for item in all_frozen_items}
+        missing_ids = [
+            item_id
+            for item_id in request.baseline_item_ids
+            if item_id not in item_by_id
+        ]
+        if missing_ids:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "baseline_items_invalid",
+                    "message": "所选 item 不属于当前冻结基准集",
+                    "item_ids": missing_ids,
+                },
+            )
+        frozen_items = [item_by_id[item_id] for item_id in request.baseline_item_ids]
+    else:
+        frozen_items = all_frozen_items
+    category_mismatch_asset_ids = [
+        item.asset_id
+        for item in frozen_items
+        if item.asset.category_key != baseline_set.category_key
+    ]
+    if (
+        request.category_context is not None
+        and request.category_context.category_key != baseline_set.category_key
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "category_context_mismatch",
+                "message": "显式类目上下文必须与冻结基准集类目一致",
+            },
+        )
+    if (
+        request.category_context is None
+        and (
+            request.baseline_item_ids is not None
+            or category_mismatch_asset_ids
+        )
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "category_context_required",
+                "message": "冻结子集或素材主类目不一致时必须显式确认基准集类目上下文",
+            },
+        )
+    category_context = {
+        "source": "baseline_set",
+        "category_key": baseline_set.category_key,
+        "selected_baseline_item_ids": [item.id for item in frozen_items],
+        "asset_category_mismatches": category_mismatch_asset_ids,
+    }
     profile = _category_profile(db, baseline_set.category_key, require_active=True)
     running = db.scalar(
         select(BaselineRegressionRun.id).where(
@@ -8883,7 +8952,8 @@ def create_baseline_run(
     )
     execution_payload = json.loads(execution_snapshot)
     execution_payload["execution_mode"] = request.execution_mode
-    execution_payload["selection_explicit"] = False
+    execution_payload["selection_explicit"] = request.baseline_item_ids is not None
+    execution_payload["category_context"] = category_context
     execution_snapshot = baseline_canonical_json(execution_payload)
     previous = db.scalar(
         select(BaselineRegressionRun)
@@ -8901,7 +8971,7 @@ def create_baseline_run(
             "expected_level": item.expected_level,
             "predicted_level": None,
         }
-        for item in baseline_set.items
+        for item in frozen_items
     )
     run = BaselineRegressionRun(
         baseline_set_id=baseline_set.id,
@@ -8913,7 +8983,7 @@ def create_baseline_run(
         execution_snapshot_json=execution_snapshot,
         baseline_set_fingerprint=baseline_set.fingerprint,
         status="running",
-        total=len(baseline_set.items),
+        total=len(frozen_items),
         metrics_json=baseline_canonical_json(initial_metrics),
         created_by=user.username,
     )
@@ -8928,7 +8998,7 @@ def create_baseline_run(
             expected_level=frozen_item.expected_level,
             status="queued",
         )
-        for frozen_item in baseline_set.items
+        for frozen_item in frozen_items
     ]
     db.add_all(run_items)
     db.flush()
@@ -8945,7 +9015,7 @@ def create_baseline_run(
             origin_queue_class="validation",
             batch_key=batch_key,
         )
-        for frozen_item, run_item in zip(baseline_set.items, run_items, strict=True)
+        for frozen_item, run_item in zip(frozen_items, run_items, strict=True)
     ]
     db.add_all(jobs)
     db.flush()
@@ -8969,6 +9039,8 @@ def create_baseline_run(
             "prompt_mode": "single" if single_prompt_mode else "ab",
             "execution_mode": request.execution_mode,
             "category_key": baseline_set.category_key,
+            "category_context": category_context,
+            "baseline_item_ids": [item.id for item in frozen_items],
             "dimension_selection_mode": json.loads(execution_snapshot)["dimension_selection"]["mode"],
             "dimension_schema_id": None,
             "v3_contract_only": True,

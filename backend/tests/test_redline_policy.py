@@ -259,3 +259,37 @@ def test_evaluate_validates_policy_before_matching() -> None:
     policy["hit_level"] = "bad"
     with pytest.raises(RedlinePolicyError):
         evaluate_redlines(_precheck(["是截图"]), policy=policy)
+
+
+def test_casual_snapshot_requires_documented_perspective_or_composition_defect() -> None:
+    policy = _inspiration_policy()
+    policy["rules"][1]["requires_any_hard_defect"] = [
+        "careless_composition",
+        "distorted_viewpoint",
+        "fisheye_distortion",
+    ]
+    casual_only = evaluate_redlines(
+        {
+            "production_fields": {"reason": ["是随手拍"]},
+            "hard_defects": [],
+        },
+        policy=policy,
+    )
+    assert casual_only == {"hit": False, "hit_rules": [], "hard_reject": False}
+    disorderly = evaluate_redlines(
+        {
+            "production_fields": {"reason": ["是随手拍"]},
+            "hard_defects": ["careless_composition"],
+        },
+        policy=policy,
+    )
+    assert disorderly["hit"] is True
+    assert disorderly["hit_rules"] == ["casual_snapshot"]
+
+
+def test_unknown_required_hard_defect_fails_closed() -> None:
+    policy = _inspiration_policy()
+    policy["rules"][1]["requires_any_hard_defect"] = ["unknown_defect"]
+    with pytest.raises(RedlinePolicyError) as excinfo:
+        validate_redline_policy(policy)
+    assert excinfo.value.code == "requires_any_hard_defect_invalid"

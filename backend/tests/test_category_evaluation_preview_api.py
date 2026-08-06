@@ -137,7 +137,7 @@ def test_get_contract_returns_assembled_config(client: TestClient) -> None:
         "seed_version",
     }
     assert body["contract"]["schema_version"] == "evaluation-category-profile-v3"
-    assert body["seed_version"] == "inspiration-category-seed-v4-aesthetic-foundation"
+    assert body["seed_version"] == "inspiration-category-seed-v6-casual-semantics"
     # The read-only endpoint returns exactly what the seed builders assemble.
     assert body["contract"] == build_inspiration_v3_contract()
     assert body["classification_map"] == build_inspiration_classification_map()
