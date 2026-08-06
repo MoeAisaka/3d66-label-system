@@ -74,7 +74,7 @@ def test_strict_validator_accepts_exact_eight_dimensions() -> None:
 def test_call_b_prompt_contains_a_complete_auditable_json_instance() -> None:
     prompt = build_prompt()
     assert AESTHETIC_CALL_B_VERSION == (
-        "inspiration-b-v4-evidence-contract-20260806"
+        "inspiration-b-v5-anchor-calibration-evidence-20260807"
     )
     assert '"contract_version": "inspiration-aesthetic-foundation-v1"' in prompt
     assert '"evidence": ["必须填写至少一条待评图可见证据"]' in prompt

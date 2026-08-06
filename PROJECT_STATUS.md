@@ -1,7 +1,20 @@
 # 3d66 标签系统｜当前项目状态
 
-> 最后更新：2026-08-06
+> 最后更新：2026-08-07
 > 本文件只记录“现在做到哪里”；长期原则见 `PRODUCT.md` 和 `AGENTS.md`，历史背景见 `CODEX_HANDOFF.md`。
+
+## 最新实施：灵感图模型质量闸门修复（2026-08-07）
+
+- 调用 A rev4 保持不变；新增不可变调用 B
+  `inspiration-b-v5-anchor-calibration-evidence-20260807`，恢复四张 Owner 锚图的
+  可见语义、相邻边界与 75/90 分边界，严格八维 evidence 合同不变。
+- 新 inspiration v3 revision 将“是随手拍+`blurry_grayish`”确定为 L5 红线；
+  未命中联合硬伤的随手拍仅软封顶 59/L4，不把软封顶冒充红线。
+- 品牌字样只有在调用 A 明示品牌文字、且调用 B 的细节完整度与呈现完整性均
+  grade≥4 且无 shortcomings 时，才窄豁免 `subject_obscuring_watermark` Tier A；
+  真实半透明/版权水印与任何证据不足样本仍保留 Tier A。
+- proposal_text_pdf、其他类目、A rev4、旧 revision、90/75/60/0 阈值与 baseline
+  真值均不改。共享测试部署和冻结 10 张金丝雀结论以外部 147 验收工件为准。
 
 ## 最新完成：灵感图美感分前置合同（2026-08-06）
 

@@ -98,7 +98,7 @@ def test_new_b_prompt_is_appended_without_overwriting_old_version() -> None:
         assert '"contract_version":"inspiration-aesthetic-foundation-v1"' in (
             active_b.system_prompt
         )
-        assert active_b.version == "inspiration-b-v4-evidence-contract-20260806"
+        assert active_b.version == "inspiration-b-v5-anchor-calibration-evidence-20260807"
         assert active_b.pipeline_scope == "shared"
         assert db.scalar(select(PromptVersion).where(
             PromptVersion.version == "inspiration-b-v3-anchor-aesthetic-20260806"

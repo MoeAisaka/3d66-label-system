@@ -47,6 +47,7 @@
 | [0032](0032-production-fields-and-large-baseline-throughput.md) | Accepted | 生产消费字段闭环与 10000 张基准回归吞吐合同 |
 | [0033](0033-category-custom-evaluation-base-and-redline.md) | Accepted | 按类目自定义评测底座（红线+分类+维度）与 L 等级方向校正 |
 | [0036](0036-inspiration-aesthetic-foundation-before-rules.md) | Accepted | 灵感图美感基础事实前置固化，规则层只读定级 |
+| [0037](0037-inspiration-quality-gates-and-brand-wordmark-exemption.md) | Accepted | 灵感图锚点校准、随手拍质量闸门与品牌字样窄豁免 |
 
 ## 新增 ADR 的规则
 

@@ -15,7 +15,7 @@ from .category_evaluation_aggregator import (
 from .redline_policy import evaluate_redlines
 from .subcategory_resolver import resolve_subcategory
 
-AESTHETIC_CALL_B_VERSION = "inspiration-b-v4-evidence-contract-20260806"
+AESTHETIC_CALL_B_VERSION = "inspiration-b-v5-anchor-calibration-evidence-20260807"
 FOUNDATION_VERSION = "inspiration-aesthetic-foundation-v1"
 DIMENSION_KEYS = (
     "composition_viewpoint",
@@ -142,8 +142,16 @@ def build_prompt() -> str:
         "confidence": 0.8,
     }
     return f"""你是3d66灵感图美感基础评分器。四张Owner锚图依次代表L1、L2、L3、L4的相对美感参照；第五张才是待评图片。
+锚点必须按下面的可见内容和质量差异理解，不能只记等级名称：
+- 2045/L1：螺旋楼梯具有独特空间结构，木构与自然场景、光线、材质关系完整，达到媒体发布成熟度。
+- 747/L2：紫绿床品的纹理和缝线清楚，产品近景稳定，但主要停留在局部床品，空间与叙事不足。
+- 1263/L3：荷花与祝福文字的主体和颜色可辨，但文字压住核心、层次较平、形式常见。
+- 601/L4：居中灯笼记录照的主体关系简单，拍摄和设计信息普通，灵感参考价值有限。
+清晰且无明显硬伤不等于高分；普通、完整、清楚的记录图通常仍应与L3/L4锚比较。
+75分边界表示L2与L3的最低分界：只有整体质量明确不低于747/L2锚才可给75分或更高；接近或低于1263/L3锚应低于75分。
+90分边界同理只保留给明确达到2045/L1媒体发布成熟度的图片。
 只判断待评图片的视觉美感基础，不执行赛道扣分、红线、封顶、发布标签或最终等级。
-评分从宽，但必须依据可见证据。以四锚作相对比较，输出0-100连续整数 aesthetic_score。
+必须依据可见证据并做相邻锚点比较，输出0-100连续整数 aesthetic_score；禁止因为画面清晰或无硬伤自动上调。
 固定八维：{dims}。
 每个维度grade只能为1、2、3、4、5；不得输出0、null、缺失或额外维度。即使不典型也必须按可见质量判断。
 只输出一个严格JSON对象，顶层字段必须且只能是 contract_version、aesthetic_score、dimensions、overall_evidence、confidence。
@@ -151,6 +159,101 @@ contract_version固定为{FOUNDATION_VERSION}。dimensions每项必须且只能�
 严禁输出final_level、level、predicted_level、predicted_score、final_score、production_fields、published_fields、tags或任何最终等级/发布字段。
 下面是必须逐字段填满的完整JSON结构实例；占位文字必须替换为待评图可见事实，任何维度的evidence不得为空：
 {json.dumps(output_example, ensure_ascii=False)}"""
+
+
+def _validated_quality_rules(contract: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """读取新revision专用质量规则；形状漂移时拒绝继续定级。"""
+    block = contract.get("aesthetic_foundation")
+    if not isinstance(block, dict):
+        raise AestheticFoundationError("quality_rules_missing", "缺少美感前置质量规则")
+    soft_cap = block.get("casual_snapshot_soft_cap")
+    if not isinstance(soft_cap, dict) or set(soft_cap) != {
+        "key", "signal", "match_any", "cap_to"
+    }:
+        raise AestheticFoundationError("soft_cap_invalid", "随手拍软封顶规则形状非法")
+    if (
+        soft_cap.get("key") != "casual_snapshot_soft_cap"
+        or soft_cap.get("signal") != "production_fields.reason"
+        or soft_cap.get("match_any") != ["是随手拍"]
+        or not _is_int(soft_cap.get("cap_to"))
+        or not 0 <= soft_cap["cap_to"] <= 100
+    ):
+        raise AestheticFoundationError("soft_cap_invalid", "随手拍软封顶规则内容非法")
+    exemptions = block.get("hard_defect_exemptions")
+    if not isinstance(exemptions, list) or len(exemptions) != 1:
+        raise AestheticFoundationError("defect_exemptions_invalid", "硬伤豁免规则必须唯一且不可缺失")
+    exemption = exemptions[0]
+    if not isinstance(exemption, dict) or set(exemption) != {
+        "key", "source", "defect_key", "evidence_contains_any", "foundation_requirements"
+    }:
+        raise AestheticFoundationError("defect_exemption_invalid", "硬伤豁免规则形状非法")
+    requirements = exemption.get("foundation_requirements")
+    if (
+        exemption.get("key") != "subject_obscuring_brand_wordmark"
+        or exemption.get("source") != "image_defects"
+        or exemption.get("defect_key") != "subject_obscuring_watermark"
+        or exemption.get("evidence_contains_any") != ["品牌文字", "品牌字样"]
+        or not isinstance(requirements, dict)
+        or set(requirements) != {"detail_completion", "presentation_integrity"}
+    ):
+        raise AestheticFoundationError("defect_exemption_invalid", "品牌字样豁免规则内容非法")
+    for key, requirement in requirements.items():
+        if (
+            not isinstance(requirement, dict)
+            or set(requirement) != {"min_grade", "shortcomings_empty"}
+            or not _is_int(requirement.get("min_grade"))
+            or not 1 <= requirement["min_grade"] <= 5
+            or requirement.get("shortcomings_empty") is not True
+            or key not in DIMENSION_KEYS
+        ):
+            raise AestheticFoundationError("defect_exemption_invalid", "品牌字样豁免的维度约束非法")
+    return soft_cap, exemptions
+
+
+def _reason_values(precheck: dict[str, Any]) -> list[str]:
+    value = (precheck.get("production_fields") or {}).get("reason")
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, list):
+        return [item for item in value if isinstance(item, str)]
+    return []
+
+
+def _precheck_after_narrow_exemptions(
+    precheck: dict[str, Any],
+    foundation: dict[str, Any],
+    exemptions: list[dict[str, Any]],
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """只在A证据与B完整性双重佐证时排除品牌字样误报；输入保持只读。"""
+    adjusted = copy.deepcopy(precheck)
+    applied: list[dict[str, Any]] = []
+    evidence_text = json.dumps(
+        precheck.get("decisive_evidence"), ensure_ascii=False, sort_keys=True
+    )
+    for exemption in exemptions:
+        source = exemption["source"]
+        defect_key = exemption["defect_key"]
+        defects = adjusted.get(source)
+        if not isinstance(defects, list) or defect_key not in defects:
+            continue
+        if not any(token in evidence_text for token in exemption["evidence_contains_any"]):
+            continue
+        qualified = True
+        for dimension_key, requirement in exemption["foundation_requirements"].items():
+            dimension = foundation["dimensions"][dimension_key]
+            if dimension["grade"] < requirement["min_grade"]:
+                qualified = False
+            if requirement["shortcomings_empty"] and dimension["shortcomings"]:
+                qualified = False
+        if not qualified:
+            continue
+        adjusted[source] = [item for item in defects if item != defect_key]
+        applied.append({
+            "rule": "hard_defect_exemption",
+            "key": exemption["key"],
+            "defect_key": defect_key,
+        })
+    return adjusted, applied
 
 
 def apply_aesthetic_v3_rules(
@@ -162,7 +265,7 @@ def apply_aesthetic_v3_rules(
     redline = evaluate_redlines(precheck, policy=contract["redline_policy"])
     if redline.get("hit"):
         return {
-            "engine_version": "inspiration-aesthetic-v3-engine-v1",
+            "engine_version": "inspiration-aesthetic-v3-engine-v2",
             "score": min(20, int(redline.get("hit_score_cap") or 20)), "level": "L5",
             "raw_level": "L5", "hard_reject": True,
             "hit_rules": list(redline.get("hit_rules") or []), "caps": ["redline"],
@@ -173,6 +276,7 @@ def apply_aesthetic_v3_rules(
     if foundation is None:
         raise AestheticFoundationError("foundation_missing", "非红线样本缺少调用B美感基础结果")
     normalized = validate_aesthetic_output(foundation)
+    soft_cap, exemptions = _validated_quality_rules(contract)
     frozen = canonical_foundation(normalized)
     working = copy.deepcopy(normalized)
     if _test_mutate_after_freeze:
@@ -198,9 +302,18 @@ def apply_aesthetic_v3_rules(
         final_score = max(0, final_score + penalty)
         if penalty:
             caps.append({"rule": "media_penalty", "media_key": media_key, "delta": penalty, "uncertain": uncertain})
+    if any(reason in soft_cap["match_any"] for reason in _reason_values(precheck)):
+        capped = min(final_score, int(soft_cap["cap_to"]))
+        if capped != final_score:
+            caps.append({"rule": soft_cap["key"], "cap_to": int(soft_cap["cap_to"])})
+        final_score = capped
     veto = modifiers["high_score_veto"]
     if "tiers" in veto:
-        after, action = _apply_v2_hard_defect_policy(precheck=precheck, veto=veto, score=float(final_score))
+        policy_precheck, applied_exemptions = _precheck_after_narrow_exemptions(
+            precheck, normalized, exemptions
+        )
+        caps.extend(applied_exemptions)
+        after, action = _apply_v2_hard_defect_policy(precheck=policy_precheck, veto=veto, score=float(final_score))
         if int(after) != final_score:
             caps.append({"rule": "hard_defect_severity", **action})
         final_score = int(after)
@@ -208,7 +321,7 @@ def apply_aesthetic_v3_rules(
     if frozen != after:
         raise AestheticFoundationError("foundation_pollution", "分层污染：v3规则改写了前置美感分或八维证据")
     return {
-        "engine_version": "inspiration-aesthetic-v3-engine-v1",
+        "engine_version": "inspiration-aesthetic-v3-engine-v2",
         "score": final_score,
         "level": _score_to_level(final_score, thresholds),
         "raw_level": raw_level, "hard_reject": False, "hit_rules": [],

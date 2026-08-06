@@ -295,6 +295,15 @@ def _seed_inspiration_image_prompts(db: Session, settings) -> None:
             "pipeline_scope": "shared",
             "note": "2026-08-06：完整JSON结构实例，八维证据非空，保留严格校验",
         },
+        {
+            "stage": "B",
+            "name": "灵感图锚点校准与逐维证据美感基础评分器",
+            "version": "inspiration-b-v5-anchor-calibration-evidence-20260807",
+            "filename": "inspiration_image_call_b_aesthetic_v5.txt",
+            "relative_path": "backend/prompts/inspiration_image_call_b_aesthetic_v5.txt",
+            "pipeline_scope": "shared",
+            "note": "2026-08-07：恢复四锚可见语义和相邻边界校准，严格八维证据合同不变",
+        },
     )
     for item in prompt_specs:
         exists = db.scalar(
@@ -331,7 +340,7 @@ def _seed_inspiration_image_prompts(db: Session, settings) -> None:
     )
     new_b = db.scalar(
         select(PromptVersion).where(
-            PromptVersion.version == "inspiration-b-v4-evidence-contract-20260806"
+            PromptVersion.version == "inspiration-b-v5-anchor-calibration-evidence-20260807"
         )
     )
     profile = db.scalar(
