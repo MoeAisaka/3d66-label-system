@@ -92,6 +92,12 @@ PROCESSOR_CATALOG: dict[str, dict[str, Any]] = {
         "output_kind": "document_image",
         "config_schema": {},
     },
+    "document.page_batches": {
+        "label": "PDF 独立页图分批",
+        "input_kinds": ["document"],
+        "output_kind": "document_image",
+        "config_schema": {},
+    },
     "document.multimodal_summary": {
         "label": "文档多模态总结",
         "input_kinds": ["document_image"],
@@ -553,8 +559,13 @@ def validate_pipeline_config(
     active_modules = {item["module"] for item in normalized_processors if item["enabled"]}
     if input_kind == "image" and "image.prepare" not in active_modules:
         raise ValueError("图片流水线必须包含 image.prepare")
-    if input_kind == "pdf" and not {"document.pdf_extract", "document.page_contact_sheet"}.issubset(active_modules):
-        raise ValueError("PDF 流水线必须包含文本提取和页图接触表")
+    if input_kind == "pdf":
+        image_channel = {
+            "document.page_contact_sheet",
+            "document.page_batches",
+        } & active_modules
+        if "document.pdf_extract" not in active_modules or not image_channel:
+            raise ValueError("PDF 流水线必须包含文本提取和一种页图输入通道")
     prompt_mode = value.get("prompt_mode", "single")
     if prompt_mode not in {"follow", "single", "ab"}:
         raise ValueError("提示词模式必须是 follow、single 或 ab")

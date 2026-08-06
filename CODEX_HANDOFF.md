@@ -772,3 +772,17 @@ npm.cmd run build
   capability，seed 不更新它们的 revision。
 - 固定 100 张复跑必须显式选择新 A 与 run #14 原 B，并把 run、指标、15 张严重误判、
   误报护栏和检出率写入 125 号外部验收报告。
+
+## 18. 2026-08-06 PDF 方案文本分批页图通道交接
+
+- proposal_text_pdf 使用 ADR-0035：原生文本层全页抽取；无文本页才 OCR；禁止联系表。
+- 调用 A 逐页长边 1024px、每批 16 页串行全扫，红线早停；每批严格校验并仅重试一次。
+- 跨批信息先见优先、冲突人工复核；效果图/分析图/意向图计数按批次求和。
+- 调用 B 由 select_representative_pages 确定性选择最多 16 页，高保真 PNG 输入；
+  同时携带目录与 build_text_layer_summary 生成的全页文本摘要，模型不得自选页。
+- prepare_proposal_pdf_model_input、run_call_a_batches 和选择器均为 proposal 专用，
+  通用 PDF 联系表及灵感图路径未改。
+- 旧部署启动时只允许精确的 page_contact_sheet→page_batches 和缺少
+  pdf_input_channel 块两种已知升级；未知配置差异拒绝覆盖。
+- 结果的 preprocess_json.pdf_input_channel 保存实际页批、代表页和 A/B token 分项。
+- 外部验收报告固定在 /Users/Shared/OpenClaw/142-实现-标签实验台PDF方案文本二期接入-20260806/。

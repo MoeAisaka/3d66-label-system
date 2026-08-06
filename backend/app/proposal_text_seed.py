@@ -23,7 +23,7 @@ def proposal_text_pipeline()->dict:
         "processors":[
             {"module":"document.pdf_extract","enabled":True,"config":{"max_pages":20,"max_text_chars":100000}},
             {"module":"document.ocr_if_needed","enabled":True,"config":{"min_text_chars":80}},
-            {"module":"document.page_contact_sheet","enabled":True,"config":{}},
+            {"module":"document.page_batches","enabled":True,"config":{}},
         ],
         "prompt_mode":"follow","prompt_context":{"instruction":""},
         "dimensions":{"enabled":False,"mode":"none","enabled_keys":[]},
@@ -52,6 +52,15 @@ def seed_proposal_text_pdf(db:Session)->None:
         profile=EvaluationCategoryProfile(category_key=PROPOSAL_CATEGORY_KEY,pipeline_revision=1,**values);db.add(profile)
     elif profile.rubric_version!=PROPOSAL_SPEC_VERSION:
         raise RuntimeError("proposal_text_pdf已存在非本版本配置，拒绝启动时覆盖")
+    elif profile.pipeline_config_json!=values["pipeline_config_json"]:
+        legacy_pipeline=json.loads(canonical_json(pipeline))
+        for processor in legacy_pipeline["processors"]:
+            if processor["module"]=="document.page_batches":
+                processor["module"]="document.page_contact_sheet"
+        if profile.pipeline_config_json!=canonical_json(legacy_pipeline):
+            raise RuntimeError("proposal_text_pdf流水线已存在未知改动，拒绝覆盖")
+        profile.pipeline_config_json=values["pipeline_config_json"]
+        profile.pipeline_revision=(profile.pipeline_revision or 0)+1
     classification={"profile_type":"text-proposal-additive-v1","source":"precheck.信息提取.项目分类.审核类别"}
     dimensions={"profile_type":"text-proposal-additive-v1","tracks":["A","B","C","balanced"]}
     contract_json=canonical_json(contract);contract_hash=hashlib.sha256(contract_json.encode()).hexdigest()
@@ -60,5 +69,13 @@ def seed_proposal_text_pdf(db:Session)->None:
         db.add(CategoryEvaluationV3Config(category_key=PROPOSAL_CATEGORY_KEY,display_name="PDF方案文本",status="active",contract_json=contract_json,classification_map_json=canonical_json(classification),subcategory_dimensions_json=canonical_json(dimensions),dimension_deduction_rules_json="{}",media_penalty_enabled=False,revision=1,contract_hash=contract_hash,created_by="system:proposal-text-v1"))
     else:
         current=json.loads(row.contract_json or "{}")
-        if current.get("spec_version")!=PROPOSAL_SPEC_VERSION or row.contract_json!=contract_json:
+        if current.get("spec_version")!=PROPOSAL_SPEC_VERSION:
             raise RuntimeError("proposal_text_pdf v3合同已存在冲突版本，拒绝覆盖")
+        if row.contract_json!=contract_json:
+            legacy_contract=dict(contract)
+            legacy_contract.pop("pdf_input_channel",None)
+            if row.contract_json!=canonical_json(legacy_contract):
+                raise RuntimeError("proposal_text_pdf v3合同已存在未知改动，拒绝覆盖")
+            row.contract_json=contract_json
+            row.contract_hash=contract_hash
+            row.revision=(row.revision or 0)+1

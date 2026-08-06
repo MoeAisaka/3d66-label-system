@@ -8,6 +8,37 @@
   "call_b_version": "proposal-text-b-v1-baseline-20260806",
   "source_standard": "钉钉文档《【标签系统】方案文本提示词》2026-08-06 15:52版",
 
+  "pdf_input_channel": {
+    "schema_version": "proposal-pdf-input-v1",
+    "long_image_stitching": false,
+    "text_layer": {
+      "primary": true,
+      "extract_all_pages": true,
+      "ocr_only_without_text": true
+    },
+    "call_a": {
+      "mode": "paged_batches",
+      "batch_size": 16,
+      "max_side_px": 1024,
+      "scan_all_pages": true,
+      "stop_on_redline": true,
+      "redline_merge": "union",
+      "information_merge": "first_seen_conflict_manual_review"
+    },
+    "call_b": {
+      "mode": "deterministic_representative_pages",
+      "sample_size": 16,
+      "high_fidelity": true,
+      "model_page_selection": false,
+      "required_inputs": ["table_of_contents", "text_layer_summary", "sampled_pages"]
+    },
+    "audit": {
+      "record_page_batches": true,
+      "record_sampled_pages": true,
+      "record_tokens_by_stage": true
+    }
+  },
+
   "deterministic_prechecks": {
     "comment": "以下红线由引擎在调用A之前确定性执行，不依赖模型判断；引擎结果与模型结果冲突时以引擎为准",
     "page_count": {

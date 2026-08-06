@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -10,8 +11,21 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
+from app import worker
+from app.doubao import DoubaoResponse
+from app.main import _category_execution_snapshot
+from app.media import ProposalPdfModelInput, ProposalPdfPage
+from app.dimension_schema_registry import canonical_json
 from app.database import Base
-from app.models import CategoryEvaluationV3Config, EvaluationCategoryProfile, PromptVersion
+from app.models import (
+    Asset,
+    CategoryEvaluationV3Config,
+    EvaluationCategoryProfile,
+    EvaluationJob,
+    EvaluationResult,
+    ModelConfig,
+    PromptVersion,
+)
 from app.proposal_text_pipeline import (
     build_deterministic_page_precheck,
     build_manual_review_precheck,
@@ -61,6 +75,9 @@ def test_seed_persists_exact_prompts_profile_and_additive_contract() -> None:
         assert "document.multimodal_summary" not in {
             item["module"] for item in pipeline["processors"]
         }
+        assert "document.page_contact_sheet" not in {
+            item["module"] for item in pipeline["processors"]
+        }
         prompts = db.scalars(select(PromptVersion).where(
             PromptVersion.category_key == "proposal_text_pdf"
         )).all()
@@ -78,6 +95,13 @@ def test_seed_persists_exact_prompts_profile_and_additive_contract() -> None:
         contract = json.loads(row.contract_json)
         assert contract["spec_version"] == PROPOSAL_SPEC_VERSION
         assert contract["profile_type"] == "text-proposal-additive-v1"
+        assert contract["pdf_input_channel"]["long_image_stitching"] is False
+        assert contract["pdf_input_channel"]["call_a"] == {
+            "mode": "paged_batches", "batch_size": 16, "max_side_px": 1024,
+            "scan_all_pages": True, "stop_on_redline": True,
+            "redline_merge": "union",
+            "information_merge": "first_seen_conflict_manual_review",
+        }
         assert v3_authoritative_category(db, "proposal_text_pdf")["contract"] == contract
 
 
@@ -125,3 +149,208 @@ def test_v3_proposal_dispatch_aggregates_without_extra_model_call() -> None:
     assert scoring["level"] == "L1"
     assert scoring["proposal_aesthetic_score"] == 90
     assert scoring["scoring_mode"] == "v3_authoritative"
+
+
+def test_worker_runs_all_a_batches_then_deterministic_b_and_audits_tokens(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    engine = _engine()
+    db = Session(engine, expire_on_commit=False)
+    seed_defaults(db)
+    profile = db.scalar(select(EvaluationCategoryProfile).where(
+        EvaluationCategoryProfile.category_key == "proposal_text_pdf"
+    ))
+    assert profile is not None
+    prompt_a = db.get(PromptVersion, profile.prompt_a_id)
+    prompt_b = db.get(PromptVersion, profile.prompt_b_id)
+    model = db.get(ModelConfig, profile.model_config_id)
+    assert prompt_a is not None and prompt_b is not None and model is not None
+    model.high_risk_review_enabled = False
+    model.encrypted_api_key = "credential-reference"
+    source_path = tmp_path / "sample.pdf"
+    source_path.write_bytes(b"%PDF-test")
+    page_image = tmp_path / "page.jpg"
+    page_image.write_bytes(b"jpeg")
+    asset = Asset(
+        original_name="sample.pdf",
+        stored_name=source_path.name,
+        mime_type="application/pdf",
+        size_bytes=source_path.stat().st_size,
+        sha256="f" * 64,
+    )
+    db.add(asset)
+    db.flush()
+    bundle = v3_authoritative_category(db, "proposal_text_pdf")
+    assert bundle is not None
+    snapshot = _category_execution_snapshot(
+        profile,
+        prompt_a_id=prompt_a.id,
+        prompt_b_id=prompt_b.id,
+        model_config=model,
+        v3_authoritative_bundle=bundle,
+    )
+    job = EvaluationJob(
+        asset_id=asset.id,
+        category_key="proposal_text_pdf",
+        category_profile_snapshot_json=snapshot,
+        prompt_a_id=prompt_a.id,
+        prompt_b_id=prompt_b.id,
+        status="processing",
+    )
+    db.add(job)
+    db.commit()
+
+    pages = tuple(
+        ProposalPdfPage(
+            page_number=page_number,
+            text=(
+                "效果图 鸟瞰图" if page_number in {5, 21}
+                else "场地分析 概念推导" if page_number in {3, 19}
+                else f"普通页面 {page_number}"
+            ),
+            text_source="text_layer",
+            call_a_image_path=page_image,
+        )
+        for page_number in range(1, 33)
+    )
+    prepared = ProposalPdfModelInput(
+        page_count=32,
+        actual_page_count=32,
+        pages=pages,
+        table_of_contents=((1, "概念", 3), (1, "效果展示", 5)),
+        batch_size=16,
+        call_a_max_side_px=1024,
+        cache_key="cache",
+    )
+
+    @contextmanager
+    def test_scope():
+        try:
+            yield db
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+
+    calls: list[dict[str, object]] = []
+
+    class FakeClient:
+        def __init__(self, _config) -> None:
+            pass
+
+        async def chat_text_images(
+            self, _system_prompt, user_prompt, samples, **kwargs
+        ):
+            call_number = len(calls) + 1
+            calls.append({
+                "user_prompt": user_prompt,
+                "sample_count": len(samples),
+                "detail": kwargs["image_detail"],
+            })
+            parsed = passed_call_a() if call_number <= 2 else call_b()
+            return DoubaoResponse(
+                parsed=parsed,
+                raw_text=json.dumps(parsed, ensure_ascii=False),
+                raw_payload={"call": call_number},
+                input_tokens=100 * call_number,
+                output_tokens=10 * call_number,
+                total_tokens=110 * call_number,
+            )
+
+    monkeypatch.setattr(worker, "session_scope", test_scope)
+    monkeypatch.setattr(worker, "settings", SimpleNamespace(upload_dir=tmp_path))
+    monkeypatch.setattr(worker, "DoubaoClient", FakeClient)
+    monkeypatch.setattr(
+        worker, "prepare_proposal_pdf_model_input",
+        lambda *_args, **_kwargs: prepared,
+    )
+    monkeypatch.setattr(
+        worker, "render_proposal_pdf_pages_high_fidelity",
+        lambda *_args, page_numbers, **_kwargs: {
+            page_number: page_image for page_number in page_numbers
+        },
+    )
+
+    try:
+        asyncio.run(worker.evaluate_job(job.id))
+        assert len(calls) == 3
+        assert [call["sample_count"] for call in calls] == [16, 16, 16]
+        assert [call["detail"] for call in calls] == ["low", "low", "high"]
+        assert "第1批" in calls[0]["user_prompt"]
+        assert "第2批" in calls[1]["user_prompt"]
+        assert "【目录结构】" in calls[2]["user_prompt"]
+        db.expire_all()
+        result = db.scalar(select(EvaluationResult).where(
+            EvaluationResult.job_id == job.id
+        ))
+        assert result is not None
+        preprocess = json.loads(result.preprocess_json)
+        channel = preprocess["pdf_input_channel"]
+        assert channel["long_image_stitching"] is False
+        assert channel["call_a"]["scanned_pages"] == list(range(1, 33))
+        assert channel["call_a"]["batch_count"] == 2
+        assert len(channel["call_b"]["representative_pages"]) == 16
+        assert channel["token_usage"] == {
+            "measured": True,
+            "call_a": {
+                "input_tokens": 300,
+                "output_tokens": 30,
+                "total_tokens": 330,
+            },
+            "call_b": {
+                "input_tokens": 300,
+                "output_tokens": 30,
+                "total_tokens": 330,
+            },
+            "total": {
+                "input_tokens": 600,
+                "output_tokens": 60,
+                "total_tokens": 660,
+            },
+        }
+    finally:
+        db.close()
+        engine.dispose()
+
+
+def test_seed_upgrades_only_the_known_legacy_pdf_channel_idempotently() -> None:
+    engine = _engine()
+    with Session(engine) as db:
+        seed_defaults(db)
+        profile = db.scalar(select(EvaluationCategoryProfile).where(
+            EvaluationCategoryProfile.category_key == "proposal_text_pdf"
+        ))
+        row = db.scalar(select(CategoryEvaluationV3Config).where(
+            CategoryEvaluationV3Config.category_key == "proposal_text_pdf"
+        ))
+        assert profile is not None and row is not None
+        legacy_pipeline = json.loads(profile.pipeline_config_json)
+        for processor in legacy_pipeline["processors"]:
+            if processor["module"] == "document.page_batches":
+                processor["module"] = "document.page_contact_sheet"
+        profile.pipeline_config_json = canonical_json(legacy_pipeline)
+        legacy_contract = json.loads(row.contract_json)
+        legacy_contract.pop("pdf_input_channel")
+        row.contract_json = canonical_json(legacy_contract)
+        original_revision = row.revision
+        original_pipeline_revision = profile.pipeline_revision
+        db.flush()
+
+        seed_proposal_text_pdf(db)
+        upgraded_pipeline = json.loads(profile.pipeline_config_json)
+        modules = {
+            processor["module"] for processor in upgraded_pipeline["processors"]
+        }
+        assert "document.page_batches" in modules
+        assert "document.page_contact_sheet" not in modules
+        assert profile.pipeline_revision == original_pipeline_revision + 1
+        assert json.loads(row.contract_json)["pdf_input_channel"]["call_a"][
+            "batch_size"
+        ] == 16
+        assert row.revision == original_revision + 1
+
+        seed_proposal_text_pdf(db)
+        assert profile.pipeline_revision == original_pipeline_revision + 1
+        assert row.revision == original_revision + 1
+    engine.dispose()

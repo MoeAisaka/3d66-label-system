@@ -46,7 +46,12 @@ from .loop_engine import (
     request_fingerprint,
     validate_result_scope,
 )
-from .media import prepare_model_image, prepare_pdf_model_input
+from .media import (
+    prepare_model_image,
+    prepare_pdf_model_input,
+    prepare_proposal_pdf_model_input,
+    render_proposal_pdf_pages_high_fidelity,
+)
 from .models import (
     Asset,
     CircuitBreaker,
@@ -134,6 +139,13 @@ from .proposal_text_pipeline import (
     build_deterministic_page_precheck,
     build_manual_review_precheck,
     call_validated_json,
+)
+from .proposal_text_pdf_channel import (
+    build_call_a_batch_context,
+    build_text_layer_summary,
+    run_call_a_batches,
+    select_representative_pages,
+    summarize_stage_usage,
 )
 from .worker_v3_shadow import (
     compute_v3_shadow,
@@ -1211,32 +1223,66 @@ async def evaluate_job(job_id: int) -> None:
     if not image_path.exists():
         raise RuntimeError("原始素材文件不存在")
     document_context: dict[str, object] | None = None
+    proposal_pdf_input = None
     proposal_precheck: dict[str, object] | None = None
+    proposal_a_responses: list[object] = []
+    proposal_b_responses: list[object] = []
+    proposal_channel_audit: dict[str, object] = {}
     category_modules = active_modules(category_pipeline_config)
     if "document.pdf_extract" in category_modules:
         pdf_config = processor_config(category_pipeline_config, "document.pdf_extract")
         ocr_config = processor_config(category_pipeline_config, "document.ocr_if_needed")
         try:
-            pdf_input = prepare_pdf_model_input(
-                image_path,
-                content_sha256=asset.sha256,
-                cache_dir=settings.upload_dir / ".derived" / "pdf",
-                max_pages=int(pdf_config.get("max_pages", category_preprocess_config.get("max_pages", 4))),
-                max_text_chars=int(
-                    pdf_config.get("max_text_chars", category_preprocess_config.get("max_text_chars", 24_000))
-                ),
-                ocr_enabled="document.ocr_if_needed" in category_modules,
-                ocr_min_text_chars=int(ocr_config.get("min_text_chars", 80)),
-            )
-            model_image_path = pdf_input.preview_path
-            model_mime_type = pdf_input.preview_mime_type
-            document_context = pdf_input.context
             if proposal_text_active:
-                raw_page_count = document_context.get("page_count")
-                page_count = raw_page_count if isinstance(raw_page_count, int) and not isinstance(raw_page_count, bool) else None
-                proposal_precheck = build_deterministic_page_precheck(
-                    asset.original_name, page_count
+                pdf_channel = proposal_contract["pdf_input_channel"]
+                call_a_channel = pdf_channel["call_a"]
+                proposal_pdf_input = prepare_proposal_pdf_model_input(
+                    image_path,
+                    content_sha256=asset.sha256,
+                    cache_dir=settings.upload_dir / ".derived" / "proposal-pdf",
+                    batch_size=int(call_a_channel["batch_size"]),
+                    call_a_max_side_px=int(call_a_channel["max_side_px"]),
+                    ocr_enabled="document.ocr_if_needed" in category_modules,
                 )
+                first_page = proposal_pdf_input.pages[0]
+                model_image_path = first_page.call_a_image_path
+                model_mime_type = first_page.call_a_mime_type
+                document_context = {
+                    "schema_version": pdf_channel["schema_version"],
+                    "page_count": proposal_pdf_input.page_count,
+                    "actual_page_count": proposal_pdf_input.actual_page_count,
+                    "rendered_pages": proposal_pdf_input.actual_page_count,
+                    "text_extraction": "all_pages_text_layer_first",
+                    "text_sources": {
+                        source: sum(
+                            page.text_source == source
+                            for page in proposal_pdf_input.pages
+                        )
+                        for source in ("text_layer", "ocr", "image")
+                    },
+                    "table_of_contents": [
+                        list(item) for item in proposal_pdf_input.table_of_contents
+                    ],
+                    "text": "",
+                }
+                proposal_precheck = build_deterministic_page_precheck(
+                    asset.original_name, proposal_pdf_input.page_count
+                )
+            else:
+                pdf_input = prepare_pdf_model_input(
+                    image_path,
+                    content_sha256=asset.sha256,
+                    cache_dir=settings.upload_dir / ".derived" / "pdf",
+                    max_pages=int(pdf_config.get("max_pages", category_preprocess_config.get("max_pages", 4))),
+                    max_text_chars=int(
+                        pdf_config.get("max_text_chars", category_preprocess_config.get("max_text_chars", 24_000))
+                    ),
+                    ocr_enabled="document.ocr_if_needed" in category_modules,
+                    ocr_min_text_chars=int(ocr_config.get("min_text_chars", 80)),
+                )
+                model_image_path = pdf_input.preview_path
+                model_mime_type = pdf_input.preview_mime_type
+                document_context = pdf_input.context
         except RuntimeError:
             if not proposal_text_active:
                 raise
@@ -1278,6 +1324,23 @@ async def evaluate_job(job_id: int) -> None:
         }
         preprocess_snapshot["text_excerpt"] = document_text[:2_000]
 
+    if proposal_pdf_input is not None:
+        proposal_channel_audit = {
+            "schema_version": "proposal-pdf-input-v1",
+            "long_image_stitching": False,
+            "metadata_page_count": proposal_pdf_input.page_count,
+            "actual_page_count": proposal_pdf_input.actual_page_count,
+            "call_a": {
+                "batch_size": proposal_pdf_input.batch_size,
+                "max_side_px": proposal_pdf_input.call_a_max_side_px,
+                "page_batches": [
+                    [page.page_number for page in batch]
+                    for batch in proposal_pdf_input.page_batches()
+                ],
+            },
+        }
+        preprocess_snapshot["pdf_input_channel"] = proposal_channel_audit
+
     execution_model = model_config
     if document_context is not None and category_profile_snapshot is not None and category_profile_snapshot.get("pdf_summary_model_config") is not None:
         pdf_model_id = category_profile_snapshot["pdf_summary_model_config_id"]
@@ -1306,7 +1369,7 @@ async def evaluate_job(job_id: int) -> None:
     # as recovery jobs so retry lineage, attempt count and Retry-After survive.
     client = DoubaoClient(client_config)  # type: ignore[arg-type]
     pdf_summary: dict[str, object] | None = None
-    if document_context is not None and "document.multimodal_summary" in category_modules:
+    if not proposal_text_active and document_context is not None and "document.multimodal_summary" in category_modules:
         _set_job(job_id, stage="pdf_summary", progress=12)
         summary_response = await client.chat_json(
             PDF_SUMMARY_SYSTEM_PROMPT,
@@ -1342,16 +1405,18 @@ async def evaluate_job(job_id: int) -> None:
         "size_bytes": asset.size_bytes,
         "category_key": job.category_key,
     }
-    category_prompt_context = _category_prompt_context(
-        category_key=job.category_key,
-        preprocess_config=category_preprocess_config,
-        document_context=document_context,
-        pdf_summary=pdf_summary,
-        pipeline_config=category_pipeline_config,
-        include_dimension_rules=(
-            not freeform_mode and not proposal_text_active and (single_mode or dimension_mode == "none")
-        ),
-        freeform=freeform_mode or proposal_text_active,
+    category_prompt_context = (
+        "" if proposal_text_active else _category_prompt_context(
+            category_key=job.category_key,
+            preprocess_config=category_preprocess_config,
+            document_context=document_context,
+            pdf_summary=pdf_summary,
+            pipeline_config=category_pipeline_config,
+            include_dimension_rules=(
+                not freeform_mode and (single_mode or dimension_mode == "none")
+            ),
+            freeform=freeform_mode,
+        )
     )
     user_a = prompt_a.user_prompt.replace(
         "{{image_metadata}}", json.dumps(metadata, ensure_ascii=False)
@@ -1383,45 +1448,74 @@ async def evaluate_job(job_id: int) -> None:
         return
     if proposal_text_active:
         if proposal_precheck is not None:
+            parsed_a = validate_proposal_call_a_output(proposal_precheck)
             response_a = SimpleNamespace(
-                parsed=validate_proposal_call_a_output(proposal_precheck),
+                parsed=parsed_a,
                 raw_text=json.dumps(proposal_precheck, ensure_ascii=False),
                 raw_payload={"engine_precheck": proposal_precheck},
             )
+            if proposal_channel_audit:
+                proposal_channel_audit["call_a"].update({
+                    "scanned_pages": [],
+                    "batch_count": 0,
+                    "stop_reason": "deterministic_precheck",
+                })
         else:
-            async def invoke_proposal_a():
-                return await client.chat_text(
+            if proposal_pdf_input is None:
+                raise RuntimeError("方案文本PDF前处理结果缺失")
+            pages_by_number = {
+                page.page_number: page for page in proposal_pdf_input.pages
+            }
+
+            async def invoke_proposal_a(
+                batch_index: int, batch: tuple[int, ...]
+            ):
+                pages = [pages_by_number[page_number] for page_number in batch]
+                return await client.chat_text_images(
                     prompt_a.system_prompt,
-                    user_a,
-                    image_path=model_image_path,
-                    mime_type=model_mime_type,
+                    user_a + build_call_a_batch_context(
+                        batch_index=batch_index,
+                        pages=pages,
+                        total_pages=proposal_pdf_input.actual_page_count,
+                    ),
+                    [
+                        (
+                            f"第{page.page_number}页",
+                            page.call_a_image_path,
+                            page.call_a_mime_type,
+                        )
+                        for page in pages
+                    ],
+                    image_detail="low",
+                    max_image_count=proposal_pdf_input.batch_size,
                     max_attempts=1,
                 )
-            call_a_outcome = await call_validated_json(
-                invoke_proposal_a, validate_proposal_call_a_output
+            call_a_result = await run_call_a_batches(
+                tuple(
+                    tuple(page.page_number for page in batch)
+                    for batch in proposal_pdf_input.page_batches()
+                ),
+                invoke=invoke_proposal_a,
+                validator=validate_proposal_call_a_output,
+                filename=asset.original_name,
+                page_count=proposal_pdf_input.page_count,
             )
-            last_a_response = call_a_outcome.responses[-1]
-            if call_a_outcome.value is None:
-                page_count_value = (
-                    document_context.get("page_count")
-                    if isinstance(document_context, dict) else None
-                )
-                parsed_a = build_manual_review_precheck(
-                    asset.original_name,
-                    page_count_value if isinstance(page_count_value, int) else None,
-                    "调用A输出连续2次校验失败，已转人工复核",
-                )
-            else:
-                parsed_a = call_a_outcome.value
+            proposal_a_responses = list(call_a_result.responses)
+            parsed_a = call_a_result.precheck
             response_a = SimpleNamespace(
                 parsed=parsed_a,
-                raw_text=last_a_response.raw_text,
-                raw_payload=(
-                    last_a_response.raw_payload
-                    if len(call_a_outcome.responses) == 1
-                    else {"attempts": [item.raw_payload for item in call_a_outcome.responses]}
-                ),
+                raw_text=json.dumps(parsed_a, ensure_ascii=False),
+                raw_payload={
+                    "attempts": [
+                        item.raw_payload for item in call_a_result.responses
+                    ]
+                },
             )
+            proposal_channel_audit["call_a"].update({
+                "scanned_pages": list(call_a_result.scanned_pages),
+                "batch_count": call_a_result.batch_count,
+                "stop_reason": call_a_result.stop_reason,
+            })
     else:
         response_a = await (
             client.chat_text(
@@ -1506,31 +1600,72 @@ async def evaluate_job(job_id: int) -> None:
             .replace("{{previous_output}}", response_a.raw_text)
             .replace("{{rubric_version}}", prompt_b.rubric_version)
         )
-        user_b += _category_prompt_context(
-            category_key=job.category_key,
-            preprocess_config=category_preprocess_config,
-            document_context=document_context,
-            pdf_summary=pdf_summary,
-            pipeline_config=category_pipeline_config,
-            include_dimension_rules=not freeform_mode and not proposal_text_active,
-            freeform=freeform_mode or proposal_text_active,
-        )
-        response_b = await (
-            client.chat_text(
+        if proposal_text_active:
+            if proposal_pdf_input is None:
+                raise RuntimeError("方案文本PDF前处理结果缺失")
+            image_stats = precheck["信息提取"]["图像统计"]
+            sample_size = int(
+                proposal_contract["pdf_input_channel"]["call_b"]["sample_size"]
+            )
+            representative_pages = select_representative_pages(
+                proposal_pdf_input.page_texts,
+                table_of_contents=proposal_pdf_input.table_of_contents,
+                image_stats=image_stats,
+                sample_size=sample_size,
+            )
+            rendered_pages = render_proposal_pdf_pages_high_fidelity(
+                image_path,
+                content_sha256=asset.sha256,
+                cache_dir=settings.upload_dir / ".derived" / "proposal-pdf-b",
+                page_numbers=representative_pages,
+            )
+            proposal_b_samples = [
+                (f"第{page_number}页", rendered_pages[page_number], "image/png")
+                for page_number in representative_pages
+            ]
+            user_b += "\n\n" + build_text_layer_summary(
+                proposal_pdf_input.page_texts,
+                table_of_contents=proposal_pdf_input.table_of_contents,
+            )
+            user_b += "\n\n【引擎确定性代表页】" + ",".join(
+                str(page_number) for page_number in representative_pages
+            )
+            proposal_channel_audit["call_b"] = {
+                "sample_size": sample_size,
+                "representative_pages": list(representative_pages),
+                "selection": "deterministic",
+                "high_fidelity": True,
+            }
+            response_b = await client.chat_text_images(
                 prompt_b.system_prompt,
                 user_b,
-                image_path=model_image_path,
-                mime_type=model_mime_type,
-                max_attempts=1 if proposal_text_active else None,
+                proposal_b_samples,
+                image_detail="high",
+                max_image_count=sample_size,
+                max_attempts=1,
             )
-            if freeform_mode or proposal_text_active
-            else client.chat_json(
-                prompt_b.system_prompt,
-                user_b,
-                image_path=model_image_path,
-                mime_type=model_mime_type,
+            proposal_b_responses.append(response_b)
+        else:
+            user_b += _category_prompt_context(
+                category_key=job.category_key,
+                preprocess_config=category_preprocess_config,
+                document_context=document_context,
+                pdf_summary=pdf_summary,
+                pipeline_config=category_pipeline_config,
+                include_dimension_rules=not freeform_mode,
+                freeform=freeform_mode,
             )
-        )
+            response_b = await (
+                client.chat_text(
+                    prompt_b.system_prompt, user_b,
+                    image_path=model_image_path, mime_type=model_mime_type,
+                )
+                if freeform_mode
+                else client.chat_json(
+                    prompt_b.system_prompt, user_b,
+                    image_path=model_image_path, mime_type=model_mime_type,
+                )
+            )
         response_b_attempts.append(response_b.raw_payload)
         _ensure_job_processing(job_id)
         aesthetic = response_b.parsed
@@ -1541,13 +1676,15 @@ async def evaluate_job(job_id: int) -> None:
                     aesthetic, contract=proposal_contract, audit_category=audit_category
                 )
             except (TypeError, ValueError):
-                response_b = await client.chat_text(
+                response_b = await client.chat_text_images(
                     prompt_b.system_prompt,
                     user_b,
-                    image_path=model_image_path,
-                    mime_type=model_mime_type,
+                    proposal_b_samples,
+                    image_detail="high",
+                    max_image_count=sample_size,
                     max_attempts=1,
                 )
+                proposal_b_responses.append(response_b)
                 response_b_attempts.append(response_b.raw_payload)
                 _ensure_job_processing(job_id)
                 try:
@@ -1594,6 +1731,11 @@ async def evaluate_job(job_id: int) -> None:
             response_b_attempts.append(response_b.raw_payload)
             _ensure_job_processing(job_id)
             aesthetic = response_b.parsed
+    if proposal_text_active and proposal_channel_audit:
+        proposal_channel_audit["token_usage"] = summarize_stage_usage(
+            proposal_a_responses, proposal_b_responses
+        )
+
 
     freeform_dimensions = (
         aesthetic.get("dimensions") if isinstance(aesthetic, dict) else None

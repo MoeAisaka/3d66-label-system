@@ -1598,3 +1598,17 @@ npm.cmd run build
   后端全量 1070 passed, 1 skipped，前端三项合同、lint、build 均通过。
 - 共享测试环境部署和固定 100 张基线的真实结果写入外部验收报告
   /Users/Shared/OpenClaw/125-实现-标签实验台硬伤分级与召回修复-20260805/README.md。
+
+## 最新完成：PDF 方案文本全页分批输入通道（2026-08-06）
+
+- proposal_text_pdf 禁止联系表和长图，改为文本层全页直抽、无文本页 OCR 补充、
+  调用 A 每批 16 页串行全扫；任一批命中红线立即停止。
+- 调用 A 跨批红线取并集，业务字段先见优先、冲突人工复核，批次局部图像计数求和。
+- 调用 B 由引擎按封面、目录、关键词和 A 图像统计确定性选取最多 16 页，使用高保真
+  PNG，并携带目录和确定性文本层摘要；模型不参与选页。
+- 前处理审计记录页批、扫描页、停止原因、代表页与 A/B token 分项。
+- 已知旧流水线和旧合同可一次性受控升级；任何未知差异仍 fail-closed。
+- TDD 专项 82 passed；后端全量 1115 passed, 1 skipped；前端生产 build、
+  compileall 与 diff check 通过。
+- 设计冻结见 ADR-0035 与
+  docs/superpowers/specs/2026-08-06-proposal-text-pdf-input-channel-design.md。

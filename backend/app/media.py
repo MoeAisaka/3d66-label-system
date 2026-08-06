@@ -377,3 +377,339 @@ def prepare_pdf_model_input(
                 pass
         raise RuntimeError("PDF 前处理结果写入失败") from exc
     return PdfPreprocessResult(preview_path, "image/png", context)
+
+
+@dataclass(frozen=True)
+class ProposalPdfPage:
+    page_number: int
+    text: str
+    text_source: str
+    call_a_image_path: Path
+    call_a_mime_type: str = "image/jpeg"
+
+
+@dataclass(frozen=True)
+class ProposalPdfModelInput:
+    page_count: int | None
+    actual_page_count: int
+    pages: tuple[ProposalPdfPage, ...]
+    table_of_contents: tuple[tuple[int, str, int], ...]
+    batch_size: int
+    call_a_max_side_px: int
+    cache_key: str
+
+    def page_batches(self) -> tuple[tuple[ProposalPdfPage, ...], ...]:
+        return tuple(
+            self.pages[index:index + self.batch_size]
+            for index in range(0, len(self.pages), self.batch_size)
+        )
+
+    @property
+    def page_texts(self) -> dict[int, str]:
+        return {page.page_number: page.text for page in self.pages}
+
+
+def _proposal_pdf_cache_key(
+    content_sha256: str,
+    *,
+    batch_size: int,
+    call_a_max_side_px: int,
+    ocr_enabled: bool,
+) -> str:
+    contract = {
+        "schema_version": "proposal-pdf-input-v1",
+        "content_sha256": content_sha256,
+        "batch_size": batch_size,
+        "call_a_max_side_px": call_a_max_side_px,
+        "ocr_enabled": ocr_enabled,
+    }
+    return hashlib.sha256(
+        json.dumps(
+            contract,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _render_pdf_page(
+    page: object,
+    *,
+    max_side_px: int | None,
+    scale: float | None,
+) -> Image.Image:
+    import fitz  # type: ignore[import-not-found]
+
+    rect = page.rect
+    if max_side_px is not None:
+        longest = max(float(rect.width), float(rect.height))
+        matrix_scale = max_side_px / longest if longest > 0 else 1.0
+    else:
+        matrix_scale = scale or 2.0
+    pixmap = page.get_pixmap(
+        matrix=fitz.Matrix(matrix_scale, matrix_scale),
+        alpha=False,
+    )
+    return Image.open(io.BytesIO(pixmap.tobytes("png"))).convert("RGB")
+
+
+def _atomic_save_image(image: Image.Image, path: Path, *, image_format: str) -> None:
+    temporary_path: str | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as temporary:
+            temporary_path = temporary.name
+        if image_format == "JPEG":
+            image.save(temporary_path, format="JPEG", quality=82, optimize=True)
+        else:
+            image.save(temporary_path, format=image_format, optimize=True)
+        os.replace(temporary_path, path)
+        temporary_path = None
+    finally:
+        if temporary_path:
+            try:
+                Path(temporary_path).unlink()
+            except OSError:
+                pass
+
+
+def _load_cached_proposal_pdf(
+    manifest_path: Path,
+    *,
+    expected_cache_key: str,
+) -> ProposalPdfModelInput | None:
+    if not manifest_path.exists():
+        return None
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if (
+            not isinstance(manifest, dict)
+            or manifest.get("schema_version") != "proposal-pdf-input-v1"
+            or manifest.get("cache_key") != expected_cache_key
+        ):
+            return None
+        pages = tuple(
+            ProposalPdfPage(
+                page_number=int(item["page_number"]),
+                text=str(item["text"]),
+                text_source=str(item["text_source"]),
+                call_a_image_path=manifest_path.parent / str(item["image_name"]),
+            )
+            for item in manifest["pages"]
+        )
+        if not pages or not all(page.call_a_image_path.exists() for page in pages):
+            return None
+        return ProposalPdfModelInput(
+            page_count=manifest.get("page_count"),
+            actual_page_count=int(manifest["actual_page_count"]),
+            pages=pages,
+            table_of_contents=tuple(
+                (int(item[0]), str(item[1]), int(item[2]))
+                for item in manifest.get("table_of_contents", [])
+            ),
+            batch_size=int(manifest["batch_size"]),
+            call_a_max_side_px=int(manifest["call_a_max_side_px"]),
+            cache_key=expected_cache_key,
+        )
+    except (KeyError, TypeError, ValueError, OSError, json.JSONDecodeError):
+        return None
+
+
+def prepare_proposal_pdf_model_input(
+    source_path: Path,
+    *,
+    content_sha256: str,
+    cache_dir: Path,
+    batch_size: int = 16,
+    call_a_max_side_px: int = 1024,
+    ocr_enabled: bool = True,
+) -> ProposalPdfModelInput:
+    if not 1 <= batch_size <= 16:
+        raise RuntimeError("调用A页批大小超出允许范围")
+    if not 512 <= call_a_max_side_px <= 2048:
+        raise RuntimeError("调用A页图分辨率超出允许范围")
+    cache_key = _proposal_pdf_cache_key(
+        content_sha256,
+        batch_size=batch_size,
+        call_a_max_side_px=call_a_max_side_px,
+        ocr_enabled=ocr_enabled,
+    )
+    result_dir = cache_dir / cache_key
+    result_dir.mkdir(parents=True, exist_ok=True)
+    manifest_path = result_dir / "manifest.json"
+    cached = _load_cached_proposal_pdf(
+        manifest_path,
+        expected_cache_key=cache_key,
+    )
+    if cached is not None:
+        return cached
+
+    try:
+        import fitz  # type: ignore[import-not-found]
+        from pypdf import PdfReader  # type: ignore[import-not-found]
+    except ImportError as exc:
+        raise RuntimeError("PDF 前处理依赖未安装") from exc
+
+    metadata_page_count: int | None = None
+    extracted_pages: list[str] = []
+    try:
+        reader = PdfReader(str(source_path))
+        metadata_page_count = len(reader.pages)
+        extracted_pages = [
+            (page.extract_text() or "").strip()
+            for page in reader.pages
+        ]
+    except Exception:
+        extracted_pages = []
+
+    try:
+        document = fitz.open(str(source_path))
+    except Exception as exc:
+        raise RuntimeError("PDF 前处理失败") from exc
+    try:
+        if document.page_count < 1:
+            raise RuntimeError("PDF 没有可渲染页面")
+        table_of_contents = tuple(
+            (int(level), str(title), int(page_number))
+            for level, title, page_number in document.get_toc(simple=True)
+            if int(page_number) >= 1
+        )
+        pages: list[ProposalPdfPage] = []
+        manifest_pages: list[dict[str, object]] = []
+        for index in range(document.page_count):
+            page = document.load_page(index)
+            image_name = f"call-a-{index + 1:04d}.jpg"
+            image_path = result_dir / image_name
+            frame: Image.Image | None = None
+            if not image_path.exists():
+                frame = _render_pdf_page(
+                    page,
+                    max_side_px=call_a_max_side_px,
+                    scale=None,
+                )
+                _atomic_save_image(frame, image_path, image_format="JPEG")
+            text = (
+                extracted_pages[index]
+                if index < len(extracted_pages)
+                else (page.get_text("text") or "").strip()
+            )
+            text_source = "text_layer" if text else "image"
+            if not text and ocr_enabled:
+                try:
+                    import pytesseract  # type: ignore[import-not-found]
+
+                    if frame is None:
+                        with Image.open(image_path) as opened:
+                            frame = opened.convert("RGB")
+                    ocr_text = pytesseract.image_to_string(
+                        frame,
+                        lang="chi_sim+eng",
+                    ).strip()
+                    if ocr_text:
+                        text = ocr_text
+                        text_source = "ocr"
+                except Exception:
+                    text_source = "image"
+            proposal_page = ProposalPdfPage(
+                page_number=index + 1,
+                text=text,
+                text_source=text_source,
+                call_a_image_path=image_path,
+            )
+            pages.append(proposal_page)
+            manifest_pages.append({
+                "page_number": index + 1,
+                "text": text,
+                "text_source": text_source,
+                "image_name": image_name,
+            })
+    finally:
+        document.close()
+
+    manifest = {
+        "schema_version": "proposal-pdf-input-v1",
+        "cache_key": cache_key,
+        "page_count": metadata_page_count,
+        "actual_page_count": len(pages),
+        "batch_size": batch_size,
+        "call_a_max_side_px": call_a_max_side_px,
+        "table_of_contents": [list(item) for item in table_of_contents],
+        "pages": manifest_pages,
+    }
+    temporary_manifest: str | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            dir=result_dir,
+            prefix=".manifest.",
+            suffix=".json.tmp",
+            delete=False,
+            mode="w",
+            encoding="utf-8",
+        ) as temporary:
+            temporary_manifest = temporary.name
+            json.dump(manifest, temporary, ensure_ascii=False, sort_keys=True)
+        os.replace(temporary_manifest, manifest_path)
+        temporary_manifest = None
+    finally:
+        if temporary_manifest:
+            try:
+                Path(temporary_manifest).unlink()
+            except OSError:
+                pass
+    return ProposalPdfModelInput(
+        page_count=metadata_page_count,
+        actual_page_count=len(pages),
+        pages=tuple(pages),
+        table_of_contents=table_of_contents,
+        batch_size=batch_size,
+        call_a_max_side_px=call_a_max_side_px,
+        cache_key=cache_key,
+    )
+
+
+def render_proposal_pdf_pages_high_fidelity(
+    source_path: Path,
+    *,
+    content_sha256: str,
+    cache_dir: Path,
+    page_numbers: tuple[int, ...],
+    render_scale: float = 2.0,
+) -> dict[int, Path]:
+    if not 1 <= len(page_numbers) <= 16 or len(set(page_numbers)) != len(page_numbers):
+        raise RuntimeError("调用B代表页集合不合法")
+    if not 1.0 <= render_scale <= 4.0:
+        raise RuntimeError("调用B页图分辨率超出允许范围")
+    try:
+        import fitz  # type: ignore[import-not-found]
+
+        document = fitz.open(str(source_path))
+    except Exception as exc:
+        raise RuntimeError("PDF 前处理失败") from exc
+    result_dir = cache_dir / (
+        hashlib.sha256(
+            f"proposal-b-v1:{content_sha256}:{render_scale}".encode("utf-8")
+        ).hexdigest()
+    )
+    result_dir.mkdir(parents=True, exist_ok=True)
+    rendered: dict[int, Path] = {}
+    try:
+        for page_number in page_numbers:
+            if page_number < 1 or page_number > document.page_count:
+                raise RuntimeError("调用B代表页页码越界")
+            path = result_dir / f"call-b-{page_number:04d}.png"
+            if not path.exists():
+                frame = _render_pdf_page(
+                    document.load_page(page_number - 1),
+                    max_side_px=None,
+                    scale=render_scale,
+                )
+                _atomic_save_image(frame, path, image_format="PNG")
+            rendered[page_number] = path
+    finally:
+        document.close()
+    return rendered

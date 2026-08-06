@@ -25,6 +25,36 @@ def validate_proposal_text_contract(contract:Mapping[str,Any])->dict[str,Any]:
     fixed={"contract_version":"evaluation-category-profile-v3","profile_type":"text-proposal-additive-v1","category_key":"proposal_text_pdf","spec_version":"proposal-text-v1-baseline-20260806","call_a_version":"proposal-text-a-v1-baseline-20260806","call_b_version":"proposal-text-b-v1-baseline-20260806"}
     for k,v in fixed.items():
         if d.get(k)!=v: _fail(f"{k}不匹配")
+    channel=_map(d.get("pdf_input_channel"),"pdf_input_channel")
+    text_layer=_map(channel.get("text_layer"),"pdf_input_channel.text_layer")
+    call_a=_map(channel.get("call_a"),"pdf_input_channel.call_a")
+    call_b=_map(channel.get("call_b"),"pdf_input_channel.call_b")
+    audit=_map(channel.get("audit"),"pdf_input_channel.audit")
+    if channel.get("schema_version")!="proposal-pdf-input-v1" or channel.get("long_image_stitching") is not False:
+        _fail("PDF输入通道版本或长图禁令不匹配")
+    if (text_layer.get("primary"),text_layer.get("extract_all_pages"),text_layer.get("ocr_only_without_text"))!=(True,True,True):
+        _fail("PDF文本层策略不匹配")
+    if (
+        call_a.get("mode"),call_a.get("batch_size"),call_a.get("max_side_px"),
+        call_a.get("scan_all_pages"),call_a.get("stop_on_redline"),
+        call_a.get("redline_merge"),call_a.get("information_merge"),
+    )!=(
+        "paged_batches",16,1024,True,True,"union",
+        "first_seen_conflict_manual_review",
+    ):
+        _fail("调用A分批策略不匹配")
+    if (
+        call_b.get("mode"),call_b.get("sample_size"),
+        call_b.get("high_fidelity"),call_b.get("model_page_selection"),
+    )!=("deterministic_representative_pages",16,True,False):
+        _fail("调用B代表页策略不匹配")
+    if call_b.get("required_inputs")!=["table_of_contents","text_layer_summary","sampled_pages"]:
+        _fail("调用B输入集合不匹配")
+    if (
+        audit.get("record_page_batches"),audit.get("record_sampled_pages"),
+        audit.get("record_tokens_by_stage"),
+    )!=(True,True,True):
+        _fail("PDF审计策略不匹配")
     r=_map(d.get("redline_policy"),"redline_policy")
     if (r.get("enabled"),r.get("signal"),r.get("hit_level"),r.get("hit_score_cap"),r.get("terminal"))!=(True,"precheck.红线检查.命中项[].类型","L5",20,True): _fail("红线语义不匹配")
     rules=r.get("rules")

@@ -89,6 +89,7 @@ def test_contract_accepts_frozen_text_proposal_profile() -> None:
         (("track_classification", "tracks", "A", "visual_max"), 44),
         (("grade_bands", "L1"), [91, 100]),
         (("redline_policy", "signal"), "production_fields.reason"),
+        (("pdf_input_channel", "call_a", "batch_size"), 8),
     ],
 )
 def test_contract_rejects_changed_frozen_semantics(

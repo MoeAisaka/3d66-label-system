@@ -485,6 +485,90 @@ class DoubaoClient:
             raise last_error
         raise DoubaoError("模型调用失败")
 
+
+    async def chat_text_images(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        samples: list[tuple[str, Path, str | None]],
+        *,
+        max_attempts: int | None = None,
+        output_budget: int | None = None,
+        reasoning_effort: str | None = None,
+        image_detail: str = "high",
+        max_image_count: int | None = None,
+        max_single_image_bytes: int | None = None,
+        max_total_image_bytes: int | None = None,
+    ) -> DoubaoResponse:
+        if image_detail not in {"low", "high", "auto"}:
+            raise ValueError("多图清晰度参数不合法")
+        if max_image_count is not None and len(samples) > max_image_count:
+            raise ValueError("诊断图片数量超过安全请求上限")
+        remaining_bytes = max_total_image_bytes
+        input_image_bytes = 0
+        content: list[dict[str, Any]] = [{"type": "text", "text": user_prompt}]
+        for label, image_path, mime_type in samples:
+            limits = [
+                limit
+                for limit in (remaining_bytes, max_single_image_bytes)
+                if limit is not None
+            ]
+            image_url, image_bytes = _bounded_image_data_url(
+                image_path,
+                mime_type,
+                max_bytes=min(limits) if limits else image_path.stat().st_size,
+            )
+            input_image_bytes += image_bytes
+            if remaining_bytes is not None:
+                remaining_bytes -= image_bytes
+            content.append({"type": "text", "text": label})
+            content.append({
+                "type": "image_url",
+                "image_url": {"url": image_url, "detail": image_detail},
+            })
+        payload = self._protocol_payload(system_prompt, content)
+        actual_budget, actual_reasoning_effort = self._generation_options(
+            payload,
+            output_budget=output_budget,
+            reasoning_effort=reasoning_effort,
+            structured_output=False,
+        )
+
+        last_error: Exception | None = None
+        attempts = self._attempts(max_attempts)
+        for attempt in range(attempts):
+            try:
+                upstream = await self._post(payload)
+                raw, status_code, request_id = self._unpack_upstream(upstream)
+                raw_text = _extract_message_text(raw)
+                try:
+                    parsed = parse_json_text(raw_text)
+                except DoubaoError:
+                    parsed = {}
+                usage = response_usage(raw)
+                return DoubaoResponse(
+                    parsed=parsed,
+                    raw_text=raw_text,
+                    raw_payload=raw,
+                    upstream_status_code=status_code,
+                    request_correlation_id=request_id,
+                    attempt_count=attempt + 1,
+                    output_budget=actual_budget,
+                    reasoning_effort=actual_reasoning_effort,
+                    input_image_bytes=input_image_bytes,
+                    input_tokens=usage[0] if usage else None,
+                    output_tokens=usage[1] if usage else None,
+                    total_tokens=usage[2] if usage else None,
+                )
+            except Exception as exc:
+                if isinstance(exc, DoubaoError):
+                    exc.attempt_count = attempt + 1
+                last_error = exc
+        if last_error is not None:
+            raise last_error
+        raise DoubaoError("模型调用失败")
+
+
     async def chat_json_images(
         self,
         system_prompt: str,

@@ -73,4 +73,3 @@
 - [ ] 使用受保护脚本部署，验收 health 200、容器 healthy、proposal 合同/提示词可查、inspiration spec 不变。
 - [ ] 在不占阶段 1c 预算的独立凭据/窗口下跑一份真实 PDF，记录 A/B token；无法满足隔离条件时 fail-closed 报告缺口。
 - [ ] 复核报告、日志和 bundle 不含凭据。
-
