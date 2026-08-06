@@ -18,7 +18,7 @@ from app.inspiration_category_seed import (
     INSPIRATION_SPEC_VERSION,
 )
 from app.proposal_text_contract import validate_proposal_text_contract
-from app.models import CategoryEvaluationV3Config, PromptVersion
+from app.models import CategoryEvaluationV3Config, EvaluationCategoryProfile, PromptVersion
 from app.seed import (
     _seed_inspiration_image_prompts,
     _seed_inspiration_image_v3_config,
@@ -88,6 +88,49 @@ def test_new_b_prompt_is_appended_without_overwriting_old_version() -> None:
                 PromptVersion.version == "inspiration-b-v1"
             )
         ) == "旧提示词不可覆盖"
+
+
+def test_existing_profile_is_bound_to_rev4_a_and_new_b_atomically() -> None:
+    engine = _engine()
+    with Session(engine) as db:
+        settings = SimpleNamespace(project_root=PROJECT_ROOT)
+        _seed_inspiration_image_prompts(db, settings)
+        legacy_a = db.scalar(
+            select(PromptVersion).where(
+                PromptVersion.version == INSPIRATION_REV3_CALL_A_VERSION
+            )
+        )
+        legacy_b = db.scalar(
+            select(PromptVersion).where(
+                PromptVersion.version == "inspiration-b-v2-human-calibrated-20260805"
+            )
+        )
+        assert legacy_a is not None and legacy_b is not None
+        profile = EvaluationCategoryProfile(
+            category_key="inspiration_image",
+            display_name="灵感图",
+            prompt_a_id=legacy_a.id,
+            prompt_b_id=legacy_b.id,
+            pipeline_revision=2,
+        )
+        db.add(profile)
+        db.commit()
+
+        _seed_inspiration_image_prompts(db, settings)
+        db.commit()
+        db.refresh(profile)
+        assert (
+            db.get(PromptVersion, profile.prompt_a_id).version == INSPIRATION_CALL_A_VERSION
+        )
+        assert (
+            db.get(PromptVersion, profile.prompt_b_id).version == INSPIRATION_CALL_B_VERSION
+        )
+        assert profile.pipeline_revision == 3
+
+        _seed_inspiration_image_prompts(db, settings)
+        db.commit()
+        db.refresh(profile)
+        assert profile.pipeline_revision == 3
 
 
 def test_existing_inspiration_config_is_replaced_once_and_stays_active() -> None:

@@ -312,8 +312,13 @@ def _seed_inspiration_image_prompts(db: Session, settings) -> None:
             )
         )
     db.flush()
-    # 新B只绑定灵感图；A保持rev4不动。已有profile原位切换并递增流水线版本，
-    # 旧PromptVersion仍保留，回滚可重新绑定旧prompt_b_id。
+    # profile 的 A/B 绑定必须与激活合同原子对齐；PromptVersion 内容保持不可变，
+    # 旧版本仍保留，回滚可重新绑定旧 prompt_a_id / prompt_b_id。
+    target_a = db.scalar(
+        select(PromptVersion).where(
+            PromptVersion.version == "inspiration-a-v3-hard-defect-recall-rev4-20260805"
+        )
+    )
     new_b = db.scalar(
         select(PromptVersion).where(
             PromptVersion.version == "inspiration-b-v3-anchor-aesthetic-20260806"
@@ -324,9 +329,16 @@ def _seed_inspiration_image_prompts(db: Session, settings) -> None:
             EvaluationCategoryProfile.category_key == "inspiration_image"
         )
     )
-    if new_b is not None and profile is not None and profile.prompt_b_id != new_b.id:
-        profile.prompt_b_id = new_b.id
-        profile.pipeline_revision += 1
+    if profile is not None and target_a is not None and new_b is not None:
+        changed = False
+        if profile.prompt_a_id != target_a.id:
+            profile.prompt_a_id = target_a.id
+            changed = True
+        if profile.prompt_b_id != new_b.id:
+            profile.prompt_b_id = new_b.id
+            changed = True
+        if changed:
+            profile.pipeline_revision += 1
 
 
 def _seed_inspiration_image_v3_config(db: Session) -> None:
