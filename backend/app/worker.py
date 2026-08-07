@@ -2589,6 +2589,46 @@ def _handle_technical_failure(
                 and not breaker_open
             )
             if can_retry:
+                # Recovery creation is an execution boundary. Re-check the
+                # operator control and the independent ABORT notice in the
+                # same transaction that claims the failed parent, so a late
+                # stop cannot be bypassed by an already queued child.
+                control = db.get(EvaluationControl, 1)
+                abort_notice = Path(
+                    os.getenv("ABORT_NOTICE_PATH", "ABORT-NOTICE.txt")
+                ).expanduser()
+                retry_abort_reason = None
+                if control is not None and control.paused:
+                    retry_abort_reason = "evaluation_control_paused"
+                elif parent.status in {"canceled", "cancelled", "paused"}:
+                    retry_abort_reason = f"parent_status:{parent.status}"
+                elif abort_notice.is_file():
+                    retry_abort_reason = f"abort_notice:{abort_notice}"
+                if retry_abort_reason is not None:
+                    parent.status = "failed"
+                    parent.stage = "retry_aborted"
+                    parent.technical_error_type = "retry_aborted"
+                    parent.failure_code = "retry_aborted"
+                    parent.error_message = "technical:retry_aborted"
+                    if parent.regression_item_id:
+                        fail_regression_item(
+                            db,
+                            parent.regression_item_id,
+                            "technical:retry_aborted",
+                        )
+                    if parent.baseline_regression_item_id:
+                        fail_baseline_item(
+                            db,
+                            item_id=parent.baseline_regression_item_id,
+                            error_code="technical:retry_aborted",
+                            job_id=parent.id,
+                        )
+                    logger.warning(
+                        "技术重试被 ABORT 门禁阻止 job=%s reason=%s",
+                        parent.id,
+                        retry_abort_reason,
+                    )
+                    return False
                 next_attempt = parent.technical_attempt + 1
                 delay = retry_delay_seconds(
                     next_attempt,

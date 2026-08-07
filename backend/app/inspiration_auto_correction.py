@@ -39,6 +39,7 @@ from .node_correction_api import CorrectNodeRequest, apply_node_correction
 
 
 GOLDEN_SET_NAME = "灵感图人工评级黄金集-20260724-v2"
+BALANCED_GOLDEN_SET_NAME = "灵感图人工评级黄金集-20260807-balanced-100"
 TRUTH_SOURCE = "灵感图人工评级前缀"
 AUTO_CORRECTOR = "auto-corrector-v1"
 AUTO_CORRECTOR_POLICY = "level-confusion-calibration-v1"
@@ -55,6 +56,13 @@ EXPECTED_RATING_DISTRIBUTION = {
     "中差": 811,
     "极差": 237,
     "过滤": 427,
+}
+BALANCED_RATING_DISTRIBUTION = {
+    "好": 20,
+    "中等": 20,
+    "中差": 20,
+    "极差": 20,
+    "过滤": 20,
 }
 _RATING_PATTERN = re.compile(r"(?:^|/|_)(好|中等|中差|极差|过滤)_")
 
@@ -139,6 +147,7 @@ def ensure_inspiration_golden_set(
     truth_source: str = TRUTH_SOURCE,
     created_by: str = AUTO_CORRECTOR,
     expected_distribution: Mapping[str, int] | None = EXPECTED_RATING_DISTRIBUTION,
+    reject_duplicate_sha256: bool = False,
 ) -> tuple[BaselineSet, dict[str, Any]]:
     """Create or validate the immutable inspiration golden baseline set.
 
@@ -183,6 +192,19 @@ def ensure_inspiration_golden_set(
     distribution = {rating: 0 for rating in RATING_TO_LEVEL}
     for _asset, rating, _level in selected:
         distribution[rating] += 1
+    duplicate_sha256: dict[str, list[int]] = {}
+    for asset, _rating, _level in selected:
+        duplicate_sha256.setdefault(asset.sha256, []).append(asset.id)
+    duplicate_sha256 = {
+        sha256: asset_ids
+        for sha256, asset_ids in duplicate_sha256.items()
+        if len(asset_ids) > 1
+    }
+    if reject_duplicate_sha256 and duplicate_sha256:
+        raise ValueError(
+            "黄金集候选存在重复 SHA-256，拒绝创建："
+            + json.dumps(duplicate_sha256, ensure_ascii=False, sort_keys=True)
+        )
 
     manifest = [
         {
@@ -219,6 +241,7 @@ def ensure_inspiration_golden_set(
             "candidate_selection": (
                 "ascending_asset_id_per_rating_until_frozen_quota"
             ),
+            "duplicate_sha256": duplicate_sha256,
         }
 
     baseline_set = BaselineSet(
@@ -294,6 +317,7 @@ def ensure_inspiration_golden_set(
             "candidate_selection": (
                 "ascending_asset_id_per_rating_until_frozen_quota"
             ),
+            "duplicate_sha256": duplicate_sha256,
         },
         event_key=f"inspiration-golden-set:{fingerprint}",
     )
@@ -308,7 +332,22 @@ def ensure_inspiration_golden_set(
         "candidate_distribution": candidate_distribution,
         "excluded_candidate_ids": [asset.id for asset, _rating, _level in excluded],
         "candidate_selection": "ascending_asset_id_per_rating_until_frozen_quota",
+        "duplicate_sha256": duplicate_sha256,
     }
+
+
+def ensure_inspiration_balanced_golden_set(
+    db: Session,
+) -> tuple[BaselineSet, dict[str, Any]]:
+    """Create the independent 100-item 20-per-level regression baseline."""
+    return ensure_inspiration_golden_set(
+        db,
+        name=BALANCED_GOLDEN_SET_NAME,
+        truth_source="灵感图人工评级前缀-100均衡扩样",
+        created_by="label148-balanced-100",
+        expected_distribution=BALANCED_RATING_DISTRIBUTION,
+        reject_duplicate_sha256=True,
+    )
 
 
 def _wilson_lower_bound(successes: int, total: int, *, z: float = 1.96) -> float:
