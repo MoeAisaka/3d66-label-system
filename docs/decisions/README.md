@@ -52,7 +52,8 @@
 ## 新增 ADR 的规则
 
 | [0034](0034-v3-rule-deduction-and-node-corrections.md) | Accepted | v3 规则扣分、节点纠偏与媒介开关 |
-| [0035](0035-proposal-pdf-paged-input-channel.md) | Accepted | PDF 方案文本全页分批扫描与确定性代表页通道 |
+| [0035](0035-proposal-pdf-paged-input-channel.md) | Superseded | PDF 方案文本全页分批扫描与确定性代表页通道 |
+| [0038](0038-proposal-pdf-document-level-grading.md) | Accepted | PDF 源文档级聚合、恢复与评分合同 |
 文件名格式：
 
 ```text

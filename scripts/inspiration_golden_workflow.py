@@ -16,6 +16,7 @@ import argparse
 import json
 import os
 import sys
+from datetime import date, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -28,7 +29,18 @@ if str(BACKEND) not in sys.path:
 
 
 def _emit(payload: dict[str, Any], output: str | None = None) -> None:
-    rendered = json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True)
+    def serialize(value: Any) -> str:
+        if isinstance(value, (date, datetime)):
+            return value.isoformat()
+        raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
+
+    rendered = json.dumps(
+        payload,
+        ensure_ascii=False,
+        indent=2,
+        sort_keys=True,
+        default=serialize,
+    )
     if output:
         target = Path(output).expanduser().resolve()
         target.parent.mkdir(parents=True, exist_ok=True)

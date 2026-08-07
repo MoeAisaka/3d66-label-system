@@ -187,6 +187,14 @@ export const baselineRegressionApi = {
     method: "POST",
     ...jsonBody(payload),
   }),
+  createBalanced100: () => api<{
+    summary: BaselineSetSummary
+    created: boolean
+    idempotent: boolean
+    item_count: number
+    distribution: Record<string, number>
+    fingerprint: string
+  }>("/api/baseline-sets/inspiration-balanced-100", { method: "POST" }),
   listPrompts: (categoryKey?: string) => {
     const params = new URLSearchParams({ pipeline_scope: "baseline_regression" })
     if (categoryKey) params.set("category_key", categoryKey)

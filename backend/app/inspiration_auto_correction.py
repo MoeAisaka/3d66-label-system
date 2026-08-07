@@ -338,13 +338,15 @@ def ensure_inspiration_golden_set(
 
 def ensure_inspiration_balanced_golden_set(
     db: Session,
+    *,
+    created_by: str = "label148-balanced-100",
 ) -> tuple[BaselineSet, dict[str, Any]]:
     """Create the independent 100-item 20-per-level regression baseline."""
     return ensure_inspiration_golden_set(
         db,
         name=BALANCED_GOLDEN_SET_NAME,
         truth_source="灵感图人工评级前缀-100均衡扩样",
-        created_by="label148-balanced-100",
+        created_by=created_by,
         expected_distribution=BALANCED_RATING_DISTRIBUTION,
         reject_duplicate_sha256=True,
     )

@@ -1393,6 +1393,7 @@ async def evaluate_job(job_id: int) -> None:
         proposal_channel_audit = {
             "schema_version": "proposal-pdf-input-v1",
             "long_image_stitching": False,
+            "evaluation_object": "source_pdf_document",
             "metadata_page_count": proposal_pdf_input.page_count,
             "actual_page_count": proposal_pdf_input.actual_page_count,
             "call_a": {
@@ -1578,6 +1579,11 @@ async def evaluate_job(job_id: int) -> None:
             )
             proposal_channel_audit["call_a"].update({
                 "scanned_pages": list(call_a_result.scanned_pages),
+                "attempted_pages": list(call_a_result.attempted_pages),
+                "failed_pages": list(call_a_result.failed_pages),
+                "recovery_batches": [
+                    list(batch) for batch in call_a_result.recovery_batches
+                ],
                 "batch_count": call_a_result.batch_count,
                 "stop_reason": call_a_result.stop_reason,
             })
@@ -1698,6 +1704,7 @@ async def evaluate_job(job_id: int) -> None:
                 str(page_number) for page_number in representative_pages
             )
             proposal_channel_audit["call_b"] = {
+                "evaluation_object": "source_pdf_document",
                 "sample_size": sample_size,
                 "representative_pages": list(representative_pages),
                 "selection": "deterministic",

@@ -1645,3 +1645,32 @@ npm.cmd run build
   compileall 与 diff check 通过。
 - 设计冻结见 ADR-0035 与
   docs/superpowers/specs/2026-08-06-proposal-text-pdf-input-channel-design.md。
+
+## 最新完成：PDF 源文档级评分与灵感图 100 张均衡入口（2026-08-07）
+
+- `proposal_text_pdf` 新任务冻结
+  `proposal-text-v2-document-aggregate-20260807`。分页 JPEG/PNG 只作为模型输入和证据
+  载体，唯一评测、评分和定级对象始终是上传的源 PDF。
+- 调用 A 先形成文档级聚合：红线证据取并集；普通字段采用首个非空值并保留冲突审计；
+  内容完整性按 `是 > 无法判断 > 否` 合并；图像计数求和；审核类别按批次实际覆盖页数
+  加权多数票收敛，平票 fail-closed。
+- 无效 A 批次在两次校验失败后确定性二分。默认 16 页批最多恢复四层到单页；任何页面
+  仍不可恢复时整份 PDF 进入人工复核。只有全页覆盖或真实红线早停才允许结束 A。
+- 调用 B 接收全文摘要、目录和引擎确定性代表页，并按整份源 PDF 评分；服务端继续
+  确定性计算总分和 L1-L5。审核列表与详情页使用 PDF 文档级状态，不再误报图片维度
+  合同异常；未增加逐页图片导出接口。
+- 现有存量回归页新增“生成 100 张均衡基准集”，仅对 `inspiration_image` 显示；服务端
+  固定 L1-L5 各 20 张，按人工真值选择并拒绝重复 SHA-256，重复调用保持幂等。
+- MacBook 隔离卷已导入 100 张真实人工真值素材并冻结基线集 1：100/100 唯一 SHA，
+  L1-L5 各 20 张，SQLite integrity=ok。生产环境零触碰。
+- 首次真实 run 1 已失败关闭：8 个任务因隔离环境 ARK 凭据失效/网络异常失败，剩余
+  92 个显式取消；0 个有效预测、0 条评测结果、active jobs=0。不得复用 run 1；凭据
+  修复后必须先做 1 张金丝雀，再新建 100 张 run。
+- 黄金工作流 CLI 已修复 API 响应包含 `datetime` 时的 JSON 序列化崩溃，统一输出
+  ISO 8601，防止“任务已建单但 CLI 报错”诱发重复运行。
+- 最终验证：Python 3.12 后端 `1160 passed, 2 skipped`；前端两项合同脚本通过；
+  Node 22 无缓存生产构建完成 `tsc -b` 与 Vite build；`compileall`、`git diff --check`
+  通过。
+- MacBook 隔离服务 `127.0.0.1:18148` 已切换到新镜像，health 200、restart 0；
+  PDF v2 contract/profile 均为 revision 2。旧容器保留为 `pre-pdfv2` 回退点。
+- 架构决策见 ADR-0038；ADR-0035 已被取代，历史 v1 结果继续只读保留。

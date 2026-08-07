@@ -85,8 +85,8 @@ def test_seed_persists_exact_prompts_profile_and_additive_contract() -> None:
         by_stage = {prompt.stage: prompt for prompt in prompts}
         assert by_stage["A"].version == PROPOSAL_CALL_A_VERSION
         assert by_stage["B"].version == PROPOSAL_CALL_B_VERSION
-        assert by_stage["A"].system_prompt == (ASSETS / "call_a_proposal_text_v1.txt").read_text(encoding="utf-8")
-        assert by_stage["B"].system_prompt == (ASSETS / "call_b_proposal_text_v1.txt").read_text(encoding="utf-8")
+        assert by_stage["A"].system_prompt == (ASSETS / "call_a_proposal_text_v2.txt").read_text(encoding="utf-8")
+        assert by_stage["B"].system_prompt == (ASSETS / "call_b_proposal_text_v2.txt").read_text(encoding="utf-8")
         assert by_stage["A"].user_prompt == by_stage["B"].user_prompt == ""
         row = db.scalar(select(CategoryEvaluationV3Config).where(
             CategoryEvaluationV3Config.category_key == "proposal_text_pdf"
@@ -100,7 +100,7 @@ def test_seed_persists_exact_prompts_profile_and_additive_contract() -> None:
             "mode": "paged_batches", "batch_size": 16, "max_side_px": 1024,
             "scan_all_pages": True, "stop_on_redline": True,
             "redline_merge": "union",
-            "information_merge": "first_seen_conflict_manual_review",
+            "information_merge": "document_first_seen_with_audit",
         }
         assert v3_authoritative_category(db, "proposal_text_pdf")["contract"] == contract
 
@@ -151,7 +151,7 @@ def test_v3_proposal_dispatch_aggregates_without_extra_model_call() -> None:
     assert scoring["scoring_mode"] == "v3_authoritative"
 
 
-def test_worker_runs_all_a_batches_then_deterministic_b_and_audits_tokens(
+def test_worker_recovers_invalid_a_batch_then_scores_source_pdf_and_audits_tokens(
     monkeypatch,
     tmp_path,
 ) -> None:
@@ -248,7 +248,10 @@ def test_worker_runs_all_a_batches_then_deterministic_b_and_audits_tokens(
                 "sample_count": len(samples),
                 "detail": kwargs["image_detail"],
             })
-            parsed = passed_call_a() if call_number <= 2 else call_b()
+            if "【引擎确定性分页输入" in user_prompt:
+                parsed = {"invalid": True} if call_number <= 2 else passed_call_a()
+            else:
+                parsed = call_b()
             return DoubaoResponse(
                 parsed=parsed,
                 raw_text=json.dumps(parsed, ensure_ascii=False),
@@ -274,12 +277,12 @@ def test_worker_runs_all_a_batches_then_deterministic_b_and_audits_tokens(
 
     try:
         asyncio.run(worker.evaluate_job(job.id))
-        assert len(calls) == 3
-        assert [call["sample_count"] for call in calls] == [16, 16, 16]
-        assert [call["detail"] for call in calls] == ["low", "low", "high"]
+        assert len(calls) == 6
+        assert [call["sample_count"] for call in calls] == [16, 16, 8, 8, 16, 16]
+        assert [call["detail"] for call in calls] == ["low", "low", "low", "low", "low", "high"]
         assert "第1批" in calls[0]["user_prompt"]
-        assert "第2批" in calls[1]["user_prompt"]
-        assert "【目录结构】" in calls[2]["user_prompt"]
+        assert "第2批" in calls[2]["user_prompt"]
+        assert "【目录结构】" in calls[5]["user_prompt"]
         db.expire_all()
         result = db.scalar(select(EvaluationResult).where(
             EvaluationResult.job_id == job.id
@@ -288,25 +291,32 @@ def test_worker_runs_all_a_batches_then_deterministic_b_and_audits_tokens(
         preprocess = json.loads(result.preprocess_json)
         channel = preprocess["pdf_input_channel"]
         assert channel["long_image_stitching"] is False
+        assert channel["evaluation_object"] == "source_pdf_document"
         assert channel["call_a"]["scanned_pages"] == list(range(1, 33))
-        assert channel["call_a"]["batch_count"] == 2
+        assert channel["call_a"]["attempted_pages"] == list(range(1, 33))
+        assert channel["call_a"]["failed_pages"] == []
+        assert channel["call_a"]["recovery_batches"] == [list(range(1, 17))]
+        assert channel["call_a"]["batch_count"] == 3
         assert len(channel["call_b"]["representative_pages"]) == 16
+        assert channel["call_b"]["evaluation_object"] == "source_pdf_document"
+        assert result.score == 90
+        assert result.level == "L1"
         assert channel["token_usage"] == {
             "measured": True,
             "call_a": {
-                "input_tokens": 300,
-                "output_tokens": 30,
-                "total_tokens": 330,
+                "input_tokens": 1500,
+                "output_tokens": 150,
+                "total_tokens": 1650,
             },
             "call_b": {
-                "input_tokens": 300,
-                "output_tokens": 30,
-                "total_tokens": 330,
-            },
-            "total": {
                 "input_tokens": 600,
                 "output_tokens": 60,
                 "total_tokens": 660,
+            },
+            "total": {
+                "input_tokens": 2100,
+                "output_tokens": 210,
+                "total_tokens": 2310,
             },
         }
     finally:
@@ -353,4 +363,33 @@ def test_seed_upgrades_only_the_known_legacy_pdf_channel_idempotently() -> None:
         seed_proposal_text_pdf(db)
         assert profile.pipeline_revision == original_pipeline_revision + 1
         assert row.revision == original_revision + 1
+    engine.dispose()
+
+
+def test_seed_upgrades_known_v1_document_contract_to_v2() -> None:
+    engine = _engine()
+    with Session(engine) as db:
+        seed_defaults(db)
+        profile = db.scalar(select(EvaluationCategoryProfile).where(
+            EvaluationCategoryProfile.category_key == "proposal_text_pdf"
+        ))
+        row = db.scalar(select(CategoryEvaluationV3Config).where(
+            CategoryEvaluationV3Config.category_key == "proposal_text_pdf"
+        ))
+        assert profile is not None and row is not None
+        legacy = json.loads(
+            (Path(__file__).parent / "fixtures" / "proposal_text_contract_v1.json")
+            .read_text(encoding="utf-8")
+        )
+        profile.rubric_version = legacy["spec_version"]
+        row.contract_json = canonical_json(legacy)
+        row.contract_hash = "legacy"
+        old_revision = row.revision
+        db.flush()
+
+        seed_proposal_text_pdf(db)
+
+        assert profile.rubric_version == PROPOSAL_SPEC_VERSION
+        assert json.loads(row.contract_json)["spec_version"] == PROPOSAL_SPEC_VERSION
+        assert row.revision == old_revision + 1
     engine.dispose()

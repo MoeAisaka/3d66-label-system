@@ -50,6 +50,19 @@ function samplingTone(tier: EvaluationRecord["sampling"]["tier"]) {
   return "neutral" as const
 }
 
+function isProposalTextPdfEvaluation(evaluation: EvaluationRecord["evaluation"] | undefined) {
+  return evaluation?.preprocess?.category_key === "proposal_text_pdf"
+    || evaluation?.preprocess?.pdf_input_channel?.evaluation_object === "source_pdf_document"
+}
+
+function proposalPdfReviewReason(evaluation: EvaluationRecord["evaluation"]) {
+  return String(
+    evaluation.scoring?.review_reasons?.[0]
+      || evaluation.precheck?.["预检结果"]?.["结论说明"]
+      || "整份源 PDF 尚未形成可发布的自动等级",
+  )
+}
+
 export function ReviewPage({ user }: { user: User }) {
   const { reviewStage: requestedStage, reviewView: requestedView } = useParams()
   const reviewView = normalizeReviewView(requestedView)
@@ -84,6 +97,7 @@ export function ReviewPage({ user }: { user: User }) {
   const currentIndex = filteredAssets.findIndex((item) => item.evaluation.id === currentId)
   const asset = detail.data
   const evaluation = asset?.evaluation
+  const proposalTextPdf = isProposalTextPdfEvaluation(evaluation)
   const sampling = asset?.sampling
   const dimensions = evaluation?.aesthetic?.dimensions ?? {}
   const scoring = evaluation?.scoring
@@ -268,7 +282,7 @@ export function ReviewPage({ user }: { user: User }) {
 
           <aside className="min-w-0 bg-white">
             <div className="flex min-h-20 items-center justify-between border-b border-[var(--line)] px-5 py-4">
-              <div><h2 className="font-editorial text-2xl font-bold">证据</h2><p className="mt-1 text-xs text-[var(--muted)]">{requiredDimensionKeys.length || "—"} 个审美维度</p></div>
+              <div><h2 className="font-editorial text-2xl font-bold">证据</h2><p className="mt-1 text-xs text-[var(--muted)]">{proposalTextPdf ? "整份源 PDF 文档级评分" : `${requiredDimensionKeys.length || "—"} 个审美维度`}</p></div>
               {scopeStatus !== "out_of_scope" && dimensionContractReady && completeDimensionCount === requiredDimensionKeys.length && evaluation?.level && (
                 <div className="text-right">
                   {evaluation.human_review?.decision === "corrected" && <Badge tone="success" className="mb-2">人工最终</Badge>}
@@ -285,6 +299,37 @@ export function ReviewPage({ user }: { user: User }) {
                 <ImageSquare size={30} weight="light" />
                 <h3 className="font-editorial mt-4 text-xl font-bold">正在读取评测结果</h3>
                 <p className="mt-2 text-sm leading-6 text-[var(--muted)]">每条结果都固定对应一次模型和提示词版本运行。</p>
+              </div>
+            ) : proposalTextPdf ? (
+              <div className="max-h-[calc(100dvh-330px)] overflow-y-auto scrollbar-thin">
+                <section className="border-b border-[var(--line-strong)] bg-[#f5f8fb] px-5 py-5">
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div>
+                      <p className="text-sm font-bold">PDF 文档级评分证据</p>
+                      <p className="font-data mt-1 text-[0.68rem] text-[var(--muted)]">评分对象：整份源 PDF；页图仅作为模型输入载体，不单独评分或定级。</p>
+                    </div>
+                    {evaluation.final_level && evaluation.final_score != null ? <div className="text-right"><p className="font-data text-3xl font-semibold">{evaluation.final_level}</p><p className="font-data mt-1 text-xs text-[var(--muted)]">{evaluation.final_score.toFixed(1)} / 100</p></div> : <Badge tone="danger">PDF 文档级人工复核</Badge>}
+                  </div>
+                  <div className="mt-4 grid gap-2 text-xs leading-5 text-[var(--muted)] sm:grid-cols-2">
+                    <p>阶段 A：{evaluation.precheck?.["预检结果"]?.["状态"] || "—"}</p>
+                    <p>阶段 B：{evaluation.scoring?.scoring_track || "—"} · {evaluation.scoring?.visual_score ?? "—"} / {evaluation.scoring?.narrative_score ?? "—"} / {evaluation.scoring?.innovation_timeliness_score ?? "—"}</p>
+                    <p>页图输入：{evaluation.preprocess?.pdf_input_channel?.call_a?.scanned_pages?.length ?? evaluation.preprocess?.pdf?.rendered_pages ?? "—"} 页已覆盖</p>
+                    <p>恢复批次：{evaluation.preprocess?.pdf_input_channel?.call_a?.recovery_batches?.length ?? 0} 个</p>
+                  </div>
+                  <p className="mt-4 border-t border-[var(--line)] pt-3 text-sm leading-6 text-[#8d2924]">{proposalPdfReviewReason(evaluation)}</p>
+                </section>
+                {evaluation.preprocess?.category_key === "pdf_text" && (
+                  <section className="border-b border-[var(--line)] px-5 py-4">
+                    <div className="flex flex-wrap items-center justify-between gap-3"><p className="text-sm font-bold">PDF 前处理依据</p><Badge tone="success">页图仅供模型输入</Badge></div>
+                    <p className="font-data mt-2 text-[0.68rem] text-[var(--muted)]">{evaluation.preprocess.pdf?.page_count ?? "—"} 页 · 渲染 {evaluation.preprocess.pdf?.rendered_pages ?? "—"} 页 · 文本 {evaluation.preprocess.pdf?.text_chars ?? 0} 字</p>
+                    {evaluation.preprocess.text_excerpt && <details className="mt-3"><summary className="cursor-pointer text-xs font-semibold">查看源 PDF 文本摘要</summary><pre className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap border border-[var(--line)] bg-white p-3 text-xs leading-5 text-[var(--muted)]">{evaluation.preprocess.text_excerpt}</pre></details>}
+                  </section>
+                )}
+                <section className="border-b border-[var(--line)] px-5 py-4">
+                  <div className="flex flex-wrap items-center justify-between gap-2"><p className="text-sm font-bold">{reviewStageMeta[evaluation.review_stage].label}</p><Badge tone={evaluation.review_stage === "completed" ? "success" : "danger"}>{evaluation.review_stage === "completed" ? "已完成" : "待处理"}</Badge></div>
+                  {(evaluation.review_history?.length ?? 0) > 0 && <details className="mt-3"><summary className="cursor-pointer text-xs font-semibold">查看人工审核记录（{evaluation.review_history.length}）</summary><div className="mt-2 divide-y divide-[var(--line)] border-y border-[var(--line)]">{evaluation.review_history.map((item) => <div key={item.id} className="py-2 text-xs"><p className="font-semibold">{reviewStageMeta[item.stage].label} · {reviewDecisionLabel(item.decision)} · {item.reviewer_name}</p>{item.note && <p className="mt-1 leading-5 text-[var(--muted)]">{item.note}</p>}</div>)}</div></details>}
+                  {evaluation.review_stage !== "completed" && <><label className="mt-4 block"><span className="mb-2 block text-xs font-semibold">审核说明（确认或退回时可选）</span><Input value={note} onChange={(event) => setNote(event.target.value)} placeholder="补充文档级判断依据" /></label><div className="mt-3 grid grid-cols-2 gap-2"><Button variant="secondary" onClick={() => review.mutate({ decision: "rejected", corrected_level: null, reviewNote: note.trim() })} disabled={review.isPending}>退回复核</Button><Button onClick={() => review.mutate({ decision: "approved", corrected_level: null, reviewNote: note.trim() })} disabled={review.isPending}><Check weight="bold" />确认文档结果</Button></div></>}
+                </section>
               </div>
             ) : scopeStatus === "out_of_scope" ? (
               <div className="flex min-h-[520px] flex-col items-center justify-center px-8 text-center">

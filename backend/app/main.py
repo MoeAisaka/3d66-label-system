@@ -8639,6 +8639,29 @@ def create_baseline_set(
     return _baseline_set_summary(baseline_set, item_count=len(frozen_items))
 
 
+@app.post("/api/baseline-sets/inspiration-balanced-100")
+def create_inspiration_balanced_baseline_set(
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    from .inspiration_auto_correction import ensure_inspiration_balanced_golden_set
+
+    try:
+        baseline_set, report = ensure_inspiration_balanced_golden_set(
+            db,
+            created_by=user.username,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {
+        "summary": _baseline_set_summary(
+            baseline_set,
+            item_count=int(report["item_count"]),
+        ),
+        **report,
+    }
+
+
 @app.get("/api/baseline-sets/{baseline_set_id}")
 def baseline_set_detail(
     baseline_set_id: int,

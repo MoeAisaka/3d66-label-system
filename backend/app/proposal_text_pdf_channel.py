@@ -14,6 +14,9 @@ class ProposalCallAResult:
     scanned_pages: tuple[int, ...]
     stop_reason: str
     batch_count: int
+    failed_pages: tuple[int, ...] = ()
+    attempted_pages: tuple[int, ...] = ()
+    recovery_batches: tuple[tuple[int, ...], ...] = ()
 
 
 def _is_missing(value: object) -> bool:
@@ -95,6 +98,10 @@ def merge_call_a_batches(
     *,
     filename: str,
     page_count: int | None,
+    scanned_pages: Sequence[int] | None = None,
+    expected_pages: Sequence[int] | None = None,
+    failed_pages: Sequence[int] | None = None,
+    batch_page_counts: Sequence[int] | None = None,
 ) -> dict[str, Any]:
     if not outputs:
         return _manual_review(filename, page_count, ["调用A没有可合并的批次输出"])
@@ -129,9 +136,13 @@ def merge_call_a_batches(
                 else "输出缺少预检结果"
             )
             manual_reasons.append(f"调用A第{index}批：{reason}")
-        for item in output.get("待复核项", []):
-            if isinstance(item, str) and item:
-                manual_reasons.append(f"调用A第{index}批：{item}")
+    failed = sorted({int(page) for page in (failed_pages or ())})
+    if failed:
+        manual_reasons.append(
+            "调用A以下页码无法恢复：" + ",".join(str(page) for page in failed)
+        )
+    if expected_pages is not None and failed:
+        manual_reasons.append("整份PDF未完成可验证的全页扫描")
     if manual_reasons:
         return _manual_review(filename, page_count, manual_reasons)
 
@@ -142,10 +153,16 @@ def merge_call_a_batches(
     image_totals = {"效果图数量": 0, "分析图数量": 0, "意向图数量": 0}
     image_seen = {key: False for key in image_totals}
     conflicts: list[str] = []
-    for output in outputs:
+    classification_outputs: list[Mapping[str, Any]] = []
+    completeness_values: dict[str, list[str]] = {}
+    batch_review_items: list[str] = []
+    for index, output in enumerate(outputs, start=1):
         info = output.get("信息提取")
         if not isinstance(info, Mapping):
             continue
+        classification = info.get("项目分类")
+        if isinstance(classification, Mapping):
+            classification_outputs.append(classification)
         image_stats = info.get("图像统计")
         if isinstance(image_stats, Mapping):
             for key in image_totals:
@@ -153,18 +170,82 @@ def merge_call_a_batches(
                 if isinstance(value, int) and not isinstance(value, bool):
                     image_totals[key] += value
                     image_seen[key] = True
-        comparable = {key: value for key, value in info.items() if key != "图像统计"}
+        completeness = info.get("内容完整性")
+        if isinstance(completeness, Mapping):
+            for key, value in completeness.items():
+                if isinstance(value, str) and value:
+                    completeness_values.setdefault(str(key), []).append(value)
+        for item in output.get("待复核项", []):
+            if isinstance(item, str) and item:
+                batch_review_items.append(f"调用A第{index}批：{item}")
+        comparable = {
+            key: value
+            for key, value in info.items()
+            if key not in {"项目分类", "图像统计", "内容完整性", "_聚合审计"}
+        }
         _merge_values(merged_info, comparable, path=("信息提取",), conflicts=conflicts)
+
+    category_counts: dict[str, int] = {}
+    category_weights = list(batch_page_counts or ())
+    if len(category_weights) != len(classification_outputs):
+        category_weights = [1] * len(classification_outputs)
+    for classification, page_weight in zip(classification_outputs, category_weights):
+        category = classification.get("审核类别")
+        if isinstance(category, str) and category in {"A", "B", "C", "其他"}:
+            category_counts[category] = category_counts.get(category, 0) + max(1, int(page_weight))
+    winners = [
+        category for category, count in category_counts.items()
+        if count == max(category_counts.values(), default=0)
+    ]
+    if len(winners) != 1:
+        return _manual_review(
+            filename,
+            page_count,
+            ["调用A跨批审核类别无法形成确定性多数票"],
+        )
+    chosen_category = winners[0]
+    chosen_classification = next(
+        classification
+        for classification in classification_outputs
+        if classification.get("审核类别") == chosen_category
+    )
+    merged_info["项目分类"] = deepcopy(dict(chosen_classification))
+
+    completeness = merged_info.get("内容完整性")
+    if not isinstance(completeness, Mapping):
+        completeness = {}
+    merged_completeness = dict(completeness)
+    for key, values in completeness_values.items():
+        if "是" in values:
+            merged_completeness[key] = "是"
+        elif "无法判断" in values:
+            merged_completeness[key] = "无法判断"
+        else:
+            merged_completeness[key] = "否"
+    merged_info["内容完整性"] = merged_completeness
     merged_info["图像统计"] = {
         key: image_totals[key] if image_seen[key] else None
         for key in image_totals
     }
-    if conflicts:
-        return _manual_review(
-            filename,
-            page_count,
-            [f"调用A跨批字段冲突：{path}" for path in sorted(set(conflicts))],
-        )
+    audit = {
+        "合并策略": "document_first_seen_with_audit",
+        "字段冲突": sorted({
+            path.removeprefix("信息提取.") for path in conflicts
+        }),
+        "分类投票": dict(sorted(category_counts.items())),
+        "分类页权重": dict(sorted(category_counts.items())),
+        "选择审核类别": chosen_category,
+        "批次待复核项": list(dict.fromkeys(batch_review_items)),
+    }
+    if scanned_pages is not None:
+        scanned = sorted({int(page) for page in scanned_pages})
+        audit["扫描页数"] = len(scanned)
+        audit["扫描页码"] = scanned
+    if expected_pages is not None:
+        expected = sorted({int(page) for page in expected_pages})
+        audit["应扫描页数"] = len(expected)
+        audit["未扫描页码"] = sorted(set(expected) - set(audit.get("扫描页码", [])))
+    merged_info["_聚合审计"] = audit
 
     return {
         "预检结果": {
@@ -192,44 +273,72 @@ async def run_call_a_batches(
     validator: Callable[[Any], dict[str, Any]],
     filename: str,
     page_count: int | None,
+    max_recovery_depth: int = 4,
 ) -> ProposalCallAResult:
     validated: list[dict[str, Any]] = []
     responses: list[Any] = []
     scanned_pages: list[int] = []
+    attempted_pages: set[int] = set()
+    failed_pages: set[int] = set()
+    recovery_batches: list[tuple[int, ...]] = []
+    validated_page_counts: list[int] = []
     stop_reason = "completed"
-    for batch_index, raw_batch in enumerate(batches):
-        batch = tuple(int(page) for page in raw_batch)
+    call_index = 0
+
+    async def scan_batch(batch: tuple[int, ...], *, depth: int) -> None:
+        nonlocal call_index, stop_reason
+        if stop_reason in {"redline", "manual_review", "invalid_output"}:
+            return
+        batch_index = call_index
+        call_index += 1
+        attempted_pages.update(batch)
         outcome = await call_validated_json(
             lambda: invoke(batch_index, batch),
             validator,
         )
         responses.extend(outcome.responses)
-        scanned_pages.extend(batch)
         if outcome.value is None:
-            precheck = _manual_review(
-                filename,
-                page_count,
-                [f"调用A第{batch_index + 1}批连续2次校验失败：{outcome.error}"],
-            )
-            return ProposalCallAResult(
-                precheck, tuple(responses), tuple(scanned_pages),
-                "invalid_output", batch_index + 1,
-            )
+            if len(batch) > 1 and depth < max_recovery_depth:
+                midpoint = len(batch) // 2
+                recovery_batches.append(batch)
+                await scan_batch(batch[:midpoint], depth=depth + 1)
+                await scan_batch(batch[midpoint:], depth=depth + 1)
+            else:
+                failed_pages.update(batch)
+                stop_reason = "invalid_output"
+            return
         validated.append(outcome.value)
+        validated_page_counts.append(len(batch))
+        scanned_pages.extend(batch)
         state = outcome.value["预检结果"]["状态"]
         if state == "淘汰":
             stop_reason = "redline"
-            break
-        if state == "人工复核":
+        elif state == "人工复核":
             stop_reason = "manual_review"
+    for raw_batch in batches:
+        if stop_reason in {"redline", "manual_review", "invalid_output"}:
             break
+        await scan_batch(tuple(int(page) for page in raw_batch), depth=0)
+
+    expected_pages = [int(page) for raw_batch in batches for page in raw_batch]
 
     return ProposalCallAResult(
-        merge_call_a_batches(validated, filename=filename, page_count=page_count),
+        merge_call_a_batches(
+            validated,
+            filename=filename,
+            page_count=page_count,
+            scanned_pages=scanned_pages,
+            expected_pages=expected_pages,
+            failed_pages=failed_pages,
+            batch_page_counts=validated_page_counts,
+        ),
         tuple(responses),
         tuple(scanned_pages),
         stop_reason,
         len(validated),
+        tuple(sorted(failed_pages)),
+        tuple(sorted(attempted_pages)),
+        tuple(recovery_batches),
     )
 
 

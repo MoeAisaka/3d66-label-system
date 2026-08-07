@@ -245,6 +245,26 @@ export type Evaluation = {
       ocr_status?: string
       text_chars?: number
     }
+    pdf_input_channel?: {
+      schema_version: "proposal-pdf-input-v1"
+      evaluation_object?: "source_pdf_document"
+      long_image_stitching: false
+      metadata_page_count?: number | null
+      actual_page_count?: number | null
+      call_a?: {
+        scanned_pages?: number[]
+        attempted_pages?: number[]
+        failed_pages?: number[]
+        recovery_batches?: number[][]
+        batch_count?: number
+        stop_reason?: string
+      }
+      call_b?: {
+        evaluation_object?: "source_pdf_document"
+        representative_pages?: number[]
+        sample_size?: number
+      }
+    }
     multimodal_summary?: {
       schema_version: "pdf-multimodal-summary-v1"
       status: "completed"

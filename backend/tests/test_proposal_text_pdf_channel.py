@@ -16,8 +16,10 @@ from app.proposal_text_pdf_channel import (
 def passed_batch(
     *,
     project_name: str = "示例项目",
+    category: str = "A",
     effect_count: int = 2,
     analysis_count: int = 1,
+    completeness: str = "是",
 ) -> dict:
     return {
         "预检结果": {"状态": "通过", "是否进入B": True, "结论说明": "本批材料正常"},
@@ -30,7 +32,7 @@ def passed_batch(
         "红线检查": {"是否命中": False, "命中项": []},
         "信息提取": {
             "项目分类": {
-                "审核类别": "A",
+                "审核类别": category,
                 "一级分类": "建筑设计",
                 "二级分类": "公共建筑",
                 "分类依据": "页面可见",
@@ -54,12 +56,12 @@ def passed_batch(
                 "意向图数量": 0,
             },
             "内容完整性": {
-                "项目背景": "是",
-                "场地或问题分析": "是",
-                "概念推导": "是",
-                "空间策略": "是",
-                "动线展示": "是",
-                "效果图": "是",
+                "项目背景": completeness,
+                "场地或问题分析": completeness,
+                "概念推导": completeness,
+                "空间策略": completeness,
+                "动线展示": completeness,
+                "效果图": completeness,
             },
         },
         "待复核项": [],
@@ -101,15 +103,51 @@ def test_merge_call_a_batches_uses_first_seen_and_sums_batch_image_counts() -> N
     assert merged["信息提取"]["图像统计"]["效果图数量"] == 5
 
 
-def test_merge_call_a_batches_conflict_becomes_manual_review() -> None:
+def test_merge_call_a_batches_keeps_ordinary_conflict_as_audit_and_scores_document() -> None:
     merged = merge_call_a_batches(
         [passed_batch(project_name="甲项目"), passed_batch(project_name="乙项目")],
         filename="sample.pdf",
         page_count=32,
     )
+    assert merged["预检结果"]["状态"] == "通过"
+    assert merged["信息提取"]["项目基本信息"]["项目名称"] == "甲项目"
+    assert "项目基本信息.项目名称" in merged["信息提取"]["_聚合审计"]["字段冲突"]
+
+
+def test_merge_call_a_batches_requires_document_classification_consensus() -> None:
+    merged = merge_call_a_batches(
+        [passed_batch(category="A"), passed_batch(category="B")],
+        filename="sample.pdf",
+        page_count=32,
+    )
     assert merged["预检结果"]["状态"] == "人工复核"
-    assert merged["信息提取"] is None
-    assert any("项目名称" in item for item in merged["待复核项"])
+    assert any("审核类别" in item for item in merged["待复核项"])
+
+
+def test_merge_call_a_batches_weights_classification_by_covered_pages() -> None:
+    merged = merge_call_a_batches(
+        [
+            passed_batch(category="A"),
+            passed_batch(category="B"),
+            passed_batch(category="B"),
+        ],
+        filename="sample.pdf",
+        page_count=48,
+        batch_page_counts=[32, 8, 8],
+    )
+    assert merged["预检结果"]["状态"] == "通过"
+    assert merged["信息提取"]["项目分类"]["审核类别"] == "A"
+    assert merged["信息提取"]["_聚合审计"]["分类页权重"] == {"A": 32, "B": 16}
+
+
+def test_merge_call_a_batches_uses_conservative_completeness_union() -> None:
+    merged = merge_call_a_batches(
+        [passed_batch(completeness="否"), passed_batch(completeness="是")],
+        filename="sample.pdf",
+        page_count=32,
+    )
+    assert merged["预检结果"]["状态"] == "通过"
+    assert merged["信息提取"]["内容完整性"]["效果图"] == "是"
 
 
 def test_run_call_a_batches_stops_immediately_after_redline() -> None:
@@ -137,6 +175,94 @@ def test_run_call_a_batches_stops_immediately_after_redline() -> None:
     assert result.precheck["预检结果"]["状态"] == "淘汰"
     assert result.stop_reason == "redline"
     assert result.scanned_pages == (1, 2)
+
+
+def test_run_call_a_batches_recovers_invalid_batch_by_binary_split() -> None:
+    calls: list[tuple[int, ...]] = []
+
+    async def invoke(_batch_index: int, batch: tuple[int, ...]):
+        calls.append(batch)
+        parsed = {"valid": True} if len(batch) <= 8 else {"valid": False}
+        return SimpleNamespace(
+            parsed=parsed,
+            raw_text="{}",
+            raw_payload={"batch": list(batch)},
+            input_tokens=100,
+            output_tokens=20,
+            total_tokens=120,
+        )
+
+    def validator(value):
+        if value.get("valid") is not True:
+            raise ValueError("invalid batch")
+        return passed_batch()
+
+    result = asyncio.run(run_call_a_batches(
+        [tuple(range(1, 17))],
+        invoke=invoke,
+        validator=validator,
+        filename="sample.pdf",
+        page_count=16,
+    ))
+    assert calls == [tuple(range(1, 17))] * 2 + [tuple(range(1, 9)), tuple(range(9, 17))]
+    assert result.precheck["预检结果"]["状态"] == "通过"
+    assert result.scanned_pages == tuple(range(1, 17))
+    assert result.stop_reason == "completed"
+
+
+def test_run_call_a_batches_keeps_unrecoverable_page_fail_closed() -> None:
+    async def invoke(_batch_index: int, _batch: tuple[int, ...]):
+        return SimpleNamespace(
+            parsed={"valid": False},
+            raw_text="{}",
+            raw_payload={"invalid": True},
+            input_tokens=1,
+            output_tokens=1,
+            total_tokens=2,
+        )
+
+    result = asyncio.run(run_call_a_batches(
+        [(1,)],
+        invoke=invoke,
+        validator=lambda _value: (_ for _ in ()).throw(ValueError("invalid")),
+        filename="sample.pdf",
+        page_count=1,
+    ))
+    assert result.precheck["预检结果"]["状态"] == "人工复核"
+    assert result.stop_reason == "invalid_output"
+    assert result.failed_pages == (1,)
+
+
+def test_run_call_a_batches_recovers_default_batch_to_single_pages() -> None:
+    calls: list[tuple[int, ...]] = []
+
+    async def invoke(_batch_index: int, batch: tuple[int, ...]):
+        calls.append(batch)
+        parsed = {"valid": len(batch) == 1}
+        return SimpleNamespace(
+            parsed=parsed,
+            raw_text="{}",
+            raw_payload={"batch": list(batch)},
+            input_tokens=1,
+            output_tokens=1,
+            total_tokens=2,
+        )
+
+    def validator(value):
+        if value.get("valid") is not True:
+            raise ValueError("invalid batch")
+        return passed_batch()
+
+    result = asyncio.run(run_call_a_batches(
+        [tuple(range(1, 17))],
+        invoke=invoke,
+        validator=validator,
+        filename="sample.pdf",
+        page_count=16,
+    ))
+    assert result.stop_reason == "completed"
+    assert result.scanned_pages == tuple(range(1, 17))
+    assert all((page,) in calls for page in range(1, 17))
 
 
 def test_select_representative_pages_is_deterministic_and_bounded() -> None:
