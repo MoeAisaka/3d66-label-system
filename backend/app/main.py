@@ -382,6 +382,7 @@ class ModelConfigUpdate(BaseModel):
     max_concurrency: int = Field(ge=1, le=10)
     structured_output: bool = True
     high_risk_review_enabled: bool = True
+    thinking_mode: Literal["auto", "enabled", "disabled"] = "auto"
     input_micros_per_million_tokens: int = Field(default=0, ge=0, le=1_000_000_000)
     output_micros_per_million_tokens: int = Field(default=0, ge=0, le=1_000_000_000)
     max_input_tokens: int = Field(default=0, ge=0, le=10_000_000)
@@ -4722,6 +4723,7 @@ def _model_config_payload(config: ModelConfig) -> dict[str, Any]:
         "max_concurrency": config.max_concurrency,
         "structured_output": config.structured_output,
         "high_risk_review_enabled": config.high_risk_review_enabled,
+        "thinking_mode": getattr(config, "thinking_mode", "auto") or "auto",
         "input_micros_per_million_tokens": config.input_micros_per_million_tokens,
         "output_micros_per_million_tokens": config.output_micros_per_million_tokens,
         "max_input_tokens": config.max_input_tokens,
@@ -4753,7 +4755,7 @@ def create_benchmark_model_config(
     for field in (
         "name", "protocol", "base_url", "api_path", "model_id", "description",
         "max_tokens", "timeout_seconds", "max_retries", "max_concurrency",
-        "structured_output", "high_risk_review_enabled",
+        "structured_output", "high_risk_review_enabled", "thinking_mode",
         "input_micros_per_million_tokens",
         "output_micros_per_million_tokens", "max_input_tokens",
         "benchmark_enabled",
@@ -4785,6 +4787,7 @@ def update_benchmark_model_config(
         "provider", "name", "protocol", "base_url", "api_path", "model_id", "description",
         "temperature", "max_tokens", "timeout_seconds", "max_retries",
         "max_concurrency", "structured_output", "high_risk_review_enabled",
+        "thinking_mode",
         "input_micros_per_million_tokens",
         "output_micros_per_million_tokens", "max_input_tokens",
         "benchmark_enabled",
@@ -4923,6 +4926,7 @@ def update_model_config(
         "max_concurrency",
         "structured_output",
         "high_risk_review_enabled",
+        "thinking_mode",
         "input_micros_per_million_tokens",
         "output_micros_per_million_tokens",
         "max_input_tokens",

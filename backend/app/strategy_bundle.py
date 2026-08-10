@@ -538,6 +538,7 @@ def _build_model_config_snapshot(config: ModelConfig) -> dict[str, Any]:
         "max_concurrency": config.max_concurrency,
         "structured_output": config.structured_output,
         "high_risk_review_enabled": config.high_risk_review_enabled,
+        "thinking_mode": getattr(config, "thinking_mode", "auto") or "auto",
     }
     return _redact_secrets(snapshot)
 

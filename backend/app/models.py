@@ -128,6 +128,9 @@ class ModelConfig(Base):
     max_concurrency: Mapped[int] = mapped_column(Integer, default=8)
     structured_output: Mapped[bool] = mapped_column(Boolean, default=True)
     high_risk_review_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    thinking_mode: Mapped[str] = mapped_column(
+        String(20), default="auto", server_default="auto"
+    )
     input_micros_per_million_tokens: Mapped[int] = mapped_column(
         Integer, default=0, server_default=sql_text("0")
     )

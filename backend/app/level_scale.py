@@ -182,8 +182,10 @@ def resolve_level_scale(contract: dict[str, Any]) -> dict[str, Any]:
     return _normalize_thresholds(DEFAULT_THRESHOLDS, source="default")
 
 
-def score_to_level(score: int, resolved_scale: dict[str, Any]) -> str:
-    """Map a clamped score to an enabled level."""
+def score_to_level(score: Any, resolved_scale: dict[str, Any]) -> str:
+    """Map an integer score to an enabled level."""
+    if not _is_int(score):
+        raise LevelScaleError("score_invalid", "分数必须是整数")
     for entry in resolved_scale["thresholds"]:
         if score >= entry["min_score"]:
             return entry["level"]
@@ -192,3 +194,25 @@ def score_to_level(score: int, resolved_scale: dict[str, Any]) -> str:
 
 def is_level_enabled(level: Any, resolved_scale: dict[str, Any]) -> bool:
     return isinstance(level, str) and level in resolved_scale["enabled_levels"]
+
+
+def assert_level_enabled(level: Any, resolved_scale: dict[str, Any]) -> str:
+    """Require a level to be enabled instead of silently remapping it."""
+    if not is_level_enabled(level, resolved_scale):
+        enabled = "、".join(resolved_scale.get("enabled_levels", ()))
+        raise LevelScaleError(
+            "level_not_enabled",
+            f"等级 {level!r} 未在此类目启用；当前启用档为 {enabled}",
+        )
+    return level
+
+
+def to_threshold_table(resolved_scale: dict[str, Any]) -> list[dict[str, Any]]:
+    """Project a normalized scale to the aggregator's legacy threshold shape."""
+    thresholds = resolved_scale.get("thresholds")
+    if not isinstance(thresholds, list) or not thresholds:
+        raise LevelScaleError("scale_invalid", "等级表为空")
+    return [
+        {"min_score": entry["min_score"], "level": entry["level"]}
+        for entry in thresholds
+    ]

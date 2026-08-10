@@ -24,6 +24,7 @@ class DoubaoResponse:
     attempt_count: int = 1
     output_budget: int | None = None
     reasoning_effort: str | None = None
+    thinking_mode: str = "auto"
     input_image_bytes: int | None = None
     input_tokens: int | None = None
     output_tokens: int | None = None
@@ -288,17 +289,22 @@ class DoubaoClient:
         output_budget: int | None,
         reasoning_effort: str | None,
         structured_output: bool | None,
-    ) -> tuple[int, str | None]:
+    ) -> tuple[int, str | None, str]:
         actual_budget = (
             self.config.max_tokens if output_budget is None else output_budget
         )
         if actual_budget < 1:
             raise ValueError("模型输出预算必须大于 0")
         actual_reasoning_effort = reasoning_effort
+        thinking_mode = getattr(self.config, "thinking_mode", "auto") or "auto"
+        if thinking_mode not in {"auto", "enabled", "disabled"}:
+            raise ValueError("thinking_mode 必须是 auto、enabled 或 disabled")
         protocol = getattr(self.config, "protocol", None) or "openai_chat"
         if protocol == "openai_responses":
             payload["max_output_tokens"] = actual_budget
             actual_reasoning_effort = actual_reasoning_effort or "high"
+            if self.config.provider == "doubao" and thinking_mode != "auto":
+                payload["thinking"] = {"type": thinking_mode}
         elif protocol == "openai_chat" and self.config.provider == "openai":
             payload["max_completion_tokens"] = actual_budget
             actual_reasoning_effort = actual_reasoning_effort or "high"
@@ -306,7 +312,10 @@ class DoubaoClient:
         else:
             payload["temperature"] = self.config.temperature
             payload["max_tokens"] = actual_budget
-            if actual_reasoning_effort is not None:
+            if self.config.provider == "doubao":
+                if thinking_mode != "auto":
+                    payload["thinking"] = {"type": thinking_mode}
+            elif actual_reasoning_effort is not None:
                 payload["reasoning_effort"] = actual_reasoning_effort
         use_structured_output = (
             self.config.structured_output
@@ -315,7 +324,7 @@ class DoubaoClient:
         )
         if use_structured_output and self.config.protocol != "anthropic_messages":
             payload["response_format"] = {"type": "json_object"}
-        return actual_budget, actual_reasoning_effort
+        return actual_budget, actual_reasoning_effort, thinking_mode
 
     def _attempts(self, max_attempts: int | None) -> int:
         if max_attempts is None:
@@ -362,7 +371,7 @@ class DoubaoClient:
         else:
             content = user_prompt
         payload = self._protocol_payload(system_prompt, content)
-        actual_budget, actual_reasoning_effort = self._generation_options(
+        actual_budget, actual_reasoning_effort, actual_thinking_mode = self._generation_options(
             payload,
             output_budget=output_budget,
             reasoning_effort=reasoning_effort,
@@ -402,6 +411,7 @@ class DoubaoClient:
                     attempt_count=attempt + 1,
                     output_budget=actual_budget,
                     reasoning_effort=actual_reasoning_effort,
+                    thinking_mode=actual_thinking_mode,
                     input_tokens=usage[0] if usage else None,
                     output_tokens=usage[1] if usage else None,
                     total_tokens=usage[2] if usage else None,
@@ -445,7 +455,7 @@ class DoubaoClient:
         else:
             content = user_prompt
         payload = self._protocol_payload(system_prompt, content)
-        actual_budget, actual_reasoning_effort = self._generation_options(
+        actual_budget, actual_reasoning_effort, actual_thinking_mode = self._generation_options(
             payload,
             output_budget=output_budget,
             reasoning_effort=reasoning_effort,
@@ -473,6 +483,7 @@ class DoubaoClient:
                     attempt_count=attempt + 1,
                     output_budget=actual_budget,
                     reasoning_effort=actual_reasoning_effort,
+                    thinking_mode=actual_thinking_mode,
                     input_tokens=usage[0] if usage else None,
                     output_tokens=usage[1] if usage else None,
                     total_tokens=usage[2] if usage else None,
@@ -527,7 +538,7 @@ class DoubaoClient:
                 "image_url": {"url": image_url, "detail": image_detail},
             })
         payload = self._protocol_payload(system_prompt, content)
-        actual_budget, actual_reasoning_effort = self._generation_options(
+        actual_budget, actual_reasoning_effort, actual_thinking_mode = self._generation_options(
             payload,
             output_budget=output_budget,
             reasoning_effort=reasoning_effort,
@@ -555,6 +566,7 @@ class DoubaoClient:
                     attempt_count=attempt + 1,
                     output_budget=actual_budget,
                     reasoning_effort=actual_reasoning_effort,
+                    thinking_mode=actual_thinking_mode,
                     input_image_bytes=input_image_bytes,
                     input_tokens=usage[0] if usage else None,
                     output_tokens=usage[1] if usage else None,
@@ -611,7 +623,7 @@ class DoubaoClient:
                 }
             )
         payload = self._protocol_payload(system_prompt, content)
-        actual_budget, actual_reasoning_effort = self._generation_options(
+        actual_budget, actual_reasoning_effort, actual_thinking_mode = self._generation_options(
             payload,
             output_budget=output_budget,
             reasoning_effort=reasoning_effort,
@@ -641,6 +653,7 @@ class DoubaoClient:
                     attempt_count=attempt + 1,
                     output_budget=actual_budget,
                     reasoning_effort=actual_reasoning_effort,
+                    thinking_mode=actual_thinking_mode,
                     input_image_bytes=input_image_bytes,
                     input_tokens=usage[0] if usage else None,
                     output_tokens=usage[1] if usage else None,

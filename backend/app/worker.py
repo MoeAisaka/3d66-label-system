@@ -857,6 +857,7 @@ def _persist_provider_trace(job_id: int, stage: str, response: object) -> None:
         "upstream_status_code": getattr(response, "upstream_status_code", None),
         "request_correlation_id": getattr(response, "request_correlation_id", None),
         "attempt_count": getattr(response, "attempt_count", None),
+        "thinking_mode": getattr(response, "thinking_mode", "auto"),
     }
     usage_trace = {
         "input_tokens": getattr(response, "input_tokens", None),

@@ -38,6 +38,13 @@ const SUBCATEGORY_DIMENSIONS_FORMAT_VERSION = "subcategory-dimensions-v1"
 
 type Json = Record<string, any>
 
+type LevelScaleEntry = {
+  level: "L1" | "L2" | "L3" | "L4" | "L5"
+  enabled: boolean
+  min_score?: number
+  display_name: string
+}
+
 type ConfigSummary = {
   id: number
   category_key: string
@@ -67,6 +74,39 @@ type Editable = {
   contract: Json
   classification_map: Json
   subcategory_dimensions: Record<string, Json>
+  revision?: number
+  contract_hash?: string
+}
+
+const LEVELS: LevelScaleEntry["level"][] = ["L1", "L2", "L3", "L4", "L5"]
+
+function levelScaleForEditor(contract: Json): LevelScaleEntry[] {
+  const configured = contract?.level_scale?.levels
+  if (Array.isArray(configured)) {
+    return LEVELS.map((level) => {
+      const entry = configured.find((item: any) => item?.level === level)
+      return {
+        level,
+        enabled: entry?.enabled !== false,
+        min_score: typeof entry?.min_score === "number" ? entry.min_score : undefined,
+        display_name: typeof entry?.display_name === "string" ? entry.display_name : level,
+      }
+    })
+  }
+  const thresholds = Array.isArray(contract?.level_thresholds) ? contract.level_thresholds : []
+  return LEVELS.map((level) => {
+    const threshold = thresholds.find((item: any) => item?.level === level)
+    return {
+      level,
+      enabled: Boolean(threshold),
+      min_score: typeof threshold?.min_score === "number" ? threshold.min_score : undefined,
+      display_name: level,
+    }
+  })
+}
+
+function editableScalePayload(contract: Json) {
+  return { version: "category-level-scale-v1", levels: levelScaleForEditor(contract) }
 }
 
 const STATUS_TONE: Record<string, "success" | "active" | "neutral"> = {
@@ -96,6 +136,15 @@ function blankEditable(): Editable {
       schema_version: CONTRACT_SCHEMA_VERSION,
       category_key: "",
       level_semantics_version: "doc-l5-worst-v1",
+      level_scale: {
+        version: "category-level-scale-v1",
+        levels: LEVELS.map((level, index) => ({
+          level,
+          enabled: true,
+          min_score: [80, 60, 40, 20, 0][index],
+          display_name: level,
+        })),
+      },
       redline_policy: {
         format_version: REDLINE_POLICY_FORMAT_VERSION,
         enabled: true,
@@ -152,6 +201,8 @@ function toEditable(detail: ConfigDetail): Editable {
     contract: clone(detail.contract),
     classification_map: clone(detail.classification_map),
     subcategory_dimensions: clone(detail.subcategory_dimensions),
+    revision: detail.revision,
+    contract_hash: detail.contract_hash,
   }
 }
 
@@ -276,6 +327,43 @@ export function CategoryEvaluationV3ConfigPage() {
     }
   }
 
+  const saveLevelScale = async () => {
+    if (!draft || isNew) {
+      setBanner("新建配置的等级档位会随整份合同一起保存。")
+      return
+    }
+    setBusy(true)
+    setBanner(null)
+    setErrors([])
+    try {
+      const result = await api<{
+        revision: number
+        contract_hash: string
+        level_scale: Json
+      }>(`${BASE}/${encodeURIComponent(draft.category_key)}/level-scale`, {
+        method: "PUT",
+        body: JSON.stringify({
+          expected_revision: draft.revision,
+          expected_contract_hash: draft.contract_hash,
+          level_scale: editableScalePayload(draft.contract),
+          redline_hit_level: draft.contract?.redline_policy?.hit_level,
+        }),
+      })
+      patchDraft((next) => {
+        next.contract.level_scale = clone(result.level_scale)
+        delete next.contract.level_thresholds
+        next.revision = result.revision
+        next.contract_hash = result.contract_hash
+      })
+      setBanner(`等级档位已保存（revision ${result.revision}，hash ${result.contract_hash.slice(0, 12)}…）`)
+      await listQuery.refetch()
+    } catch (err) {
+      setBanner(errMessage(err))
+    } finally {
+      setBusy(false)
+    }
+  }
+
   const changeStatus = async (status: string) => {
     if (!draft || isNew) return
     setBusy(true)
@@ -387,6 +475,7 @@ export function CategoryEvaluationV3ConfigPage() {
                 onPatch={patchDraft}
                 onValidate={runValidate}
                 onSave={save}
+                onSaveLevelScale={saveLevelScale}
                 onStatus={changeStatus}
               />
             )}
@@ -419,6 +508,7 @@ function V3ConfigEditor({
   onPatch,
   onValidate,
   onSave,
+  onSaveLevelScale,
   onStatus,
 }: {
   draft: Editable
@@ -431,11 +521,12 @@ function V3ConfigEditor({
   onPatch: (mutator: (next: Editable) => void) => void
   onValidate: () => void
   onSave: () => void
+  onSaveLevelScale: () => void
   onStatus: (status: string) => void
 }) {
   const tracks: any[] = draft.contract?.track_classification?.tracks ?? []
   const trackKeys = tracks.map((t) => t.key).filter(Boolean)
-  const bannerIsError = banner != null && !banner.startsWith("已保存") && !banner.startsWith("校验通过") && !banner.startsWith("状态已改")
+  const bannerIsError = banner != null && !banner.startsWith("已保存") && !banner.startsWith("等级档位已保存") && !banner.startsWith("新建配置") && !banner.startsWith("校验通过") && !banner.startsWith("状态已改")
 
   return (
     <div className="space-y-5">
@@ -521,6 +612,12 @@ function V3ConfigEditor({
       </FieldCard>
 
       <RedlineEditor draft={draft} onPatch={onPatch} />
+      <LevelScaleEditor
+        draft={draft}
+        busy={busy}
+        onPatch={onPatch}
+        onSave={onSaveLevelScale}
+      />
       <TrackEditor draft={draft} onPatch={onPatch} />
       <MediaPenaltyEditor draft={draft} onPatch={onPatch} />
       <DimensionGroupsEditor draft={draft} trackKeys={trackKeys} onPatch={onPatch} />
@@ -552,6 +649,105 @@ function IconButton({ onClick, title, danger }: { onClick: () => void; title: st
     >
       {danger ? <Trash /> : <Plus />}
     </button>
+  )
+}
+
+function LevelScaleEditor({
+  draft,
+  busy,
+  onPatch,
+  onSave,
+}: {
+  draft: Editable
+  busy: boolean
+  onPatch: (mutator: (next: Editable) => void) => void
+  onSave: () => void
+}) {
+  const levels = levelScaleForEditor(draft.contract)
+  const enabled = levels.filter((entry) => entry.enabled)
+  const validationErrors: string[] = []
+  if (enabled.length === 0) validationErrors.push("至少保留一个启用档位")
+  if (enabled.some((entry) => !Number.isInteger(entry.min_score) || (entry.min_score ?? -1) < 0 || (entry.min_score ?? 101) > 100)) {
+    validationErrors.push("启用档位切点必须是 0-100 的整数")
+  }
+  for (let index = 0; index < enabled.length - 1; index += 1) {
+    if ((enabled[index].min_score ?? -1) <= (enabled[index + 1].min_score ?? -1)) {
+      validationErrors.push("切点必须随 L 序号增大而严格下降")
+      break
+    }
+  }
+  if (enabled.length > 0 && enabled[enabled.length - 1].min_score !== 0) {
+    validationErrors.push(`${enabled[enabled.length - 1].level} 是当前最差档，切点必须为 0`)
+  }
+  const redlineLevel = draft.contract?.redline_policy?.hit_level
+  if (typeof redlineLevel === "string" && !enabled.some((entry) => entry.level === redlineLevel)) {
+    validationErrors.push(`红线命中档 ${redlineLevel} 已关闭`)
+  }
+
+  const commit = (mutator: (next: LevelScaleEntry[]) => void) => {
+    onPatch((next) => {
+      const entries = levelScaleForEditor(next.contract)
+      mutator(entries)
+      next.contract.level_scale = {
+        version: "category-level-scale-v1",
+        levels: entries.map((entry) => entry.enabled
+          ? entry
+          : { level: entry.level, enabled: false, display_name: entry.display_name }),
+      }
+      delete next.contract.level_thresholds
+    })
+  }
+
+  return (
+    <FieldCard title="等级档位（L1 最优，L 序号越大质量越差）">
+      <div className="overflow-x-auto border-y border-[var(--line)]">
+        <div className="grid min-w-[620px] grid-cols-[80px_90px_140px_minmax(180px,1fr)] bg-[#f6f8f3] px-3 py-2 text-[0.68rem] font-semibold text-[var(--muted)]">
+          <span>档位</span><span>启用</span><span>最低美感分</span><span>展示名称</span>
+        </div>
+        {levels.map((entry, index) => (
+          <div key={entry.level} className="grid min-w-[620px] grid-cols-[80px_90px_140px_minmax(180px,1fr)] items-center border-t border-[var(--line)] px-3 py-2 text-xs">
+            <strong className="font-data">{entry.level}</strong>
+            <input
+              type="checkbox"
+              checked={entry.enabled}
+              aria-label={`${entry.level} 启用`}
+              onChange={(event) => commit((next) => {
+                next[index].enabled = event.target.checked
+                next[index].min_score = event.target.checked ? (next[index].min_score ?? 0) : undefined
+              })}
+            />
+            <input
+              type="number"
+              min={0}
+              max={100}
+              className={numberClass}
+              disabled={!entry.enabled}
+              value={entry.min_score ?? ""}
+              onChange={(event) => commit((next) => { next[index].min_score = Number(event.target.value) })}
+            />
+            <input
+              className={inputClass}
+              maxLength={40}
+              value={entry.display_name}
+              onChange={(event) => commit((next) => { next[index].display_name = event.target.value })}
+            />
+          </div>
+        ))}
+      </div>
+      <div className="mt-3 flex flex-wrap items-start justify-between gap-3">
+        <div className="min-h-8 text-xs text-[#8d2924]">
+          {validationErrors.map((message) => <p key={message}>{message}</p>)}
+        </div>
+        <Button
+          size="sm"
+          variant="secondary"
+          onClick={onSave}
+          disabled={busy || validationErrors.length > 0}
+        >
+          <FloppyDisk />仅保存等级档位
+        </Button>
+      </div>
+    </FieldCard>
   )
 }
 

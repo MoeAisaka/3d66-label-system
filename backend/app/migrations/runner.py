@@ -6838,6 +6838,27 @@ def _migration_059_persist_evaluation_job_failure_traces(
     """)
 
 
+def _migration_060_add_model_thinking_mode(connection: Connection) -> None:
+    """Add an explicit Ark thinking control while preserving provider defaults."""
+    tables = {
+        row[0]
+        for row in connection.exec_driver_sql(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )
+    }
+    if "model_configs" not in tables:
+        return
+    columns = {
+        row[1]
+        for row in connection.exec_driver_sql("PRAGMA table_info(model_configs)")
+    }
+    if "thinking_mode" not in columns:
+        connection.exec_driver_sql(
+            "ALTER TABLE model_configs ADD COLUMN "
+            "thinking_mode VARCHAR(20) NOT NULL DEFAULT 'auto'"
+        )
+
+
 MIGRATIONS = [
     Migration(1, "add_sample_expected_level", _migration_001_add_sample_expected_level),
     Migration(2, "add_review_corrections", _migration_002_add_review_corrections),
@@ -7089,6 +7110,11 @@ MIGRATIONS = [
         59,
         "persist_evaluation_job_failure_traces",
         _migration_059_persist_evaluation_job_failure_traces,
+    ),
+    Migration(
+        60,
+        "add_model_thinking_mode",
+        _migration_060_add_model_thinking_mode,
     ),
 ]
 

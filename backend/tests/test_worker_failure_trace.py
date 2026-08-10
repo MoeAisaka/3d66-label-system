@@ -127,6 +127,7 @@ def test_failure_path_persists_sanitized_a_b_usage_stage_and_code(
         },
         upstream_status_code=200,
         request_correlation_id="request-b",
+        thinking_mode="disabled",
         input_tokens=13,
         output_tokens=5,
         total_tokens=18,
@@ -151,6 +152,7 @@ def test_failure_path_persists_sanitized_a_b_usage_stage_and_code(
         assert trace_a["provider_payload"]["authorization"] == "[REDACTED]"
         assert "must-not-persist" not in failed.trace_response_a_json
         assert trace_b["raw_text"] == "raw-b-invalid"
+        assert trace_b["thinking_mode"] == "disabled"
         assert usage_a == {"input_tokens": 11, "output_tokens": 7, "total_tokens": 18}
         assert usage_b == {"input_tokens": 13, "output_tokens": 5, "total_tokens": 18}
         assert failed.failure_stage == "aesthetic"

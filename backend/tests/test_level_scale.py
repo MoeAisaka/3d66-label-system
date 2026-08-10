@@ -5,8 +5,11 @@ import pytest
 from app.level_scale import (
     DEFAULT_LEVEL_SCALE_VERSION,
     LevelScaleError,
+    assert_level_enabled,
+    is_level_enabled,
     resolve_level_scale,
     score_to_level,
+    to_threshold_table,
 )
 
 
@@ -117,3 +120,29 @@ def test_enabled_level_display_names_are_preserved() -> None:
         "L3": "常规",
         "L4": "过滤",
     }
+
+
+def test_disabled_level_reference_fails_closed() -> None:
+    resolved = resolve_level_scale({"level_scale": _four_level_scale()})
+    assert assert_level_enabled("L4", resolved) == "L4"
+    assert is_level_enabled("L5", resolved) is False
+    with pytest.raises(LevelScaleError) as excinfo:
+        assert_level_enabled("L5", resolved)
+    assert excinfo.value.code == "level_not_enabled"
+
+
+def test_threshold_projection_excludes_disabled_levels() -> None:
+    resolved = resolve_level_scale({"level_scale": _four_level_scale()})
+    assert to_threshold_table(resolved) == [
+        {"min_score": 80, "level": "L1"},
+        {"min_score": 60, "level": "L2"},
+        {"min_score": 40, "level": "L3"},
+        {"min_score": 0, "level": "L4"},
+    ]
+
+
+@pytest.mark.parametrize("bad", [None, "50", 1.5, True])
+def test_score_to_level_rejects_non_integer_score(bad: object) -> None:
+    with pytest.raises(LevelScaleError) as excinfo:
+        score_to_level(bad, resolve_level_scale({}))
+    assert excinfo.value.code == "score_invalid"

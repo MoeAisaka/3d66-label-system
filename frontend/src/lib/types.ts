@@ -1053,6 +1053,7 @@ export type ModelConfig = {
   max_concurrency: number
   structured_output: boolean
   high_risk_review_enabled: boolean
+  thinking_mode: "auto" | "enabled" | "disabled"
   input_micros_per_million_tokens: number
   output_micros_per_million_tokens: number
   max_input_tokens: number
@@ -1065,7 +1066,7 @@ export type ModelConfig = {
 
 export type OptimizerConfig = Omit<
   ModelConfig,
-  "max_concurrency" | "high_risk_review_enabled" | "benchmark_enabled" | "active"
+  "max_concurrency" | "high_risk_review_enabled" | "thinking_mode" | "benchmark_enabled" | "active"
 >
 
 export type SamplingPolicy = {

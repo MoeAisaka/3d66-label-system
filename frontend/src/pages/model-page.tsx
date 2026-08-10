@@ -62,6 +62,7 @@ const emptyBenchmarkConfig: BenchmarkConfigDraft = {
   max_concurrency: 8,
   structured_output: true,
   high_risk_review_enabled: false,
+  thinking_mode: "auto",
   input_micros_per_million_tokens: 0,
   output_micros_per_million_tokens: 0,
   max_input_tokens: 0,
@@ -428,6 +429,33 @@ export function ModelPage() {
               <Field label="单次输入上限 Token"><Input type="number" min="0" value={form.max_input_tokens} onChange={(event) => update("max_input_tokens", Number(event.target.value))} /></Field>
               <Field label="输入计价 / 百万 Token（micros）"><Input type="number" min="0" value={form.input_micros_per_million_tokens} onChange={(event) => update("input_micros_per_million_tokens", Number(event.target.value))} /></Field>
               <Field label="输出计价 / 百万 Token（micros）"><Input type="number" min="0" value={form.output_micros_per_million_tokens} onChange={(event) => update("output_micros_per_million_tokens", Number(event.target.value))} /></Field>
+              <div className="sm:col-span-2 xl:col-span-3">
+                <span className="mb-2 block text-xs font-semibold">豆包思考模式</span>
+                <div className="inline-flex max-w-full overflow-auto rounded-[4px] border border-[var(--line-strong)] bg-white p-1">
+                  {([
+                    { value: "auto", label: "自动" },
+                    { value: "enabled", label: "开启" },
+                    { value: "disabled", label: "关闭" },
+                  ] as Array<{ value: ModelConfig["thinking_mode"]; label: string }>).map((option) => (
+                    <button
+                      type="button"
+                      key={option.value}
+                      disabled={form.provider !== "doubao"}
+                      onClick={() => update("thinking_mode", option.value)}
+                      className={`h-9 whitespace-nowrap rounded-[3px] px-4 text-xs font-semibold disabled:cursor-not-allowed disabled:opacity-45 ${
+                        form.thinking_mode === option.value
+                          ? "bg-[#11130f] text-white"
+                          : "text-[var(--muted)] hover:bg-[#f1f3ef]"
+                      }`}
+                    >
+                      {option.label}
+                    </button>
+                  ))}
+                </div>
+                <p className="mt-2 text-xs leading-5 text-[var(--muted)]">
+                  自动保持方舟默认行为；开启或关闭仅对 doubao 渠道生效，并写入新任务的策略快照。其他渠道继续使用各自的推理参数。
+                </p>
+              </div>
               <label className="flex min-h-20 items-center justify-between gap-4 border border-[var(--line)] bg-[#fafbf8] px-4"><span><span className="block text-sm font-semibold">结构化输出</span><span className="mt-1 block text-xs text-[var(--muted)]">仍保留服务端 JSON 校验</span></span><input type="checkbox" checked={form.structured_output} onChange={(event) => update("structured_output", event.target.checked)} className="size-5 accent-[#11130f]" /></label>
               <label className="flex min-h-20 items-center justify-between gap-4 border border-[var(--line)] bg-[#fafbf8] px-4 sm:col-span-2 xl:col-span-3"><span><span className="block text-sm font-semibold">高风险结果自动复核</span><span className="mt-1 block text-xs leading-5 text-[var(--muted)]">仅在专业摄影、L4/L5或出现5级维度时增加一次短调用；复核只能保持或降级，不会抬高分数。</span></span><input type="checkbox" checked={form.high_risk_review_enabled} onChange={(event) => update("high_risk_review_enabled", event.target.checked)} className="size-5 shrink-0 accent-[#11130f]" /></label>
               <label className="flex min-h-20 items-center justify-between gap-4 border border-[#e8c876] bg-[#fff9e9] px-4 sm:col-span-2 xl:col-span-3"><span><span className="block text-sm font-semibold">允许参与真实横评</span><span className="mt-1 block text-xs leading-5 text-[#6f5513]">必须同时配置密钥、输入上限和非零计价；此开关不等于自动运行。</span></span><input type="checkbox" checked={form.benchmark_enabled} onChange={(event) => { update("benchmark_enabled", event.target.checked); setMainBenchmarkConfirmed(false) }} className="size-5 shrink-0" /></label>

@@ -11,6 +11,7 @@
     "contract:node-correction": "node --experimental-strip-types scripts/check-node-correction-editor.ts",
     "contract:proposal-pdf": "node --experimental-strip-types scripts/check-proposal-pdf-review.ts",
     "contract:balanced-100": "node --experimental-strip-types scripts/check-balanced-100-baseline.ts",
+    "contract:level-scale-thinking": "node --experimental-strip-types scripts/check-level-scale-thinking-controls.ts",
     "test:lightbox": "node --experimental-strip-types scripts/check-baseline-lightbox.ts",
     "lint": "tsc -b --pretty false",
     "preview": "vite preview --host 0.0.0.0"
