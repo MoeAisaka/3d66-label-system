@@ -162,10 +162,7 @@ from .worker_v3_authoritative import (
     v3_authoritative_for_job,
     v3_uses_rule_deductions,
 )
-from .level_semantics import (
-    LEVEL_SEMANTICS_V1_L5_BEST,
-    LEVEL_SEMANTICS_V3_L5_WORST,
-)
+from .level_semantics import UNIFIED_LEVEL_SEMANTICS_VERSION
 
 
 settings = get_settings()
@@ -2067,7 +2064,7 @@ async def evaluate_job(job_id: int) -> None:
         # 评分 fail-closed：
         # 共性/特有 grade 拿不齐或引擎异常 → V3AuthoritativeError → score/level=None +
         # 人工复核，绝不降级成 v1 给出误导性分数。
-        _v3_level_semantics = LEVEL_SEMANTICS_V1_L5_BEST
+        _v3_level_semantics = UNIFIED_LEVEL_SEMANTICS_VERSION
         v3_bundle = v3_bundle_for_job or v3_authoritative_category(
             db, current_job.category_key
         )
@@ -2119,7 +2116,7 @@ async def evaluate_job(job_id: int) -> None:
             "config_revision": v3_bundle.get("config_revision"),
         }
         _v3_level_semantics = (
-            scoring.get("level_semantics_version") or LEVEL_SEMANTICS_V3_L5_WORST
+            scoring.get("level_semantics_version") or UNIFIED_LEVEL_SEMANTICS_VERSION
         )
 
         rubric_version = (
@@ -2275,9 +2272,8 @@ async def evaluate_job(job_id: int) -> None:
                 if v3_shadow_payload is not None
                 else None
             ),
-            # ADR-0033 Task 2 安全脚手架 + Task 2b：老类目仍如实标 v1 语义（L5=最高分），
-            # v3 权威类目标 v3 语义（doc-l5-worst-v1，L5=最差）。只是打标签，不改任何
-            # 老类目 level 值 / 算分。
+            # 所有现役类目统一标记 L1 最优、L 序号越大质量越差。早期未标记的
+            # 历史行保持原值，不在写入路径中静默重解释。
             level_semantics_version=_v3_level_semantics,
         )
         is_baseline_regression = (

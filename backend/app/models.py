@@ -1585,10 +1585,10 @@ class EvaluationResult(Base):
     scoring_json: Mapped[str] = mapped_column(Text)
     # ADR-0033 Phase 4 灰度旁挂：v3 影子评分旁存字段。Nullable, best-effort, never
     # part of any authoritative decision — populated only when the shadow switch
-    # is on; the v1 scoring above is unaffected.
+    # is on; the authoritative result is unaffected.
     v3_shadow_json: Mapped[str | None] = mapped_column(Text, nullable=True)
-    # ADR-0033 Task 2 安全脚手架：如实标注这条 level 属于哪套语义版本（v1 现状为
-    # "v1-l5-best"）。Nullable, 只读标签，不改任何 level 值 / 算分 / 已发布数据。
+    # 等级语义版本：全系统统一 L1 最优、L 序号越大质量越差。
+    # Nullable 仅用于兼容早期未标记的历史结果。
     level_semantics_version: Mapped[str | None] = mapped_column(
         String(40), nullable=True
     )

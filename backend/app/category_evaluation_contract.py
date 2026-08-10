@@ -21,6 +21,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from .dimension_schema_registry import canonical_hash as _canonical_hash
 from .dimension_schema_registry import canonical_json as _canonical_json
+from .level_scale import LevelScaleError, is_level_enabled, resolve_level_scale
 from .redline_policy import (
     RedlinePolicyError,
     validate_redline_policy,
@@ -471,6 +472,19 @@ def validate_category_evaluation_contract(contract: Any) -> None:
 
     _validate_track_classification(contract["track_classification"])
     _validate_common_modifiers(contract["common_modifiers"])
+
+    try:
+        level_scale = resolve_level_scale(contract)
+    except LevelScaleError as exc:
+        raise CategoryEvaluationContractError(
+            f"level_scale.{exc.code}", str(exc)
+        ) from exc
+    hit_level = contract["redline_policy"]["hit_level"]
+    if not is_level_enabled(hit_level, level_scale):
+        raise CategoryEvaluationContractError(
+            "level_scale.redline_level_disabled",
+            f"红线 hit_level {hit_level} 已被当前类目关闭",
+        )
 
 
 def canonical_contract_hash(contract: dict[str, Any]) -> str:

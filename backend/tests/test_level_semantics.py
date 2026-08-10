@@ -1,8 +1,8 @@
-"""ADR-0033 Task 2 tests: level-semantics-version scaffold (read-only, no flip).
+"""Unified level-semantics tests.
 
 Covers the pure ``level_semantics`` helpers and migration 54:
-- both version constants exist and differ; v3 constant reuses the aggregator's.
-- ``describe_level_semantics`` returns correct directions per version and
+- the sole production constant reuses the aggregator's.
+- ``describe_level_semantics`` returns the unified direction and
   fail-closed ``known=False`` for unknown versions (no raise).
 - migration 54 is idempotent and table-guarded (missing table does not crash).
 - adding ``level_semantics_version`` leaves authoritative fields intact.
@@ -20,10 +20,10 @@ from sqlalchemy.pool import StaticPool
 from app.category_evaluation_aggregator import LEVEL_SEMANTICS_VERSION
 from app.database import Base
 from app.level_semantics import (
-    LEVEL_SEMANTICS_V1_L5_BEST,
-    LEVEL_SEMANTICS_V3_L5_WORST,
+    UNIFIED_LEVEL_SEMANTICS_VERSION,
     describe_level_semantics,
 )
+import app.level_semantics as level_semantics
 from app.migrations import run_migrations
 from app.migrations.runner import (
     _migration_054_add_evaluation_result_level_semantics,
@@ -35,16 +35,13 @@ from app.migrations.runner import (
 # --------------------------------------------------------------------------- #
 
 
-def test_two_distinct_version_constants() -> None:
-    assert LEVEL_SEMANTICS_V1_L5_BEST == "v1-l5-best"
-    assert LEVEL_SEMANTICS_V3_L5_WORST == "doc-l5-worst-v1"
-    assert LEVEL_SEMANTICS_V1_L5_BEST != LEVEL_SEMANTICS_V3_L5_WORST
+def test_unified_constant_reuses_aggregator() -> None:
+    assert UNIFIED_LEVEL_SEMANTICS_VERSION == "doc-l5-worst-v1"
+    assert UNIFIED_LEVEL_SEMANTICS_VERSION == LEVEL_SEMANTICS_VERSION
 
 
-def test_v3_constant_reuses_aggregator() -> None:
-    # v3 must be the SAME value the aggregator already tags — imported, not
-    # redefined, so the two can never drift.
-    assert LEVEL_SEMANTICS_V3_L5_WORST == LEVEL_SEMANTICS_VERSION
+def test_removed_v1_l5_best_constant_is_not_exposed() -> None:
+    assert not hasattr(level_semantics, "LEVEL_SEMANTICS_V1_L5_BEST")
 
 
 # --------------------------------------------------------------------------- #
@@ -52,33 +49,14 @@ def test_v3_constant_reuses_aggregator() -> None:
 # --------------------------------------------------------------------------- #
 
 
-def test_describe_v1_l5_best() -> None:
-    desc = describe_level_semantics(LEVEL_SEMANTICS_V1_L5_BEST)
-    assert desc["known"] is True
-    assert desc["best_level"] == "L5"
-    assert desc["worst_level"] == "L1"
-    assert desc["levels"]["L5"] == "best"
-    assert desc["levels"]["L1"] == "worst"
-
-
-def test_describe_v3_l5_worst() -> None:
-    desc = describe_level_semantics(LEVEL_SEMANTICS_V3_L5_WORST)
+def test_describe_unified_l1_best() -> None:
+    desc = describe_level_semantics(UNIFIED_LEVEL_SEMANTICS_VERSION)
     assert desc["known"] is True
     assert desc["best_level"] == "L1"
     assert desc["worst_level"] == "L5"
     assert desc["levels"]["L1"] == "best"
     assert desc["levels"]["L5"] == "worst"
-
-
-def test_describe_two_versions_are_opposite() -> None:
-    v1 = describe_level_semantics(LEVEL_SEMANTICS_V1_L5_BEST)
-    v3 = describe_level_semantics(LEVEL_SEMANTICS_V3_L5_WORST)
-    # The whole point: the two are directionally reversed.
-    assert v1["best_level"] == v3["worst_level"]
-    assert v1["worst_level"] == v3["best_level"]
-
-
-@pytest.mark.parametrize("bad", ["", "l5-best", "v2", "doc-l5-worst-v2", "unknown"])
+@pytest.mark.parametrize("bad", ["", "l5-best", "v1-l5-best", "v2", "unknown"])
 def test_describe_unknown_version_is_fail_closed(bad: str) -> None:
     desc = describe_level_semantics(bad)
     assert desc["known"] is False
