@@ -170,5 +170,5 @@ def test_model_registry_migrates_existing_configs_and_defaults_role(client):
 - [x] **Step 1: Record the closed-loop, Canonical fact sovereignty, vector responsibility and release/consumption boundaries in ADR-0043.**
 - [x] **Step 2: Map current entities/endpoints to implemented, partial, Gap and external-boundary states.**
 - [x] **Step 3: Align product, status, ADR index and plan terminology without changing ADR-0041 scope.**
-- [ ] **Step 4: Run `git diff --check`, inspect the diff and commit the documentation-only synchronization.**
-- [ ] **Step 5: Return the Gap path and summary to the 【标签体系】重构 session; do not implement the Gap before Owner freezes the next phase.**
+- [x] **Step 4: Run `git diff --check`, inspect the diff and commit the documentation-only synchronization.**
+- [x] **Step 5: Return the Gap path and summary to the 【标签体系】重构 session; do not implement the Gap before Owner freezes the next phase.**
