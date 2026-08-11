@@ -58,6 +58,7 @@
 | [0040](0040-level-scale-and-thinking-control.md) | Accepted | 类目等级档位与模型 thinking 控制 |
 | [0041](0041-label-mechanism-v1-execution-contract.md) | Accepted | 标签机制双发布轴、存量重跑与统一模型管理 |
 | [0042](0042-unified-labellab-product-carrier.md) | Accepted | TPENG 标签实验台作为标签/内容中台重构统一产品载体 |
+| [0043](0043-canonical-facts-and-semantic-projection-boundaries.md) | Accepted | TPENG 中台 Canonical 事实与资产语义投影边界 |
 
 文件名格式：
 

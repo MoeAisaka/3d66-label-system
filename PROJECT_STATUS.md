@@ -30,6 +30,19 @@
   trigger 保护。迁移 61 只在旧配置表具备完整投影列时导入兼容记录，并显式写入审计
   时间，兼容最小历史表与 ORM 预建表。旧表、旧 API 和历史发布事实未删除、未覆盖。
 
+### 本次同步：TPENG 中台上层架构约束（2026-08-11）
+
+- 新增 ADR-0043，固化统一业务闭环：下游字段需求合同 → 素材接入 → 标注路径/任务 → 自动与人工标注
+  → 纠偏验收 → 版本发布 → 下游引用/对账 → Badcase 回流；产品名称和类目扩展边界继续遵循 ADR-0042。
+- 固化事实主权：`semantic.*`、`quality.*`、`governance.*` 是后续 Canonical 资产事实命名空间；人工真值、
+  证据、来源、模型/规则版本、审核和发布状态必须可追溯。搜索索引、知识图谱和向量索引只能作为可重建
+  消费投影；Query×素材相关性、排序权重、召回融合、在线实验和知识图谱内部关系属于下游策略。
+- 固化向量边界：中台后续负责资产/图片/文本/多模态 Embedding 生命周期，并以“资产语义投影服务”承载；
+  知识图谱负责实体关系与图 Embedding，搜索/推荐负责 Query Embedding、相似度、召回与排序。上述 Gap
+  只记录约束，不在本批次实现。
+- 能力映射与 Gap 清单见 [`docs/discussion/tpeng-platform-capability-map-and-gaps-20260811.md`](docs/discussion/tpeng-platform-capability-map-and-gaps-20260811.md)。当前已实现接入、评测、纠偏、双发布轴和正式消费；字段需求合同、Canonical 事实命名空间、统一资产版本、投影 registry、Embedding 生命周期和真实重跑 Worker 仍待 Owner 冻结。
+- 本次同步不扩大 ADR-0041 的实施范围、非目标、权限或验收。当前批次完成后将 Gap 清单返回【标签体系】重构会话；下一阶段冻结后仍由 TPENG 标签实验台会话作为唯一代码写入方。
+
 当前验证：
 
 - 后端全量：`1203 passed, 4 skipped, 6 warnings`（Python 3.12，隔离临时 `DATA_DIR`）。

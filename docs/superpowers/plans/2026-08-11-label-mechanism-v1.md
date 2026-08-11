@@ -151,3 +151,24 @@ def test_model_registry_migrates_existing_configs_and_defaults_role(client):
 - [x] **Step 3: Search for conflicting “two projects” or “evaluation-only tool” wording and correct only active authoritative documents.**
 - [x] **Step 4: Run the existing deterministic verification commands and `git diff --check`.**
 - [ ] **Step 5: Commit the complete v1 candidate, push `codex/label-mechanism-v1` to Codeup and create a merge request targeting `main`.**
+
+### Task 8: Record TPENG canonical-fact and projection boundaries
+
+**Files:**
+- Create: `docs/decisions/0043-canonical-facts-and-semantic-projection-boundaries.md`
+- Create: `docs/discussion/tpeng-platform-capability-map-and-gaps-20260811.md`
+- Modify: `docs/decisions/README.md`
+- Modify: `docs/decisions/0042-unified-labellab-product-carrier.md`
+- Modify: `PRODUCT.md`
+- Modify: `PROJECT_STATUS.md`
+
+**Interfaces:**
+- Consumes: ADR-0041 frozen execution contract and ADR-0042 unified product carrier.
+- Produces: accepted upper-layer architecture constraints plus a capability map that is advisory until Owner freezes
+  the next phase; no code, schema, production, embedding, or real batch-run changes.
+
+- [x] **Step 1: Record the closed-loop, Canonical fact sovereignty, vector responsibility and release/consumption boundaries in ADR-0043.**
+- [x] **Step 2: Map current entities/endpoints to implemented, partial, Gap and external-boundary states.**
+- [x] **Step 3: Align product, status, ADR index and plan terminology without changing ADR-0041 scope.**
+- [ ] **Step 4: Run `git diff --check`, inspect the diff and commit the documentation-only synchronization.**
+- [ ] **Step 5: Return the Gap path and summary to the 【标签体系】重构 session; do not implement the Gap before Owner freezes the next phase.**
