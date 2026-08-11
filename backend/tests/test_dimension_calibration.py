@@ -33,6 +33,7 @@ from app.dimension_schema_registry import (
     canonical_json,
 )
 from app.migrations import run_migrations
+from app.migrations.runner import MIGRATIONS
 from app.models import (
     Asset,
     DimensionCalibrationFrozenError,
@@ -915,7 +916,7 @@ def test_latest_migration_and_dimension_triggers_are_installed(database) -> None
     with engine.connect() as connection:
         assert connection.exec_driver_sql(
             "SELECT max(version) FROM schema_migrations"
-        ).scalar_one() == 60
+        ).scalar_one() == max(item.version for item in MIGRATIONS)
         assert connection.exec_driver_sql(
             "SELECT name FROM schema_migrations WHERE version = 54"
         ).scalar_one() == "add_evaluation_result_level_semantics"

@@ -1,7 +1,60 @@
 # 3d66 标签系统｜当前项目状态
 
-> 最后更新：2026-08-07
+> 最后更新：2026-08-11
 > 本文件只记录“现在做到哪里”；长期原则见 `PRODUCT.md` 和 `AGENTS.md`，历史背景见 `CODEX_HANDOFF.md`。
+
+## 最新实施：TPENG 标签实验台统一底座——标签机制与模型管理 v1（2026-08-11）
+
+- 产品定位已按 ADR-0042 冻结：“标签体系重构”与“标签实验台”合并为一条产品线，统一以
+  **TPENG 标签实验台（LabelLab）**作为标签体系重构载体和标签/内容中台通用底座。当前
+  模型注册、类目机制、人工纠偏、AI 迭代、双发布轴、存量重跑与下游发布均属于底座能力；
+  业务类目只做场景扩展，不复制这些平台能力。本次对齐不改变当前范围、非目标、权限与验收。
+- 当前工作分支为 `codex/label-mechanism-v1`，基线提交 `5d6206e`；本候选只通过 Codeup
+  功能分支与面向 `main` 的 PR 交付，不直接合并或部署，也未访问正式数据库、真实模型
+  批量调用或真实密钥。
+- 新增统一 `ModelRegistryEntry` 列表，兼容投影既有 `ModelConfig` 与
+  `OptimizerConfig`，支持 `main/tuning/benchmark`、四种受控协议、能力标签、Token
+  上限、输入/输出价格、并发/速率/月预算、thinking、层级、启停与本地连接参数校验。
+  API 只返回 `has_api_key` 和掩码，不返回密文或安全存储引用；旧模型配置 API 保留。
+- 前端新增 `/workflow/governance/model-registry`：密集列表、角色筛选、新建/编辑抽屉、
+  启停与连接检查；编辑时 API Key 始终留空以保留已有安全凭据。旧 `/model` 入口已转向
+  模型注册中心，高级设置入口同步改名。
+- 新增独立 `MechanismRelease` 机制发布轴。人工发布 `EvaluationPackage` 时在同一事务内
+  生成机制 revision，并把上一 revision 标为 superseded；审计明确记录“不会触发存量重跑、
+  不会发布标签”。既有 `LabelRelease/PublishedLabel/Outbox` 继续作为独立标签事实发布轴。
+- 新增 `StockRerun` 控制记录和 `/api/stock-reruns` 查询/创建接口。重跑必须人工显式创建，
+  冻结精确素材 ID/哈希、来源/目标机制、完整评测包 manifest、模型、提示词、规则和执行参数；
+  类目不一致、快照损坏、缺执行器或回归门禁未通过时统一 fail-closed。当前执行模式固定为
+  `dry_run_only`，结果不会自动进入标签事实轴。
+- 数据库采用增量迁移 61（模型注册中心）与 62（机制发布/存量重跑）；冻结快照受数据库
+  trigger 保护。迁移 61 只在旧配置表具备完整投影列时导入兼容记录，并显式写入审计
+  时间，兼容最小历史表与 ORM 预建表。旧表、旧 API 和历史发布事实未删除、未覆盖。
+
+当前验证：
+
+- 后端全量：`1203 passed, 4 skipped, 6 warnings`（Python 3.12，隔离临时 `DATA_DIR`）。
+- 迁移 61 自审修复定向套件：模型注册、完整机制发布轴与历史迁移共 `50 passed`。
+- 发布轴/模型/评测包/标签治理/回归/迁移专项：`82 passed`；模型注册中心专项 `6 passed`，
+  发布轴专项 `5 passed`。
+- 前端所有合同脚本通过；`npm run build` 完成 TypeScript 与 Vite production build；既有
+  lightbox 无头浏览器契约通过。仅保留既有主 chunk 大于 500 kB 的构建警告。
+- 浏览器验收：桌面列表、主/调优/横评筛选、新建/编辑抽屉、编辑态密钥留空均通过；
+  停用后可重新启用；未配置密钥时连接测试保持禁用。390×844 下页面和抽屉
+  `scrollWidth == 390`，无文档级横向溢出；控制台 error 为 0。
+- 当前 MacBook 路径已复核：源码位于
+  `/Users/yukina/Documents/Codex/2026-08-11/labellab/work/labellab`；
+  `backend/.venv312`、`frontend/node_modules`、`frontend/dist`、本机应用数据目录及历史
+  `/Users/Shared/OpenClaw/119/120/121/125/142/145/148...` 验收目录均存在。历史绝对路径
+  只作为旧证据引用，不再作为当前源码或执行入口。
+
+仍未完成/明确非本阶段闭环：
+
+- `StockRerun` 当前只实现可审计控制面与 dry-run 门禁，尚未接入真实批量执行 Worker、
+  结果差异工作台或“选择重跑结果后批量创建标签发布申请”。
+- 尚未增加机制轴的人工回滚 API；标签事实轴既有回滚仍可用。机制回滚应采用新的追加式
+  activation revision，不应改写或删除旧 `MechanismRelease`。
+- 尚未在生产环境部署、保存真实 Keychain 凭据或进行真实模型金丝雀；这些动作需要新的
+  精确授权、生产回退点和单独验收。
 
 ## 最新实施：灵感图模型质量闸门修复（2026-08-07）
 

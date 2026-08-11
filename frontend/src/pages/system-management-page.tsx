@@ -20,7 +20,7 @@ const managementGroups = [
     entries: [
       { to: "/workflow/optimization/category-evaluation-v3-config", label: "类目评测 v3 合同配置", note: "四类目的分类赛道与子类目维度唯一配置入口" },
       { to: "/workflow/optimization/candidates", label: "提示词版本", note: "查看候选、变更说明和人工发布门禁" },
-      { to: "/workflow/governance/model-config", label: "模型配置", note: "维护服务连接和类目可用模型" },
+      { to: "/workflow/governance/model-registry", label: "模型注册中心", note: "列表维护主模型、调优模型、协议和调用限制" },
     ],
   },
   {

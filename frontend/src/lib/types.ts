@@ -1064,6 +1064,40 @@ export type ModelConfig = {
   updated_at: string
 }
 
+export type ModelRegistryEntry = {
+  id: number
+  role: "main" | "tuning" | "benchmark"
+  name: string
+  provider: string
+  protocol: "openai_chat" | "openai_responses" | "anthropic_messages" | "custom_json"
+  capabilities: string[]
+  description: string
+  base_url: string
+  api_path: string
+  model_id: string
+  temperature: number
+  max_tokens: number
+  timeout_seconds: number
+  max_retries: number
+  max_concurrency: number
+  max_requests_per_minute: number
+  max_input_tokens: number
+  input_micros_per_million_tokens: number
+  output_micros_per_million_tokens: number
+  monthly_budget_micros: number
+  thinking_mode: "auto" | "enabled" | "disabled"
+  level: string
+  structured_output: boolean
+  active: boolean
+  source_model_config_id: number | null
+  source_optimizer_config_id: number | null
+  has_api_key: boolean
+  api_key_mask: string
+  created_by: string
+  created_at: string
+  updated_at: string
+}
+
 export type OptimizerConfig = Omit<
   ModelConfig,
   "max_concurrency" | "high_risk_review_enabled" | "thinking_mode" | "benchmark_enabled" | "active"

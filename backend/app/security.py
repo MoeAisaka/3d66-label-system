@@ -604,6 +604,7 @@ def _validate_account(account: str) -> str:
     if (
         account not in _ALLOWED_KEYCHAIN_ACCOUNTS
         and re.fullmatch(r"model-config-[1-9][0-9]*", account) is None
+        and re.fullmatch(r"model-registry-[1-9][0-9]*", account) is None
     ):
         raise SecretStorageError("不支持的 API Key account")
     return account

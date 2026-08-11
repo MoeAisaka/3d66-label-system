@@ -75,6 +75,8 @@ MIGRATION_NAMES = [
     "add_inspiration_aesthetic_foundation",
     "persist_evaluation_job_failure_traces",
     "add_model_thinking_mode",
+    "add_model_registry_entries",
+    "add_mechanism_release_axes",
 ]
 
 

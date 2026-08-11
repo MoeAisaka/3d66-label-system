@@ -96,6 +96,7 @@ from .models import (
     MigrationItem,
     MigrationRun,
     ModelConfig,
+    ModelRegistryEntry,
     ModelNodeBinding,
     ModelBenchmarkExperiment,
     ModelBenchmarkVariant,
@@ -415,6 +416,43 @@ class OptimizerConfigUpdate(BaseModel):
 
 class BenchmarkModelConfigCreate(ModelConfigUpdate):
     provider: str = Field(default="openai", min_length=1, max_length=40)
+
+
+class ModelRegistryUpdate(BaseModel):
+    role: Literal["main", "tuning", "benchmark"] = "main"
+    name: str = Field(min_length=1, max_length=120)
+    provider: str = Field(min_length=1, max_length=40)
+    protocol: Literal["openai_chat", "openai_responses", "anthropic_messages", "custom_json"] = "openai_chat"
+    capabilities: list[Literal["text", "vision", "structured_output", "pdf", "gif"]] = Field(
+        default_factory=lambda: ["text", "vision", "structured_output"], max_length=10
+    )
+    description: str = Field(default="", max_length=1000)
+    base_url: str = Field(min_length=8, max_length=300)
+    api_path: str = Field(min_length=1, max_length=120)
+    model_id: str = Field(min_length=1, max_length=200)
+    api_key: SecretStr | None = Field(default=None, json_schema_extra={"maxLength": 1000})
+    temperature: float = Field(default=0.1, ge=0, le=2)
+    max_tokens: int = Field(default=4096, ge=128, le=65536)
+    timeout_seconds: int = Field(default=120, ge=10, le=900)
+    max_retries: int = Field(default=1, ge=0, le=5)
+    max_concurrency: int = Field(default=8, ge=1, le=100)
+    max_requests_per_minute: int = Field(default=0, ge=0, le=1_000_000)
+    max_input_tokens: int = Field(default=0, ge=0, le=10_000_000)
+    input_micros_per_million_tokens: int = Field(default=0, ge=0, le=1_000_000_000)
+    output_micros_per_million_tokens: int = Field(default=0, ge=0, le=1_000_000_000)
+    monthly_budget_micros: int = Field(default=0, ge=0, le=10_000_000_000_000)
+    thinking_mode: Literal["auto", "enabled", "disabled"] = "auto"
+    level: str = Field(default="standard", min_length=1, max_length=40)
+    structured_output: bool = True
+    active: bool = True
+
+    @model_validator(mode="after")
+    def validate_capability_contract(self) -> "ModelRegistryUpdate":
+        if "text" not in self.capabilities:
+            raise ValueError("模型注册项必须声明 text 能力")
+        if self.structured_output and "structured_output" not in self.capabilities:
+            raise ValueError("启用结构化输出时必须声明 structured_output 能力")
+        return self
 
 
 class SamplingPolicyUpdate(BaseModel):
@@ -4732,6 +4770,380 @@ def _model_config_payload(config: ModelConfig) -> dict[str, Any]:
         "has_api_key": bool(config.encrypted_api_key),
         "api_key_mask": "••••••••" if config.encrypted_api_key else "",
         "updated_at": config.updated_at,
+    }
+
+
+def _registry_capabilities(entry: ModelRegistryEntry) -> list[str]:
+    try:
+        capabilities = json.loads(entry.capabilities_json or "[]")
+    except json.JSONDecodeError:
+        capabilities = []
+    return [str(item) for item in capabilities] if isinstance(capabilities, list) else []
+
+
+def _registry_payload(entry: ModelRegistryEntry) -> dict[str, Any]:
+    return {
+        "id": entry.id,
+        "role": entry.role,
+        "name": entry.name,
+        "provider": entry.provider,
+        "protocol": entry.protocol,
+        "capabilities": _registry_capabilities(entry),
+        "description": entry.description,
+        "base_url": entry.base_url,
+        "api_path": entry.api_path,
+        "model_id": entry.model_id,
+        "temperature": entry.temperature,
+        "max_tokens": entry.max_tokens,
+        "timeout_seconds": entry.timeout_seconds,
+        "max_retries": entry.max_retries,
+        "max_concurrency": entry.max_concurrency,
+        "max_requests_per_minute": entry.max_requests_per_minute,
+        "max_input_tokens": entry.max_input_tokens,
+        "input_micros_per_million_tokens": entry.input_micros_per_million_tokens,
+        "output_micros_per_million_tokens": entry.output_micros_per_million_tokens,
+        "monthly_budget_micros": entry.monthly_budget_micros,
+        "thinking_mode": entry.thinking_mode,
+        "level": entry.level,
+        "structured_output": entry.structured_output,
+        "active": entry.active,
+        "source_model_config_id": entry.source_model_config_id,
+        "source_optimizer_config_id": entry.source_optimizer_config_id,
+        "has_api_key": bool(entry.encrypted_api_key),
+        "api_key_mask": "••••••••" if entry.encrypted_api_key else "",
+        "created_by": entry.created_by,
+        "created_at": entry.created_at,
+        "updated_at": entry.updated_at,
+    }
+
+
+def _copy_model_source_to_registry(
+    entry: ModelRegistryEntry, config: ModelConfig
+) -> None:
+    entry.name = config.name
+    entry.provider = config.provider
+    entry.protocol = config.protocol
+    entry.capabilities_json = config.capabilities_json
+    entry.description = config.description
+    entry.base_url = config.base_url
+    entry.api_path = config.api_path
+    entry.model_id = config.model_id
+    entry.encrypted_api_key = config.encrypted_api_key
+    entry.temperature = config.temperature
+    entry.max_tokens = config.max_tokens
+    entry.timeout_seconds = config.timeout_seconds
+    entry.max_retries = config.max_retries
+    entry.max_concurrency = config.max_concurrency
+    entry.max_input_tokens = config.max_input_tokens
+    entry.input_micros_per_million_tokens = config.input_micros_per_million_tokens
+    entry.output_micros_per_million_tokens = config.output_micros_per_million_tokens
+    entry.thinking_mode = getattr(config, "thinking_mode", "auto") or "auto"
+    entry.structured_output = config.structured_output
+    entry.active = config.active
+
+
+def _copy_optimizer_source_to_registry(
+    entry: ModelRegistryEntry, config: OptimizerConfig
+) -> None:
+    entry.name = config.name
+    entry.provider = config.provider
+    entry.protocol = config.protocol
+    entry.capabilities_json = config.capabilities_json
+    if entry.created_by in {"compatibility", "migration"}:
+        entry.description = ""
+    entry.base_url = config.base_url
+    entry.api_path = config.api_path
+    entry.model_id = config.model_id
+    entry.encrypted_api_key = config.encrypted_api_key
+    entry.temperature = config.temperature
+    entry.max_tokens = config.max_tokens
+    entry.timeout_seconds = config.timeout_seconds
+    entry.max_retries = config.max_retries
+    entry.max_input_tokens = config.max_input_tokens
+    entry.input_micros_per_million_tokens = config.input_micros_per_million_tokens
+    entry.output_micros_per_million_tokens = config.output_micros_per_million_tokens
+    entry.structured_output = config.structured_output
+    if entry.created_by in {"compatibility", "migration"}:
+        entry.max_concurrency = 8
+        entry.thinking_mode = "auto"
+        entry.active = True
+
+
+def _ensure_model_registry_entries(db: Session) -> list[ModelRegistryEntry]:
+    entries = db.scalars(select(ModelRegistryEntry).order_by(ModelRegistryEntry.id.asc())).all()
+    by_model = {entry.source_model_config_id: entry for entry in entries if entry.source_model_config_id is not None}
+    by_optimizer = {entry.source_optimizer_config_id: entry for entry in entries if entry.source_optimizer_config_id is not None}
+    changed = False
+    for config in db.scalars(select(ModelConfig).order_by(ModelConfig.id.asc())).all():
+        entry = by_model.get(config.id)
+        if entry is None:
+            entry = ModelRegistryEntry(
+                role="main" if config.active else "benchmark",
+                source_model_config_id=config.id,
+                created_by="compatibility",
+            )
+            db.add(entry)
+            entries.append(entry)
+            changed = True
+        _copy_model_source_to_registry(entry, config)
+    for config in db.scalars(select(OptimizerConfig).order_by(OptimizerConfig.id.asc())).all():
+        entry = by_optimizer.get(config.id)
+        if entry is None:
+            entry = ModelRegistryEntry(
+                role="tuning",
+                source_optimizer_config_id=config.id,
+                created_by="compatibility",
+            )
+            db.add(entry)
+            entries.append(entry)
+            changed = True
+        _copy_optimizer_source_to_registry(entry, config)
+    if changed:
+        db.commit()
+        entries = db.scalars(select(ModelRegistryEntry).order_by(ModelRegistryEntry.id.asc())).all()
+    return entries
+
+
+def _apply_registry_payload(
+    entry: ModelRegistryEntry,
+    payload: ModelRegistryUpdate,
+    *,
+    encrypted_api_key: str | None = None,
+) -> None:
+    for field in (
+        "role", "name", "provider", "protocol", "description", "base_url", "api_path",
+        "model_id", "temperature", "max_tokens", "timeout_seconds", "max_retries",
+        "max_concurrency", "max_requests_per_minute", "max_input_tokens",
+        "input_micros_per_million_tokens", "output_micros_per_million_tokens",
+        "monthly_budget_micros", "thinking_mode", "level", "structured_output", "active",
+    ):
+        setattr(entry, field, getattr(payload, field))
+    entry.capabilities_json = json.dumps(payload.capabilities, ensure_ascii=False)
+    if encrypted_api_key is not None:
+        entry.encrypted_api_key = encrypted_api_key
+
+
+@app.get("/api/model-registry")
+def list_model_registry(
+    role: Literal["main", "tuning", "benchmark"] | None = None,
+    active: bool | None = None,
+    _user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    entries = _ensure_model_registry_entries(db)
+    if role is not None:
+        entries = [entry for entry in entries if entry.role == role]
+    if active is not None:
+        entries = [entry for entry in entries if entry.active is active]
+    return {"items": [_registry_payload(entry) for entry in entries]}
+
+
+@app.post("/api/model-registry")
+def create_model_registry_entry(
+    payload: ModelRegistryUpdate,
+    actor: User = Depends(_permission_user("models:write")),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    _ensure_model_registry_entries(db)
+    if payload.role == "tuning":
+        source: ModelConfig | OptimizerConfig = OptimizerConfig(
+            name=payload.name,
+            provider=payload.provider,
+            protocol=payload.protocol,
+            capabilities_json=json.dumps(payload.capabilities, ensure_ascii=False),
+            base_url=payload.base_url,
+            api_path=payload.api_path,
+            model_id=payload.model_id,
+            temperature=payload.temperature,
+            max_tokens=payload.max_tokens,
+            timeout_seconds=payload.timeout_seconds,
+            max_retries=payload.max_retries,
+            structured_output=payload.structured_output,
+            input_micros_per_million_tokens=payload.input_micros_per_million_tokens,
+            output_micros_per_million_tokens=payload.output_micros_per_million_tokens,
+            max_input_tokens=payload.max_input_tokens,
+        )
+        db.add(source)
+    else:
+        source = ModelConfig(
+            name=payload.name,
+            provider=payload.provider,
+            protocol=payload.protocol,
+            capabilities_json=json.dumps(payload.capabilities, ensure_ascii=False),
+            description=payload.description,
+            base_url=payload.base_url,
+            api_path=payload.api_path,
+            model_id=payload.model_id,
+            temperature=payload.temperature,
+            max_tokens=payload.max_tokens,
+            timeout_seconds=payload.timeout_seconds,
+            max_retries=payload.max_retries,
+            max_concurrency=payload.max_concurrency,
+            structured_output=payload.structured_output,
+            thinking_mode=payload.thinking_mode,
+            input_micros_per_million_tokens=payload.input_micros_per_million_tokens,
+            output_micros_per_million_tokens=payload.output_micros_per_million_tokens,
+            max_input_tokens=payload.max_input_tokens,
+            benchmark_enabled=payload.role == "benchmark",
+            active=payload.active,
+        )
+        db.add(source)
+    db.flush()
+    entry = ModelRegistryEntry(
+        role=payload.role,
+        source_model_config_id=source.id if isinstance(source, ModelConfig) else None,
+        source_optimizer_config_id=source.id if isinstance(source, OptimizerConfig) else None,
+        created_by=actor.username,
+    )
+    _apply_registry_payload(entry, payload)
+    db.add(entry)
+    db.flush()
+    protected = _protected_api_key(
+        payload.api_key, account=f"model-registry-{entry.id}"
+    )
+    if protected is not None:
+        source.encrypted_api_key = protected
+        entry.encrypted_api_key = protected
+    db.commit()
+    db.refresh(entry)
+    return _registry_payload(entry)
+
+
+@app.put("/api/model-registry/{entry_id}")
+def update_model_registry_entry(
+    entry_id: int,
+    payload: ModelRegistryUpdate,
+    actor: User = Depends(_permission_user("models:write")),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    entry = db.get(ModelRegistryEntry, entry_id)
+    if entry is None:
+        raise HTTPException(status_code=404, detail="模型注册项不存在")
+    if entry.role == "tuning" and payload.role != "tuning":
+        raise HTTPException(status_code=422, detail="调优模型不能切换为主模型角色")
+    if entry.role != "tuning" and payload.role == "tuning":
+        raise HTTPException(status_code=422, detail="主模型不能直接切换为调优模型角色")
+    protected = _protected_api_key(payload.api_key, account=f"model-registry-{entry.id}")
+    _apply_registry_payload(entry, payload, encrypted_api_key=protected)
+    if entry.source_model_config_id is not None:
+        source = db.get(ModelConfig, entry.source_model_config_id)
+        if source is not None:
+            _copy_registry_to_model_source(entry, source)
+            if protected is not None:
+                source.encrypted_api_key = protected
+    if entry.source_optimizer_config_id is not None:
+        source = db.get(OptimizerConfig, entry.source_optimizer_config_id)
+        if source is not None:
+            _copy_registry_to_optimizer_source(entry, source)
+            if protected is not None:
+                source.encrypted_api_key = protected
+    entry.created_by = entry.created_by or actor.username
+    db.commit()
+    db.refresh(entry)
+    return _registry_payload(entry)
+
+
+def _copy_registry_to_model_source(entry: ModelRegistryEntry, source: ModelConfig) -> None:
+    for field in (
+        "name", "provider", "protocol", "description", "base_url", "api_path", "model_id",
+        "temperature", "max_tokens", "timeout_seconds", "max_retries", "max_concurrency",
+        "structured_output", "thinking_mode", "input_micros_per_million_tokens",
+        "output_micros_per_million_tokens", "max_input_tokens", "active",
+    ):
+        setattr(source, field, getattr(entry, field))
+    source.capabilities_json = entry.capabilities_json
+    source.benchmark_enabled = entry.role == "benchmark"
+
+
+def _copy_registry_to_optimizer_source(entry: ModelRegistryEntry, source: OptimizerConfig) -> None:
+    for field in (
+        "name", "provider", "protocol", "base_url", "api_path", "model_id", "temperature",
+        "max_tokens", "timeout_seconds", "max_retries", "structured_output",
+        "input_micros_per_million_tokens", "output_micros_per_million_tokens", "max_input_tokens",
+    ):
+        setattr(source, field, getattr(entry, field))
+    source.capabilities_json = entry.capabilities_json
+
+
+@app.post("/api/model-registry/{entry_id}/activate")
+def activate_model_registry_entry(
+    entry_id: int,
+    actor: User = Depends(_permission_user("models:write")),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    entry = db.get(ModelRegistryEntry, entry_id)
+    if entry is None:
+        raise HTTPException(status_code=404, detail="模型注册项不存在")
+    entry.active = True
+    if entry.source_model_config_id is not None:
+        source = db.get(ModelConfig, entry.source_model_config_id)
+        if source is not None:
+            source.active = True
+    db.commit()
+    db.refresh(entry)
+    return _registry_payload(entry)
+
+
+@app.post("/api/model-registry/{entry_id}/deactivate")
+def deactivate_model_registry_entry(
+    entry_id: int,
+    actor: User = Depends(_permission_user("models:write")),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    entry = db.get(ModelRegistryEntry, entry_id)
+    if entry is None:
+        raise HTTPException(status_code=404, detail="模型注册项不存在")
+    entry.active = False
+    if entry.source_model_config_id is not None:
+        source = db.get(ModelConfig, entry.source_model_config_id)
+        if source is not None:
+            source.active = False
+    db.commit()
+    db.refresh(entry)
+    return _registry_payload(entry)
+
+
+@app.post("/api/model-registry/{entry_id}/test")
+def test_model_registry_entry(
+    entry_id: int,
+    _actor: User = Depends(_permission_user("models:write")),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    entry = db.get(ModelRegistryEntry, entry_id)
+    if entry is None:
+        raise HTTPException(status_code=404, detail="模型注册项不存在")
+    if not entry.encrypted_api_key:
+        raise HTTPException(status_code=422, detail="请先配置 API Key")
+    if not entry.base_url.startswith(("http://", "https://")):
+        raise HTTPException(status_code=422, detail="Base URL 必须使用 HTTP(S)")
+    return {"ok": True, "message": "连接参数校验通过；本地测试未发起真实批量调用"}
+
+
+@app.get("/api/model-registry/{entry_id}/bindings")
+def list_model_registry_bindings(
+    entry_id: int,
+    _user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    entry = db.get(ModelRegistryEntry, entry_id)
+    if entry is None:
+        raise HTTPException(status_code=404, detail="模型注册项不存在")
+    rows = []
+    if entry.source_model_config_id is not None:
+        rows = db.scalars(
+            select(ModelNodeBinding)
+            .where(ModelNodeBinding.model_config_id == entry.source_model_config_id)
+            .order_by(ModelNodeBinding.node_key.asc(), ModelNodeBinding.category_key.asc())
+        ).all()
+    return {
+        "items": [
+            {
+                "node_key": row.node_key,
+                "category_key": row.category_key,
+                "enabled": row.enabled,
+            }
+            for row in rows
+        ]
     }
 
 

@@ -55,6 +55,10 @@
 | [0035](0035-proposal-pdf-paged-input-channel.md) | Superseded | PDF 方案文本全页分批扫描与确定性代表页通道 |
 | [0038](0038-proposal-pdf-document-level-grading.md) | Accepted | PDF 源文档级聚合、恢复与评分合同 |
 | [0039](0039-unified-level-semantics-and-category-scale.md) | Accepted | 统一 L1 最优语义与类目级启停档位 |
+| [0040](0040-level-scale-and-thinking-control.md) | Accepted | 类目等级档位与模型 thinking 控制 |
+| [0041](0041-label-mechanism-v1-execution-contract.md) | Accepted | 标签机制双发布轴、存量重跑与统一模型管理 |
+| [0042](0042-unified-labellab-product-carrier.md) | Accepted | TPENG 标签实验台作为标签/内容中台重构统一产品载体 |
+
 文件名格式：
 
 ```text

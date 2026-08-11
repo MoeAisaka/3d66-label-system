@@ -12,6 +12,7 @@ import { AssetsPage } from "@/pages/assets-page"
 import { JobsPage } from "@/pages/jobs-page"
 import { LoginPage } from "@/pages/login-page"
 import { ModelPage } from "@/pages/model-page"
+import { ModelRegistryPage } from "@/pages/model-registry-page"
 import { MigrationsPage } from "@/pages/migrations-page"
 import { UsersPage } from "@/pages/users-page"
 
@@ -142,6 +143,7 @@ export default function App() {
             <Route path="workflow/models/migration" element={<MigrationsPage user={user} />} />
             <Route path="workflow/models/candidates" element={<Suspense fallback={<RouteLoading />}><CapabilityStatusPage kind="candidates" /></Suspense>} />
             <Route path="workflow/governance" element={<Suspense fallback={<RouteLoading />}><SystemManagementPage user={user} /></Suspense>} />
+            <Route path="workflow/governance/model-registry" element={<ModelRegistryPage />} />
             <Route path="workflow/governance/model-config" element={<ModelPage />} />
             <Route path="workflow/governance/users" element={<UsersPage />} />
             <Route path="workflow/governance/canary" element={<Suspense fallback={<RouteLoading />}><CanaryRunsPage /></Suspense>} />
@@ -152,7 +154,7 @@ export default function App() {
             <Route path="review" element={<Navigate to="/workflow/review/low-confidence" replace />} />
             <Route path="review/:reviewStage" element={<LegacyReviewRedirect />} />
             <Route path="prompts" element={<Navigate to="/workflow/optimization/candidates" replace />} />
-            <Route path="model" element={<Navigate to="/workflow/governance/model-config" replace />} />
+            <Route path="model" element={<Navigate to="/workflow/governance/model-registry" replace />} />
             <Route path="sample-sets" element={<Navigate to="/legacy/sample-sets" replace />} />
             <Route path="historical-corrections" element={<Navigate to="/legacy/historical-corrections" replace />} />
             <Route path="migrations" element={<Navigate to="/workflow/models/migration" replace />} />

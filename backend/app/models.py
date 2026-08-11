@@ -212,6 +212,68 @@ class OptimizerConfig(Base):
     )
 
 
+class ModelRegistryEntry(Base):
+    """Unified non-secret model registry for main and tuning roles.
+
+    Existing ``ModelConfig`` and ``OptimizerConfig`` rows remain the runtime
+    compatibility stores for this phase.  Registry entries carry a stable,
+    role-aware management projection and may optionally point back to one of
+    those legacy rows.  Historical task snapshots never depend on a live
+    registry row.
+    """
+
+    __tablename__ = "model_registry_entries"
+    __table_args__ = (
+        UniqueConstraint("source_model_config_id", name="uq_model_registry_source_model"),
+        UniqueConstraint("source_optimizer_config_id", name="uq_model_registry_source_optimizer"),
+        CheckConstraint(
+            "role IN ('main','tuning','benchmark')",
+            name="ck_model_registry_role",
+        ),
+        CheckConstraint(
+            "protocol IN ('openai_chat','openai_responses','anthropic_messages','custom_json')",
+            name="ck_model_registry_protocol",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    role: Mapped[str] = mapped_column(String(20), default="main", index=True)
+    name: Mapped[str] = mapped_column(String(120))
+    provider: Mapped[str] = mapped_column(String(40), default="doubao")
+    protocol: Mapped[str] = mapped_column(String(40), default="openai_chat")
+    capabilities_json: Mapped[str] = mapped_column(
+        Text, default='["text","vision","structured_output"]', server_default='["text","vision","structured_output"]'
+    )
+    description: Mapped[str] = mapped_column(Text, default="", server_default="")
+    base_url: Mapped[str] = mapped_column(String(300))
+    api_path: Mapped[str] = mapped_column(String(120))
+    model_id: Mapped[str] = mapped_column(String(200), index=True)
+    encrypted_api_key: Mapped[str | None] = mapped_column(Text, nullable=True)
+    temperature: Mapped[float] = mapped_column(Float, default=0.1)
+    max_tokens: Mapped[int] = mapped_column(Integer, default=4096)
+    timeout_seconds: Mapped[int] = mapped_column(Integer, default=120)
+    max_retries: Mapped[int] = mapped_column(Integer, default=1)
+    max_concurrency: Mapped[int] = mapped_column(Integer, default=8)
+    max_requests_per_minute: Mapped[int] = mapped_column(Integer, default=0, server_default=sql_text("0"))
+    max_input_tokens: Mapped[int] = mapped_column(Integer, default=0, server_default=sql_text("0"))
+    input_micros_per_million_tokens: Mapped[int] = mapped_column(Integer, default=0, server_default=sql_text("0"))
+    output_micros_per_million_tokens: Mapped[int] = mapped_column(Integer, default=0, server_default=sql_text("0"))
+    monthly_budget_micros: Mapped[int] = mapped_column(Integer, default=0, server_default=sql_text("0"))
+    thinking_mode: Mapped[str] = mapped_column(String(20), default="auto", server_default="auto")
+    level: Mapped[str] = mapped_column(String(40), default="standard", server_default="standard")
+    structured_output: Mapped[bool] = mapped_column(Boolean, default=True, server_default=sql_text("1"))
+    active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    source_model_config_id: Mapped[int | None] = mapped_column(
+        ForeignKey("model_configs.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    source_optimizer_config_id: Mapped[int | None] = mapped_column(
+        ForeignKey("optimizer_configs.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    created_by: Mapped[str] = mapped_column(String(80), default="system")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
 class PromptVersion(Base):
     __tablename__ = "prompt_versions"
     __table_args__ = (
@@ -3649,6 +3711,120 @@ class EvaluationPackage(Base):
     regression_run: Mapped[PromptRegressionRun] = relationship()
     automation_run: Mapped[AutomationOptimizationRun | None] = relationship()
     metric_snapshot: Mapped[PromptMetricSnapshot | None] = relationship()
+
+
+class MechanismRelease(Base):
+    """Immutable activation record for the mechanism release axis."""
+
+    __tablename__ = "mechanism_releases"
+    __table_args__ = (
+        UniqueConstraint("release_key", name="uq_mechanism_releases_release_key"),
+        UniqueConstraint("evaluation_package_id", name="uq_mechanism_releases_package"),
+        UniqueConstraint(
+            "category_key", "revision", name="uq_mechanism_releases_category_revision"
+        ),
+        CheckConstraint(
+            "status IN ('active','superseded','rolled_back')",
+            name="ck_mechanism_releases_status",
+        ),
+        CheckConstraint("revision >= 1", name="ck_mechanism_releases_revision"),
+        CheckConstraint(
+            "length(manifest_hash) = 64 AND manifest_hash = lower(manifest_hash) "
+            "AND manifest_hash NOT GLOB '*[^0-9a-f]*'",
+            name="ck_mechanism_releases_manifest_hash",
+        ),
+        CheckConstraint(
+            "json_valid(manifest_json) AND json_type(manifest_json, '$') = 'object'",
+            name="ck_mechanism_releases_manifest_json",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    release_key: Mapped[str] = mapped_column(String(160), unique=True, index=True)
+    category_key: Mapped[str] = mapped_column(String(40), index=True)
+    evaluation_package_id: Mapped[int] = mapped_column(
+        ForeignKey("evaluation_packages.id", ondelete="RESTRICT"), index=True
+    )
+    previous_release_id: Mapped[int | None] = mapped_column(
+        ForeignKey("mechanism_releases.id", ondelete="RESTRICT"), nullable=True, index=True
+    )
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+    manifest_json: Mapped[str] = mapped_column(Text)
+    manifest_hash: Mapped[str] = mapped_column(String(64), index=True)
+    status: Mapped[str] = mapped_column(String(30), default="active", index=True)
+    activated_by: Mapped[str] = mapped_column(String(80))
+    activated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    evaluation_package: Mapped[EvaluationPackage] = relationship()
+    previous_release: Mapped["MechanismRelease | None"] = relationship(
+        remote_side=[id]
+    )
+
+
+class StockRerun(Base):
+    """Control-plane record for an explicit, snapshot-frozen stock rerun."""
+
+    __tablename__ = "stock_reruns"
+    __table_args__ = (
+        UniqueConstraint("idempotency_key", name="uq_stock_reruns_idempotency_key"),
+        CheckConstraint(
+            "status IN ('planned','queued','running','completed','failed','cancelled')",
+            name="ck_stock_reruns_status",
+        ),
+        CheckConstraint(
+            "json_valid(material_scope_json) AND json_type(material_scope_json, '$') = 'object'",
+            name="ck_stock_reruns_material_scope_json",
+        ),
+        CheckConstraint(
+            "json_valid(mechanism_snapshot_json) AND json_type(mechanism_snapshot_json, '$') = 'object'",
+            name="ck_stock_reruns_mechanism_snapshot_json",
+        ),
+        CheckConstraint(
+            "json_valid(model_snapshot_json) AND json_type(model_snapshot_json, '$') = 'object'",
+            name="ck_stock_reruns_model_snapshot_json",
+        ),
+        CheckConstraint(
+            "json_valid(prompt_snapshot_json) AND json_type(prompt_snapshot_json, '$') = 'object'",
+            name="ck_stock_reruns_prompt_snapshot_json",
+        ),
+        CheckConstraint(
+            "json_valid(rule_snapshot_json) AND json_type(rule_snapshot_json, '$') = 'object'",
+            name="ck_stock_reruns_rule_snapshot_json",
+        ),
+        CheckConstraint(
+            "json_valid(execution_snapshot_json) AND json_type(execution_snapshot_json, '$') = 'object'",
+            name="ck_stock_reruns_execution_snapshot_json",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    idempotency_key: Mapped[str] = mapped_column(String(160), unique=True, index=True)
+    category_key: Mapped[str] = mapped_column(String(40), index=True)
+    source_mechanism_release_id: Mapped[int | None] = mapped_column(
+        ForeignKey("mechanism_releases.id", ondelete="RESTRICT"), nullable=True, index=True
+    )
+    target_mechanism_release_id: Mapped[int] = mapped_column(
+        ForeignKey("mechanism_releases.id", ondelete="RESTRICT"), index=True
+    )
+    material_scope_json: Mapped[str] = mapped_column(Text)
+    mechanism_snapshot_json: Mapped[str] = mapped_column(Text)
+    model_snapshot_json: Mapped[str] = mapped_column(Text, default="{}", server_default="{}")
+    prompt_snapshot_json: Mapped[str] = mapped_column(Text, default="{}", server_default="{}")
+    rule_snapshot_json: Mapped[str] = mapped_column(Text, default="{}", server_default="{}")
+    execution_snapshot_json: Mapped[str] = mapped_column(Text, default="{}", server_default="{}")
+    status: Mapped[str] = mapped_column(String(30), default="planned", index=True)
+    reason: Mapped[str] = mapped_column(Text, default="", server_default="")
+    created_by: Mapped[str] = mapped_column(String(80))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+    source_mechanism_release: Mapped[MechanismRelease | None] = relationship(
+        foreign_keys=[source_mechanism_release_id]
+    )
+    target_mechanism_release: Mapped[MechanismRelease] = relationship(
+        foreign_keys=[target_mechanism_release_id]
+    )
 
 
 class EvaluationPackageFrozenError(ValueError):
