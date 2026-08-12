@@ -1,25 +1,25 @@
 # 3d66 标签系统｜当前项目状态
 
-> 最后更新：2026-08-11
+> 最后更新：2026-08-12
 > 本文件只记录“现在做到哪里”；长期原则见 `PRODUCT.md` 和 `AGENTS.md`，历史背景见 `CODEX_HANDOFF.md`。
 
 ## 最新实施：前端信息架构与机制编辑器重构（2026-08-12）
 
 - 产品定位继续以 ADR-0042/0043 为准：**TPENG 标签实验台（LabelLab）**是“标签体系重构”的统一产品载体，也是标签/内容中台通用底座；业务类目只做场景扩展，不复制平台能力。
-- 当前分支为 `codex/frontend-information-architecture-v1`，当前提交为 `4f22e1b`，基线合并点为 `main` 的 `ee48d2b`。Codeup `origin` 指向 `git@codeup.aliyun.com:3d66/tepeng/3d66.label-system.git`；本批尚未 push、创建/合并 MR 或部署。
+- 当前分支为 `codex/frontend-information-architecture-v1`，已验证功能提交为 `90270fe`，基线合并点为 `main` 的 `ee48d2b`。Codeup `origin` 指向 `git@codeup.aliyun.com:3d66/tepeng/3d66.label-system.git`；本批尚未完成 Codeup push、MR 合并或测试服务器部署。
 - Task 10 已完成：存量回归一级页面聚焦“选择基准集 → 启动回归 → 逐条确认与纠偏”，复杂内容进入 `BaselineSetDialog`、`RunConfigDrawer`、`MetricsDrawer`、`RunHistoryDrawer` 和 `CorrectionWorkbench`；纠偏上下文通过 `?run=<id>&item=<id>&mode=correction` 可恢复。
 - 当前批次仅做前端信息架构、合同脚本和文档边界；没有新增后端状态、机制激活、自动发布、真实存量重跑 Worker、正式标签事实写入或新权限。Proposal PDF 仍保持独立三分项加法；3D/SU 只保留受控插件注册与安全降级边界。
 - ADR-0044 与全路由审计已补齐：一级页面/二级承载、受控 `profile_type` 插件、candidate revision、双发布轴和下游正式事实消费边界已记录。候选绑定、manifest、原子 projection switch、追加式机制回滚仍列为 Owner=`标签体系` 的下一阶段 Gap。
+- 验收修复已补齐：人工验收进度按整轮分页聚合，接口失败或数量不完整时 fail-closed；`?run=<id>&item=<id>&mode=correction` 直接刷新保持 run/item 身份；`BaselineSetDialog` 与三个二级抽屉关闭后均把键盘焦点恢复到触发按钮。
 
 当前验证：
 
-- `npm --prefix frontend run contract:information-architecture`：通过；workspace component contract：通过。
-- `npm --prefix frontend run contract:node-correction`：通过。
-- `npm --prefix frontend run contract:balanced-100`：通过。
-- `npm --prefix frontend run test:lightbox`：通过。
-- `npm --prefix frontend run lint`：通过。
-- `npm --prefix frontend run build`：通过；仅保留既有主 chunk 大于 500 kB 的构建 warning。
-- `git diff --check`：通过。
+- 后端完整套件：`1251 passed, 1 skipped, 1 deselected, 6 warnings`；`test_macos_keychain_real_isolated_round_trip_update_and_cleanup` 因依赖真实 macOS Keychain 环境明确排除，未宣称通过。
+- 前端 `dimensions`、`v3-only`、`node-correction`、`proposal-pdf`、`balanced-100`、`level-scale-thinking`、`model-registry`、`information-architecture`、`mechanism-editor` 合同全部通过；workspace component 与 Lightbox 浏览器合同通过。
+- TypeScript lint、带真实 `90270fe` SHA 的 Vite production build、`build dev` 产物扫描和 `git diff --check` 通过；仅保留既有主 chunk 大于 500 kB 的构建 warning。
+- Microsoft Edge 桌面验收通过：`1440×900`、`1280×720` 下高级设置、V3 合同配置、存量回归与纠偏深链均无文档级横向溢出、登录后控制台错误或 4xx/5xx。
+- Proposal PDF revision 3 可从 UI 重载并保留未知 `extension`，现役仍为 revision 1；图像候选 revision 2 保留 `edge_qa_bonus`、加分 3、tags `edge,qa` 与维度上限 99，现役 hash 未变；未知 `future-3d-v1` 只读降级且无写按钮。
+- 201 条跨分页回归显示“已确认 201/201 · 未评分/失败阻塞 0”，整轮汇总请求使用 `limit=1000`，完成人工验收按钮启用；四个浮层焦点恢复和纠偏深链刷新均通过。
 
 仍未完成/明确非本阶段闭环：
 
