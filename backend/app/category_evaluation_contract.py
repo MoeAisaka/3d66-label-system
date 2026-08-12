@@ -139,6 +139,7 @@ class DimensionDeductionOutput(BaseModel):
 
     dimension_key: str
     hit_rules: list[DeductionRuleHit] = Field(default_factory=list)
+    hit_bonus_rules: list[DeductionRuleHit] = Field(default_factory=list)
 
 
 class NodeCorrectionEvidence(BaseModel):

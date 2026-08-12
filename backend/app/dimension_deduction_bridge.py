@@ -19,8 +19,10 @@ import math
 from typing import Any
 
 from .category_evaluation_contract import (
+    BonusRule,
     DeductionRule,
     DimensionDeductionOutput,
+    dimension_rule_mode,
 )
 from .dimension_composition import validate_subcategory_dimensions
 from .dimension_grade_bridge import (
@@ -30,8 +32,11 @@ from .dimension_grade_bridge import (
 
 
 DEDUCTION_BRIDGE_VERSION = "dimension-deduction-bridge-v2"
+BONUS_CAP_BRIDGE_VERSION = "dimension-deduction-bridge-v3-bonus-cap"
 DEDUCTION_PROMPT_TEMPLATE_VERSION = "dimension-deduction-prompt-v1"
+BONUS_CAP_PROMPT_TEMPLATE_VERSION = "dimension-deduction-prompt-v2-bonus-cap"
 RULE_COMPOSITION_VERSION = "dimension-rule-composition-v1"
+RULE_COMPOSITION_V2 = "dimension-rule-composition-v2-bonus-cap"
 FALLBACK_WARNING = "调用B失败，维度分按满分通过（安全兜底）"
 _WEIGHT_TOLERANCE = 1e-9
 
@@ -84,24 +89,40 @@ def dimension_definitions(config: Any) -> list[dict[str, Any]]:
 
 
 def has_deduction_rules(config: Any) -> bool:
-    """True when every non-empty dimension uses the new rule contract."""
+    """Backward-compatible probe for either explicit rule-scoring mode."""
+    return rule_scoring_mode(config) in {"deduction_v1", "bonus_cap_v2"}
+
+
+def rule_scoring_mode(config: Any) -> str:
+    """Return the validated raw-field mode without mutating the contract."""
     dimensions = dimension_definitions(config)
-    return bool(dimensions) and all(
-        isinstance(dimension.get("deduction_rules"), list)
-        and bool(dimension["deduction_rules"])
-        for dimension in dimensions
-    )
+    if not dimensions:
+        return "grade_fallback"
+    modes = {dimension_rule_mode(dimension) for dimension in dimensions}
+    if len(modes) != 1:
+        raise DimensionDeductionBridgeError(
+            "dimension_rule_mode_mixed", "同一赛道的维度规则模式不一致"
+        )
+    return next(iter(modes))
 
 
 def empty_deduction_output(
     config: dict[str, Any], *, warning: str | None = None,
     prompt_identity: dict[str, str] | None = None,
 ) -> dict[str, Any]:
+    mode = rule_scoring_mode(config)
+    bonus_cap = mode == "bonus_cap_v2"
     return {
-        "bridge_version": DEDUCTION_BRIDGE_VERSION,
+        "bridge_version": (
+            BONUS_CAP_BRIDGE_VERSION if bonus_cap else DEDUCTION_BRIDGE_VERSION
+        ),
         "prompt_identity": prompt_identity,
         "dimensions": {
-            dimension["key"]: {"hit_rules": []}
+            dimension["key"]: (
+                {"hit_rules": [], "hit_bonus_rules": []}
+                if bonus_cap
+                else {"hit_rules": []}
+            )
             for dimension in dimension_definitions(config)
         },
         "overall_note": "",
@@ -112,16 +133,27 @@ def empty_deduction_output(
 
 def _configured_rules(
     config: dict[str, Any],
-) -> tuple[list[dict[str, Any]], dict[str, dict[str, DeductionRule]]]:
+) -> tuple[
+    list[dict[str, Any]],
+    dict[str, dict[str, DeductionRule]],
+    dict[str, dict[str, BonusRule]],
+    str,
+]:
     dimensions = dimension_definitions(config)
     if not dimensions:
         raise DimensionDeductionBridgeError(
             "dimensions_empty", "规则扣分调用B至少需要一个维度"
         )
+    mode = rule_scoring_mode(config)
+    if mode == "grade_fallback":
+        raise DimensionDeductionBridgeError(
+            "rule_contract_missing", "当前维度合同应走旧 grade fallback"
+        )
     rules_by_dimension: dict[str, dict[str, DeductionRule]] = {}
+    bonus_rules_by_dimension: dict[str, dict[str, BonusRule]] = {}
     for dimension in dimensions:
         raw_rules = dimension.get("deduction_rules")
-        if not isinstance(raw_rules, list) or not raw_rules:
+        if not isinstance(raw_rules, list) or (mode == "deduction_v1" and not raw_rules):
             raise DimensionDeductionBridgeError(
                 "deduction_rules_missing",
                 f"维度 {dimension['key']} 缺少 deduction_rules，应走旧 grade fallback",
@@ -130,7 +162,16 @@ def _configured_rules(
             rule.rule_id: rule
             for rule in (DeductionRule.model_validate(item) for item in raw_rules)
         }
-    return dimensions, rules_by_dimension
+        raw_bonus_rules = dimension.get("bonus_rules", [])
+        if mode == "bonus_cap_v2" and not isinstance(raw_bonus_rules, list):
+            raise DimensionDeductionBridgeError(
+                "bonus_rules_missing", f"维度 {dimension['key']} 缺少 bonus_rules"
+            )
+        bonus_rules_by_dimension[dimension["key"]] = {
+            rule.rule_id: rule
+            for rule in (BonusRule.model_validate(item) for item in raw_bonus_rules)
+        }
+    return dimensions, rules_by_dimension, bonus_rules_by_dimension, mode
 
 
 def normalize_dimension_deduction_output(
@@ -138,7 +179,7 @@ def normalize_dimension_deduction_output(
     config: dict[str, Any],
 ) -> dict[str, Any]:
     """Validate provider JSON against the frozen configured dimensions/rules."""
-    dimensions, rules_by_dimension = _configured_rules(config)
+    dimensions, rules_by_dimension, bonus_rules_by_dimension, mode = _configured_rules(config)
     if not isinstance(payload, dict):
         raise DimensionDeductionBridgeError(
             "response_not_object", "调用B响应必须是 JSON 对象"
@@ -164,6 +205,13 @@ def normalize_dimension_deduction_output(
 
     parsed: dict[str, DimensionDeductionOutput] = {}
     for raw in raw_items:
+        if mode == "bonus_cap_v2" and (
+            "hit_rules" not in raw or "hit_bonus_rules" not in raw
+        ):
+            raise DimensionDeductionBridgeError(
+                "dimension_output_invalid",
+                "bonus-cap-v2 维度输出必须同时包含 hit_rules 与 hit_bonus_rules",
+            )
         try:
             item = DimensionDeductionOutput.model_validate(raw)
         except ValueError as exc:
@@ -175,7 +223,8 @@ def normalize_dimension_deduction_output(
                 "dimension_duplicate", f"维度重复：{item.dimension_key}"
             )
         configured = rules_by_dimension.get(item.dimension_key)
-        if configured is None:
+        configured_bonus = bonus_rules_by_dimension.get(item.dimension_key)
+        if configured is None or configured_bonus is None:
             raise DimensionDeductionBridgeError(
                 "dimension_unknown", f"调用B返回未知维度：{item.dimension_key}"
             )
@@ -185,6 +234,18 @@ def normalize_dimension_deduction_output(
                 raise DimensionDeductionBridgeError(
                     "rule_unknown",
                     f"维度 {item.dimension_key} 返回未知 rule_id：{hit.rule_id}",
+                )
+            if hit.rule_id in seen_rules:
+                raise DimensionDeductionBridgeError(
+                    "rule_duplicate",
+                    f"维度 {item.dimension_key} 重复命中 rule_id：{hit.rule_id}",
+                )
+            seen_rules.add(hit.rule_id)
+        for hit in item.hit_bonus_rules:
+            if hit.rule_id not in configured_bonus:
+                raise DimensionDeductionBridgeError(
+                    "rule_unknown",
+                    f"维度 {item.dimension_key} 返回未知 bonus rule_id：{hit.rule_id}",
                 )
             if hit.rule_id in seen_rules:
                 raise DimensionDeductionBridgeError(
@@ -203,9 +264,20 @@ def normalize_dimension_deduction_output(
             f"调用B维度必须与合同完全一致（缺失 {missing}，多余 {extra}）",
         )
     return {
-        "bridge_version": DEDUCTION_BRIDGE_VERSION,
+        "bridge_version": (
+            BONUS_CAP_BRIDGE_VERSION
+            if mode == "bonus_cap_v2"
+            else DEDUCTION_BRIDGE_VERSION
+        ),
         "dimensions": {
-            key: {"hit_rules": parsed[key].model_dump()["hit_rules"]}
+            key: (
+                {
+                    "hit_rules": parsed[key].model_dump()["hit_rules"],
+                    "hit_bonus_rules": parsed[key].model_dump()["hit_bonus_rules"],
+                }
+                if mode == "bonus_cap_v2"
+                else {"hit_rules": parsed[key].model_dump()["hit_rules"]}
+            )
             for key in expected_keys
         },
         "overall_note": str(payload.get("overall_note") or "").strip(),
@@ -217,21 +289,33 @@ def build_dimension_deduction_prompt(
     config: dict[str, Any], *, precheck: dict[str, Any] | None = None
 ) -> tuple[str, str]:
     """Build the Chinese rule-by-rule calling-B prompt from frozen config."""
-    dimensions, _ = _configured_rules(config)
+    dimensions, _, _, mode = _configured_rules(config)
+    bonus_cap = mode == "bonus_cap_v2"
     system = (
         "你是灵感素材质量核验专家。你只做规则命中判断，不打1-5分、不输出总分或等级。"
-        "逐维度检查每条扣分规则；只返回确有视觉证据的命中项。每条命中必须给出独立、"
-        "可定位的中文证据和 high/medium/low 置信度。严格输出 JSON。"
+        + (
+            "逐维度分别检查每条扣分规则与加分规则；只返回确有视觉证据的命中项。"
+            if bonus_cap
+            else "逐维度检查每条扣分规则；只返回确有视觉证据的命中项。"
+        )
+        + "每条命中必须给出独立、可定位的中文证据和 high/medium/low 置信度。严格输出 JSON。"
     )
     rule_blocks: list[str] = []
     for dimension in dimensions:
-        rule_lines = [
+        deduction_lines = [
             f"- {rule['rule_id']}: {rule['description']}（扣 {rule['deduction']} 分）"
             for rule in dimension["deduction_rules"]
         ]
+        bonus_lines = [
+            f"- {rule['rule_id']}: {rule['description']}（加 {rule['bonus']} 分）"
+            for rule in dimension.get("bonus_rules", [])
+        ]
+        rules_text = "扣分规则：\n" + ("\n".join(deduction_lines) or "- 无")
+        if bonus_cap:
+            rules_text += "\n加分规则：\n" + ("\n".join(bonus_lines) or "- 无")
         rule_blocks.append(
             f"# 维度：{dimension.get('label') or dimension['key']}（{dimension['key']}）\n"
-            + "\n".join(rule_lines)
+            + rules_text
         )
     response_contract = {
         "dimensions": {
@@ -243,6 +327,19 @@ def build_dimension_deduction_prompt(
                         "evidence": "图中具体证据",
                     }
                 ],
+                **(
+                    {
+                        "hit_bonus_rules": [
+                            {
+                                "rule_id": "命中的加分规则ID",
+                                "confidence": "high|medium|low",
+                                "evidence": "图中具体证据",
+                            }
+                        ]
+                    }
+                    if bonus_cap
+                    else {}
+                ),
             }
             for dimension in dimensions
         },
@@ -252,15 +349,25 @@ def build_dimension_deduction_prompt(
         "\n\n".join(rule_blocks)
         + "\n\n调用A预检字段：\n"
         + json.dumps(precheck or {}, ensure_ascii=False, sort_keys=True)
-        + "\n\n输出结构（未命中时 hit_rules 必须为空数组）：\n"
+        + (
+            "\n\n输出结构（未命中时 hit_rules 与 hit_bonus_rules 必须为空数组）：\n"
+            if bonus_cap
+            else "\n\n输出结构（未命中时 hit_rules 必须为空数组）：\n"
+        )
         + json.dumps(response_contract, ensure_ascii=False)
     )
     return system, user
 
 
-def _deduction_prompt_identity(system_prompt: str, user_prompt: str) -> dict[str, str]:
+def _deduction_prompt_identity(
+    system_prompt: str, user_prompt: str, *, bonus_cap: bool = False
+) -> dict[str, str]:
     return {
-        "template_version": DEDUCTION_PROMPT_TEMPLATE_VERSION,
+        "template_version": (
+            BONUS_CAP_PROMPT_TEMPLATE_VERSION
+            if bonus_cap
+            else DEDUCTION_PROMPT_TEMPLATE_VERSION
+        ),
         "system_sha256": hashlib.sha256(system_prompt.encode("utf-8")).hexdigest(),
         "user_sha256": hashlib.sha256(user_prompt.encode("utf-8")).hexdigest(),
     }
@@ -281,11 +388,13 @@ async def call_multimodal_for_dimension_deductions(
     malformed local rule configuration is validated before the ``try`` and
     therefore fails closed instead of being disguised as a model outage.
     """
-    _configured_rules(contract)  # local contract corruption must fail closed
+    _, _, _, mode = _configured_rules(contract)  # local corruption fails closed
     system_prompt, user_prompt = build_dimension_deduction_prompt(
         contract, precheck=precheck
     )
-    prompt_identity = _deduction_prompt_identity(system_prompt, user_prompt)
+    prompt_identity = _deduction_prompt_identity(
+        system_prompt, user_prompt, bonus_cap=mode == "bonus_cap_v2"
+    )
     try:
         response = await client.chat_json(
             system_prompt,
@@ -316,8 +425,10 @@ def compose_rule_deductions(
     its group's effective ``dimension_max`` slice.  This preserves the existing
     track/group weighting while replacing subjective grades with explicit rules.
     """
+    if rule_scoring_mode(config) == "bonus_cap_v2":
+        return compose_rule_scores(config=config, dimension_output=dimension_output)
     validate_subcategory_dimensions(config)
-    dimensions, rules_by_dimension = _configured_rules(config)
+    dimensions, rules_by_dimension, _, _ = _configured_rules(config)
     normalized = normalize_dimension_deduction_output(dimension_output, config)
     hit_by_key = {
         key: value["hit_rules"]
@@ -375,6 +486,110 @@ def compose_rule_deductions(
     return {
         "composition_version": RULE_COMPOSITION_VERSION,
         "mode": "rule_deduction",
+        "sub_category_key": config["sub_category_key"],
+        "dimension_max": dimension_max,
+        "dimension_deductions": dict(normalized["dimensions"]),
+        "deductions": deductions,
+        "evidence": evidence,
+        "warning": dimension_output.get("warning"),
+        "overall_note": normalized.get("overall_note", ""),
+        "prompt_identity": dimension_output.get("prompt_identity"),
+    }
+
+
+def compose_rule_scores(
+    *,
+    config: dict[str, Any],
+    dimension_output: dict[str, Any],
+) -> dict[str, Any]:
+    """Compose explicit deduction/bonus hits into capped dimension scores."""
+    validate_subcategory_dimensions(config)
+    (
+        _dimensions,
+        rules_by_dimension,
+        bonus_rules_by_dimension,
+        mode,
+    ) = _configured_rules(config)
+    if mode != "bonus_cap_v2":
+        raise DimensionDeductionBridgeError(
+            "bonus_cap_mode_required", "compose_rule_scores 仅接受 bonus-cap-v2 合同"
+        )
+    normalized = normalize_dimension_deduction_output(dimension_output, config)
+
+    non_empty_groups: list[tuple[str, dict[str, Any]]] = []
+    for group_name in ("common_group", "specific_group"):
+        group = config.get(group_name)
+        schema = group.get("schema_definition") if isinstance(group, dict) else None
+        group_dimensions = schema.get("dimensions") if isinstance(schema, dict) else None
+        if isinstance(group_dimensions, list) and group_dimensions:
+            non_empty_groups.append((group_name, group))
+    weight_total = sum(float(group["group_weight"]) for _, group in non_empty_groups)
+    if weight_total <= 0:
+        raise DimensionDeductionBridgeError(
+            "group_weight_invalid", "非空维度组 group_weight 之和必须大于0"
+        )
+
+    deductions: dict[str, float] = {}
+    evidence: dict[str, Any] = {}
+    dimension_max = float(config["dimension_max"])
+    for group_name, group in non_empty_groups:
+        schema_dimensions = group["schema_definition"]["dimensions"]
+        effective_max = float(group["group_weight"]) / weight_total * dimension_max
+        try:
+            weight_scale, weight_mode = resolve_dimension_weight_scale(
+                schema_dimensions, effective_max
+            )
+        except DimensionGradeBridgeError as exc:
+            raise DimensionDeductionBridgeError(exc.code, str(exc)) from exc
+        for dimension in schema_dimensions:
+            key = dimension["key"]
+            hits = normalized["dimensions"][key]["hit_rules"]
+            bonus_hits = normalized["dimensions"][key]["hit_bonus_rules"]
+            raw_rule_deduction = sum(
+                rules_by_dimension[key][hit["rule_id"]].deduction for hit in hits
+            )
+            raw_rule_bonus = sum(
+                bonus_rules_by_dimension[key][hit["rule_id"]].bonus
+                for hit in bonus_hits
+            )
+            raw_dimension_score = (
+                100.0 - float(raw_rule_deduction) + float(raw_rule_bonus)
+            )
+            score_before_cap = max(raw_dimension_score, 0.0)
+            cap = float(dimension["dimension_score_cap"])
+            dimension_score = min(score_before_cap, cap)
+            share = float(dimension["weight"]) * weight_scale
+            point_contribution = round(share * dimension_score / 100.0, 4)
+            point_deduction = round(share - point_contribution, 4)
+            deductions[key] = point_deduction
+            evidence[key] = {
+                "group": group_name,
+                "share": round(share, 6),
+                "weight_mode": weight_mode,
+                "raw_rule_deduction": float(raw_rule_deduction),
+                "applied_rule_deduction": float(raw_rule_deduction),
+                "raw_rule_bonus": float(raw_rule_bonus),
+                "applied_rule_bonus": float(raw_rule_bonus),
+                "raw_dimension_score": raw_dimension_score,
+                "score_before_cap": score_before_cap,
+                "dimension_score_cap": cap,
+                "dimension_score": dimension_score,
+                "cap_applied": dimension_score < score_before_cap,
+                "cap_reason": (
+                    f"维度分数按 dimension_score_cap={cap:g} 封顶"
+                    if dimension_score < score_before_cap
+                    else None
+                ),
+                "point_contribution": point_contribution,
+                "point_deduction": point_deduction,
+                "hit_rules": hits,
+                "hit_bonus_rules": bonus_hits,
+            }
+
+    return {
+        "composition_version": RULE_COMPOSITION_V2,
+        "mode": "rule_deduction",
+        "rule_mode": "bonus_cap_v2",
         "sub_category_key": config["sub_category_key"],
         "dimension_max": dimension_max,
         "dimension_deductions": dict(normalized["dimensions"]),
