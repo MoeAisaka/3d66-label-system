@@ -3,6 +3,30 @@
 > 最后更新：2026-08-11
 > 本文件只记录“现在做到哪里”；长期原则见 `PRODUCT.md` 和 `AGENTS.md`，历史背景见 `CODEX_HANDOFF.md`。
 
+## 最新实施：前端信息架构与机制编辑器重构（2026-08-12）
+
+- 产品定位继续以 ADR-0042/0043 为准：**TPENG 标签实验台（LabelLab）**是“标签体系重构”的统一产品载体，也是标签/内容中台通用底座；业务类目只做场景扩展，不复制平台能力。
+- 当前分支为 `codex/frontend-information-architecture-v1`，当前提交为 `4f22e1b`，基线合并点为 `main` 的 `ee48d2b`。Codeup `origin` 指向 `git@codeup.aliyun.com:3d66/tepeng/3d66.label-system.git`；本批尚未 push、创建/合并 MR 或部署。
+- Task 10 已完成：存量回归一级页面聚焦“选择基准集 → 启动回归 → 逐条确认与纠偏”，复杂内容进入 `BaselineSetDialog`、`RunConfigDrawer`、`MetricsDrawer`、`RunHistoryDrawer` 和 `CorrectionWorkbench`；纠偏上下文通过 `?run=<id>&item=<id>&mode=correction` 可恢复。
+- 当前批次仅做前端信息架构、合同脚本和文档边界；没有新增后端状态、机制激活、自动发布、真实存量重跑 Worker、正式标签事实写入或新权限。Proposal PDF 仍保持独立三分项加法；3D/SU 只保留受控插件注册与安全降级边界。
+- ADR-0044 与全路由审计已补齐：一级页面/二级承载、受控 `profile_type` 插件、candidate revision、双发布轴和下游正式事实消费边界已记录。候选绑定、manifest、原子 projection switch、追加式机制回滚仍列为 Owner=`标签体系` 的下一阶段 Gap。
+
+当前验证：
+
+- `npm --prefix frontend run contract:information-architecture`：通过；workspace component contract：通过。
+- `npm --prefix frontend run contract:node-correction`：通过。
+- `npm --prefix frontend run contract:balanced-100`：通过。
+- `npm --prefix frontend run test:lightbox`：通过。
+- `npm --prefix frontend run lint`：通过。
+- `npm --prefix frontend run build`：通过；仅保留既有主 chunk 大于 500 kB 的构建 warning。
+- `git diff --check`：通过。
+
+仍未完成/明确非本阶段闭环：
+
+- 全路由审计以外的页面重构、3D/SU 专用编辑器、候选自动激活、真实生产发布和真实存量重跑执行均不在本批。
+- candidate revision → candidate-aware regression snapshot、回归证据 → `EvaluationPackage` manifest、approved package → 原子 active projection switch、追加式机制回滚仍待【标签体系】Owner 单独冻结。
+- 本批完成后继续由 TPENG 标签实验台会话作为唯一代码写入方；本状态更新不构成下一阶段实施授权。
+
 ## 最新实施：TPENG 标签实验台统一底座——标签机制与模型管理 v1（2026-08-11）
 
 - 产品定位已按 ADR-0042 冻结：“标签体系重构”与“标签实验台”合并为一条产品线，统一以
@@ -1449,7 +1473,7 @@ doctor 九项门禁：两个变体下均全部通过
 | 黄金回归 | 已完成基础流程 | 全量运行与比较；发布前硬门禁尚未完成 |
 | 模型迁移 | 已完成基础流程 | 旧结果基线、新模型重跑、差异/抽检人工判断 |
 | 智能抽样 v1 | 已完成 | 必审/抽审/暂缓/已审、稳定 10% 抽样、原因和优先级 |
-| 抽样策略配置 v1.1 | 已提交 | 自动测试和构建通过，待补一次真实浏览器验收 |
+| 抽样策略配置 v1.1 | 已提交 | 自动测试和构建通过，尚需一次真实浏览器验收 |
 | 初审人数弹性机制 | 当前工作树已完成 | 初期默认 1 人即时定案；支持切换 3/5/7/9 人，收齐全部冻结席位后计算多数共识；面板创建时冻结人数 |
 | P0-E 金丝雀前端编排 | 工作树已完成 | 已接 E3 认证 API；只登记门禁证据，不执行导入、下载、模型、Gold 或发布 |
 | macOS 部署生命周期 | 离线能力已完成 | 安装/诊断/前台启动/脱敏备份恢复已测试；目标 MacBook 尚未实际部署 |
