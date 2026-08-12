@@ -136,17 +136,58 @@ def _call_a_field(path: str) -> str:
     return parts[0]
 
 
+def _dimension_definition(
+    config: Any, dimension_key: str
+) -> dict[str, Any] | None:
+    if not isinstance(config, dict):
+        return None
+    for group_name in ("common_group", "specific_group"):
+        group = config.get(group_name)
+        if not isinstance(group, dict):
+            continue
+        schema = group.get("schema_definition")
+        dimensions = schema.get("dimensions") if isinstance(schema, dict) else None
+        if not isinstance(dimensions, list):
+            dimensions = group.get("dimensions")
+        if not isinstance(dimensions, list):
+            continue
+        for dimension in dimensions:
+            if isinstance(dimension, dict) and dimension.get("key") == dimension_key:
+                return dimension
+    return None
+
+
+def _configured_dimension_rule_ids(
+    config: Any, *, dimension_key: str, hit_field: str
+) -> set[str]:
+    dimension = _dimension_definition(config, dimension_key)
+    rule_field = "bonus_rules" if hit_field == "hit_bonus_rules" else "deduction_rules"
+    raw_rules = dimension.get(rule_field) if isinstance(dimension, dict) else None
+    if not isinstance(raw_rules, list):
+        return set()
+    return {
+        str(rule["rule_id"])
+        for rule in raw_rules
+        if isinstance(rule, dict) and isinstance(rule.get("rule_id"), str)
+    }
+
+
 def _dimension_node(
-    output: dict[str, Any], path: str
+    output: dict[str, Any], path: str, *, frozen_config: Any = None
 ) -> tuple[Any, Callable[[Any], None]]:
     parts = _path_parts(path, prefix="dimension.")
-    if len(parts) not in {2, 3} or parts[1] != "hit_rules":
+    if len(parts) not in {2, 3} or parts[1] not in {
+        "hit_rules",
+        "hit_bonus_rules",
+    }:
         raise _coded(
             400,
             "node_path_invalid",
-            "维度路径应为 dimension.<维度key>.hit_rules[.<rule_id>]",
+            "维度路径应为 dimension.<维度key>.hit_rules[.<rule_id>] 或 "
+            "dimension.<维度key>.hit_bonus_rules[.<rule_id>]",
         )
     dimension_key = parts[0]
+    hit_field = parts[1]
     dimensions = output.get("dimensions")
     if isinstance(dimensions, dict):
         target = dimensions.get(dimension_key)
@@ -162,13 +203,32 @@ def _dimension_node(
         )
     if target is None:
         raise _coded(400, "dimension_not_found", f"未找到维度 {dimension_key}")
-    hits = target.setdefault("hit_rules", [])
+    hits = target.setdefault(hit_field, [])
+    if not isinstance(hits, list):
+        raise _coded(400, "dimension_rule_invalid", "规则命中必须是数组")
+    configured_rule_ids = _configured_dimension_rule_ids(
+        frozen_config,
+        dimension_key=dimension_key,
+        hit_field=hit_field,
+    )
+
+    def validate_configured(rule_id: str) -> None:
+        if rule_id not in configured_rule_ids:
+            polarity = "加分" if hit_field == "hit_bonus_rules" else "扣分"
+            raise _coded(
+                400,
+                "rule_unknown",
+                f"维度 {dimension_key} 未配置{polarity}规则 {rule_id}",
+            )
+
     if len(parts) == 2:
         def assign_all(value: Any) -> None:
             try:
-                parsed = DimensionDeductionOutput(
-                    dimension_key=dimension_key,
-                    hit_rules=value,
+                parsed = DimensionDeductionOutput.model_validate(
+                    {
+                        "dimension_key": dimension_key,
+                        hit_field: value,
+                    }
                 )
             except ValidationError as exc:
                 raise _coded(
@@ -176,12 +236,16 @@ def _dimension_node(
                     "dimension_rule_invalid",
                     "规则命中必须使用 high/medium/low 置信度枚举",
                 ) from exc
-            target["hit_rules"] = [
-                item.model_dump(mode="json") for item in parsed.hit_rules
+            parsed_hits = getattr(parsed, hit_field)
+            for item in parsed_hits:
+                validate_configured(item.rule_id)
+            target[hit_field] = [
+                item.model_dump(mode="json") for item in parsed_hits
             ]
 
         return hits, assign_all
     rule_id = parts[2]
+    validate_configured(rule_id)
     index = next(
         (i for i, hit in enumerate(hits) if hit.get("rule_id") == rule_id), None
     )
@@ -364,7 +428,17 @@ def apply_node_correction(
     elif payload.node_type == "dimension_rule":
         if not isinstance(dimension_output, dict):
             raise _coded(409, "dimension_output_missing", "结果缺少维度规则命中输出")
-        old_value, assign = _dimension_node(dimension_output, payload.node_path)
+        dimensions_by_track = context.get("subcategory_dimensions")
+        frozen_config = (
+            dimensions_by_track.get(scoring.get("track_key"))
+            if isinstance(dimensions_by_track, dict)
+            else None
+        )
+        old_value, assign = _dimension_node(
+            dimension_output,
+            payload.node_path,
+            frozen_config=frozen_config,
+        )
     elif payload.node_type == "track":
         old_value = scoring.get("track_key")
         if payload.node_path not in {"track", "track_key", "scoring.track_key"}:

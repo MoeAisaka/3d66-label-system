@@ -37,6 +37,25 @@ def _context() -> dict:
     }
 
 
+def _bonus_context() -> dict:
+    context = _context()
+    dimensions = context["subcategory_dimensions"]["class_one"]["common_group"][
+        "schema_definition"
+    ]["dimensions"]
+    for dimension in dimensions:
+        dimension["dimension_score_cap"] = 100
+        dimension["bonus_rules"] = []
+    dimensions[0]["bonus_rules"] = [
+        {
+            "rule_id": "composition_clear",
+            "description": "主体、留白与层级关系清晰",
+            "bonus": 8,
+            "tags": ["构图"],
+        }
+    ]
+    return context
+
+
 def _precheck() -> dict:
     return {
         "classification": {
@@ -250,6 +269,142 @@ def test_correct_dimension_rule_appends_evidence_and_recomputes_downstream() -> 
         assert history[-1]["corrector"] == "auto-corrector-v1"
         assert history[-1]["corrector_confidence"] == 0.91
         assert history[-1]["corrector_policy"] == "level-confusion-calibration-v1"
+    engine.dispose()
+
+
+def test_correct_bonus_rule_hit_recomputes_with_frozen_context() -> None:
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    sessions = sessionmaker(bind=engine, expire_on_commit=False)
+    context = _bonus_context()
+    config = context["subcategory_dimensions"]["class_one"]
+    first_dimension = config["common_group"]["schema_definition"]["dimensions"][0]
+    first_rule = first_dimension["deduction_rules"][0]
+    bonus_rule = first_dimension["bonus_rules"][0]
+    dimension_output = empty_deduction_output(config)
+    dimension_output["dimensions"][first_dimension["key"]]["hit_rules"] = [
+        {
+            "rule_id": first_rule["rule_id"],
+            "confidence": "high",
+            "evidence": "主体明显偏移",
+        }
+    ]
+    precheck = _precheck()
+    aggregate = recompute_qualified_v3(
+        v3_context=context,
+        precheck=precheck,
+        dimension_output=dimension_output,
+    )
+    scoring = build_v3_authoritative_scoring(aggregate, precheck=precheck)
+    scoring.pop("_dimension_deduction_raw_payload", None)
+    scoring["v3_context"] = context
+
+    with sessions() as db:
+        row = EvaluationResult(
+            asset_id=1,
+            job_id=1,
+            precheck_json=json.dumps(precheck, ensure_ascii=False),
+            aesthetic_json=json.dumps(dimension_output, ensure_ascii=False),
+            scoring_json=json.dumps(scoring, ensure_ascii=False),
+            correction_history_json="[]",
+            raw_response_a='{"immutable":"provider payload"}',
+            score=scoring["score"],
+            level=scoring["level"],
+            confidence=scoring["confidence"],
+            needs_review=False,
+            model_id="fake",
+            prompt_a_version="a",
+            rubric_version="r",
+            engine_version="e",
+        )
+        db.add(row)
+        db.commit()
+        result_id = row.id
+        original_score = row.score
+
+    def db_dependency():
+        db = sessions()
+        try:
+            yield db
+        finally:
+            db.close()
+
+    def reviewer():
+        return SimpleNamespace(username="reviewer", display_name="审核员")
+
+    app = FastAPI()
+    app.include_router(build_node_correction_router(reviewer))
+    app.dependency_overrides[get_db] = db_dependency
+    client = TestClient(app)
+    new_hit = {
+        "rule_id": bonus_rule["rule_id"],
+        "confidence": "high",
+        "evidence": "主体、留白与层级关系清晰",
+    }
+    payload = {
+        "correction_key": "bonus-add-1",
+        "node_type": "dimension_rule",
+        "node_path": (
+            f"dimension.{first_dimension['key']}.hit_bonus_rules."
+            f"{bonus_rule['rule_id']}"
+        ),
+        "old_value": None,
+        "new_value": new_hit,
+        "evidence": [],
+        "reason": "人工确认正向规则命中",
+    }
+
+    response = client.post(
+        f"/api/evaluation-results/{result_id}/correct-node", json=payload
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["score"] > original_score
+    assert body["aesthetic"]["dimensions"][first_dimension["key"]][
+        "hit_bonus_rules"
+    ] == [new_hit]
+    assert body["correction_history"][-1]["node_path"].endswith(
+        "hit_bonus_rules.composition_clear"
+    )
+
+    replay = client.post(
+        f"/api/evaluation-results/{result_id}/correct-node", json=payload
+    )
+    assert replay.status_code == 200
+    assert len(replay.json()["correction_history"]) == 1
+
+    stale = client.post(
+        f"/api/evaluation-results/{result_id}/correct-node",
+        json={**payload, "correction_key": "bonus-stale", "old_value": None},
+    )
+    assert stale.status_code == 409
+    assert stale.json()["detail"]["code"] == "node_value_conflict"
+
+    unknown = client.post(
+        f"/api/evaluation-results/{result_id}/correct-node",
+        json={
+            **payload,
+            "correction_key": "bonus-unknown",
+            "node_path": (
+                f"dimension.{first_dimension['key']}.hit_bonus_rules.unknown_bonus"
+            ),
+            "old_value": None,
+            "new_value": {**new_hit, "rule_id": "unknown_bonus"},
+        },
+    )
+    assert unknown.status_code == 400
+    assert unknown.json()["detail"]["code"] == "rule_unknown"
+
+    with sessions() as db:
+        stored = db.get(EvaluationResult, result_id)
+        assert stored is not None
+        assert stored.raw_response_a == '{"immutable":"provider payload"}'
+        history = json.loads(stored.correction_history_json)
+        assert len(history) == 1
     engine.dispose()
 
 
