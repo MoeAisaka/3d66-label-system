@@ -89,6 +89,21 @@ def test_new_b_prompt_is_appended_without_overwriting_old_version() -> None:
             )
         ) == "旧提示词不可覆盖"
 
+        active_b = db.scalar(
+            select(PromptVersion).where(
+                PromptVersion.version == INSPIRATION_CALL_B_VERSION
+            )
+        )
+        assert active_b is not None
+        assert '"contract_version":"inspiration-aesthetic-foundation-v1"' in (
+            active_b.system_prompt
+        )
+        assert active_b.version == "inspiration-b-v5-anchor-calibration-evidence-20260807"
+        assert active_b.pipeline_scope == "shared"
+        assert db.scalar(select(PromptVersion).where(
+            PromptVersion.version == "inspiration-b-v3-anchor-aesthetic-20260806"
+        )) is not None
+
 
 def test_existing_profile_is_bound_to_rev4_a_and_new_b_atomically() -> None:
     engine = _engine()

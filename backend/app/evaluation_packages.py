@@ -22,11 +22,13 @@ from .category_pipeline import (
 )
 from .database import get_db
 from .models import (
+    Asset,
     AutomationOptimizationRun,
     DimensionRoutePolicy,
     DimensionSchema,
     EvaluationCategoryProfile,
     EvaluationPackage,
+    MechanismRelease,
     ModelConfig,
     PromptMetricSnapshot,
     PromptRegressionRun,
@@ -34,6 +36,7 @@ from .models import (
     SampleSet,
     SamplingPolicy,
     StrategyBundle,
+    StockRerun,
     User,
 )
 from .strategy_bundle import (
@@ -189,6 +192,34 @@ class EvaluationPackageArchiveRequest(BaseModel):
         if not normalized:
             raise ValueError("归档原因不得为空白")
         return normalized
+
+
+class StockRerunCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    idempotency_key: str = Field(min_length=1, max_length=160)
+    category_key: str = Field(pattern=r"^[a-z][a-z0-9_]{2,39}$")
+    target_mechanism_release_id: int = Field(ge=1)
+    source_mechanism_release_id: int | None = Field(default=None, ge=1)
+    asset_ids: list[int] = Field(min_length=1, max_length=5000)
+    reason: str = Field(min_length=1, max_length=4000)
+
+    @field_validator("idempotency_key", "reason")
+    @classmethod
+    def normalize_text(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("字段不得为空白")
+        return normalized
+
+    @field_validator("asset_ids")
+    @classmethod
+    def validate_asset_ids(cls, values: list[int]) -> list[int]:
+        if any(isinstance(value, bool) or value < 1 for value in values):
+            raise ValueError("asset_ids 只能包含正整数")
+        if len(values) != len(set(values)):
+            raise ValueError("asset_ids 不得重复")
+        return values
 
 
 def canonical_json(value: Any) -> str:
@@ -1636,6 +1667,320 @@ def _activate_package_category_baseline(
     return previous_prompt_ids
 
 
+def _mechanism_release_payload(
+    release: MechanismRelease,
+    *,
+    include_manifest: bool = False,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "id": release.id,
+        "release_key": release.release_key,
+        "category_key": release.category_key,
+        "evaluation_package_id": release.evaluation_package_id,
+        "previous_release_id": release.previous_release_id,
+        "revision": release.revision,
+        "manifest_hash": release.manifest_hash,
+        "status": release.status,
+        "activated_by": release.activated_by,
+        "activated_at": release.activated_at,
+        "created_at": release.created_at,
+    }
+    if include_manifest:
+        payload["manifest"] = _loads_object(
+            release.manifest_json, label="机制发布快照"
+        )
+    return _secret_safe(payload)
+
+
+def _assert_mechanism_release_valid(release: MechanismRelease) -> dict[str, Any]:
+    try:
+        manifest = _loads_object(release.manifest_json, label="机制发布快照")
+        recomputed = canonical_manifest_hash(manifest)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="机制发布快照已损坏，请停止重跑并联系管理员",
+        ) from exc
+    if recomputed != release.manifest_hash:
+        raise HTTPException(
+            status_code=409,
+            detail="机制发布快照哈希无法复算，请停止重跑并联系管理员",
+        )
+    if manifest.get("schema_version") != MANIFEST_SCHEMA_VERSION:
+        raise HTTPException(status_code=409, detail="机制发布快照版本不受支持")
+    category = manifest.get("category")
+    if not isinstance(category, dict) or category.get("category_key") != release.category_key:
+        raise HTTPException(status_code=409, detail="机制发布快照类目身份损坏")
+    return manifest
+
+
+def _assert_stock_rerun_gate(manifest: dict[str, Any]) -> dict[str, Any]:
+    regression = manifest.get("regression")
+    if not isinstance(regression, dict):
+        raise HTTPException(status_code=409, detail="机制快照缺少回归证据")
+    metrics = regression.get("metrics")
+    if (
+        regression.get("terminal") is not True
+        or regression.get("status") != "passed"
+        or regression.get("recommendation") != "pass"
+        or not isinstance(metrics, dict)
+        or metrics.get("release_gate_passed") is not True
+    ):
+        raise HTTPException(status_code=409, detail="机制回归门禁未通过，不能创建存量重跑")
+
+    identity = manifest.get("identity")
+    category = manifest.get("category")
+    profile = category.get("profile") if isinstance(category, dict) else None
+    pipeline = profile.get("pipeline_config") if isinstance(profile, dict) else None
+    engine_version = identity.get("engine_version") if isinstance(identity, dict) else None
+    if not isinstance(engine_version, str) or not engine_version.strip():
+        raise HTTPException(status_code=409, detail="机制快照缺少可执行引擎")
+    if (
+        not isinstance(pipeline, dict)
+        or pipeline.get("schema_version") != "category-pipeline-v1"
+        or not isinstance(pipeline.get("processors"), list)
+        or not isinstance(pipeline.get("model_nodes"), dict)
+        or pipeline["model_nodes"].get("evaluation_main") is not True
+    ):
+        raise HTTPException(status_code=409, detail="机制快照缺少可执行类目流水线")
+
+    prompts = manifest.get("prompts")
+    strategies = manifest.get("strategies")
+    candidate = strategies.get("candidate") if isinstance(strategies, dict) else None
+    model_snapshot = candidate.get("model_config") if isinstance(candidate, dict) else None
+    if not isinstance(prompts, dict) or not isinstance(prompts.get("a"), dict):
+        raise HTTPException(status_code=409, detail="机制快照缺少提示词执行身份")
+    if not isinstance(model_snapshot, dict) or not model_snapshot.get("model_id"):
+        raise HTTPException(status_code=409, detail="机制快照缺少模型执行身份")
+    return {
+        "model": model_snapshot,
+        "prompts": prompts,
+        "rules": {
+            "dimensions": manifest.get("dimensions") or {},
+            "category": category,
+        },
+        "execution": {
+            "schema_version": "stock-rerun-execution-v1",
+            "mode": "dry_run_only",
+            "engine_version": engine_version,
+            "pipeline": pipeline,
+            "publishes_labels_automatically": False,
+            "requires_explicit_label_release": True,
+        },
+    }
+
+
+def _create_mechanism_release(
+    db: Session,
+    *,
+    package: EvaluationPackage,
+    actor: str,
+    activated_at: datetime,
+) -> MechanismRelease:
+    existing = db.scalar(
+        select(MechanismRelease).where(
+            MechanismRelease.evaluation_package_id == package.id
+        )
+    )
+    if existing is not None:
+        return existing
+    previous = db.scalar(
+        select(MechanismRelease)
+        .where(
+            MechanismRelease.category_key == package.category_key,
+            MechanismRelease.status == "active",
+        )
+        .order_by(MechanismRelease.revision.desc(), MechanismRelease.id.desc())
+    )
+    revision = (previous.revision + 1) if previous is not None else 1
+    if previous is not None:
+        previous.status = "superseded"
+    release = MechanismRelease(
+        release_key=f"mechanism:{package.category_key}:r{revision}:package:{package.id}",
+        category_key=package.category_key,
+        evaluation_package_id=package.id,
+        previous_release_id=previous.id if previous is not None else None,
+        revision=revision,
+        manifest_json=package.canonical_manifest_json,
+        manifest_hash=package.canonical_manifest_hash,
+        status="active",
+        activated_by=actor,
+        activated_at=activated_at,
+    )
+    db.add(release)
+    db.flush()
+    append_audit_event(
+        db,
+        category="mechanism_release",
+        action="activated",
+        subject_type="mechanism_release",
+        subject_id=release.id,
+        actor=actor,
+        payload={
+            "category_key": release.category_key,
+            "evaluation_package_id": package.id,
+            "previous_release_id": release.previous_release_id,
+            "revision": release.revision,
+            "manifest_hash": release.manifest_hash,
+            "triggers_stock_rerun": False,
+            "publishes_labels": False,
+        },
+        event_key=f"mechanism-release:activated:{package.id}",
+    )
+    return release
+
+
+def _stock_rerun_payload(rerun: StockRerun) -> dict[str, Any]:
+    scope = _loads_object(rerun.material_scope_json, label="存量重跑素材范围")
+    return _secret_safe(
+        {
+            "id": rerun.id,
+            "idempotency_key": rerun.idempotency_key,
+            "category_key": rerun.category_key,
+            "source_mechanism_release_id": rerun.source_mechanism_release_id,
+            "target_mechanism_release_id": rerun.target_mechanism_release_id,
+            "asset_ids": scope.get("asset_ids") or [],
+            "material_scope": scope,
+            "mechanism_snapshot": _loads_object(
+                rerun.mechanism_snapshot_json, label="存量重跑机制快照"
+            ),
+            "model_snapshot": _loads_object(
+                rerun.model_snapshot_json, label="存量重跑模型快照"
+            ),
+            "prompt_snapshot": _loads_object(
+                rerun.prompt_snapshot_json, label="存量重跑提示词快照"
+            ),
+            "rule_snapshot": _loads_object(
+                rerun.rule_snapshot_json, label="存量重跑规则快照"
+            ),
+            "execution_snapshot": _loads_object(
+                rerun.execution_snapshot_json, label="存量重跑执行快照"
+            ),
+            "status": rerun.status,
+            "reason": rerun.reason,
+            "created_by": rerun.created_by,
+            "created_at": rerun.created_at,
+            "updated_at": rerun.updated_at,
+            "publishes_labels_automatically": False,
+        }
+    )
+
+
+def create_stock_rerun(
+    db: Session,
+    *,
+    payload: StockRerunCreateRequest,
+    actor: str,
+) -> tuple[StockRerun, bool]:
+    existing = db.scalar(
+        select(StockRerun).where(
+            StockRerun.idempotency_key == payload.idempotency_key
+        )
+    )
+    if existing is not None:
+        existing_scope = _loads_object(
+            existing.material_scope_json, label="存量重跑素材范围"
+        )
+        if (
+            existing.category_key != payload.category_key
+            or existing.target_mechanism_release_id
+            != payload.target_mechanism_release_id
+            or (
+                payload.source_mechanism_release_id is not None
+                and existing.source_mechanism_release_id
+                != payload.source_mechanism_release_id
+            )
+            or existing_scope.get("asset_ids") != payload.asset_ids
+        ):
+            raise HTTPException(status_code=409, detail="同一幂等键的存量重跑请求不一致")
+        return existing, True
+
+    target = db.get(MechanismRelease, payload.target_mechanism_release_id)
+    if target is None:
+        raise HTTPException(status_code=404, detail="目标机制发布版本不存在")
+    if target.category_key != payload.category_key:
+        raise HTTPException(status_code=409, detail="目标机制发布版本与重跑类目不一致")
+    if target.status != "active":
+        raise HTTPException(status_code=409, detail="目标机制发布版本不是当前启用版本")
+    manifest = _assert_mechanism_release_valid(target)
+    snapshots = _assert_stock_rerun_gate(manifest)
+
+    source_release_id = payload.source_mechanism_release_id
+    if source_release_id is None:
+        source_release_id = target.previous_release_id
+    if source_release_id is not None:
+        source = db.get(MechanismRelease, source_release_id)
+        if source is None:
+            raise HTTPException(status_code=404, detail="来源机制发布版本不存在")
+        if source.category_key != payload.category_key or source.id == target.id:
+            raise HTTPException(status_code=409, detail="来源机制发布版本与重跑类目或目标不一致")
+
+    assets = db.scalars(select(Asset).where(Asset.id.in_(payload.asset_ids))).all()
+    by_id = {asset.id: asset for asset in assets}
+    if len(by_id) != len(payload.asset_ids):
+        raise HTTPException(status_code=409, detail="存量重跑素材范围包含不存在的素材")
+    ordered_assets = [by_id[asset_id] for asset_id in payload.asset_ids]
+    if any(asset.category_key != payload.category_key for asset in ordered_assets):
+        raise HTTPException(status_code=409, detail="存量重跑素材与目标类目不一致")
+    material_scope = {
+        "schema_version": "stock-rerun-material-scope-v1",
+        "category_key": payload.category_key,
+        "asset_ids": payload.asset_ids,
+        "asset_count": len(ordered_assets),
+        "assets": [
+            {
+                "asset_id": asset.id,
+                "sha256": asset.sha256,
+                "original_name": asset.original_name,
+                "mime_type": asset.mime_type,
+                "category_key": asset.category_key,
+            }
+            for asset in ordered_assets
+        ],
+    }
+    mechanism_snapshot = {
+        "schema_version": "stock-rerun-mechanism-snapshot-v1",
+        "release_id": target.id,
+        "evaluation_package_id": target.evaluation_package_id,
+        "manifest_hash": target.manifest_hash,
+        "manifest": manifest,
+    }
+    rerun = StockRerun(
+        idempotency_key=payload.idempotency_key,
+        category_key=payload.category_key,
+        source_mechanism_release_id=source_release_id,
+        target_mechanism_release_id=target.id,
+        material_scope_json=canonical_json(material_scope),
+        mechanism_snapshot_json=canonical_json(mechanism_snapshot),
+        model_snapshot_json=canonical_json(snapshots["model"]),
+        prompt_snapshot_json=canonical_json(snapshots["prompts"]),
+        rule_snapshot_json=canonical_json(snapshots["rules"]),
+        execution_snapshot_json=canonical_json(snapshots["execution"]),
+        status="planned",
+        reason=payload.reason,
+        created_by=actor,
+    )
+    db.add(rerun)
+    db.flush()
+    append_audit_event(
+        db,
+        category="stock_rerun",
+        action="planned",
+        subject_type="stock_rerun",
+        subject_id=rerun.id,
+        actor=actor,
+        payload={
+            "category_key": rerun.category_key,
+            "source_mechanism_release_id": rerun.source_mechanism_release_id,
+            "target_mechanism_release_id": rerun.target_mechanism_release_id,
+            "asset_count": len(ordered_assets),
+            "publishes_labels_automatically": False,
+        },
+        event_key=f"stock-rerun:planned:{payload.idempotency_key}",
+    )
+    return rerun, False
+
+
 def publish_evaluation_package(
     db: Session,
     *,
@@ -1645,6 +1990,19 @@ def publish_evaluation_package(
 ) -> tuple[EvaluationPackage, bool]:
     manifest = _assert_manifest_valid(package)
     if package.status == "published":
+        if db.scalar(
+            select(MechanismRelease).where(
+                MechanismRelease.evaluation_package_id == package.id
+            )
+        ) is None:
+            _create_mechanism_release(
+                db,
+                package=package,
+                actor=actor,
+                activated_at=package.published_at or datetime.now(timezone.utc),
+            )
+            db.commit()
+            db.expire_all()
         return package, True
     if package.status != "approved":
         raise HTTPException(
@@ -1696,6 +2054,12 @@ def publish_evaluation_package(
             previous_prompt_id=previous_prompt_b_id,
             now=now,
         )
+    mechanism_release = _create_mechanism_release(
+        db,
+        package=package,
+        actor=actor,
+        activated_at=now,
+    )
     append_audit_event(
         db,
         category="evaluation_package",
@@ -1709,6 +2073,9 @@ def publish_evaluation_package(
             "prompt_a_id": package.prompt_a_id,
             "prompt_b_id": package.prompt_b_id,
             "human_gate": True,
+            "mechanism_release_id": mechanism_release.id,
+            "triggers_stock_rerun": False,
+            "publishes_labels": False,
         },
         event_key=f"evaluation-package-published:{package.id}",
     )
@@ -2023,6 +2390,89 @@ def build_evaluation_package_router(
         )
         detail = _package_payload(db, current, include_manifest=True)
         return {"duplicate": duplicate, "package": detail, **detail}
+
+    @router.get("/mechanism-releases")
+    def list_mechanism_releases(
+        category_key: str | None = None,
+        status: Literal["active", "superseded", "rolled_back"] | None = None,
+        limit: int = Query(default=200, ge=1, le=500),
+        _user: User = Depends(read_user_dependency),
+        db: Session = Depends(get_db),
+    ) -> dict[str, Any]:
+        statement = select(MechanismRelease).order_by(
+            MechanismRelease.category_key.asc(),
+            MechanismRelease.revision.desc(),
+            MechanismRelease.id.desc(),
+        )
+        if category_key is not None:
+            statement = statement.where(MechanismRelease.category_key == category_key)
+        if status is not None:
+            statement = statement.where(MechanismRelease.status == status)
+        return {
+            "items": [
+                _mechanism_release_payload(item)
+                for item in db.scalars(statement.limit(limit)).all()
+            ]
+        }
+
+    @router.get("/mechanism-releases/{release_id}")
+    def get_mechanism_release(
+        release_id: int,
+        _user: User = Depends(read_user_dependency),
+        db: Session = Depends(get_db),
+    ) -> dict[str, Any]:
+        release = db.get(MechanismRelease, release_id)
+        if release is None:
+            raise HTTPException(status_code=404, detail="机制发布版本不存在")
+        _assert_mechanism_release_valid(release)
+        return _mechanism_release_payload(release, include_manifest=True)
+
+    @router.post("/stock-reruns")
+    def plan_stock_rerun(
+        payload: StockRerunCreateRequest,
+        user: User = Depends(write_user_dependency),
+        db: Session = Depends(get_db),
+    ) -> dict[str, Any]:
+        rerun, duplicate = create_stock_rerun(
+            db, payload=payload, actor=user.username
+        )
+        db.commit()
+        db.refresh(rerun)
+        detail = _stock_rerun_payload(rerun)
+        return {"duplicate": duplicate, "rerun": detail, **detail}
+
+    @router.get("/stock-reruns")
+    def list_stock_reruns(
+        category_key: str | None = None,
+        status: Literal[
+            "planned", "queued", "running", "completed", "failed", "cancelled"
+        ]
+        | None = None,
+        limit: int = Query(default=200, ge=1, le=500),
+        _user: User = Depends(read_user_dependency),
+        db: Session = Depends(get_db),
+    ) -> dict[str, Any]:
+        statement = select(StockRerun).order_by(
+            StockRerun.created_at.desc(), StockRerun.id.desc()
+        )
+        if category_key is not None:
+            statement = statement.where(StockRerun.category_key == category_key)
+        if status is not None:
+            statement = statement.where(StockRerun.status == status)
+        return {
+            "items": [_stock_rerun_payload(item) for item in db.scalars(statement.limit(limit)).all()]
+        }
+
+    @router.get("/stock-reruns/{rerun_id}")
+    def get_stock_rerun(
+        rerun_id: int,
+        _user: User = Depends(read_user_dependency),
+        db: Session = Depends(get_db),
+    ) -> dict[str, Any]:
+        rerun = db.get(StockRerun, rerun_id)
+        if rerun is None:
+            raise HTTPException(status_code=404, detail="存量重跑记录不存在")
+        return _stock_rerun_payload(rerun)
 
     @router.post("/evaluation-packages/{package_id}/archive")
     def archive_package(

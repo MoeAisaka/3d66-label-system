@@ -162,10 +162,7 @@ from .worker_v3_authoritative import (
     v3_authoritative_for_job,
     v3_uses_rule_deductions,
 )
-from .level_semantics import (
-    LEVEL_SEMANTICS_V1_L5_BEST,
-    LEVEL_SEMANTICS_V3_L5_WORST,
-)
+from .level_semantics import UNIFIED_LEVEL_SEMANTICS_VERSION
 
 
 settings = get_settings()
@@ -819,6 +816,65 @@ def _set_job(job_id: int, **values: object) -> None:
         )
 
 
+_SENSITIVE_TRACE_KEYS = frozenset({
+    "authorization",
+    "api_key",
+    "apikey",
+    "access_token",
+    "refresh_token",
+    "secret",
+})
+
+
+def _sanitize_provider_trace(value: object) -> object:
+    """Redact credential-shaped response fields while retaining provider evidence."""
+    if isinstance(value, dict):
+        return {
+            str(key): (
+                "[REDACTED]"
+                if str(key).lower() in _SENSITIVE_TRACE_KEYS
+                else _sanitize_provider_trace(item)
+            )
+            for key, item in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [_sanitize_provider_trace(item) for item in value]
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    return str(value)
+
+
+def _persist_provider_trace(job_id: int, stage: str, response: object) -> None:
+    """Freeze an A/B provider response before any schema/business validation."""
+    normalized_stage = stage.upper()
+    if normalized_stage not in {"A", "B"}:
+        raise ValueError("provider trace stage must be A or B")
+    response_trace = {
+        "provider_payload": _sanitize_provider_trace(
+            getattr(response, "raw_payload", None)
+        ),
+        "raw_text": getattr(response, "raw_text", None),
+        "upstream_status_code": getattr(response, "upstream_status_code", None),
+        "request_correlation_id": getattr(response, "request_correlation_id", None),
+        "attempt_count": getattr(response, "attempt_count", None),
+        "thinking_mode": getattr(response, "thinking_mode", "auto"),
+    }
+    usage_trace = {
+        "input_tokens": getattr(response, "input_tokens", None),
+        "output_tokens": getattr(response, "output_tokens", None),
+        "total_tokens": getattr(response, "total_tokens", None),
+    }
+    suffix = normalized_stage.lower()
+    _set_job(job_id, **{
+        f"trace_response_{suffix}_json": json.dumps(
+            response_trace, ensure_ascii=False, sort_keys=True
+        ),
+        f"trace_usage_{suffix}_json": json.dumps(
+            usage_trace, ensure_ascii=False, sort_keys=True
+        ),
+    })
+
+
 def _ensure_job_processing(job_id: int) -> None:
     with session_scope() as db:
         status = db.scalar(select(EvaluationJob.status).where(EvaluationJob.id == job_id))
@@ -928,6 +984,7 @@ async def _evaluate_targeted_loop_job(
 async def evaluate_job(job_id: int) -> None:
     production_dimension_contract = None
     v3_bundle_for_job: dict[str, object] | None = None
+    aesthetic_foundation_active = False
     with session_scope() as db:
         job = db.get(EvaluationJob, job_id)
         if not job:
@@ -938,6 +995,12 @@ async def evaluate_job(job_id: int) -> None:
             if isinstance(v3_bundle_for_job, dict) else None
         )
         proposal_text_active = isinstance(proposal_contract, dict) and proposal_contract.get("profile_type") == "text-proposal-additive-v1"
+        aesthetic_foundation_active = bool(
+            job.category_key == "inspiration_image"
+            and isinstance(proposal_contract, dict)
+            and proposal_contract.get("category_key") == "inspiration_image"
+            and isinstance(proposal_contract.get("aesthetic_foundation"), dict)
+        )
         asset = db.get(Asset, job.asset_id)
         if not asset:
             raise RuntimeError("图片不存在")
@@ -1328,6 +1391,7 @@ async def evaluate_job(job_id: int) -> None:
         proposal_channel_audit = {
             "schema_version": "proposal-pdf-input-v1",
             "long_image_stitching": False,
+            "evaluation_object": "source_pdf_document",
             "metadata_page_count": proposal_pdf_input.page_count,
             "actual_page_count": proposal_pdf_input.actual_page_count,
             "call_a": {
@@ -1513,6 +1577,11 @@ async def evaluate_job(job_id: int) -> None:
             )
             proposal_channel_audit["call_a"].update({
                 "scanned_pages": list(call_a_result.scanned_pages),
+                "attempted_pages": list(call_a_result.attempted_pages),
+                "failed_pages": list(call_a_result.failed_pages),
+                "recovery_batches": [
+                    list(batch) for batch in call_a_result.recovery_batches
+                ],
                 "batch_count": call_a_result.batch_count,
                 "stop_reason": call_a_result.stop_reason,
             })
@@ -1528,6 +1597,8 @@ async def evaluate_job(job_id: int) -> None:
                 image_path=model_image_path, mime_type=model_mime_type,
             )
         )
+    if aesthetic_foundation_active:
+        _persist_provider_trace(job_id, "A", response_a)
     _ensure_job_processing(job_id)
     combined_response = is_combined_aesthetic_response(response_a.parsed)
     if (
@@ -1571,13 +1642,6 @@ async def evaluate_job(job_id: int) -> None:
     )
     v3_rule_deduction_active = proposal_text_active or v3_uses_rule_deductions(
         v3_bundle_for_job, precheck
-    )
-    aesthetic_foundation_active = bool(
-        job.category_key == "inspiration_image"
-        and isinstance(v3_bundle_for_job, dict)
-        and v3_bundle_for_job.get("contract", {}).get("category_key")
-        == "inspiration_image"
-        and isinstance(v3_bundle_for_job["contract"].get("aesthetic_foundation"), dict)
     )
 
     response_b = None
@@ -1638,6 +1702,7 @@ async def evaluate_job(job_id: int) -> None:
                 str(page_number) for page_number in representative_pages
             )
             proposal_channel_audit["call_b"] = {
+                "evaluation_object": "source_pdf_document",
                 "sample_size": sample_size,
                 "representative_pages": list(representative_pages),
                 "selection": "deterministic",
@@ -1682,6 +1747,8 @@ async def evaluate_job(job_id: int) -> None:
                     image_path=model_image_path, mime_type=model_mime_type,
                 )
                 )
+        if aesthetic_foundation_active:
+            _persist_provider_trace(job_id, "B", response_b)
         response_b_attempts.append(response_b.raw_payload)
         _ensure_job_processing(job_id)
         aesthetic = response_b.parsed
@@ -1998,7 +2065,7 @@ async def evaluate_job(job_id: int) -> None:
         # 评分 fail-closed：
         # 共性/特有 grade 拿不齐或引擎异常 → V3AuthoritativeError → score/level=None +
         # 人工复核，绝不降级成 v1 给出误导性分数。
-        _v3_level_semantics = LEVEL_SEMANTICS_V1_L5_BEST
+        _v3_level_semantics = UNIFIED_LEVEL_SEMANTICS_VERSION
         v3_bundle = v3_bundle_for_job or v3_authoritative_category(
             db, current_job.category_key
         )
@@ -2050,7 +2117,7 @@ async def evaluate_job(job_id: int) -> None:
             "config_revision": v3_bundle.get("config_revision"),
         }
         _v3_level_semantics = (
-            scoring.get("level_semantics_version") or LEVEL_SEMANTICS_V3_L5_WORST
+            scoring.get("level_semantics_version") or UNIFIED_LEVEL_SEMANTICS_VERSION
         )
 
         rubric_version = (
@@ -2206,9 +2273,8 @@ async def evaluate_job(job_id: int) -> None:
                 if v3_shadow_payload is not None
                 else None
             ),
-            # ADR-0033 Task 2 安全脚手架 + Task 2b：老类目仍如实标 v1 语义（L5=最高分），
-            # v3 权威类目标 v3 语义（doc-l5-worst-v1，L5=最差）。只是打标签，不改任何
-            # 老类目 level 值 / 算分。
+            # 所有现役类目统一标记 L1 最优、L 序号越大质量越差。早期未标记的
+            # 历史行保持原值，不在写入路径中静默重解释。
             level_semantics_version=_v3_level_semantics,
         )
         is_baseline_regression = (
@@ -2488,6 +2554,8 @@ def _handle_technical_failure(
                 .values(
                     status="failure_handling",
                     technical_error_type=failure.error_type,
+                    failure_stage=EvaluationJob.stage,
+                    failure_code=str(getattr(exc, "code", failure.error_type))[:80],
                     error_message=f"technical:{failure.error_type}",
                     finished_at=now,
                 )
@@ -2525,6 +2593,46 @@ def _handle_technical_failure(
                 and not breaker_open
             )
             if can_retry:
+                # Recovery creation is an execution boundary. Re-check the
+                # operator control and the independent ABORT notice in the
+                # same transaction that claims the failed parent, so a late
+                # stop cannot be bypassed by an already queued child.
+                control = db.get(EvaluationControl, 1)
+                abort_notice = Path(
+                    os.getenv("ABORT_NOTICE_PATH", "ABORT-NOTICE.txt")
+                ).expanduser()
+                retry_abort_reason = None
+                if control is not None and control.paused:
+                    retry_abort_reason = "evaluation_control_paused"
+                elif parent.status in {"canceled", "cancelled", "paused"}:
+                    retry_abort_reason = f"parent_status:{parent.status}"
+                elif abort_notice.is_file():
+                    retry_abort_reason = f"abort_notice:{abort_notice}"
+                if retry_abort_reason is not None:
+                    parent.status = "failed"
+                    parent.stage = "retry_aborted"
+                    parent.technical_error_type = "retry_aborted"
+                    parent.failure_code = "retry_aborted"
+                    parent.error_message = "technical:retry_aborted"
+                    if parent.regression_item_id:
+                        fail_regression_item(
+                            db,
+                            parent.regression_item_id,
+                            "technical:retry_aborted",
+                        )
+                    if parent.baseline_regression_item_id:
+                        fail_baseline_item(
+                            db,
+                            item_id=parent.baseline_regression_item_id,
+                            error_code="technical:retry_aborted",
+                            job_id=parent.id,
+                        )
+                    logger.warning(
+                        "技术重试被 ABORT 门禁阻止 job=%s reason=%s",
+                        parent.id,
+                        retry_abort_reason,
+                    )
+                    return False
                 next_attempt = parent.technical_attempt + 1
                 delay = retry_delay_seconds(
                     next_attempt,

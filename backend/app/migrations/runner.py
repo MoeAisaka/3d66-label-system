@@ -6789,6 +6789,335 @@ def _migration_058_add_inspiration_aesthetic_foundation(connection: Connection) 
     """)
 
 
+def _migration_059_persist_evaluation_job_failure_traces(
+    connection: Connection,
+) -> None:
+    """Persist immutable provider responses/usage before downstream validation."""
+    tables = {
+        row[0]
+        for row in connection.exec_driver_sql(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )
+    }
+    if "evaluation_jobs" not in tables:
+        return
+    columns = {
+        row[1]
+        for row in connection.exec_driver_sql(
+            "PRAGMA table_info(evaluation_jobs)"
+        )
+    }
+    for name, definition in (
+        ("trace_response_a_json", "TEXT"),
+        ("trace_usage_a_json", "TEXT"),
+        ("trace_response_b_json", "TEXT"),
+        ("trace_usage_b_json", "TEXT"),
+        ("failure_stage", "VARCHAR(40)"),
+        ("failure_code", "VARCHAR(80)"),
+    ):
+        if name not in columns:
+            connection.exec_driver_sql(
+                f"ALTER TABLE evaluation_jobs ADD COLUMN {name} {definition}"
+            )
+    connection.exec_driver_sql("""
+        CREATE TRIGGER IF NOT EXISTS trg_job_provider_trace_no_update
+        BEFORE UPDATE OF trace_response_a_json, trace_usage_a_json,
+                         trace_response_b_json, trace_usage_b_json
+        ON evaluation_jobs
+        WHEN (OLD.trace_response_a_json IS NOT NULL
+              AND NEW.trace_response_a_json IS NOT OLD.trace_response_a_json)
+          OR (OLD.trace_usage_a_json IS NOT NULL
+              AND NEW.trace_usage_a_json IS NOT OLD.trace_usage_a_json)
+          OR (OLD.trace_response_b_json IS NOT NULL
+              AND NEW.trace_response_b_json IS NOT OLD.trace_response_b_json)
+          OR (OLD.trace_usage_b_json IS NOT NULL
+              AND NEW.trace_usage_b_json IS NOT OLD.trace_usage_b_json)
+        BEGIN
+            SELECT RAISE(ABORT, 'provider trace is immutable');
+        END
+    """)
+
+
+def _migration_060_add_model_thinking_mode(connection: Connection) -> None:
+    """Add an explicit Ark thinking control while preserving provider defaults."""
+    tables = {
+        row[0]
+        for row in connection.exec_driver_sql(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )
+    }
+    if "model_configs" not in tables:
+        return
+    columns = {
+        row[1]
+        for row in connection.exec_driver_sql("PRAGMA table_info(model_configs)")
+    }
+    if "thinking_mode" not in columns:
+        connection.exec_driver_sql(
+            "ALTER TABLE model_configs ADD COLUMN "
+            "thinking_mode VARCHAR(20) NOT NULL DEFAULT 'auto'"
+        )
+
+
+def _migration_061_add_model_registry_entries(connection: Connection) -> None:
+    """Create the role-aware model registry and project legacy configurations."""
+    tables = {
+        row[0]
+        for row in connection.exec_driver_sql(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )
+    }
+    if "model_configs" not in tables or "optimizer_configs" not in tables:
+        return
+    connection.exec_driver_sql(
+        """
+        CREATE TABLE IF NOT EXISTS model_registry_entries (
+            id INTEGER PRIMARY KEY,
+            role VARCHAR(20) NOT NULL DEFAULT 'main'
+                CHECK(role IN ('main','tuning','benchmark')),
+            name VARCHAR(120) NOT NULL,
+            provider VARCHAR(40) NOT NULL DEFAULT 'doubao',
+            protocol VARCHAR(40) NOT NULL DEFAULT 'openai_chat'
+                CHECK(protocol IN ('openai_chat','openai_responses','anthropic_messages','custom_json')),
+            capabilities_json TEXT NOT NULL DEFAULT '["text","vision","structured_output"]',
+            description TEXT NOT NULL DEFAULT '',
+            base_url VARCHAR(300) NOT NULL,
+            api_path VARCHAR(120) NOT NULL,
+            model_id VARCHAR(200) NOT NULL,
+            encrypted_api_key TEXT,
+            temperature FLOAT NOT NULL DEFAULT 0.1,
+            max_tokens INTEGER NOT NULL DEFAULT 4096,
+            timeout_seconds INTEGER NOT NULL DEFAULT 120,
+            max_retries INTEGER NOT NULL DEFAULT 1,
+            max_concurrency INTEGER NOT NULL DEFAULT 8,
+            max_requests_per_minute INTEGER NOT NULL DEFAULT 0,
+            max_input_tokens INTEGER NOT NULL DEFAULT 0,
+            input_micros_per_million_tokens INTEGER NOT NULL DEFAULT 0,
+            output_micros_per_million_tokens INTEGER NOT NULL DEFAULT 0,
+            monthly_budget_micros INTEGER NOT NULL DEFAULT 0,
+            thinking_mode VARCHAR(20) NOT NULL DEFAULT 'auto',
+            level VARCHAR(40) NOT NULL DEFAULT 'standard',
+            structured_output BOOLEAN NOT NULL DEFAULT 1,
+            active BOOLEAN NOT NULL DEFAULT 1,
+            source_model_config_id INTEGER REFERENCES model_configs(id) ON DELETE SET NULL,
+            source_optimizer_config_id INTEGER REFERENCES optimizer_configs(id) ON DELETE SET NULL,
+            created_by VARCHAR(80) NOT NULL DEFAULT 'system',
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(source_model_config_id),
+            UNIQUE(source_optimizer_config_id)
+        )
+        """
+    )
+    connection.exec_driver_sql(
+        "CREATE INDEX IF NOT EXISTS ix_model_registry_entries_role ON model_registry_entries(role)"
+    )
+    connection.exec_driver_sql(
+        "CREATE INDEX IF NOT EXISTS ix_model_registry_entries_active ON model_registry_entries(active)"
+    )
+    model_columns = {
+        row[1] for row in connection.exec_driver_sql("PRAGMA table_info(model_configs)")
+    }
+    optimizer_columns = {
+        row[1] for row in connection.exec_driver_sql("PRAGMA table_info(optimizer_configs)")
+    }
+    required_model_columns = {
+        "id",
+        "name",
+        "provider",
+        "protocol",
+        "capabilities_json",
+        "description",
+        "base_url",
+        "api_path",
+        "model_id",
+        "encrypted_api_key",
+        "temperature",
+        "max_tokens",
+        "timeout_seconds",
+        "max_retries",
+        "max_concurrency",
+        "max_input_tokens",
+        "input_micros_per_million_tokens",
+        "output_micros_per_million_tokens",
+        "thinking_mode",
+        "structured_output",
+        "active",
+    }
+    required_optimizer_columns = {
+        "id",
+        "name",
+        "provider",
+        "protocol",
+        "capabilities_json",
+        "base_url",
+        "api_path",
+        "model_id",
+        "encrypted_api_key",
+        "temperature",
+        "max_tokens",
+        "timeout_seconds",
+        "max_retries",
+        "max_input_tokens",
+        "input_micros_per_million_tokens",
+        "output_micros_per_million_tokens",
+        "structured_output",
+    }
+    if required_model_columns <= model_columns:
+        connection.exec_driver_sql(
+            """
+            INSERT INTO model_registry_entries(
+                role,name,provider,protocol,capabilities_json,description,base_url,api_path,model_id,
+                encrypted_api_key,temperature,max_tokens,timeout_seconds,max_retries,max_concurrency,
+                max_input_tokens,input_micros_per_million_tokens,output_micros_per_million_tokens,
+                thinking_mode,structured_output,active,source_model_config_id,created_by,
+                created_at,updated_at
+            )
+            SELECT CASE WHEN active = 1 THEN 'main' ELSE 'benchmark' END,
+                name,provider,protocol,capabilities_json,description,base_url,api_path,model_id,
+                encrypted_api_key,temperature,max_tokens,timeout_seconds,max_retries,max_concurrency,
+                max_input_tokens,input_micros_per_million_tokens,output_micros_per_million_tokens,
+                COALESCE(thinking_mode,'auto'),structured_output,active,id,'migration',
+                CURRENT_TIMESTAMP,CURRENT_TIMESTAMP
+            FROM model_configs
+            WHERE NOT EXISTS (
+                SELECT 1 FROM model_registry_entries r
+                WHERE r.source_model_config_id = model_configs.id
+            )
+            """
+        )
+    if required_optimizer_columns <= optimizer_columns:
+        connection.exec_driver_sql(
+            """
+            INSERT INTO model_registry_entries(
+                role,name,provider,protocol,capabilities_json,description,base_url,api_path,model_id,
+                encrypted_api_key,temperature,max_tokens,timeout_seconds,max_retries,max_concurrency,
+                max_input_tokens,input_micros_per_million_tokens,output_micros_per_million_tokens,
+                structured_output,active,source_optimizer_config_id,created_by,
+                created_at,updated_at
+            )
+            SELECT 'tuning',name,provider,protocol,capabilities_json,'',base_url,api_path,model_id,
+                encrypted_api_key,temperature,max_tokens,timeout_seconds,max_retries,8,
+                max_input_tokens,input_micros_per_million_tokens,output_micros_per_million_tokens,
+                structured_output,1,id,'migration',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP
+            FROM optimizer_configs
+            WHERE NOT EXISTS (
+                SELECT 1 FROM model_registry_entries r
+                WHERE r.source_optimizer_config_id = optimizer_configs.id
+            )
+            """
+        )
+
+
+def _migration_062_add_mechanism_release_axes(connection: Connection) -> None:
+    """Add independent mechanism activation and explicit stock-rerun control records."""
+    connection.exec_driver_sql(
+        """
+        CREATE TABLE IF NOT EXISTS mechanism_releases (
+            id INTEGER PRIMARY KEY,
+            release_key VARCHAR(160) NOT NULL UNIQUE,
+            category_key VARCHAR(40) NOT NULL,
+            evaluation_package_id INTEGER NOT NULL UNIQUE
+                REFERENCES evaluation_packages(id) ON DELETE RESTRICT,
+            previous_release_id INTEGER
+                REFERENCES mechanism_releases(id) ON DELETE RESTRICT,
+            revision INTEGER NOT NULL DEFAULT 1 CHECK(revision >= 1),
+            manifest_json TEXT NOT NULL
+                CHECK(json_valid(manifest_json) AND json_type(manifest_json, '$') = 'object'),
+            manifest_hash VARCHAR(64) NOT NULL
+                CHECK(length(manifest_hash) = 64
+                      AND manifest_hash = lower(manifest_hash)
+                      AND manifest_hash NOT GLOB '*[^0-9a-f]*'),
+            status VARCHAR(30) NOT NULL DEFAULT 'active'
+                CHECK(status IN ('active','superseded','rolled_back')),
+            activated_by VARCHAR(80) NOT NULL,
+            activated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(category_key, revision)
+        )
+        """
+    )
+    connection.exec_driver_sql(
+        "CREATE INDEX IF NOT EXISTS ix_mechanism_releases_category "
+        "ON mechanism_releases(category_key)"
+    )
+    connection.exec_driver_sql(
+        "CREATE INDEX IF NOT EXISTS ix_mechanism_releases_status "
+        "ON mechanism_releases(status)"
+    )
+    connection.exec_driver_sql(
+        """
+        CREATE TABLE IF NOT EXISTS stock_reruns (
+            id INTEGER PRIMARY KEY,
+            idempotency_key VARCHAR(160) NOT NULL UNIQUE,
+            category_key VARCHAR(40) NOT NULL,
+            source_mechanism_release_id INTEGER
+                REFERENCES mechanism_releases(id) ON DELETE RESTRICT,
+            target_mechanism_release_id INTEGER NOT NULL
+                REFERENCES mechanism_releases(id) ON DELETE RESTRICT,
+            material_scope_json TEXT NOT NULL
+                CHECK(json_valid(material_scope_json)
+                      AND json_type(material_scope_json, '$') = 'object'),
+            mechanism_snapshot_json TEXT NOT NULL
+                CHECK(json_valid(mechanism_snapshot_json)
+                      AND json_type(mechanism_snapshot_json, '$') = 'object'),
+            model_snapshot_json TEXT NOT NULL DEFAULT '{}'
+                CHECK(json_valid(model_snapshot_json)
+                      AND json_type(model_snapshot_json, '$') = 'object'),
+            prompt_snapshot_json TEXT NOT NULL DEFAULT '{}'
+                CHECK(json_valid(prompt_snapshot_json)
+                      AND json_type(prompt_snapshot_json, '$') = 'object'),
+            rule_snapshot_json TEXT NOT NULL DEFAULT '{}'
+                CHECK(json_valid(rule_snapshot_json)
+                      AND json_type(rule_snapshot_json, '$') = 'object'),
+            execution_snapshot_json TEXT NOT NULL DEFAULT '{}'
+                CHECK(json_valid(execution_snapshot_json)
+                      AND json_type(execution_snapshot_json, '$') = 'object'),
+            status VARCHAR(30) NOT NULL DEFAULT 'planned'
+                CHECK(status IN ('planned','queued','running','completed','failed','cancelled')),
+            reason TEXT NOT NULL DEFAULT '',
+            created_by VARCHAR(80) NOT NULL,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    for statement in (
+        "CREATE INDEX IF NOT EXISTS ix_stock_reruns_category ON stock_reruns(category_key)",
+        "CREATE INDEX IF NOT EXISTS ix_stock_reruns_status ON stock_reruns(status)",
+        "CREATE INDEX IF NOT EXISTS ix_stock_reruns_target_release ON stock_reruns(target_mechanism_release_id)",
+    ):
+        connection.exec_driver_sql(statement)
+    connection.exec_driver_sql("DROP TRIGGER IF EXISTS trg_mechanism_releases_frozen")
+    connection.exec_driver_sql(
+        """
+        CREATE TRIGGER trg_mechanism_releases_frozen
+        BEFORE UPDATE OF release_key, category_key, evaluation_package_id,
+            previous_release_id, revision, manifest_json, manifest_hash,
+            activated_by, activated_at, created_at
+        ON mechanism_releases
+        BEGIN
+            SELECT RAISE(ABORT, 'MechanismRelease snapshot is immutable');
+        END
+        """
+    )
+    connection.exec_driver_sql("DROP TRIGGER IF EXISTS trg_stock_reruns_frozen")
+    connection.exec_driver_sql(
+        """
+        CREATE TRIGGER trg_stock_reruns_frozen
+        BEFORE UPDATE OF idempotency_key, category_key,
+            source_mechanism_release_id, target_mechanism_release_id,
+            material_scope_json, mechanism_snapshot_json, model_snapshot_json,
+            prompt_snapshot_json, rule_snapshot_json, execution_snapshot_json,
+            reason, created_by, created_at
+        ON stock_reruns
+        BEGIN
+            SELECT RAISE(ABORT, 'StockRerun snapshot is immutable');
+        END
+        """
+    )
+
+
 MIGRATIONS = [
     Migration(1, "add_sample_expected_level", _migration_001_add_sample_expected_level),
     Migration(2, "add_review_corrections", _migration_002_add_review_corrections),
@@ -7035,6 +7364,26 @@ MIGRATIONS = [
         58,
         "add_inspiration_aesthetic_foundation",
         _migration_058_add_inspiration_aesthetic_foundation,
+    ),
+    Migration(
+        59,
+        "persist_evaluation_job_failure_traces",
+        _migration_059_persist_evaluation_job_failure_traces,
+    ),
+    Migration(
+        60,
+        "add_model_thinking_mode",
+        _migration_060_add_model_thinking_mode,
+    ),
+    Migration(
+        61,
+        "add_model_registry_entries",
+        _migration_061_add_model_registry_entries,
+    ),
+    Migration(
+        62,
+        "add_mechanism_release_axes",
+        _migration_062_add_mechanism_release_axes,
     ),
 ]
 

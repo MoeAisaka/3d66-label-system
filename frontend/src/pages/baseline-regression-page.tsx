@@ -302,6 +302,17 @@ export function BaselineRegressionPage() {
     onError: (error) => toast.error(error.message),
   })
 
+  const createBalanced100 = useMutation({
+    mutationFn: () => baselineRegressionApi.createBalanced100(),
+    onSuccess: async ({ summary, idempotent }) => {
+      setSelectedSetId(summary.id)
+      setSelectedRunId(0)
+      await queryClient.invalidateQueries({ queryKey: ["baseline-sets"] })
+      toast.success(idempotent ? "100 张均衡基准集已存在，已切换" : "100 张均衡基准集已冻结")
+    },
+    onError: (error) => toast.error(error.message),
+  })
+
   const createRun = useMutation({
     mutationFn: () => {
       const promptPayload = promptSelectionMode === "single"
@@ -402,6 +413,14 @@ export function BaselineRegressionPage() {
             >
               <CloudArrowUp />{upload.isPending ? "正在上传" : "上传基准素材"}
             </Button>
+            {selectedCategoryKey === "inspiration_image" && <Button
+              variant="secondary"
+              title="L1-L5 各 20 张；按人工真值与 SHA-256 去重后冻结"
+              onClick={() => createBalanced100.mutate()}
+              disabled={createBalanced100.isPending}
+            >
+              <CheckSquare />{createBalanced100.isPending ? "正在校验" : "生成 100 张均衡基准集"}
+            </Button>}
             <Button
               variant="secondary"
               onClick={() => {

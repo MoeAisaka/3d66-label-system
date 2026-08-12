@@ -20,7 +20,10 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from .schema_adapter import PRODUCTION_REASON_VALUES
+from .schema_adapter import (
+    INSPIRATION_HARD_DEFECT_VALUES,
+    PRODUCTION_REASON_VALUES,
+)
 
 
 REDLINE_POLICY_FORMAT_VERSION = "redline-policy-v1"
@@ -126,6 +129,22 @@ def validate_redline_policy(policy: Any) -> None:
                 "exemptions_invalid", "红线规则 exemptions 必须是非空字符串数组或空数组"
             )
 
+        required_defects = rule.get("requires_any_hard_defect")
+        if required_defects is not None and (
+            not isinstance(required_defects, list)
+            or not required_defects
+            or len(required_defects) != len(set(required_defects))
+            or any(
+                not isinstance(item, str)
+                or item not in INSPIRATION_HARD_DEFECT_VALUES
+                for item in required_defects
+            )
+        ):
+            raise RedlinePolicyError(
+                "requires_any_hard_defect_invalid",
+                "红线规则 requires_any_hard_defect 必须是非空、去重且已冻结的硬伤枚举",
+            )
+
 
 def evaluate_redlines(precheck: Any, *, policy: dict) -> dict:
     """Deterministically decide whether a precheck payload hits any redline.
@@ -151,6 +170,13 @@ def evaluate_redlines(precheck: Any, *, policy: dict) -> dict:
         raw_reason = production_fields.get("reason")
         if isinstance(raw_reason, list):
             reasons = {item for item in raw_reason if isinstance(item, str)}
+    hard_defects: set[str] = set()
+    if isinstance(precheck, dict):
+        raw_hard_defects = precheck.get("hard_defects")
+        if isinstance(raw_hard_defects, list):
+            hard_defects = {
+                item for item in raw_hard_defects if isinstance(item, str)
+            }
 
     hit_rules: list[str] = []
     for rule in policy["rules"]:
@@ -160,6 +186,11 @@ def evaluate_redlines(precheck: Any, *, policy: dict) -> dict:
             continue
         exemptions = rule.get("exemptions", [])
         if any(exemption in reasons for exemption in exemptions):
+            continue
+        required_defects = rule.get("requires_any_hard_defect")
+        if required_defects and not hard_defects.intersection(
+            required_defects
+        ):
             continue
         key = rule["key"]
         if key not in hit_rules:

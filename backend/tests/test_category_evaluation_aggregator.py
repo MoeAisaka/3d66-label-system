@@ -33,6 +33,48 @@ def _redline_policy() -> dict:
     }
 
 
+def _four_level_scale() -> dict:
+    return {
+        "version": "category-level-scale-v1",
+        "levels": [
+            {"level": "L1", "enabled": True, "min_score": 80},
+            {"level": "L2", "enabled": True, "min_score": 60},
+            {"level": "L3", "enabled": True, "min_score": 40},
+            {"level": "L4", "enabled": True, "min_score": 0},
+            {"level": "L5", "enabled": False},
+        ],
+    }
+
+
+def test_four_level_category_never_emits_disabled_l5() -> None:
+    contract = _contract()
+    contract["level_scale"] = _four_level_scale()
+    contract["redline_policy"]["hit_level"] = "L4"
+    result = aggregate_category_evaluation(
+        contract,
+        _precheck(trait="AI图"),
+        {"deductions": {"composition": 60}},
+        track_key="class_one",
+    )
+    assert result["level"] == "L4"
+    assert result["level_scale"]["enabled_levels"] == ["L1", "L2", "L3", "L4"]
+    assert result["level_scale"]["disabled_levels"] == ["L5"]
+
+
+def test_four_level_redline_terminates_as_l4_with_hard_reject_evidence() -> None:
+    contract = _contract()
+    contract["level_scale"] = _four_level_scale()
+    contract["redline_policy"]["hit_level"] = "L4"
+    precheck = _precheck()
+    precheck["production_fields"]["reason"] = ["是截图"]
+    result = aggregate_category_evaluation(
+        contract, precheck, _dimensions(), track_key="class_one"
+    )
+    assert result["hard_reject"] is True
+    assert result["level"] == "L4"
+    assert result["terminated_at"] == "redline"
+
+
 def _track_classification() -> dict:
     return {
         "format_version": "track-classification-v1",
@@ -422,7 +464,7 @@ def test_invalid_level_thresholds_override_fails_closed() -> None:
         aggregate_category_evaluation(
             contract, _precheck(), _dimensions(), track_key="class_one"
         )
-    assert excinfo.value.code == "level_thresholds_invalid"
+    assert excinfo.value.code == "contract.level_scale.catch_all_missing"
 
 
 # --- Contract-overridable level thresholds. ---

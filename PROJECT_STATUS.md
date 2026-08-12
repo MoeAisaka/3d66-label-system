@@ -1,7 +1,86 @@
 # 3d66 标签系统｜当前项目状态
 
-> 最后更新：2026-08-06
+> 最后更新：2026-08-11
 > 本文件只记录“现在做到哪里”；长期原则见 `PRODUCT.md` 和 `AGENTS.md`，历史背景见 `CODEX_HANDOFF.md`。
+
+## 最新实施：TPENG 标签实验台统一底座——标签机制与模型管理 v1（2026-08-11）
+
+- 产品定位已按 ADR-0042 冻结：“标签体系重构”与“标签实验台”合并为一条产品线，统一以
+  **TPENG 标签实验台（LabelLab）**作为标签体系重构载体和标签/内容中台通用底座。当前
+  模型注册、类目机制、人工纠偏、AI 迭代、双发布轴、存量重跑与下游发布均属于底座能力；
+  业务类目只做场景扩展，不复制这些平台能力。本次对齐不改变当前范围、非目标、权限与验收。
+- 当前工作分支为 `codex/label-mechanism-v1`，基线提交 `5d6206e`；本候选只通过 Codeup
+  功能分支与面向 `main` 的 PR 交付，不直接合并或部署，也未访问正式数据库、真实模型
+  批量调用或真实密钥。
+- 新增统一 `ModelRegistryEntry` 列表，兼容投影既有 `ModelConfig` 与
+  `OptimizerConfig`，支持 `main/tuning/benchmark`、四种受控协议、能力标签、Token
+  上限、输入/输出价格、并发/速率/月预算、thinking、层级、启停与本地连接参数校验。
+  API 只返回 `has_api_key` 和掩码，不返回密文或安全存储引用；旧模型配置 API 保留。
+- 前端新增 `/workflow/governance/model-registry`：密集列表、角色筛选、新建/编辑抽屉、
+  启停与连接检查；编辑时 API Key 始终留空以保留已有安全凭据。旧 `/model` 入口已转向
+  模型注册中心，高级设置入口同步改名。
+- 新增独立 `MechanismRelease` 机制发布轴。人工发布 `EvaluationPackage` 时在同一事务内
+  生成机制 revision，并把上一 revision 标为 superseded；审计明确记录“不会触发存量重跑、
+  不会发布标签”。既有 `LabelRelease/PublishedLabel/Outbox` 继续作为独立标签事实发布轴。
+- 新增 `StockRerun` 控制记录和 `/api/stock-reruns` 查询/创建接口。重跑必须人工显式创建，
+  冻结精确素材 ID/哈希、来源/目标机制、完整评测包 manifest、模型、提示词、规则和执行参数；
+  类目不一致、快照损坏、缺执行器或回归门禁未通过时统一 fail-closed。当前执行模式固定为
+  `dry_run_only`，结果不会自动进入标签事实轴。
+- 数据库采用增量迁移 61（模型注册中心）与 62（机制发布/存量重跑）；冻结快照受数据库
+  trigger 保护。迁移 61 只在旧配置表具备完整投影列时导入兼容记录，并显式写入审计
+  时间，兼容最小历史表与 ORM 预建表。旧表、旧 API 和历史发布事实未删除、未覆盖。
+
+### 本次同步：TPENG 中台上层架构约束（2026-08-11）
+
+- 新增 ADR-0043，固化统一业务闭环：下游字段需求合同 → 素材接入 → 标注路径/任务 → 自动与人工标注
+  → 纠偏验收 → 版本发布 → 下游引用/对账 → Badcase 回流；产品名称和类目扩展边界继续遵循 ADR-0042。
+- 固化事实主权：`semantic.*`、`quality.*`、`governance.*` 是后续 Canonical 资产事实命名空间；人工真值、
+  证据、来源、模型/规则版本、审核和发布状态必须可追溯。搜索索引、知识图谱和向量索引只能作为可重建
+  消费投影；Query×素材相关性、排序权重、召回融合、在线实验和知识图谱内部关系属于下游策略。
+- 固化向量边界：中台后续负责资产/图片/文本/多模态 Embedding 生命周期，并以“资产语义投影服务”承载；
+  知识图谱负责实体关系与图 Embedding，搜索/推荐负责 Query Embedding、相似度、召回与排序。上述 Gap
+  只记录约束，不在本批次实现。
+- 能力映射与 Gap 清单见 [`docs/discussion/tpeng-platform-capability-map-and-gaps-20260811.md`](docs/discussion/tpeng-platform-capability-map-and-gaps-20260811.md)。当前已实现接入、评测、纠偏、双发布轴和正式消费；字段需求合同、Canonical 事实命名空间、统一资产版本、投影 registry、Embedding 生命周期和真实重跑 Worker 仍待 Owner 冻结。
+- 本次同步不扩大 ADR-0041 的实施范围、非目标、权限或验收。当前批次完成后将 Gap 清单返回【标签体系】重构会话；下一阶段冻结后仍由 TPENG 标签实验台会话作为唯一代码写入方。
+
+当前验证：
+
+- 后端全量：`1203 passed, 4 skipped, 6 warnings`（Python 3.12，隔离临时 `DATA_DIR`）。
+- 迁移 61 自审修复定向套件：模型注册、完整机制发布轴与历史迁移共 `50 passed`。
+- 发布轴/模型/评测包/标签治理/回归/迁移专项：`82 passed`；模型注册中心专项 `6 passed`，
+  发布轴专项 `5 passed`。
+- 前端所有合同脚本通过；`npm run build` 完成 TypeScript 与 Vite production build；既有
+  lightbox 无头浏览器契约通过。仅保留既有主 chunk 大于 500 kB 的构建警告。
+- 浏览器验收：桌面列表、主/调优/横评筛选、新建/编辑抽屉、编辑态密钥留空均通过；
+  停用后可重新启用；未配置密钥时连接测试保持禁用。390×844 下页面和抽屉
+  `scrollWidth == 390`，无文档级横向溢出；控制台 error 为 0。
+- 当前 MacBook 路径已复核：源码位于
+  `/Users/yukina/Documents/Codex/2026-08-11/labellab/work/labellab`；
+  `backend/.venv312`、`frontend/node_modules`、`frontend/dist`、本机应用数据目录及历史
+  `/Users/Shared/OpenClaw/119/120/121/125/142/145/148...` 验收目录均存在。历史绝对路径
+  只作为旧证据引用，不再作为当前源码或执行入口。
+
+仍未完成/明确非本阶段闭环：
+
+- `StockRerun` 当前只实现可审计控制面与 dry-run 门禁，尚未接入真实批量执行 Worker、
+  结果差异工作台或“选择重跑结果后批量创建标签发布申请”。
+- 尚未增加机制轴的人工回滚 API；标签事实轴既有回滚仍可用。机制回滚应采用新的追加式
+  activation revision，不应改写或删除旧 `MechanismRelease`。
+- 尚未在生产环境部署、保存真实 Keychain 凭据或进行真实模型金丝雀；这些动作需要新的
+  精确授权、生产回退点和单独验收。
+
+## 最新实施：灵感图模型质量闸门修复（2026-08-07）
+
+- 调用 A rev4 保持不变；新增不可变调用 B
+  `inspiration-b-v5-anchor-calibration-evidence-20260807`，恢复四张 Owner 锚图的
+  可见语义、相邻边界与 75/90 分边界，严格八维 evidence 合同不变。
+- 新 inspiration v3 revision 将“是随手拍+`blurry_grayish`”确定为 L5 红线；
+  未命中联合硬伤的随手拍仅软封顶 59/L4，不把软封顶冒充红线。
+- 品牌字样只有在调用 A 明示品牌文字、且调用 B 的细节完整度与呈现完整性均
+  grade≥4 且无 shortcomings 时，才窄豁免 `subject_obscuring_watermark` Tier A；
+  真实半透明/版权水印与任何证据不足样本仍保留 Tier A。
+- proposal_text_pdf、其他类目、A rev4、旧 revision、90/75/60/0 阈值与 baseline
+  真值均不改。共享测试部署和冻结 10 张金丝雀结论以外部 147 验收工件为准。
 
 ## 最新完成：灵感图美感分前置合同（2026-08-06）
 
@@ -1632,3 +1711,32 @@ npm.cmd run build
   compileall 与 diff check 通过。
 - 设计冻结见 ADR-0035 与
   docs/superpowers/specs/2026-08-06-proposal-text-pdf-input-channel-design.md。
+
+## 最新完成：PDF 源文档级评分与灵感图 100 张均衡入口（2026-08-07）
+
+- `proposal_text_pdf` 新任务冻结
+  `proposal-text-v2-document-aggregate-20260807`。分页 JPEG/PNG 只作为模型输入和证据
+  载体，唯一评测、评分和定级对象始终是上传的源 PDF。
+- 调用 A 先形成文档级聚合：红线证据取并集；普通字段采用首个非空值并保留冲突审计；
+  内容完整性按 `是 > 无法判断 > 否` 合并；图像计数求和；审核类别按批次实际覆盖页数
+  加权多数票收敛，平票 fail-closed。
+- 无效 A 批次在两次校验失败后确定性二分。默认 16 页批最多恢复四层到单页；任何页面
+  仍不可恢复时整份 PDF 进入人工复核。只有全页覆盖或真实红线早停才允许结束 A。
+- 调用 B 接收全文摘要、目录和引擎确定性代表页，并按整份源 PDF 评分；服务端继续
+  确定性计算总分和 L1-L5。审核列表与详情页使用 PDF 文档级状态，不再误报图片维度
+  合同异常；未增加逐页图片导出接口。
+- 现有存量回归页新增“生成 100 张均衡基准集”，仅对 `inspiration_image` 显示；服务端
+  固定 L1-L5 各 20 张，按人工真值选择并拒绝重复 SHA-256，重复调用保持幂等。
+- MacBook 隔离卷已导入 100 张真实人工真值素材并冻结基线集 1：100/100 唯一 SHA，
+  L1-L5 各 20 张，SQLite integrity=ok。生产环境零触碰。
+- 首次真实 run 1 已失败关闭：8 个任务因隔离环境 ARK 凭据失效/网络异常失败，剩余
+  92 个显式取消；0 个有效预测、0 条评测结果、active jobs=0。不得复用 run 1；凭据
+  修复后必须先做 1 张金丝雀，再新建 100 张 run。
+- 黄金工作流 CLI 已修复 API 响应包含 `datetime` 时的 JSON 序列化崩溃，统一输出
+  ISO 8601，防止“任务已建单但 CLI 报错”诱发重复运行。
+- 最终验证：Python 3.12 后端 `1160 passed, 2 skipped`；前端两项合同脚本通过；
+  Node 22 无缓存生产构建完成 `tsc -b` 与 Vite build；`compileall`、`git diff --check`
+  通过。
+- MacBook 隔离服务 `127.0.0.1:18148` 已切换到新镜像，health 200、restart 0；
+  PDF v2 contract/profile 均为 revision 2。旧容器保留为 `pre-pdfv2` 回退点。
+- 架构决策见 ADR-0038；ADR-0035 已被取代，历史 v1 结果继续只读保留。

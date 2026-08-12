@@ -466,7 +466,6 @@ def test_strategy_creation_rejects_endpoint_and_header_credentials(
     for secret in secrets.values():
         assert secret not in str(caught.value)
     assert db.scalar(select(func.count()).select_from(StrategyBundle)) == 0
-
     sanitized = _redact_secrets(
         {
             "base_url": model_config.base_url,
@@ -508,6 +507,15 @@ def test_strategy_creation_rejects_endpoint_and_header_credentials(
         "Cookie": REDACTED,
         "Accept": "application/json",
     }
+
+
+def test_model_snapshot_records_thinking_mode_without_secrets(db: Session) -> None:
+    model_config, _prompt_a, _prompt_b, _policy = _seed_strategy_inputs(db)
+    model_config.thinking_mode = "disabled"
+    db.commit()
+    snapshot = strategy_bundle_module.build_model_config_snapshot(model_config)
+    assert snapshot["thinking_mode"] == "disabled"
+    assert "encrypted_api_key" not in snapshot
 
 
 def test_serialized_prompt_credentials_fail_closed(

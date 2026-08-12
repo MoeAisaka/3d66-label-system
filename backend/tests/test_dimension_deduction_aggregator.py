@@ -219,10 +219,25 @@ def test_rev4_high_quality_guardrail_and_four_redlines() -> None:
         contract, _defect_precheck(), _deductions(0), track_key="class_one"
     )
     assert (good["score"], good["level"]) == (100, "L1")
-    for reason in ("是截图", "是随手拍", "有大面积文字说明", "有二维码"):
+    for reason in ("是截图", "有大面积文字说明", "有二维码"):
         precheck = _defect_precheck()
         precheck["production_fields"]["reason"] = [reason]
         result = aggregate_category_evaluation(
             contract, precheck, _deductions(0), track_key="class_one"
         )
         assert (result["score"], result["level"]) == (20, "L5")
+
+    casual_only = _defect_precheck()
+    casual_only["production_fields"]["reason"] = ["是随手拍"]
+    without_disorder = aggregate_category_evaluation(
+        contract, casual_only, _deductions(0), track_key="class_one"
+    )
+    assert (without_disorder["score"], without_disorder["level"]) == (100, "L1")
+
+    casual_disorder = _defect_precheck()
+    casual_disorder["production_fields"]["reason"] = ["是随手拍"]
+    casual_disorder["hard_defects"] = ["careless_composition"]
+    with_disorder = aggregate_category_evaluation(
+        contract, casual_disorder, _deductions(0), track_key="class_one"
+    )
+    assert (with_disorder["score"], with_disorder["level"]) == (20, "L5")

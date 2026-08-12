@@ -47,11 +47,19 @@
 | [0032](0032-production-fields-and-large-baseline-throughput.md) | Accepted | 生产消费字段闭环与 10000 张基准回归吞吐合同 |
 | [0033](0033-category-custom-evaluation-base-and-redline.md) | Accepted | 按类目自定义评测底座（红线+分类+维度）与 L 等级方向校正 |
 | [0036](0036-inspiration-aesthetic-foundation-before-rules.md) | Accepted | 灵感图美感基础事实前置固化，规则层只读定级 |
+| [0037](0037-inspiration-quality-gates-and-brand-wordmark-exemption.md) | Accepted | 灵感图锚点校准、随手拍质量闸门与品牌字样窄豁免 |
 
 ## 新增 ADR 的规则
 
 | [0034](0034-v3-rule-deduction-and-node-corrections.md) | Accepted | v3 规则扣分、节点纠偏与媒介开关 |
-| [0035](0035-proposal-pdf-paged-input-channel.md) | Accepted | PDF 方案文本全页分批扫描与确定性代表页通道 |
+| [0035](0035-proposal-pdf-paged-input-channel.md) | Superseded | PDF 方案文本全页分批扫描与确定性代表页通道 |
+| [0038](0038-proposal-pdf-document-level-grading.md) | Accepted | PDF 源文档级聚合、恢复与评分合同 |
+| [0039](0039-unified-level-semantics-and-category-scale.md) | Accepted | 统一 L1 最优语义与类目级启停档位 |
+| [0040](0040-level-scale-and-thinking-control.md) | Accepted | 类目等级档位与模型 thinking 控制 |
+| [0041](0041-label-mechanism-v1-execution-contract.md) | Accepted | 标签机制双发布轴、存量重跑与统一模型管理 |
+| [0042](0042-unified-labellab-product-carrier.md) | Accepted | TPENG 标签实验台作为标签/内容中台重构统一产品载体 |
+| [0043](0043-canonical-facts-and-semantic-projection-boundaries.md) | Accepted | TPENG 中台 Canonical 事实与资产语义投影边界 |
+
 文件名格式：
 
 ```text

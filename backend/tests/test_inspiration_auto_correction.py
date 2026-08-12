@@ -3,20 +3,25 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 
+import pytest
+from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from app.database import Base
+from app.database import get_db
 from app.inspiration_auto_correction import (
     AutoCorrectionPolicy,
     build_drift_report,
     decide_level_correction,
     ensure_inspiration_golden_set,
+    ensure_inspiration_balanced_golden_set,
     fit_level_calibration,
     rating_from_original_name,
 )
-from app.models import Asset, BaselineSetItem
+from app.main import app, current_user
+from app.models import Asset, BaselineSet, BaselineSetItem, User
 
 
 def _sessions():
@@ -123,6 +128,103 @@ def test_golden_set_references_cross_category_assets_without_mutation() -> None:
         assert same.id == golden.id
         assert replay["idempotent"] is True
         assert len(db.scalars(select(BaselineSetItem)).all()) == 3
+    engine.dispose()
+
+
+def test_balanced_golden_set_is_immutable() -> None:
+    engine, sessions = _sessions()
+    with sessions() as db:
+        for rating in ("好", "中等", "中差", "极差", "过滤"):
+            for index in range(20):
+                db.add(
+                    Asset(
+                        original_name=f"batch/{rating}_{rating}-{index}.jpeg",
+                        stored_name=f"{rating}-{index}.jpeg",
+                        mime_type="image/jpeg",
+                        size_bytes=1,
+                        sha256=f"{rating}-{index}".encode().hex().ljust(64, "0"),
+                        category_key="space_image",
+                    )
+                )
+        db.commit()
+        golden, report = ensure_inspiration_balanced_golden_set(db)
+        assert report["item_count"] == 100
+        assert report["distribution"] == {
+            "好": 20, "中等": 20, "中差": 20, "极差": 20, "过滤": 20
+        }
+        same, replay = ensure_inspiration_balanced_golden_set(db)
+        assert same.id == golden.id
+        assert replay["idempotent"] is True
+    engine.dispose()
+
+
+def test_balanced_golden_set_can_be_frozen_from_baseline_api() -> None:
+    engine, sessions = _sessions()
+    db = sessions()
+    user = User(username="baseline-owner", password_hash="unused", display_name="基准负责人")
+    db.add(user)
+    for rating in ("好", "中等", "中差", "极差", "过滤"):
+        for index in range(20):
+            db.add(
+                Asset(
+                    original_name=f"batch/{rating}_{rating}-{index}.jpeg",
+                    stored_name=f"{rating}-{index}.jpeg",
+                    mime_type="image/jpeg",
+                    size_bytes=1,
+                    sha256=f"{rating}-{index}".encode().hex().ljust(64, "0"),
+                    category_key="space_image",
+                )
+            )
+    db.commit()
+    app.dependency_overrides[get_db] = lambda: (yield db)
+    app.dependency_overrides[current_user] = lambda: user
+    client = TestClient(app)
+    try:
+        response = client.post("/api/baseline-sets/inspiration-balanced-100")
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["summary"]["category_key"] == "inspiration_image"
+        assert payload["summary"]["item_count"] == 100
+        assert payload["distribution"] == {
+            "好": 20, "中等": 20, "中差": 20, "极差": 20, "过滤": 20
+        }
+        frozen = db.get(BaselineSet, payload["summary"]["id"])
+        assert frozen is not None
+        assert frozen.created_by == user.username
+
+        replay = client.post("/api/baseline-sets/inspiration-balanced-100")
+        assert replay.status_code == 200
+        assert replay.json()["summary"]["id"] == payload["summary"]["id"]
+        assert replay.json()["idempotent"] is True
+    finally:
+        app.dependency_overrides.clear()
+        db.close()
+        engine.dispose()
+
+
+def test_balanced_golden_set_rejects_duplicate_sha256() -> None:
+    engine, sessions = _sessions()
+    with sessions() as db:
+        for rating in ("好", "中等", "中差", "极差", "过滤"):
+            for index in range(20):
+                sha = (
+                    "duplicate".encode().hex().ljust(64, "0")
+                    if rating == "好" and index < 2
+                    else f"{rating}-{index}".encode().hex().ljust(64, "0")
+                )
+                db.add(
+                    Asset(
+                        original_name=f"batch/{rating}_{rating}-{index}.jpeg",
+                        stored_name=f"{rating}-{index}.jpeg",
+                        mime_type="image/jpeg",
+                        size_bytes=1,
+                        sha256=sha,
+                        category_key="space_image",
+                    )
+                )
+        db.commit()
+        with pytest.raises(ValueError, match="重复 SHA-256"):
+            ensure_inspiration_balanced_golden_set(db)
     engine.dispose()
 
 

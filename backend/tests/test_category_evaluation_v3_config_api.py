@@ -139,6 +139,119 @@ def test_create_get_update_round_trip(client: TestClient) -> None:
     assert updated_json["contract_hash"] != original_hash
 
 
+def _five_level_scale() -> dict[str, Any]:
+    return {
+        "version": "category-level-scale-v1",
+        "levels": [
+            {"level": "L1", "enabled": True, "min_score": 90, "display_name": "优选"},
+            {"level": "L2", "enabled": True, "min_score": 75, "display_name": "良好"},
+            {"level": "L3", "enabled": True, "min_score": 60, "display_name": "常规"},
+            {"level": "L4", "enabled": True, "min_score": 1, "display_name": "较差"},
+            {"level": "L5", "enabled": True, "min_score": 0, "display_name": "红线"},
+        ],
+    }
+
+
+def test_level_scale_get_and_put_are_revision_guarded(client: TestClient) -> None:
+    created = client.post(f"{_BASE}/", json=_valid_body()).json()
+
+    current = client.get(f"{_BASE}/inspiration_image/level-scale")
+    assert current.status_code == 200, current.text
+    current_json = current.json()
+    assert current_json["revision"] == 1
+    assert current_json["contract_hash"] == created["contract_hash"]
+    assert current_json["level_scale"] is None
+    assert current_json["level_thresholds"][-1] == {"level": "L4", "min_score": 0}
+
+    updated = client.put(
+        f"{_BASE}/inspiration_image/level-scale",
+        json={
+            "expected_revision": 1,
+            "expected_contract_hash": created["contract_hash"],
+            "level_scale": _five_level_scale(),
+        },
+    )
+    assert updated.status_code == 200, updated.text
+    body = updated.json()
+    assert body["revision"] == 2
+    assert body["contract_hash"] != created["contract_hash"]
+    assert body["level_scale"] == _five_level_scale()
+    assert body["level_thresholds"] is None
+    assert body["resolved_level_scale"]["enabled_levels"] == [
+        "L1", "L2", "L3", "L4", "L5"
+    ]
+
+    stale = client.put(
+        f"{_BASE}/inspiration_image/level-scale",
+        json={"expected_revision": 1, "level_scale": _five_level_scale()},
+    )
+    assert stale.status_code == 409, stale.text
+    assert stale.json()["detail"]["code"] == "revision_conflict"
+    assert client.get(f"{_BASE}/inspiration_image").json()["revision"] == 2
+
+
+def test_level_scale_put_rejects_disabled_redline_without_mutation(
+    client: TestClient,
+) -> None:
+    created = client.post(f"{_BASE}/", json=_valid_body()).json()
+    scale = _five_level_scale()
+    scale["levels"][3]["min_score"] = 0
+    scale["levels"][4] = {
+        "level": "L5",
+        "enabled": False,
+        "display_name": "停用",
+    }
+
+    response = client.put(
+        f"{_BASE}/inspiration_image/level-scale",
+        json={"expected_revision": 1, "level_scale": scale},
+    )
+    assert response.status_code == 422, response.text
+    assert response.json()["detail"]["code"] == "redline_level_disabled"
+    unchanged = client.get(f"{_BASE}/inspiration_image").json()
+    assert unchanged["revision"] == 1
+    assert unchanged["contract_hash"] == created["contract_hash"]
+
+
+def test_level_scale_put_rejects_hash_conflict(client: TestClient) -> None:
+    client.post(f"{_BASE}/", json=_valid_body())
+    response = client.put(
+        f"{_BASE}/inspiration_image/level-scale",
+        json={
+            "expected_revision": 1,
+            "expected_contract_hash": "0" * 64,
+            "level_scale": _five_level_scale(),
+        },
+    )
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"]["code"] == "contract_hash_conflict"
+
+
+def test_level_scale_put_can_atomically_move_redline_to_enabled_floor(
+    client: TestClient,
+) -> None:
+    client.post(f"{_BASE}/", json=_valid_body())
+    scale = _five_level_scale()
+    scale["levels"][3]["min_score"] = 0
+    scale["levels"][4] = {
+        "level": "L5",
+        "enabled": False,
+        "display_name": "停用",
+    }
+    response = client.put(
+        f"{_BASE}/inspiration_image/level-scale",
+        json={
+            "expected_revision": 1,
+            "level_scale": scale,
+            "redline_hit_level": "L4",
+        },
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["resolved_level_scale"]["disabled_levels"] == ["L5"]
+    contract = client.get(f"{_BASE}/inspiration_image").json()["contract"]
+    assert contract["redline_policy"]["hit_level"] == "L4"
+
+
 # --------------------------------------------------------------------------- #
 # 2. invalid artifacts are rejected with coded 400 and not persisted
 # --------------------------------------------------------------------------- #

@@ -3,9 +3,9 @@
   "profile_type": "text-proposal-additive-v1",
   "category_key": "proposal_text_pdf",
   "display_name": "PDF方案文本",
-  "spec_version": "proposal-text-v1-baseline-20260806",
-  "call_a_version": "proposal-text-a-v1-baseline-20260806",
-  "call_b_version": "proposal-text-b-v1-baseline-20260806",
+  "spec_version": "proposal-text-v2-document-aggregate-20260807",
+  "call_a_version": "proposal-text-a-v2-document-aggregate-20260807",
+  "call_b_version": "proposal-text-b-v2-document-aggregate-20260807",
   "source_standard": "钉钉文档《【标签系统】方案文本提示词》2026-08-06 15:52版",
 
   "pdf_input_channel": {
@@ -23,7 +23,7 @@
       "scan_all_pages": true,
       "stop_on_redline": true,
       "redline_merge": "union",
-      "information_merge": "first_seen_conflict_manual_review"
+      "information_merge": "document_first_seen_with_audit"
     },
     "call_b": {
       "mode": "deterministic_representative_pages",

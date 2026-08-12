@@ -16,7 +16,7 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from .level_semantics import LEVEL_SEMANTICS_V3_L5_WORST
+from .level_semantics import UNIFIED_LEVEL_SEMANTICS_VERSION
 
 # 复用影子模块已有的只读加载与 grade 映射机件（不另造）。
 from .category_evaluation_contract import validate_category_evaluation_contract
@@ -465,7 +465,7 @@ def build_v3_authoritative_scoring(v3_result: dict, *, precheck: Any) -> dict:
             "evidence_notes": list(v3_result.get("evidence_notes") or []),
             "redline_hits": list(v3_result.get("redline_hits") or []),
             "status": v3_result.get("status"),
-            "level_semantics_version": LEVEL_SEMANTICS_V3_L5_WORST,
+            "level_semantics_version": UNIFIED_LEVEL_SEMANTICS_VERSION,
         }
     hard_reject = bool(v3_result.get("hard_reject"))
     level = v3_result.get("level")
@@ -572,5 +572,5 @@ def build_v3_authoritative_error_scoring(exc: "V3AuthoritativeError") -> dict:
         "interpretation_status": "manual_required",
         "not_formal_reason": reason,
         "v3_error_code": exc.code,
-        "level_semantics_version": LEVEL_SEMANTICS_V3_L5_WORST,
+        "level_semantics_version": UNIFIED_LEVEL_SEMANTICS_VERSION,
     }

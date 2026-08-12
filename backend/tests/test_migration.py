@@ -11,6 +11,7 @@ from app import models  # noqa: F401
 from app.database import Base
 from app.migration import compare_results
 from app.migrations import run_migrations
+from app.migrations.runner import MIGRATIONS
 
 
 MIGRATION_NAMES = [
@@ -72,6 +73,10 @@ MIGRATION_NAMES = [
     "bind_inspiration_production_dimension",
     "bind_inspiration_production_rubric",
     "add_inspiration_aesthetic_foundation",
+    "persist_evaluation_job_failure_traces",
+    "add_model_thinking_mode",
+    "add_model_registry_entries",
+    "add_mechanism_release_axes",
 ]
 
 
@@ -765,6 +770,31 @@ def test_schema_migrations_table_created_with_all_versions(tmp_path) -> None:
             range(1, len(MIGRATION_NAMES) + 1)
         )
         assert [row[1] for row in rows] == MIGRATION_NAMES
+    finally:
+        engine.dispose()
+
+
+def test_v60_adds_auto_thinking_mode_to_existing_model_configs(tmp_path) -> None:
+    engine = _engine(tmp_path, "v60-model-thinking.db")
+    try:
+        with engine.begin() as connection:
+            connection.exec_driver_sql(
+                "CREATE TABLE model_configs (id INTEGER PRIMARY KEY, name VARCHAR(120))"
+            )
+            connection.exec_driver_sql(
+                "INSERT INTO model_configs(id, name) VALUES (1, 'existing')"
+            )
+            migration = next(item for item in MIGRATIONS if item.version == 60)
+            migration.up(connection)
+            migration.up(connection)
+            columns = {
+                row[1]
+                for row in connection.exec_driver_sql("PRAGMA table_info(model_configs)")
+            }
+            assert "thinking_mode" in columns
+            assert connection.exec_driver_sql(
+                "SELECT thinking_mode FROM model_configs WHERE id=1"
+            ).scalar_one() == "auto"
     finally:
         engine.dispose()
 

@@ -13,10 +13,9 @@ score is 0-100 (higher is better) but the L-level direction is inverted: a high
 score maps to a low L number.  The score→level table lives here as an explicit,
 contract-overridable ordered threshold list.
 
-Out of scope (later independent phases): wiring into the worker/production
-path and the global L-direction migration.  ``scoring.py`` uses the opposite
-direction (L5 = best) and is intentionally left untouched; this is a separate
-new-semantics engine tagged with ``LEVEL_SEMANTICS_VERSION``.
+The production worker is v3-only and persists this semantic version.  Older
+unversioned evaluation rows remain historical evidence and are not silently
+reinterpreted by this engine.
 """
 
 from __future__ import annotations
@@ -29,6 +28,11 @@ from .category_evaluation_contract import (
     COMMON_MODIFIERS_V2_FORMAT_VERSION,
     validate_category_evaluation_contract,
 )
+from .level_scale import (
+    DEFAULT_THRESHOLDS,
+    resolve_level_scale,
+    score_to_level,
+)
 from .redline_policy import evaluate_redlines
 
 
@@ -38,13 +42,7 @@ LEVEL_SEMANTICS_VERSION = "doc-l5-worst-v1"
 # doc-l5-worst-v1 default score→level table.  Ordered high→low; the first entry
 # whose ``min_score`` the score reaches wins.  The trailing 0 entry is the
 # catch-all worst bucket.  Overridable via contract["level_thresholds"].
-DEFAULT_LEVEL_THRESHOLDS: tuple[dict[str, Any], ...] = (
-    {"min_score": 80, "level": "L1"},
-    {"min_score": 60, "level": "L2"},
-    {"min_score": 40, "level": "L3"},
-    {"min_score": 20, "level": "L4"},
-    {"min_score": 0, "level": "L5"},
-)
+DEFAULT_LEVEL_THRESHOLDS = DEFAULT_THRESHOLDS
 
 _VALID_LEVELS = frozenset({"L1", "L2", "L3", "L4", "L5"})
 
@@ -98,57 +96,13 @@ def _step(step: str, score_after: Any, note: str) -> dict[str, Any]:
 
 
 def _resolve_level_thresholds(contract: dict[str, Any]) -> list[dict[str, Any]]:
-    """Return the contract's ``level_thresholds`` or the doc default.
-
-    A contract override must be a non-empty list of ``{min_score, level}``
-    objects with legal L values and integer 0..100 ``min_score``; anything else
-    fails closed.  The returned table is sorted high→low by ``min_score`` and
-    must cover ``min_score`` 0 so every score maps to a level.
-    """
-    override = contract.get("level_thresholds")
-    if override is None:
-        return list(DEFAULT_LEVEL_THRESHOLDS)
-
-    if not isinstance(override, list) or not override:
-        raise CategoryEvaluationAggregatorError(
-            "level_thresholds_invalid", "level_thresholds 必须是非空数组"
-        )
-    resolved: list[dict[str, Any]] = []
-    for entry in override:
-        if not isinstance(entry, dict):
-            raise CategoryEvaluationAggregatorError(
-                "level_thresholds_invalid", "level_thresholds 每项必须是对象"
-            )
-        min_score = entry.get("min_score")
-        level = entry.get("level")
-        if not _is_int(min_score) or not 0 <= min_score <= 100:
-            raise CategoryEvaluationAggregatorError(
-                "level_thresholds_invalid",
-                "level_thresholds.min_score 必须是 0 至 100 的整数",
-            )
-        if level not in _VALID_LEVELS:
-            raise CategoryEvaluationAggregatorError(
-                "level_thresholds_invalid",
-                "level_thresholds.level 必须是 L1 至 L5 之一",
-            )
-        resolved.append({"min_score": min_score, "level": level})
-
-    resolved.sort(key=lambda item: item["min_score"], reverse=True)
-    if resolved[-1]["min_score"] != 0:
-        raise CategoryEvaluationAggregatorError(
-            "level_thresholds_invalid",
-            "level_thresholds 必须包含 min_score=0 的兜底档",
-        )
-    return resolved
+    """Backward-compatible threshold view for foundation callers."""
+    return list(resolve_level_scale(contract)["thresholds"])
 
 
 def _score_to_level(score: int, thresholds: list[dict[str, Any]]) -> str:
     """Map a clamped score to an L-level via the high→low threshold table."""
-    for entry in thresholds:
-        if score >= entry["min_score"]:
-            return entry["level"]
-    # Unreachable: table is validated to include min_score=0.
-    return thresholds[-1]["level"]
+    return score_to_level(score, {"thresholds": thresholds})
 
 
 def _resolve_track(contract: dict[str, Any], track_key: Any) -> dict[str, Any]:
@@ -369,7 +323,8 @@ def aggregate_category_evaluation(
             "precheck_invalid", "precheck 必须是对象"
         )
 
-    thresholds = _resolve_level_thresholds(contract)
+    level_scale = resolve_level_scale(contract)
+    thresholds = level_scale["thresholds"]
 
     # Step 2 — redline (node 0).  A hit terminates before any scoring step.
     redline = evaluate_redlines(precheck, policy=contract["redline_policy"])
@@ -389,6 +344,7 @@ def aggregate_category_evaluation(
         return {
             "aggregator_version": AGGREGATOR_VERSION,
             "level_semantics_version": LEVEL_SEMANTICS_VERSION,
+            "level_scale": level_scale,
             "hard_reject": True,
             "terminated_at": "redline",
             "track_key": None,
@@ -543,6 +499,7 @@ def aggregate_category_evaluation(
     return {
         "aggregator_version": AGGREGATOR_VERSION,
         "level_semantics_version": LEVEL_SEMANTICS_VERSION,
+        "level_scale": level_scale,
         "hard_reject": False,
         "terminated_at": None,
         "track_key": resolved_track_key,

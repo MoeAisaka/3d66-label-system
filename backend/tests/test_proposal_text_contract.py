@@ -16,6 +16,7 @@ from app.proposal_text_contract import (
 
 
 FIXTURE = Path(__file__).parent / "fixtures" / "proposal_text_contract_v1.json"
+ASSET_DIR = Path(__file__).parents[1] / "app" / "proposal_text_assets"
 
 
 def contract() -> dict:
@@ -80,6 +81,25 @@ def call_b(track: str = "A") -> dict:
 
 def test_contract_accepts_frozen_text_proposal_profile() -> None:
     validate_proposal_text_contract(contract())
+
+
+def test_contract_accepts_document_level_v2_channel() -> None:
+    candidate = contract()
+    candidate["spec_version"] = "proposal-text-v2-document-aggregate-20260807"
+    candidate["call_a_version"] = "proposal-text-a-v2-document-aggregate-20260807"
+    candidate["call_b_version"] = "proposal-text-b-v2-document-aggregate-20260807"
+    candidate["pdf_input_channel"]["call_a"][
+        "information_merge"
+    ] = "document_first_seen_with_audit"
+    assert validate_proposal_text_contract(candidate)["spec_version"] == (
+        "proposal-text-v2-document-aggregate-20260807"
+    )
+
+
+def test_document_level_v2_prompt_uses_validator_readability_enum() -> None:
+    prompt = (ASSET_DIR / "call_a_proposal_text_v2.txt").read_text(encoding="utf-8")
+    assert '"页面可读性": "正常|部分异常|无法判断"' in prompt
+    assert '"页面可读性": "正常|异常|无法判断"' not in prompt
 
 
 @pytest.mark.parametrize(

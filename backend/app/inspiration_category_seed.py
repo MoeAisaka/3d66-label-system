@@ -52,8 +52,8 @@ from .subcategory_resolver import (
 
 from .inspiration_aesthetic_foundation import AESTHETIC_CALL_B_VERSION, ANCHORS, DIMENSION_KEYS, FOUNDATION_VERSION
 
-INSPIRATION_SEED_VERSION = "inspiration-category-seed-v4-aesthetic-foundation"
-INSPIRATION_SPEC_VERSION = "inspiration-v3-anchor-aesthetic-20260806"
+INSPIRATION_SEED_VERSION = "inspiration-category-seed-v7-quality-gates"
+INSPIRATION_SPEC_VERSION = "inspiration-v3-aesthetic-evidence-v4-quality-gates-20260807"
 INSPIRATION_CALL_A_VERSION = "inspiration-a-v3-hard-defect-recall-rev4-20260805"
 INSPIRATION_CALL_B_VERSION = AESTHETIC_CALL_B_VERSION
 INSPIRATION_REV3_SPEC_VERSION = "inspiration-v2-human-calibrated-20260805"
@@ -74,7 +74,7 @@ _REDLINE_HIT_SCORE_CAP = 20
 _MIN_CONFIDENCE = 0.6
 
 
-def _redline_policy() -> dict[str, Any]:
+def _redline_policy(*, include_blurry_casual: bool = False) -> dict[str, Any]:
     """Four inspiration-image redlines over the frozen 调用A ``reason`` enum.
 
     Signal is always ``production_fields.reason``; ``match_any`` values are drawn
@@ -101,6 +101,11 @@ def _redline_policy() -> dict[str, Any]:
                 "label": "随手拍（透视杂乱）",
                 "signal": "production_fields.reason",
                 "match_any": ["是随手拍"],
+                "requires_any_hard_defect": [
+                    "careless_composition",
+                    "distorted_viewpoint",
+                    "fisheye_distortion",
+                ] + (["blurry_grayish"] if include_blurry_casual else []),
                 "exemptions": [],
                 "enabled": True,
             },
@@ -339,8 +344,32 @@ def build_inspiration_v3_contract() -> dict[str, Any]:
                 {"min_score": 0, "level": "L4"},
             ],
             "dimension_keys": list(DIMENSION_KEYS), "anchors": [dict(item) for item in ANCHORS],
+            "casual_snapshot_soft_cap": {
+                "key": "casual_snapshot_soft_cap",
+                "signal": "production_fields.reason",
+                "match_any": ["是随手拍"],
+                "cap_to": 59,
+            },
+            "hard_defect_exemptions": [
+                {
+                    "key": "subject_obscuring_brand_wordmark",
+                    "source": "image_defects",
+                    "defect_key": "subject_obscuring_watermark",
+                    "evidence_contains_any": ["品牌文字", "品牌字样"],
+                    "foundation_requirements": {
+                        "detail_completion": {
+                            "min_grade": 4,
+                            "shortcomings_empty": True,
+                        },
+                        "presentation_integrity": {
+                            "min_grade": 4,
+                            "shortcomings_empty": True,
+                        },
+                    },
+                }
+            ],
         },
-        "redline_policy": _redline_policy(),
+        "redline_policy": _redline_policy(include_blurry_casual=True),
         "track_classification": _track_classification(),
         "common_modifiers": _common_modifiers_v2(),
     }

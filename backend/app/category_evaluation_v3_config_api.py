@@ -34,7 +34,7 @@ from typing import Any, Callable
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from .category_evaluation_contract import (
@@ -45,7 +45,8 @@ from .database import get_db
 from .dimension_composition import validate_subcategory_dimensions
 from .dimension_deduction_bridge import extract_dimension_deduction_rules
 from .dimension_schema_registry import canonical_json
-from .models import CategoryEvaluationV3Config
+from .level_scale import resolve_level_scale
+from .models import AuditEvent, CategoryEvaluationV3Config
 from .redline_policy import evaluate_redlines
 from .subcategory_resolver import validate_classification_map
 
@@ -118,6 +119,28 @@ class V3ConfigDetail(BaseModel):
     created_by: str
     created_at: Any
     updated_at: Any
+
+
+class LevelScaleWriteRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expected_revision: int = Field(ge=1)
+    expected_contract_hash: str | None = Field(
+        default=None, min_length=64, max_length=64
+    )
+    level_scale: dict[str, Any]
+    redline_hit_level: str | None = Field(default=None, pattern=r"^L[1-5]$")
+
+
+class LevelScaleResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    category_key: str
+    revision: int
+    contract_hash: str
+    level_scale: dict[str, Any] | None
+    level_thresholds: list[dict[str, Any]] | None
+    resolved_level_scale: dict[str, Any]
 
 
 # --------------------------------------------------------------------------- #
@@ -303,6 +326,18 @@ def _load(db: Session, category_key: str) -> CategoryEvaluationV3Config:
     return row
 
 
+def _level_scale_response(row: CategoryEvaluationV3Config) -> LevelScaleResponse:
+    contract = json.loads(row.contract_json)
+    return LevelScaleResponse(
+        category_key=row.category_key,
+        revision=row.revision,
+        contract_hash=row.contract_hash,
+        level_scale=contract.get("level_scale"),
+        level_thresholds=contract.get("level_thresholds"),
+        resolved_level_scale=resolve_level_scale(contract),
+    )
+
+
 # --------------------------------------------------------------------------- #
 # Router factory
 # --------------------------------------------------------------------------- #
@@ -322,6 +357,117 @@ def build_category_evaluation_v3_config_router(
         prefix="/api/category-evaluation/v3-config",
         tags=["category-evaluation-v3-config"],
     )
+
+    @router.get(
+        "/{category_key}/level-scale", response_model=LevelScaleResponse
+    )
+    def get_level_scale(
+        category_key: str,
+        _user: Any = Depends(require_user),
+        db: Session = Depends(get_db),
+    ) -> LevelScaleResponse:
+        """Read the raw and normalized level contract with concurrency guards."""
+        return _level_scale_response(_load(db, category_key))
+
+    @router.put(
+        "/{category_key}/level-scale", response_model=LevelScaleResponse
+    )
+    def update_level_scale(
+        category_key: str,
+        payload: LevelScaleWriteRequest,
+        user: Any = Depends(require_user),
+        db: Session = Depends(get_db),
+    ) -> LevelScaleResponse:
+        """Replace only ``level_scale`` under optimistic concurrency control."""
+        row = _load(db, category_key)
+        if row.revision != payload.expected_revision:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "revision_conflict",
+                    "message": "配置已被其他操作更新，请刷新后重试",
+                    "current_revision": row.revision,
+                },
+            )
+        if (
+            payload.expected_contract_hash is not None
+            and row.contract_hash != payload.expected_contract_hash
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "contract_hash_conflict",
+                    "message": "合同内容已变化，请刷新后重试",
+                    "current_contract_hash": row.contract_hash,
+                },
+            )
+
+        contract = json.loads(row.contract_json)
+        previous_hash = row.contract_hash
+        contract.pop("level_thresholds", None)
+        contract["level_scale"] = payload.level_scale
+        if payload.redline_hit_level is not None:
+            contract["redline_policy"]["hit_level"] = payload.redline_hit_level
+        try:
+            validate_category_evaluation_contract(contract)
+        except ValueError as exc:
+            code = getattr(exc, "code", "invalid_level_scale")
+            if code == "level_scale.redline_level_disabled":
+                code = "redline_level_disabled"
+            raise HTTPException(
+                status_code=422,
+                detail={"code": code, "message": str(exc)},
+            ) from exc
+
+        next_revision = row.revision + 1
+        next_hash = canonical_contract_hash(contract)
+        update_result = db.execute(
+            update(CategoryEvaluationV3Config)
+            .where(
+                CategoryEvaluationV3Config.id == row.id,
+                CategoryEvaluationV3Config.revision == payload.expected_revision,
+                CategoryEvaluationV3Config.contract_hash == previous_hash,
+            )
+            .values(
+                contract_json=canonical_json(contract),
+                contract_hash=next_hash,
+                revision=next_revision,
+            )
+            .execution_options(synchronize_session=False)
+        )
+        if update_result.rowcount != 1:
+            db.rollback()
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "revision_conflict",
+                    "message": "配置已被其他操作更新，请刷新后重试",
+                },
+            )
+        actor = getattr(user, "username", None) or "system"
+        db.add(
+            AuditEvent(
+                event_key=f"v3-level-scale:{row.id}:revision:{next_revision}",
+                category="category_evaluation_v3_config",
+                action="update_level_scale",
+                subject_type="category_evaluation_v3_config",
+                subject_id=str(row.id),
+                actor=actor,
+                payload_json=canonical_json(
+                    {
+                        "category_key": category_key,
+                        "previous_revision": payload.expected_revision,
+                        "revision": next_revision,
+                        "previous_contract_hash": previous_hash,
+                        "contract_hash": next_hash,
+                    }
+                ),
+            )
+        )
+        db.commit()
+        db.expire(row)
+        db.refresh(row)
+        return _level_scale_response(row)
 
     @router.get("/", response_model=dict[str, Any])
     def list_configs(

@@ -7,6 +7,18 @@ class ProposalTextContractError(ValueError): pass
 PROPOSAL_REDLINE_TYPES=("页数不足","竞品水印","内容异常","核心方案缺失","类目不符或禁用类型","内容安全违规")
 _TRACKS={"A":(45,45,10),"B":(27,63,10),"C":(63,27,10),"balanced":(45,45,10)}
 _BANDS={"L1":[90,100],"L2":[75,89],"L3":[60,74],"L4":[21,59],"L5":[0,20]}
+_CONTRACT_VERSIONS={
+    "proposal-text-v1-baseline-20260806": {
+        "call_a_version": "proposal-text-a-v1-baseline-20260806",
+        "call_b_version": "proposal-text-b-v1-baseline-20260806",
+        "information_merge": "first_seen_conflict_manual_review",
+    },
+    "proposal-text-v2-document-aggregate-20260807": {
+        "call_a_version": "proposal-text-a-v2-document-aggregate-20260807",
+        "call_b_version": "proposal-text-b-v2-document-aggregate-20260807",
+        "information_merge": "document_first_seen_with_audit",
+    },
+}
 _A_KEYS={"预检结果","材料扫描","红线检查","信息提取","待复核项","置信度"}
 _B_KEYS={"scoring_track","visual_score","narrative_score","innovation_timeliness_score","reason","evidence_notes"}
 
@@ -22,9 +34,16 @@ def _int(v:object)->bool: return isinstance(v,int) and not isinstance(v,bool)
 
 def validate_proposal_text_contract(contract:Mapping[str,Any])->dict[str,Any]:
     d=_map(contract,"contract")
-    fixed={"contract_version":"evaluation-category-profile-v3","profile_type":"text-proposal-additive-v1","category_key":"proposal_text_pdf","spec_version":"proposal-text-v1-baseline-20260806","call_a_version":"proposal-text-a-v1-baseline-20260806","call_b_version":"proposal-text-b-v1-baseline-20260806"}
+    fixed={"contract_version":"evaluation-category-profile-v3","profile_type":"text-proposal-additive-v1","category_key":"proposal_text_pdf"}
     for k,v in fixed.items():
         if d.get(k)!=v: _fail(f"{k}不匹配")
+    version = d.get("spec_version")
+    version_config = _CONTRACT_VERSIONS.get(str(version))
+    if version_config is None:
+        _fail("spec_version不匹配")
+    for key in ("call_a_version", "call_b_version"):
+        if d.get(key) != version_config[key]:
+            _fail(f"{key}不匹配")
     channel=_map(d.get("pdf_input_channel"),"pdf_input_channel")
     text_layer=_map(channel.get("text_layer"),"pdf_input_channel.text_layer")
     call_a=_map(channel.get("call_a"),"pdf_input_channel.call_a")
@@ -40,7 +59,7 @@ def validate_proposal_text_contract(contract:Mapping[str,Any])->dict[str,Any]:
         call_a.get("redline_merge"),call_a.get("information_merge"),
     )!=(
         "paged_batches",16,1024,True,True,"union",
-        "first_seen_conflict_manual_review",
+        version_config["information_merge"],
     ):
         _fail("调用A分批策略不匹配")
     if (

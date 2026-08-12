@@ -118,7 +118,30 @@ export function ruleDeductionDimensions(evaluation: EvaluationRecord["evaluation
   return raw as Record<string, Record<string, any>>
 }
 
-function resultStatus(asset: EvaluationRecord) {
+function isProposalTextEvaluation(asset: EvaluationRecord) {
+  const channel = asset.evaluation.preprocess?.pdf_input_channel
+  return asset.category_key === "proposal_text_pdf"
+    || asset.evaluation.preprocess?.category_key === "proposal_text_pdf"
+    || channel?.evaluation_object === "source_pdf_document"
+}
+
+function proposalReviewReason(evaluation: EvaluationRecord["evaluation"]) {
+  const scoringReason = evaluation.scoring?.review_reasons?.[0]
+  const precheckReason = evaluation.precheck?.["预检结果"]?.["结论说明"]
+  return String(scoringReason || precheckReason || "整份 PDF 尚未形成可发布的自动等级")
+}
+
+export function resultStatus(asset: EvaluationRecord) {
+  if (isProposalTextEvaluation(asset)) {
+    const level = asset.evaluation.final_level || asset.evaluation.level
+    const score = asset.evaluation.final_score ?? asset.evaluation.score
+    if (["L1", "L2", "L3", "L4", "L5"].includes(level || "") && typeof score === "number") {
+      return "scored"
+    }
+    return asset.evaluation.needs_review || asset.evaluation.scoring?.needs_review
+      ? "proposal_review"
+      : "proposal_incomplete"
+  }
   if (asset.evaluation.precheck?.classification?.scope_status === "out_of_scope") return "out_of_scope"
   const deductionDimensions = ruleDeductionDimensions(asset.evaluation)
   if (asset.evaluation.scoring?.dimension_scoring_mode === "rule_deduction") {
@@ -335,10 +358,13 @@ export function ReviewList({ items, loading, searchParams, setSearchParams, stag
             <thead><tr className="border-b border-[var(--line)] bg-[#fafbf8] text-xs text-[var(--muted)]"><th className="px-4 py-3 font-semibold">图片</th><th className="px-3 py-3 font-semibold">分类与形态</th><th className="px-3 py-3 font-semibold">画质</th><th className="px-3 py-3 font-semibold">美感结果</th><th className="px-3 py-3 font-semibold">置信度</th><th className="px-3 py-3 font-semibold">审核建议</th><th className="px-3 py-3 font-semibold">审核状态</th><th className="px-3 py-3 font-semibold">版本</th><th className="px-3 py-3 font-semibold">最新更新时间</th><th className="w-28 px-4 py-3 text-right font-semibold">操作</th></tr></thead>
             <tbody>{filtered.map((asset) => {
               const evaluation = asset.evaluation
+              const proposalText = isProposalTextEvaluation(asset)
               const status = reviewStatus(asset)
               const result = resultStatus(asset)
               const level = evaluation?.final_level || evaluation?.level
-              const category = evaluation?.precheck?.classification?.primary_category || "无法判断"
+              const category = proposalText
+                ? evaluation?.precheck?.["信息提取"]?.["项目分类"]?.["一级分类"] || "PDF方案文本"
+                : evaluation?.precheck?.classification?.primary_category || "无法判断"
               const quality = normalizedQuality(evaluation?.precheck?.image_quality?.quality_severity)
               const forms = mediaLabels(asset)
               const nonScored = result !== "scored"
@@ -350,9 +376,9 @@ export function ReviewList({ items, loading, searchParams, setSearchParams, stag
                 : expectedDimensions.filter((key) => Number(evaluation.aesthetic?.dimensions?.[key]?.grade)).length
               return <tr key={evaluation.id} className="border-b border-[var(--line)] last:border-0 hover:bg-[#fbfcfa]">
                 <td className="px-4 py-3"><div className="flex min-w-0 items-center gap-3"><img src={asset.image_url} alt="" loading="lazy" className="size-16 rounded-[4px] border border-[var(--line)] object-cover" /><div className="min-w-0"><p className="file-name max-w-[260px] truncate">{asset.name}</p><p className="font-data mt-1 text-[0.68rem] text-[var(--muted)]">素材 #{String(asset.id).padStart(5, "0")} · 结果 #{String(evaluation.id).padStart(5, "0")} · {asset.width} × {asset.height}</p></div></div></td>
-                <td className="px-3 py-3"><Badge tone="active">{category}</Badge><div className="mt-2 flex max-w-52 flex-wrap gap-1">{forms.slice(0, 3).map((label) => <Badge key={label}>{label}</Badge>)}{forms.length > 3 && <Badge>+{forms.length - 3}</Badge>}</div></td>
-                <td className="px-3 py-3"><span className={`text-xs font-semibold ${quality === "severe" || quality === "unusable" ? "text-[#8d2924]" : "text-[var(--muted)]"}`}>{qualityNames[quality] || quality || "—"}</span>{(evaluation?.scoring?.caps?.length ?? 0) > 0 && <p className="mt-2 text-xs text-[#7d4308]">{evaluation?.scoring.caps.length} 项等级限制</p>}</td>
-                <td className="px-3 py-3">{result === "out_of_scope" ? <><Badge>范围外</Badge><p className="mt-2 text-xs text-[var(--muted)]">范围判定后未生成美感等级</p></> : result === "invalid_contract" ? <><Badge tone="danger">规则异常</Badge><p className="mt-2 text-xs text-[#8d2924]">维度合同无法解析</p></> : result === "incomplete" ? <><Badge tone="danger">结果不完整</Badge><p className="mt-2 text-xs text-[#8d2924]">{ruleMode ? "规则判定" : "维度数据"} {completedDimensions}/{expectedDimensions.length}</p></> : <><div className="flex items-baseline gap-2"><strong className="font-data text-xl">{level || "—"}</strong><span className="font-data text-xs text-[var(--muted)]">{evaluation?.final_score?.toFixed(1) ?? "—"}</span></div>{ruleMode && <p className="mt-1 text-xs font-semibold text-[#45620c]">规则扣分 · {completedDimensions} 个维度</p>}{evaluation?.risk_review?.verdict === "downgrade" && <p className="mt-1 text-xs font-semibold text-[#7d4308]">高风险复核已降级</p>}{evaluation?.final_level !== evaluation?.level && <p className="mt-1 text-xs text-[var(--muted)]">模型 {evaluation?.level} · {evaluation?.score?.toFixed(1)}</p>}</>}</td>
+                <td className="px-3 py-3"><Badge tone="active">{category}</Badge>{proposalText ? <p className="mt-2 text-xs text-[var(--muted)]">源 PDF 文档</p> : <div className="mt-2 flex max-w-52 flex-wrap gap-1">{forms.slice(0, 3).map((label) => <Badge key={label}>{label}</Badge>)}{forms.length > 3 && <Badge>+{forms.length - 3}</Badge>}</div>}</td>
+                <td className="px-3 py-3"><span className={`text-xs font-semibold ${quality === "severe" || quality === "unusable" ? "text-[#8d2924]" : "text-[var(--muted)]"}`}>{proposalText ? "PDF 全页预处理" : qualityNames[quality] || quality || "—"}</span>{(evaluation?.scoring?.caps?.length ?? 0) > 0 && <p className="mt-2 text-xs text-[#7d4308]">{evaluation?.scoring.caps.length} 项等级限制</p>}</td>
+                <td className="px-3 py-3">{result === "proposal_review" ? <><Badge tone="danger">PDF 文档级人工复核</Badge><p className="mt-2 max-w-64 text-xs leading-5 text-[#8d2924]">{proposalReviewReason(evaluation)}</p></> : result === "proposal_incomplete" ? <><Badge tone="danger">PDF 结果不完整</Badge><p className="mt-2 text-xs text-[#8d2924]">整份源 PDF 尚未完成文档级评分</p></> : result === "out_of_scope" ? <><Badge>范围外</Badge><p className="mt-2 text-xs text-[var(--muted)]">范围判定后未生成美感等级</p></> : result === "invalid_contract" ? <><Badge tone="danger">规则异常</Badge><p className="mt-2 text-xs text-[#8d2924]">维度合同无法解析</p></> : result === "incomplete" ? <><Badge tone="danger">结果不完整</Badge><p className="mt-2 text-xs text-[#8d2924]">{ruleMode ? "规则判定" : "维度数据"} {completedDimensions}/{expectedDimensions.length}</p></> : <><div className="flex items-baseline gap-2"><strong className="font-data text-xl">{level || "—"}</strong><span className="font-data text-xs text-[var(--muted)]">{(evaluation?.final_score ?? evaluation?.score)?.toFixed(1) ?? "—"}</span></div>{proposalText && <p className="mt-1 text-xs font-semibold text-[#45620c]">PDF 文档级评分</p>}{ruleMode && <p className="mt-1 text-xs font-semibold text-[#45620c]">规则扣分 · {completedDimensions} 个维度</p>}{evaluation?.risk_review?.verdict === "downgrade" && <p className="mt-1 text-xs font-semibold text-[#7d4308]">高风险复核已降级</p>}{evaluation?.final_level !== evaluation?.level && <p className="mt-1 text-xs text-[var(--muted)]">模型 {evaluation?.level} · {evaluation?.score?.toFixed(1)}</p>}</>}</td>
                 <td className="font-data px-3 py-3"><span className={evaluation?.confidence != null && evaluation.confidence < 0.7 ? "font-semibold text-[#8d2924]" : ""}>{nonScored ? "不适用" : evaluation?.confidence != null ? `${Math.round(evaluation.confidence * 100)}%` : "—"}</span>{evaluation?.needs_review && <p className="mt-2 text-xs text-[#7d4308]">需要复核</p>}</td>
                 <td className="px-3 py-3"><div className="flex items-center gap-2"><Badge tone={samplingTone(asset.sampling.tier)}>{samplingNames[asset.sampling.tier]}</Badge><span className="font-data text-xs font-semibold">P{asset.sampling.priority}</span></div><p className="mt-2 max-w-48 text-xs leading-5 text-[var(--muted)]">{asset.sampling.reasons.slice(0, 2).map((reason) => reason.label).join("；")}</p></td>
                 <td className="px-3 py-3"><Badge tone={statusTone(status)}>{statusNames[status]}</Badge>{evaluation?.human_review && <p className="mt-2 max-w-32 truncate text-xs text-[var(--muted)]">{evaluation.human_review.reviewer_name}</p>}</td>

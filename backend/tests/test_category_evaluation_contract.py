@@ -11,6 +11,19 @@ from app.category_evaluation_contract import (
 from app.redline_policy import REDLINE_POLICY_FORMAT_VERSION
 
 
+def _four_level_scale() -> dict:
+    return {
+        "version": "category-level-scale-v1",
+        "levels": [
+            {"level": "L1", "enabled": True, "min_score": 80},
+            {"level": "L2", "enabled": True, "min_score": 60},
+            {"level": "L3", "enabled": True, "min_score": 40},
+            {"level": "L4", "enabled": True, "min_score": 0},
+            {"level": "L5", "enabled": False},
+        ],
+    }
+
+
 def _redline_policy() -> dict:
     return {
         "format_version": REDLINE_POLICY_FORMAT_VERSION,
@@ -26,6 +39,21 @@ def _redline_policy() -> dict:
             }
         ],
     }
+
+
+def test_contract_accepts_l1_to_l4_scale_when_redline_uses_l4() -> None:
+    contract = _contract()
+    contract["level_scale"] = _four_level_scale()
+    contract["redline_policy"]["hit_level"] = "L4"
+    validate_category_evaluation_contract(contract)
+
+
+def test_contract_rejects_redline_level_disabled_by_category() -> None:
+    contract = _contract()
+    contract["level_scale"] = _four_level_scale()
+    with pytest.raises(CategoryEvaluationContractError) as excinfo:
+        validate_category_evaluation_contract(contract)
+    assert excinfo.value.code == "level_scale.redline_level_disabled"
 
 
 # Inspiration-image three tracks: 一类 40+60=100, 二类 20+60=80, 三类 40+30=70.
