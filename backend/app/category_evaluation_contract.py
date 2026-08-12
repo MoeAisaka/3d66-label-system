@@ -13,6 +13,7 @@ v2 fields are intentionally not redefined here.
 from __future__ import annotations
 
 import re
+import math
 from datetime import datetime
 from typing import Literal
 from typing import Any
@@ -73,6 +74,43 @@ class DeductionRule(BaseModel):
             raise ValueError("扣分规则 tags 不能包含空标签")
         if len(set(normalized)) != len(normalized):
             raise ValueError("扣分规则 tags 不能重复")
+        return normalized
+
+
+class BonusRule(BaseModel):
+    """One operator-authored positive rule scoped to a single dimension."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    rule_id: str
+    description: str
+    bonus: float = Field(gt=0, le=100)
+    tags: list[str] = Field(default_factory=list, max_length=12)
+
+    @field_validator("rule_id")
+    @classmethod
+    def _valid_rule_id(cls, value: str) -> str:
+        value = value.strip()
+        if not _RULE_ID_PATTERN.fullmatch(value):
+            raise ValueError("rule_id 必须以小写字母开头，只含小写字母、数字、_、-")
+        return value
+
+    @field_validator("description")
+    @classmethod
+    def _valid_chinese_description(cls, value: str) -> str:
+        value = value.strip()
+        if not value or not _HAN_PATTERN.search(value):
+            raise ValueError("加分规则 description 必须是非空中文描述")
+        return value
+
+    @field_validator("tags")
+    @classmethod
+    def _valid_tags(cls, value: list[str]) -> list[str]:
+        normalized = [item.strip() for item in value]
+        if any(not item for item in normalized):
+            raise ValueError("加分规则 tags 不能包含空标签")
+        if len(set(normalized)) != len(normalized):
+            raise ValueError("加分规则 tags 不能重复")
         return normalized
 
 
@@ -438,6 +476,91 @@ def validate_deduction_rules(rules: Any, *, dimension_key: str) -> None:
                 f"维度 {dimension_key} 的 rule_id 重复：{rule.rule_id}",
             )
         seen.add(rule.rule_id)
+
+
+def dimension_rule_mode(
+    dimension: Any,
+) -> Literal["grade_fallback", "deduction_v1", "bonus_cap_v2"]:
+    """Select scoring mode from raw field presence without adding defaults."""
+    if not isinstance(dimension, dict):
+        return "grade_fallback"
+    if "bonus_rules" in dimension or "dimension_score_cap" in dimension:
+        return "bonus_cap_v2"
+    if "deduction_rules" in dimension:
+        return "deduction_v1"
+    return "grade_fallback"
+
+
+def validate_dimension_rules(dimension: Any, *, dimension_key: str) -> None:
+    """Validate a dimension's raw rule mode while preserving legacy behavior."""
+    mode = dimension_rule_mode(dimension)
+    if mode == "grade_fallback":
+        return
+    if mode == "deduction_v1":
+        validate_deduction_rules(
+            dimension.get("deduction_rules"), dimension_key=dimension_key
+        )
+        return
+
+    cap = dimension.get("dimension_score_cap")
+    if (
+        isinstance(cap, bool)
+        or not isinstance(cap, (int, float))
+        or not math.isfinite(float(cap))
+        or not 0 <= float(cap) <= 100
+    ):
+        raise CategoryEvaluationContractError(
+            "dimension_score_cap_invalid",
+            f"维度 {dimension_key} 的 dimension_score_cap 必须是 0 至 100 的有限数值",
+        )
+
+    if "deduction_rules" not in dimension:
+        raise CategoryEvaluationContractError(
+            "deduction_rules_missing",
+            f"维度 {dimension_key} 的 bonus-cap-v2 必须显式包含 deduction_rules 数组",
+        )
+    if "bonus_rules" not in dimension:
+        raise CategoryEvaluationContractError(
+            "bonus_rules_missing",
+            f"维度 {dimension_key} 的 bonus-cap-v2 必须显式包含 bonus_rules 数组",
+        )
+    deduction_rules = dimension["deduction_rules"]
+    bonus_rules = dimension["bonus_rules"]
+    if not isinstance(deduction_rules, list):
+        raise CategoryEvaluationContractError(
+            "deduction_rules_invalid",
+            f"维度 {dimension_key} 的 deduction_rules 必须是数组",
+        )
+    if not isinstance(bonus_rules, list):
+        raise CategoryEvaluationContractError(
+            "bonus_rules_invalid",
+            f"维度 {dimension_key} 的 bonus_rules 必须是数组",
+        )
+    if not deduction_rules and not bonus_rules:
+        raise CategoryEvaluationContractError(
+            "rules_empty",
+            f"维度 {dimension_key} 的扣分规则与加分规则不能同时为空",
+        )
+
+    seen: set[str] = set()
+    for kind, rules, model in (
+        ("扣分", deduction_rules, DeductionRule),
+        ("加分", bonus_rules, BonusRule),
+    ):
+        for index, raw_rule in enumerate(rules):
+            try:
+                rule = model.model_validate(raw_rule)
+            except ValueError as exc:
+                raise CategoryEvaluationContractError(
+                    f"{kind == '扣分' and 'deduction' or 'bonus'}_rule_invalid",
+                    f"维度 {dimension_key} 的第 {index + 1} 条{kind}规则无效：{exc}",
+                ) from exc
+            if rule.rule_id in seen:
+                raise CategoryEvaluationContractError(
+                    "rule_id_duplicate",
+                    f"维度 {dimension_key} 的扣分/加分 rule_id 重复：{rule.rule_id}",
+                )
+            seen.add(rule.rule_id)
 
 
 def validate_category_evaluation_contract(contract: Any) -> None:
