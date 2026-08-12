@@ -22,6 +22,10 @@ const workbenchSource = readFileSync(
   new URL("../src/features/baseline-regression/correction-workbench.tsx", import.meta.url),
   "utf8",
 )
+const baselineSetDialogSource = readFileSync(
+  new URL("../src/features/baseline-regression/baseline-set-dialog.tsx", import.meta.url),
+  "utf8",
+)
 
 assert.doesNotMatch(appShell, /高级设置首页/)
 assert.doesNotMatch(appShell, /active\.to === advancedWorkflowDomain\.to/)
@@ -46,6 +50,8 @@ assert.equal(
 assert.doesNotMatch(baselinePage, /function BaselineCorrectionPanel/)
 assert.match(workbenchSource, /<NodeCorrectionEditor/)
 assert.match(workbenchSource, /返回轮次列表/)
+assert.match(baselineSetDialogSource, /onCloseAutoFocus/)
+assert.match(baselineSetDialogSource, /returnFocusRef\.current\?\.focus/)
 assert.deepEqual(
   baselineAcceptanceProgress([
     { status: "completed", evaluation: { human_review: { decision: "approved" } } },
