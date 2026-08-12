@@ -6,7 +6,7 @@
 ## 最新实施：前端信息架构与机制编辑器重构（2026-08-12）
 
 - 产品定位继续以 ADR-0042/0043 为准：**TPENG 标签实验台（LabelLab）**是“标签体系重构”的统一产品载体，也是标签/内容中台通用底座；业务类目只做场景扩展，不复制平台能力。
-- 当前分支为 `codex/frontend-information-architecture-v1`，已验证功能提交为 `90270fe`，Codeup `main` 基线与 merge-base 均为 `ca829b7`（MR #1 合并点）。Codeup `origin` 指向 `git@codeup.aliyun.com:3d66/tepeng/3d66.label-system.git`；本批尚未完成 Codeup push、MR 合并或测试服务器部署。
+- 当前分支为 `codex/frontend-information-architecture-v1`，已验证功能提交为 `90270fe`，Codeup `main` 基线与 merge-base 均为 `ca829b7`（MR #1 合并点）。本批通过 Codeup MR #2 向 `main` 交付；最终合并与测试服务器部署状态以 Codeup MR 和受保护部署记录为准。
 - Task 10 已完成：存量回归一级页面聚焦“选择基准集 → 启动回归 → 逐条确认与纠偏”，复杂内容进入 `BaselineSetDialog`、`RunConfigDrawer`、`MetricsDrawer`、`RunHistoryDrawer` 和 `CorrectionWorkbench`；纠偏上下文通过 `?run=<id>&item=<id>&mode=correction` 可恢复。
 - 当前批次仅做前端信息架构、合同脚本和文档边界；没有新增后端状态、机制激活、自动发布、真实存量重跑 Worker、正式标签事实写入或新权限。Proposal PDF 仍保持独立三分项加法；3D/SU 只保留受控插件注册与安全降级边界。
 - ADR-0044 与全路由审计已补齐：一级页面/二级承载、受控 `profile_type` 插件、candidate revision、双发布轴和下游正式事实消费边界已记录。候选绑定、manifest、原子 projection switch、追加式机制回滚仍列为 Owner=`标签体系` 的下一阶段 Gap。
