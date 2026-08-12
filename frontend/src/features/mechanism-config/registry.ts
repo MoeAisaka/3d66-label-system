@@ -7,9 +7,9 @@ const ImageRuleEditor = lazy(async () => {
   return { default: module.ImageRuleEditor }
 })
 
-const ProposalTextPlaceholder = lazy(async () => {
-  const module = await import("./proposal-text-placeholder")
-  return { default: module.ProposalTextPlaceholder }
+const ProposalTextEditor = lazy(async () => {
+  const module = await import("./proposal-text-editor")
+  return { default: module.ProposalTextEditor }
 })
 
 const PLUGINS: Record<string, MechanismEditorPlugin> = {
@@ -23,8 +23,8 @@ const PLUGINS: Record<string, MechanismEditorPlugin> = {
   },
   "text-proposal-additive-v1": {
     profileType: "text-proposal-additive-v1",
-    canEdit: false,
-    Editor: ProposalTextPlaceholder,
+    canEdit: true,
+    Editor: ProposalTextEditor,
     buildSummary: (revision) => revision
       ? `Proposal PDF 三分项加法机制 · revision ${revision.revision}`
       : "Proposal PDF 三分项加法机制",

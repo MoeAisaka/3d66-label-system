@@ -20,6 +20,7 @@ Coverage:
 
 from __future__ import annotations
 
+from copy import deepcopy
 import json
 from pathlib import Path
 from typing import Any, Iterator
@@ -183,6 +184,55 @@ def test_proposal_profile_reads_and_validates_without_image_fields(client: TestC
     )
     assert validated.status_code == 200, validated.text
     assert validated.json() == {"ok": True, "errors": []}
+
+
+def test_proposal_candidate_round_trip_preserves_unknown_json_and_runtime(
+    client: TestClient,
+) -> None:
+    created = client.post(f"{_BASE}/", json=_proposal_body())
+    assert created.status_code == 201, created.text
+    runtime = created.json()
+    candidate_body = deepcopy(_proposal_body())
+    candidate_body["contract"]["spec_version"] = (
+        "proposal-text-v3-owner-edit-20260812"
+    )
+    candidate_body["contract"]["call_a_version"] = (
+        "proposal-text-a-v3-owner-edit-20260812"
+    )
+    candidate_body["contract"]["call_b_version"] = (
+        "proposal-text-b-v3-owner-edit-20260812"
+    )
+    candidate_body["contract"]["extension"] = {
+        "keep": ["x", {"nested": True}],
+        "owner_note": "未知扩展字段必须无损保留",
+    }
+    candidate_body.update(
+        {
+            "parent_revision_id": runtime["projected_revision_id"],
+            "expected_projected_revision": runtime["revision"],
+            "expected_projected_contract_hash": runtime["contract_hash"],
+        }
+    )
+
+    candidate_response = client.post(
+        f"{_BASE}/proposal_text_pdf/revisions",
+        json=candidate_body,
+    )
+    assert candidate_response.status_code == 201, candidate_response.text
+    candidate = candidate_response.json()
+    reopened = client.get(
+        f"{_BASE}/proposal_text_pdf/revisions/{candidate['revision']}"
+    )
+    assert reopened.status_code == 200, reopened.text
+    assert reopened.json()["contract"]["extension"] == candidate_body["contract"][
+        "extension"
+    ]
+
+    unchanged = client.get(f"{_BASE}/proposal_text_pdf")
+    assert unchanged.status_code == 200, unchanged.text
+    assert unchanged.json()["revision"] == runtime["revision"]
+    assert unchanged.json()["contract_hash"] == runtime["contract_hash"]
+    assert "extension" not in unchanged.json()["contract"]
 
 
 def test_unknown_explicit_profile_is_readable_but_validation_is_fail_closed(
