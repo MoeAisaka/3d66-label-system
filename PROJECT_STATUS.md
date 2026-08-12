@@ -16,7 +16,7 @@
 
 - 后端完整套件：`1251 passed, 1 skipped, 1 deselected, 6 warnings`；`test_macos_keychain_real_isolated_round_trip_update_and_cleanup` 因依赖真实 macOS Keychain 环境明确排除，未宣称通过。
 - 前端 `dimensions`、`v3-only`、`node-correction`、`proposal-pdf`、`balanced-100`、`level-scale-thinking`、`model-registry`、`information-architecture`、`mechanism-editor` 合同全部通过；workspace component 与 Lightbox 浏览器合同通过。
-- TypeScript lint、带真实 `90270fe` SHA 的 Vite production build、`build dev` 产物扫描和 `git diff --check` 通过；仅保留既有主 chunk 大于 500 kB 的构建 warning。
+- TypeScript lint、带真实 Git 短 SHA 的 Vite production build、`build dev` 产物扫描和 `git diff --check` 通过；仅保留既有主 chunk 大于 500 kB 的构建 warning。
 - Microsoft Edge 桌面验收通过：`1440×900`、`1280×720` 下高级设置、V3 合同配置、存量回归与纠偏深链均无文档级横向溢出、登录后控制台错误或 4xx/5xx。
 - Proposal PDF revision 3 可从 UI 重载并保留未知 `extension`，现役仍为 revision 1；图像候选 revision 2 保留 `edge_qa_bonus`、加分 3、tags `edge,qa` 与维度上限 99，现役 hash 未变；未知 `future-3d-v1` 只读降级且无写按钮。
 - 201 条跨分页回归显示“已确认 201/201 · 未评分/失败阻塞 0”，整轮汇总请求使用 `limit=1000`，完成人工验收按钮启用；四个浮层焦点恢复和纠偏深链刷新均通过。
