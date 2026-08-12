@@ -238,15 +238,15 @@ const baselineSource = readFileSync(
   new URL("../src/pages/baseline-regression-page.tsx", import.meta.url),
   "utf8",
 )
-assert.match(
-  baselineSource,
-  /import \{ NodeCorrectionEditor \} from "@\/pages\/node-correction-editor"/,
+const correctionWorkbenchSource = readFileSync(
+  new URL("../src/features/baseline-regression/correction-workbench.tsx", import.meta.url),
+  "utf8",
 )
 assert.match(
-  baselineSource,
+  correctionWorkbenchSource,
   /evaluation\.scoring\?\.dimension_scoring_mode === "rule_deduction"/,
 )
-assert.match(baselineSource, /<NodeCorrectionEditor/)
+assert.match(correctionWorkbenchSource, /<NodeCorrectionEditor/)
 
 const editorSource = readFileSync(
   new URL("../src/pages/node-correction-editor.tsx", import.meta.url),
