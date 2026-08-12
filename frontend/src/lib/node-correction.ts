@@ -46,7 +46,8 @@ export type NodeCorrectionHistoryItem = {
 export type RuleDefinition = {
   rule_id: string
   description: string
-  deduction: number
+  kind: "deduction" | "bonus"
+  value: number
   tags?: string[]
 }
 
@@ -282,9 +283,19 @@ function dimensionMap(aesthetic: unknown): Record<string, Record<string, unknown
   return Object.fromEntries(Object.entries(raw).filter(([, item]) => isRecord(item))) as Record<string, Record<string, unknown>>
 }
 
-function definitionsForTrack(config: unknown): Array<{ key: string; label: string; rules: RuleDefinition[] }> {
+function definitionsForTrack(config: unknown): Array<{
+  key: string
+  label: string
+  deductionRules: RuleDefinition[]
+  bonusRules: RuleDefinition[]
+}> {
   if (!isRecord(config)) return []
-  const definitions: Array<{ key: string; label: string; rules: RuleDefinition[] }> = []
+  const definitions: Array<{
+    key: string
+    label: string
+    deductionRules: RuleDefinition[]
+    bonusRules: RuleDefinition[]
+  }> = []
   for (const groupName of ["common_group", "specific_group"]) {
     const group = config[groupName]
     const schema = isRecord(group) ? group.schema_definition : null
@@ -296,20 +307,31 @@ function definitionsForTrack(config: unknown): Array<{ key: string; label: strin
     if (!Array.isArray(dimensions)) continue
     for (const dimension of dimensions) {
       if (!isRecord(dimension) || typeof dimension.key !== "string") continue
-      const rawRules = Array.isArray(dimension.deduction_rules) ? dimension.deduction_rules : []
-      const rules = rawRules.flatMap((rule) => {
+      const deductionRules = (Array.isArray(dimension.deduction_rules) ? dimension.deduction_rules : []).flatMap((rule) => {
         if (!isRecord(rule) || typeof rule.rule_id !== "string") return []
         return [{
           rule_id: rule.rule_id,
           description: typeof rule.description === "string" ? rule.description : rule.rule_id,
-          deduction: Number(rule.deduction) || 0,
+          kind: "deduction",
+          value: Number(rule.deduction) || 0,
+          tags: Array.isArray(rule.tags) ? rule.tags.map((tag) => String(tag)) : undefined,
+        } satisfies RuleDefinition]
+      })
+      const bonusRules = (Array.isArray(dimension.bonus_rules) ? dimension.bonus_rules : []).flatMap((rule) => {
+        if (!isRecord(rule) || typeof rule.rule_id !== "string") return []
+        return [{
+          rule_id: rule.rule_id,
+          description: typeof rule.description === "string" ? rule.description : rule.rule_id,
+          kind: "bonus",
+          value: Number(rule.bonus) || 0,
           tags: Array.isArray(rule.tags) ? rule.tags.map((tag) => String(tag)) : undefined,
         } satisfies RuleDefinition]
       })
       definitions.push({
         key: dimension.key,
         label: typeof dimension.label === "string" ? dimension.label : dimension.key,
-        rules,
+        deductionRules,
+        bonusRules,
       })
     }
   }
@@ -440,9 +462,9 @@ export function buildCorrectionNodes(evaluation: EvaluationLike): CorrectionNode
   for (const definition of definitions) {
     const currentDimension = currentDimensions[definition.key]
     const hits = normalizeRuleHits(currentDimension?.hit_rules)
-    const configuredRuleIds = new Set(definition.rules.map((rule) => rule.rule_id))
+    const configuredRuleIds = new Set(definition.deductionRules.map((rule) => rule.rule_id))
     const unknownRuleIds = hits.filter((hit) => !configuredRuleIds.has(hit.rule_id))
-    const aligned = Boolean(currentDimension) && definition.rules.length > 0 && unknownRuleIds.length === 0
+    const aligned = Boolean(currentDimension) && definition.deductionRules.length > 0 && unknownRuleIds.length === 0
     const evidenceLines = !aligned
       ? [compatibilityMessage]
       : hits.length
@@ -454,14 +476,44 @@ export function buildCorrectionNodes(evaluation: EvaluationLike): CorrectionNode
       nodeType: "dimension_rule",
       nodePath: `dimension.${definition.key}.hit_rules`,
       label: definition.label,
-      summary: hits.length ? `命中 ${hits.length} / ${definition.rules.length} 条` : `未命中（共 ${definition.rules.length} 条）`,
+      summary: hits.length ? `命中 ${hits.length} / ${definition.deductionRules.length} 条` : `未命中（共 ${definition.deductionRules.length} 条）`,
       evidenceLines,
       currentValue: hits,
       editor: "dimension_rules",
-      ruleDefinitions: definition.rules,
+      ruleDefinitions: definition.deductionRules,
       readOnly: !aligned,
       compatibilityMessage: aligned ? undefined : compatibilityMessage,
     })
+
+    if (definition.bonusRules.length || Array.isArray(currentDimension?.hit_bonus_rules)) {
+      const bonusHits = normalizeRuleHits(currentDimension?.hit_bonus_rules)
+      const configuredBonusIds = new Set(definition.bonusRules.map((rule) => rule.rule_id))
+      const unknownBonusIds = bonusHits.filter((hit) => !configuredBonusIds.has(hit.rule_id))
+      const bonusAligned = Boolean(currentDimension)
+        && definition.bonusRules.length > 0
+        && unknownBonusIds.length === 0
+      const bonusEvidenceLines = !bonusAligned
+        ? [compatibilityMessage]
+        : bonusHits.length
+          ? bonusHits.map((hit) => `加分 · ${hit.rule_id} · 置信度${confidenceLabel(hit.confidence)} · ${hit.evidence}`)
+          : ["当前未命中任何加分规则"]
+      nodes.push({
+        id: `dimension:${definition.key}:bonus`,
+        stage: 4,
+        nodeType: "dimension_rule",
+        nodePath: `dimension.${definition.key}.hit_bonus_rules`,
+        label: `${definition.label} · 加分规则`,
+        summary: bonusHits.length
+          ? `命中 ${bonusHits.length} / ${definition.bonusRules.length} 条`
+          : `未命中（共 ${definition.bonusRules.length} 条）`,
+        evidenceLines: bonusEvidenceLines,
+        currentValue: bonusHits,
+        editor: "dimension_rules",
+        ruleDefinitions: definition.bonusRules,
+        readOnly: !bonusAligned,
+        compatibilityMessage: bonusAligned ? undefined : compatibilityMessage,
+      })
+    }
   }
 
   for (const [dimensionKey, dimension] of hasDimensionConfig ? Object.entries(currentDimensions) : []) {
@@ -484,6 +536,26 @@ export function buildCorrectionNodes(evaluation: EvaluationLike): CorrectionNode
       readOnly: true,
       compatibilityMessage,
     })
+    const bonusHits = normalizeRuleHits(dimension.hit_bonus_rules)
+    if (bonusHits.length) {
+      nodes.push({
+        id: `dimension:${dimensionKey}:bonus`,
+        stage: 4,
+        nodeType: "dimension_rule",
+        nodePath: `dimension.${dimensionKey}.hit_bonus_rules`,
+        label: `${dimensionKey} · 加分规则`,
+        summary: "仅可查看（历史维度）",
+        evidenceLines: [
+          compatibilityMessage,
+          ...bonusHits.map((hit) => `加分 · ${hit.rule_id} · 置信度${confidenceLabel(hit.confidence)} · ${hit.evidence}`),
+        ],
+        currentValue: bonusHits,
+        editor: "dimension_rules",
+        ruleDefinitions: [],
+        readOnly: true,
+        compatibilityMessage,
+      })
+    }
   }
 
   const level = evaluation.level || (typeof scoring.level === "string" ? scoring.level : null)

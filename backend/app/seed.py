@@ -20,6 +20,10 @@ from .models import (
     SamplingPolicy,
     User,
 )
+from .category_evaluation_v3_revisions import (
+    ensure_projected_revision,
+    sync_projected_revision,
+)
 from .prompt_loader import load_prompt_pairs, load_standalone_prompt
 from .security import DEFAULT_ADMIN_PASSWORD_HASH
 
@@ -427,20 +431,36 @@ def _seed_inspiration_image_v3_config(db: Session) -> None:
         except (json.JSONDecodeError, TypeError, AttributeError):
             existing_spec = None
         if existing_spec == contract["spec_version"]:
+            ensure_projected_revision(db, existing)
             return
-        for field, value in persisted.items():
-            setattr(existing, field, value)
-        existing.revision += 1
+        sync_projected_revision(
+            db,
+            existing,
+            display_name=persisted["display_name"],
+            status=persisted["status"],
+            contract_json=persisted["contract_json"],
+            classification_map_json=persisted["classification_map_json"],
+            subcategory_dimensions_json=persisted[
+                "subcategory_dimensions_json"
+            ],
+            dimension_deduction_rules_json=persisted[
+                "dimension_deduction_rules_json"
+            ],
+            media_penalty_enabled=persisted["media_penalty_enabled"],
+            contract_hash=persisted["contract_hash"],
+            actor="system:inspiration-v2-human-calibrated",
+        )
         return
 
-    db.add(
-        CategoryEvaluationV3Config(
-            category_key=category_key,
-            **persisted,
-            revision=1,
-            created_by="system:inspiration-v2-human-calibrated",
-        )
+    created = CategoryEvaluationV3Config(
+        category_key=category_key,
+        **persisted,
+        revision=1,
+        created_by="system:inspiration-v2-human-calibrated",
     )
+    db.add(created)
+    db.flush()
+    ensure_projected_revision(db, created)
 
 
 
@@ -586,13 +606,14 @@ def _seed_v3_only_category_clones(db: Session) -> None:
             )
         )
         if existing is None:
-            db.add(
-                CategoryEvaluationV3Config(
-                    category_key=category_key,
-                    revision=1,
-                    **persisted,
-                )
+            created = CategoryEvaluationV3Config(
+                category_key=category_key,
+                revision=1,
+                **persisted,
             )
+            db.add(created)
+            db.flush()
+            ensure_projected_revision(db, created)
             continue
 
         try:
@@ -600,6 +621,7 @@ def _seed_v3_only_category_clones(db: Session) -> None:
         except (json.JSONDecodeError, TypeError):
             existing_contract = {}
         if existing_contract.get("spec_version") == contract["spec_version"]:
+            ensure_projected_revision(db, existing)
             continue
         is_system_placeholder = (
             existing.created_by == "system"
@@ -608,6 +630,20 @@ def _seed_v3_only_category_clones(db: Session) -> None:
         )
         if not is_system_placeholder:
             continue
-        for field, value in persisted.items():
-            setattr(existing, field, value)
-        existing.revision += 1
+        sync_projected_revision(
+            db,
+            existing,
+            display_name=persisted["display_name"],
+            status=persisted["status"],
+            contract_json=persisted["contract_json"],
+            classification_map_json=persisted["classification_map_json"],
+            subcategory_dimensions_json=persisted[
+                "subcategory_dimensions_json"
+            ],
+            dimension_deduction_rules_json=persisted[
+                "dimension_deduction_rules_json"
+            ],
+            media_penalty_enabled=persisted["media_penalty_enabled"],
+            contract_hash=persisted["contract_hash"],
+            actor=persisted["created_by"],
+        )

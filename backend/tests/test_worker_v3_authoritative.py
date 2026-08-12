@@ -371,6 +371,24 @@ def _legacy_bundle(db: Session) -> dict:
     return bundle
 
 
+def _bonus_cap_bundle(db: Session) -> dict:
+    bundle = _bundle(db)
+    class_one = bundle["subcategory_dimensions"]["class_one"]
+    dimensions = class_one["common_group"]["schema_definition"]["dimensions"]
+    for dimension in dimensions:
+        dimension["dimension_score_cap"] = 80
+        dimension["deduction_rules"] = []
+        dimension["bonus_rules"] = [
+            {
+                "rule_id": f"{dimension['key']}_strength",
+                "description": f"{dimension['label']}表现清晰完整",
+                "bonus": 5,
+                "tags": ["优势"],
+            }
+        ]
+    return bundle
+
+
 def _bundle_with_specific(db: Session) -> dict:
     """A bundle whose class_one track carries a synthetic non-empty specific group.
 
@@ -464,6 +482,7 @@ def test_normal_in_scope_produces_score(sessions: sessionmaker[Session]) -> None
     assert result["level"] in {"L1", "L2", "L3", "L4", "L5"}
     assert result["track_key"] == "class_one"
     assert result["level_semantics_version"] == "doc-l5-worst-v1"
+    assert result["dimension_scoring_mode"] == "rule_deduction"
     identity = result["dimension_deduction_output"]["prompt_identity"]
     assert identity["template_version"] == "dimension-deduction-prompt-v1"
     assert len(identity["system_sha256"]) == 64
@@ -474,6 +493,30 @@ def test_normal_in_scope_produces_score(sessions: sessionmaker[Session]) -> None
     assert scoring["dimension_deduction_output"]["prompt_identity"] == identity
     assert scoring["_dimension_deduction_raw_payload"]["prompt_identity"] == identity
     assert "provider_payload" in scoring["_dimension_deduction_raw_payload"]
+
+
+def test_bonus_cap_provider_warning_keeps_score_and_requires_review(
+    sessions: sessionmaker[Session],
+) -> None:
+    with sessions() as db:
+        bundle = _bonus_cap_bundle(db)
+    precheck = _class_one_precheck()
+    result = asyncio.run(
+        evaluate_v3_authoritative(
+            _FakeClient(raise_exc=True),
+            "img.jpg",
+            "image/jpeg",
+            v3_bundle=bundle,
+            precheck=precheck,
+            aesthetic=None,
+        )
+    )
+    assert result["score"] == 88
+    assert result["dimension_scoring_mode"] == "bonus_cap_v2"
+    scoring = build_v3_authoritative_scoring(result, precheck=precheck)
+    assert scoring["score"] == 88
+    assert scoring["needs_review"] is True
+    assert "调用B失败" in "；".join(scoring["review_reasons"])
 
 
 def test_common_grade_unavailable_raises(sessions: sessionmaker[Session]) -> None:

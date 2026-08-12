@@ -5,6 +5,10 @@ from pathlib import Path
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 from .category_pipeline import validate_pipeline_config
+from .category_evaluation_v3_revisions import (
+    ensure_projected_revision,
+    sync_projected_revision,
+)
 from .dimension_schema_registry import canonical_json
 from .models import CategoryEvaluationV3Config,EvaluationCategoryProfile,ModelConfig,PromptVersion
 from .proposal_text_contract import validate_proposal_text_contract
@@ -76,14 +80,13 @@ def seed_proposal_text_pdf(db:Session)->None:
     contract_json=canonical_json(contract);contract_hash=hashlib.sha256(contract_json.encode()).hexdigest()
     row=db.scalar(select(CategoryEvaluationV3Config).where(CategoryEvaluationV3Config.category_key==PROPOSAL_CATEGORY_KEY))
     if row is None:
-        db.add(CategoryEvaluationV3Config(category_key=PROPOSAL_CATEGORY_KEY,display_name="PDF方案文本",status="active",contract_json=contract_json,classification_map_json=canonical_json(classification),subcategory_dimensions_json=canonical_json(dimensions),dimension_deduction_rules_json="{}",media_penalty_enabled=False,revision=1,contract_hash=contract_hash,created_by="system:proposal-text-v1"))
+        row=CategoryEvaluationV3Config(category_key=PROPOSAL_CATEGORY_KEY,display_name="PDF方案文本",status="active",contract_json=contract_json,classification_map_json=canonical_json(classification),subcategory_dimensions_json=canonical_json(dimensions),dimension_deduction_rules_json="{}",media_penalty_enabled=False,revision=1,contract_hash=contract_hash,created_by="system:proposal-text-v1")
+        db.add(row);db.flush();ensure_projected_revision(db,row)
     else:
         current=json.loads(row.contract_json or "{}")
         if current.get("spec_version")==LEGACY_PROPOSAL_SPEC_VERSION:
             validate_proposal_text_contract(current)
-            row.contract_json=contract_json
-            row.contract_hash=contract_hash
-            row.revision=(row.revision or 0)+1
+            sync_projected_revision(db,row,display_name="PDF方案文本",status="active",contract_json=contract_json,classification_map_json=canonical_json(classification),subcategory_dimensions_json=canonical_json(dimensions),dimension_deduction_rules_json="{}",media_penalty_enabled=False,contract_hash=contract_hash,actor="system:proposal-text-v2")
         elif current.get("spec_version")!=PROPOSAL_SPEC_VERSION:
             raise RuntimeError("proposal_text_pdf v3合同已存在冲突版本，拒绝覆盖")
         elif row.contract_json!=contract_json:
@@ -91,6 +94,6 @@ def seed_proposal_text_pdf(db:Session)->None:
             legacy_contract.pop("pdf_input_channel",None)
             if row.contract_json!=canonical_json(legacy_contract):
                 raise RuntimeError("proposal_text_pdf v3合同已存在未知改动，拒绝覆盖")
-            row.contract_json=contract_json
-            row.contract_hash=contract_hash
-            row.revision=(row.revision or 0)+1
+            sync_projected_revision(db,row,display_name="PDF方案文本",status="active",contract_json=contract_json,classification_map_json=canonical_json(classification),subcategory_dimensions_json=canonical_json(dimensions),dimension_deduction_rules_json="{}",media_penalty_enabled=False,contract_hash=contract_hash,actor="system:proposal-text-v2")
+        else:
+            ensure_projected_revision(db,row)

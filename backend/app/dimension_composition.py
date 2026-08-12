@@ -37,7 +37,8 @@ from .dimension_grade_bridge import (
 )
 from .category_evaluation_contract import (
     CategoryEvaluationContractError,
-    validate_deduction_rules,
+    dimension_rule_mode,
+    validate_dimension_rules,
 )
 
 
@@ -111,9 +112,7 @@ def _group_dimension_keys(group_name: str, schema_definition: Any) -> list[str]:
             )
         keys.append(key)
         try:
-            validate_deduction_rules(
-                dimension.get("deduction_rules"), dimension_key=key
-            )
+            validate_dimension_rules(dimension, dimension_key=key)
         except CategoryEvaluationContractError as exc:
             raise DimensionCompositionError(
                 f"{group_name}.{exc.code}", str(exc)
@@ -151,7 +150,7 @@ def validate_subcategory_dimensions(config: Any) -> None:
         )
 
     group_keys: dict[str, list[str]] = {}
-    rule_mode_flags: list[bool] = []
+    rule_modes: list[str] = []
     non_empty_weight_sum = 0.0
     non_empty_count = 0
     for group_name in _GROUP_KEYS:
@@ -170,7 +169,7 @@ def validate_subcategory_dimensions(config: Any) -> None:
         schema_definition = group.get("schema_definition")
         if isinstance(schema_definition, dict):
             for dimension in schema_definition.get("dimensions") or []:
-                rule_mode_flags.append("deduction_rules" in dimension)
+                rule_modes.append(dimension_rule_mode(dimension))
         group_weight = group.get("group_weight")
         if keys:
             # A non-empty group must carry a positive share; an empty group's
@@ -208,10 +207,10 @@ def validate_subcategory_dimensions(config: Any) -> None:
             "dimension_key_overlap",
             f"共性维度与特有维度的 key 不得重叠（重叠 {overlap}）",
         )
-    if rule_mode_flags and any(rule_mode_flags) and not all(rule_mode_flags):
+    if rule_modes and len(set(rule_modes)) > 1:
         raise DimensionCompositionError(
-            "deduction_rule_mode_mixed",
-            "同一赛道的维度必须全部使用 deduction_rules，或全部使用已废弃的 grade_points fallback",
+            "dimension_rule_mode_mixed",
+            "同一赛道的维度必须统一使用 grade fallback、deduction-v1 或 bonus-cap-v2",
         )
 
 

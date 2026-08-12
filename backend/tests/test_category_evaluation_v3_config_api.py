@@ -8,17 +8,21 @@ placeholder principal — mirroring ``test_material_packages_api`` isolation and
 database is never touched.
 
 Coverage:
-- create → get → update (revision +1, hash changes) round trip.
+- create → get round trip with a matching projected revision.
 - invalid contract / classification_map / subcategory_dimensions are each
   rejected with a coded 400 and nothing is persisted.
 - duplicate category_key → coded 409.
 - ``/validate`` reports coded errors and does not persist.
-- status endpoint flips draft → retired without bumping revision.
+- legacy full, level-scale and status mutations are rejected because the
+  runtime projection is immutable.
 - unauthenticated (missing principal) → 401.
 """
 
 from __future__ import annotations
 
+from copy import deepcopy
+import json
+from pathlib import Path
 from typing import Any, Iterator
 
 import pytest
@@ -41,6 +45,12 @@ from app.migrations import run_migrations
 
 
 _BASE = "/api/category-evaluation/v3-config"
+_PROPOSAL_CONTRACT = (
+    Path(__file__).parents[1]
+    / "app"
+    / "proposal_text_assets"
+    / "v3_contract_proposal_text_v1.json"
+)
 
 
 def _valid_body(category_key: str = "inspiration_image") -> dict[str, Any]:
@@ -50,6 +60,22 @@ def _valid_body(category_key: str = "inspiration_image") -> dict[str, Any]:
         "contract": build_inspiration_v3_contract(),
         "classification_map": build_inspiration_classification_map(),
         "subcategory_dimensions": build_inspiration_subcategory_dimensions(),
+    }
+
+
+def _proposal_body() -> dict[str, Any]:
+    return {
+        "category_key": "proposal_text_pdf",
+        "display_name": "PDF方案文本",
+        "contract": json.loads(_PROPOSAL_CONTRACT.read_text(encoding="utf-8")),
+        "classification_map": {
+            "profile_type": "text-proposal-additive-v1",
+            "source": "precheck.信息提取.项目分类.审核类别",
+        },
+        "subcategory_dimensions": {
+            "profile_type": "text-proposal-additive-v1",
+            "tracks": ["A", "B", "C", "balanced"],
+        },
     }
 
 
@@ -100,11 +126,13 @@ def client(sessions: sessionmaker[Session]) -> Iterator[TestClient]:
 
 
 # --------------------------------------------------------------------------- #
-# 1. create → get → update round trip
+# 1. create → get round trip
 # --------------------------------------------------------------------------- #
 
 
-def test_create_get_update_round_trip(client: TestClient) -> None:
+def test_create_get_round_trip_has_matching_projected_revision(
+    client: TestClient,
+) -> None:
     created = client.post(f"{_BASE}/", json=_valid_body())
     assert created.status_code == 201, created.text
     body = created.json()
@@ -112,6 +140,8 @@ def test_create_get_update_round_trip(client: TestClient) -> None:
     assert body["status"] == "draft"
     assert body["revision"] == 1
     assert body["created_by"] == "v3-config-tester"
+    assert isinstance(body["projected_revision_id"], int)
+    assert body["candidate_count"] == 0
     original_hash = body["contract_hash"]
     assert len(original_hash) == 64
 
@@ -124,19 +154,144 @@ def test_create_get_update_round_trip(client: TestClient) -> None:
     fetched = client.get(f"{_BASE}/inspiration_image")
     assert fetched.status_code == 200
     assert fetched.json()["contract"] == build_inspiration_v3_contract()
+    assert fetched.json()["mechanism_profile"] == {
+        "profile_type": "image-rule-deduction-v1",
+        "source": "legacy_image_shape",
+        "supported": True,
+        "editable": True,
+        "reason": None,
+    }
+    assert fetched.json()["projected_revision_id"] == body["projected_revision_id"]
+    assert fetched.json()["contract_hash"] == original_hash
 
-    # Mutate the contract (drop AI-image penalty magnitude) → hash must change.
-    updated_body = _valid_body()
-    updated_body["display_name"] = "灵感图 v3（改）"
-    updated_body["contract"]["common_modifiers"]["media_type_penalty"][
-        "penalties"
-    ]["ai_image"] = -10
-    updated = client.put(f"{_BASE}/inspiration_image", json=updated_body)
-    assert updated.status_code == 200, updated.text
-    updated_json = updated.json()
-    assert updated_json["revision"] == 2
-    assert updated_json["display_name"] == "灵感图 v3（改）"
-    assert updated_json["contract_hash"] != original_hash
+
+def test_proposal_profile_reads_and_validates_without_image_fields(client: TestClient) -> None:
+    created = client.post(f"{_BASE}/", json=_proposal_body())
+    assert created.status_code == 201, created.text
+    body = created.json()
+    assert body["mechanism_profile"] == {
+        "profile_type": "text-proposal-additive-v1",
+        "source": "explicit",
+        "supported": True,
+        "editable": True,
+        "reason": None,
+    }
+    assert body["dimension_deduction_rules"] == {}
+    assert body["media_penalty_enabled"] is False
+
+    validated = client.post(
+        f"{_BASE}/proposal_text_pdf/validate", json=_proposal_body()
+    )
+    assert validated.status_code == 200, validated.text
+    assert validated.json() == {"ok": True, "errors": []}
+
+
+def test_proposal_candidate_round_trip_preserves_unknown_json_and_runtime(
+    client: TestClient,
+) -> None:
+    created = client.post(f"{_BASE}/", json=_proposal_body())
+    assert created.status_code == 201, created.text
+    runtime = created.json()
+    candidate_body = deepcopy(_proposal_body())
+    candidate_body["contract"]["spec_version"] = (
+        "proposal-text-v3-owner-edit-20260812"
+    )
+    candidate_body["contract"]["call_a_version"] = (
+        "proposal-text-a-v3-owner-edit-20260812"
+    )
+    candidate_body["contract"]["call_b_version"] = (
+        "proposal-text-b-v3-owner-edit-20260812"
+    )
+    candidate_body["contract"]["extension"] = {
+        "keep": ["x", {"nested": True}],
+        "owner_note": "未知扩展字段必须无损保留",
+    }
+    candidate_body.update(
+        {
+            "parent_revision_id": runtime["projected_revision_id"],
+            "expected_projected_revision": runtime["revision"],
+            "expected_projected_contract_hash": runtime["contract_hash"],
+        }
+    )
+
+    candidate_response = client.post(
+        f"{_BASE}/proposal_text_pdf/revisions",
+        json=candidate_body,
+    )
+    assert candidate_response.status_code == 201, candidate_response.text
+    candidate = candidate_response.json()
+    reopened = client.get(
+        f"{_BASE}/proposal_text_pdf/revisions/{candidate['revision']}"
+    )
+    assert reopened.status_code == 200, reopened.text
+    assert reopened.json()["contract"]["extension"] == candidate_body["contract"][
+        "extension"
+    ]
+
+    unchanged = client.get(f"{_BASE}/proposal_text_pdf")
+    assert unchanged.status_code == 200, unchanged.text
+    assert unchanged.json()["revision"] == runtime["revision"]
+    assert unchanged.json()["contract_hash"] == runtime["contract_hash"]
+    assert "extension" not in unchanged.json()["contract"]
+
+
+def test_unknown_explicit_profile_is_readable_but_validation_is_fail_closed(
+    client: TestClient, sessions: sessionmaker[Session]
+) -> None:
+    with sessions() as db:
+        from app.category_evaluation_contract import canonical_contract_hash
+        from app.category_evaluation_v3_revisions import ensure_projected_revision
+        from app.dimension_schema_registry import canonical_json
+        from app.models import CategoryEvaluationV3Config
+
+        contract = {"profile_type": "future-3d-v1", "category_key": "future_3d"}
+        row = CategoryEvaluationV3Config(
+                category_key="future_3d",
+                display_name="未来 3D 机制",
+                status="draft",
+                contract_json=canonical_json(contract),
+                classification_map_json="{}",
+                subcategory_dimensions_json="{}",
+                dimension_deduction_rules_json="{}",
+                media_penalty_enabled=False,
+                revision=1,
+                contract_hash=canonical_contract_hash(contract),
+                created_by="test",
+            )
+        db.add(row)
+        db.flush()
+        ensure_projected_revision(db, row)
+        db.commit()
+
+    fetched = client.get(f"{_BASE}/future_3d")
+    assert fetched.status_code == 200, fetched.text
+    assert fetched.json()["mechanism_profile"] == {
+        "profile_type": "future-3d-v1",
+        "source": "explicit",
+        "supported": False,
+        "editable": False,
+        "reason": "未注册机制 profile：future-3d-v1",
+    }
+
+    unknown_body = {
+        "category_key": "future_3d",
+        "display_name": "未来 3D 机制",
+        "contract": {"profile_type": "future-3d-v1", "category_key": "future_3d"},
+        "classification_map": {},
+        "subcategory_dimensions": {},
+    }
+    validated = client.post(f"{_BASE}/future_3d/validate", json=unknown_body)
+    assert validated.status_code == 200, validated.text
+    assert validated.json() == {
+        "ok": False,
+        "errors": [
+            {
+                "target": "mechanism_profile",
+                "code": "profile_type_unsupported",
+                "message": "未注册机制 profile：future-3d-v1",
+            }
+        ],
+    }
 
 
 def _five_level_scale() -> dict[str, Any]:
@@ -152,7 +307,9 @@ def _five_level_scale() -> dict[str, Any]:
     }
 
 
-def test_level_scale_get_and_put_are_revision_guarded(client: TestClient) -> None:
+def test_level_scale_get_remains_available_but_put_is_immutable(
+    client: TestClient,
+) -> None:
     created = client.post(f"{_BASE}/", json=_valid_body()).json()
 
     current = client.get(f"{_BASE}/inspiration_image/level-scale")
@@ -163,7 +320,7 @@ def test_level_scale_get_and_put_are_revision_guarded(client: TestClient) -> Non
     assert current_json["level_scale"] is None
     assert current_json["level_thresholds"][-1] == {"level": "L4", "min_score": 0}
 
-    updated = client.put(
+    rejected = client.put(
         f"{_BASE}/inspiration_image/level-scale",
         json={
             "expected_revision": 1,
@@ -171,85 +328,14 @@ def test_level_scale_get_and_put_are_revision_guarded(client: TestClient) -> Non
             "level_scale": _five_level_scale(),
         },
     )
-    assert updated.status_code == 200, updated.text
-    body = updated.json()
-    assert body["revision"] == 2
-    assert body["contract_hash"] != created["contract_hash"]
-    assert body["level_scale"] == _five_level_scale()
-    assert body["level_thresholds"] is None
-    assert body["resolved_level_scale"]["enabled_levels"] == [
-        "L1", "L2", "L3", "L4", "L5"
-    ]
-
-    stale = client.put(
-        f"{_BASE}/inspiration_image/level-scale",
-        json={"expected_revision": 1, "level_scale": _five_level_scale()},
-    )
-    assert stale.status_code == 409, stale.text
-    assert stale.json()["detail"]["code"] == "revision_conflict"
-    assert client.get(f"{_BASE}/inspiration_image").json()["revision"] == 2
-
-
-def test_level_scale_put_rejects_disabled_redline_without_mutation(
-    client: TestClient,
-) -> None:
-    created = client.post(f"{_BASE}/", json=_valid_body()).json()
-    scale = _five_level_scale()
-    scale["levels"][3]["min_score"] = 0
-    scale["levels"][4] = {
-        "level": "L5",
-        "enabled": False,
-        "display_name": "停用",
+    assert rejected.status_code == 409, rejected.text
+    assert rejected.json()["detail"] == {
+        "code": "active_projection_immutable",
+        "message": "现役合同只能通过已批准机制发布原子切换，请先创建候选版本",
     }
-
-    response = client.put(
-        f"{_BASE}/inspiration_image/level-scale",
-        json={"expected_revision": 1, "level_scale": scale},
-    )
-    assert response.status_code == 422, response.text
-    assert response.json()["detail"]["code"] == "redline_level_disabled"
     unchanged = client.get(f"{_BASE}/inspiration_image").json()
     assert unchanged["revision"] == 1
     assert unchanged["contract_hash"] == created["contract_hash"]
-
-
-def test_level_scale_put_rejects_hash_conflict(client: TestClient) -> None:
-    client.post(f"{_BASE}/", json=_valid_body())
-    response = client.put(
-        f"{_BASE}/inspiration_image/level-scale",
-        json={
-            "expected_revision": 1,
-            "expected_contract_hash": "0" * 64,
-            "level_scale": _five_level_scale(),
-        },
-    )
-    assert response.status_code == 409, response.text
-    assert response.json()["detail"]["code"] == "contract_hash_conflict"
-
-
-def test_level_scale_put_can_atomically_move_redline_to_enabled_floor(
-    client: TestClient,
-) -> None:
-    client.post(f"{_BASE}/", json=_valid_body())
-    scale = _five_level_scale()
-    scale["levels"][3]["min_score"] = 0
-    scale["levels"][4] = {
-        "level": "L5",
-        "enabled": False,
-        "display_name": "停用",
-    }
-    response = client.put(
-        f"{_BASE}/inspiration_image/level-scale",
-        json={
-            "expected_revision": 1,
-            "level_scale": scale,
-            "redline_hit_level": "L4",
-        },
-    )
-    assert response.status_code == 200, response.text
-    assert response.json()["resolved_level_scale"]["disabled_levels"] == ["L5"]
-    contract = client.get(f"{_BASE}/inspiration_image").json()["contract"]
-    assert contract["redline_policy"]["hit_level"] == "L4"
 
 
 # --------------------------------------------------------------------------- #
@@ -333,25 +419,33 @@ def test_missing_config_returns_coded_404(client: TestClient) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# 5. status endpoint (retire without DELETE), no revision bump
+# 5. legacy active mutations are closed
 # --------------------------------------------------------------------------- #
 
 
-def test_status_change_retires_without_revision_bump(client: TestClient) -> None:
-    client.post(f"{_BASE}/", json=_valid_body())
-    retired = client.put(
-        f"{_BASE}/inspiration_image/status", json={"status": "retired"}
-    )
-    assert retired.status_code == 200, retired.text
-    body = retired.json()
-    assert body["status"] == "retired"
-    assert body["revision"] == 1  # status change does not bump the contract revision
-
-    bad = client.put(
-        f"{_BASE}/inspiration_image/status", json={"status": "bogus"}
-    )
-    assert bad.status_code == 400
-    assert bad.json()["detail"]["code"] == "invalid_status"
+@pytest.mark.parametrize(
+    ("path", "payload"),
+    [
+        ("inspiration_image", _valid_body()),
+        ("inspiration_image/status", {"status": "retired"}),
+    ],
+)
+def test_legacy_active_mutations_return_immutable_conflict(
+    client: TestClient,
+    path: str,
+    payload: dict[str, Any],
+) -> None:
+    created = client.post(f"{_BASE}/", json=_valid_body()).json()
+    response = client.put(f"{_BASE}/{path}", json=payload)
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"] == {
+        "code": "active_projection_immutable",
+        "message": "现役合同只能通过已批准机制发布原子切换，请先创建候选版本",
+    }
+    unchanged = client.get(f"{_BASE}/inspiration_image").json()
+    assert unchanged["status"] == "draft"
+    assert unchanged["revision"] == 1
+    assert unchanged["contract_hash"] == created["contract_hash"]
 
 
 # --------------------------------------------------------------------------- #

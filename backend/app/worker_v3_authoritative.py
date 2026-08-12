@@ -334,9 +334,16 @@ async def evaluate_v3_authoritative(
             call_multimodal_for_dimension_deductions,
             compose_rule_deductions,
             has_deduction_rules,
+            rule_scoring_mode,
         )
 
         if has_deduction_rules(track_config):
+            active_rule_mode = rule_scoring_mode(track_config)
+            public_scoring_mode = (
+                "bonus_cap_v2"
+                if active_rule_mode == "bonus_cap_v2"
+                else "rule_deduction"
+            )
             # New rule-deduction path: calling B judges rule hits only.  Provider
             # failure is converted by the bridge into empty hits + warning.
             rule_dimension_output = await call_multimodal_for_dimension_deductions(
@@ -359,11 +366,11 @@ async def evaluate_v3_authoritative(
                     contract, precheck_obj, composed, track_key=track_key
                 )
                 result["dimension_deduction_output"] = rule_dimension_output
-                result["dimension_scoring_mode"] = "rule_deduction"
+                result["dimension_scoring_mode"] = public_scoring_mode
                 return result
             except Exception as exc:  # noqa: BLE001 - deterministic contract fault
                 raise V3AuthoritativeError(
-                    "v3_rule_engine_failed", f"v3 规则扣分聚合失败：{exc}"
+                    "v3_rule_engine_failed", f"v3 规则计分聚合失败：{exc}"
                 ) from exc
 
         # @deprecated fallback: contracts without deduction_rules keep the

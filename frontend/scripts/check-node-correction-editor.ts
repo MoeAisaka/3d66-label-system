@@ -39,6 +39,7 @@ const evaluation = {
     dimensions: {
       visual_structure: {
         hit_rules: [{ rule_id: "r1", confidence: "high", evidence: "主体明显偏移" }],
+        hit_bonus_rules: [{ rule_id: "b1", confidence: "medium", evidence: "构图层级清晰" }],
       },
     },
   },
@@ -73,6 +74,11 @@ const evaluation = {
                   { rule_id: "r1", description: "主体结构明显失衡", deduction: 20 },
                   { rule_id: "r2", description: "视觉层级不清晰", deduction: 10 },
                 ],
+                bonus_rules: [
+                  { rule_id: "b1", description: "构图层级清晰完整", bonus: 8 },
+                  { rule_id: "b2", description: "留白关系舒适", bonus: 4 },
+                ],
+                dimension_score_cap: 100,
               }],
             },
           },
@@ -110,7 +116,17 @@ const dimension = nodes.find((node) => node.id === "dimension:visual_structure")
 assert(dimension)
 assert.equal(dimension.summary, "命中 1 / 2 条")
 assert.equal(dimension.ruleDefinitions?.[0].description, "主体结构明显失衡")
+assert.equal(dimension.ruleDefinitions?.[0].kind, "deduction")
+assert.equal(dimension.ruleDefinitions?.[0].value, 20)
 assert.equal(dimension.evidenceLines[0], "r1 · 置信度高 · 主体明显偏移")
+
+const bonusDimension = nodes.find((node) => node.id === "dimension:visual_structure:bonus")
+assert(bonusDimension)
+assert.equal(bonusDimension.nodePath, "dimension.visual_structure.hit_bonus_rules")
+assert.equal(bonusDimension.summary, "命中 1 / 2 条")
+assert.equal(bonusDimension.ruleDefinitions?.[0].kind, "bonus")
+assert.equal(bonusDimension.ruleDefinitions?.[0].value, 8)
+assert.equal(bonusDimension.evidenceLines[0], "加分 · b1 · 置信度中 · 构图层级清晰")
 
 // UI uses Chinese labels while requests and persisted values stay canonical.
 assert.equal(confidenceLabel("medium"), "中")
@@ -222,15 +238,15 @@ const baselineSource = readFileSync(
   new URL("../src/pages/baseline-regression-page.tsx", import.meta.url),
   "utf8",
 )
-assert.match(
-  baselineSource,
-  /import \{ NodeCorrectionEditor \} from "@\/pages\/node-correction-editor"/,
+const correctionWorkbenchSource = readFileSync(
+  new URL("../src/features/baseline-regression/correction-workbench.tsx", import.meta.url),
+  "utf8",
 )
 assert.match(
-  baselineSource,
+  correctionWorkbenchSource,
   /evaluation\.scoring\?\.dimension_scoring_mode === "rule_deduction"/,
 )
-assert.match(baselineSource, /<NodeCorrectionEditor/)
+assert.match(correctionWorkbenchSource, /<NodeCorrectionEditor/)
 
 const editorSource = readFileSync(
   new URL("../src/pages/node-correction-editor.tsx", import.meta.url),
@@ -240,5 +256,7 @@ assert.match(editorSource, /一级分类/)
 assert.match(editorSource, /二级分类/)
 assert.match(editorSource, /添加标签/)
 assert.match(editorSource, /最多 \{node\.maxLength\} 个字/)
+assert.match(editorSource, /rule\.kind === "bonus"/)
+assert.match(editorSource, /加分/)
 
 console.log("node correction editor frontend contract: ok")

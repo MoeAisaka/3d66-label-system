@@ -5,7 +5,12 @@ from copy import deepcopy
 from pathlib import Path
 
 from app.category_evaluation_aggregator import aggregate_category_evaluation
-from app.dimension_deduction_bridge import compose_rule_deductions, empty_deduction_output
+from app.dimension_deduction_bridge import (
+    RULE_COMPOSITION_V2,
+    compose_rule_deductions,
+    compose_rule_scores,
+    empty_deduction_output,
+)
 from app.inspiration_category_seed import (
     build_inspiration_subcategory_dimensions,
     build_inspiration_v3_contract,
@@ -22,6 +27,103 @@ def _precheck() -> dict:
         "classification": {"primary_category": "建筑设计", "primary_confidence": 0.95},
         "production_fields": {"reason": [], "trait": "实景照片"},
     }
+
+
+def _bonus_cap_config(
+    *, cap: float = 90, deduction: float = 20, bonus: float = 8
+) -> dict:
+    return {
+        "format_version": "subcategory-dimensions-v1",
+        "sub_category_key": "class_one",
+        "dimension_max": 30,
+        "common_group": {
+            "group_weight": 1.0,
+            "schema_definition": {
+                "dimensions": [
+                    {
+                        "key": "visual_structure",
+                        "label": "视觉结构",
+                        "weight": 1.0,
+                        "dimension_score_cap": cap,
+                        "deduction_rules": [
+                            {
+                                "rule_id": "structure_defect",
+                                "description": "视觉结构存在明显缺陷",
+                                "deduction": deduction,
+                                "tags": ["结构"],
+                            }
+                        ],
+                        "bonus_rules": [
+                            {
+                                "rule_id": "structure_strength",
+                                "description": "视觉结构层级清晰完整",
+                                "bonus": bonus,
+                                "tags": ["结构"],
+                            }
+                        ],
+                    }
+                ]
+            },
+        },
+        "specific_group": None,
+    }
+
+
+def _bonus_cap_hits(*, deduction: bool = False, bonus: bool = False) -> dict:
+    return {
+        "dimensions": {
+            "visual_structure": {
+                "hit_rules": (
+                    [
+                        {
+                            "rule_id": "structure_defect",
+                            "confidence": "high",
+                            "evidence": "主体结构出现断裂",
+                        }
+                    ]
+                    if deduction
+                    else []
+                ),
+                "hit_bonus_rules": (
+                    [
+                        {
+                            "rule_id": "structure_strength",
+                            "confidence": "high",
+                            "evidence": "前中后景层次明确",
+                        }
+                    ]
+                    if bonus
+                    else []
+                ),
+            }
+        },
+        "overall_note": "",
+    }
+
+
+def test_bonus_offsets_deduction_before_cap() -> None:
+    result = compose_rule_scores(
+        config=_bonus_cap_config(),
+        dimension_output=_bonus_cap_hits(deduction=True, bonus=True),
+    )
+    evidence = result["evidence"]["visual_structure"]
+    assert result["composition_version"] == RULE_COMPOSITION_V2
+    assert evidence["raw_dimension_score"] == 88
+    assert evidence["dimension_score"] == 88
+    assert evidence["point_contribution"] == 26.4
+    assert result["deductions"]["visual_structure"] == 3.6
+
+
+def test_dimension_cap_limits_unpenalized_dimension() -> None:
+    result = compose_rule_scores(
+        config=_bonus_cap_config(cap=80),
+        dimension_output=_bonus_cap_hits(),
+    )
+    evidence = result["evidence"]["visual_structure"]
+    assert evidence["raw_dimension_score"] == 100
+    assert evidence["dimension_score"] == 80
+    assert evidence["cap_applied"] is True
+    assert result["deductions"]["visual_structure"] == 6
 
 
 def test_rule_hits_accumulate_into_weighted_dimension_deductions() -> None:

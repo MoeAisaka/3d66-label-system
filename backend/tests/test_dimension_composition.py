@@ -11,6 +11,7 @@ from app.dimension_composition import (
     SUBCATEGORY_DIMENSIONS_FORMAT_VERSION,
     DimensionCompositionError,
     compose_deductions,
+    dimension_rule_mode,
     validate_subcategory_dimensions,
 )
 from app.dimension_grade_bridge import DimensionGradeBridgeError
@@ -47,6 +48,53 @@ def _config(
         "dimension_max": dimension_max,
         "common_group": _group({"c_a": 0.5, "c_b": 0.5}, common_weight),
         "specific_group": _group({"s_a": 0.5, "s_b": 0.5}, specific_weight),
+    }
+
+
+def _deduction_rule(rule_id: str = "defect") -> dict:
+    return {
+        "rule_id": rule_id,
+        "description": "画面存在明显缺陷",
+        "deduction": 10,
+        "tags": ["缺陷"],
+    }
+
+
+def _bonus_rule(rule_id: str = "strength") -> dict:
+    return {
+        "rule_id": rule_id,
+        "description": "画面层级清晰完整",
+        "bonus": 8,
+        "tags": ["优势"],
+    }
+
+
+def _v2_dimension(
+    *,
+    key: str = "c_a",
+    deduction_rules: list[dict] | None = None,
+    bonus_rules: list[dict] | None = None,
+    cap: float = 100,
+) -> dict:
+    return {
+        "key": key,
+        "weight": 1.0,
+        "dimension_score_cap": cap,
+        "deduction_rules": [] if deduction_rules is None else deduction_rules,
+        "bonus_rules": [] if bonus_rules is None else bonus_rules,
+    }
+
+
+def _single_group_config(dimensions: list[dict]) -> dict:
+    return {
+        "format_version": SUBCATEGORY_DIMENSIONS_FORMAT_VERSION,
+        "sub_category_key": "class_one",
+        "dimension_max": 60,
+        "common_group": {
+            "group_weight": 1.0,
+            "schema_definition": {"dimensions": dimensions},
+        },
+        "specific_group": None,
     }
 
 
@@ -114,6 +162,68 @@ def test_hand_computed_mixed_common_dimension() -> None:
 
 def test_validate_accepts_legal_config() -> None:
     assert validate_subcategory_dimensions(_config()) is None
+
+
+@pytest.mark.parametrize("cap", [0, 100])
+def test_bonus_cap_v2_accepts_boundary_caps(cap: float) -> None:
+    dimension = _v2_dimension(bonus_rules=[_bonus_rule()], cap=cap)
+    assert dimension_rule_mode(dimension) == "bonus_cap_v2"
+    assert validate_subcategory_dimensions(_single_group_config([dimension])) is None
+
+
+@pytest.mark.parametrize("cap", [-1, 101, float("nan")])
+def test_bonus_cap_v2_rejects_invalid_caps(cap: float) -> None:
+    config = _single_group_config([_v2_dimension(bonus_rules=[_bonus_rule()], cap=cap)])
+    with pytest.raises(DimensionCompositionError) as excinfo:
+        validate_subcategory_dimensions(config)
+    assert excinfo.value.code.endswith("dimension_score_cap_invalid")
+
+
+@pytest.mark.parametrize(
+    ("deduction_rules", "bonus_rules"),
+    [
+        ([_deduction_rule()], []),
+        ([], [_bonus_rule()]),
+        ([_deduction_rule()], [_bonus_rule()]),
+    ],
+)
+def test_bonus_cap_v2_allows_only_deduction_only_bonus_or_mixed(
+    deduction_rules: list[dict], bonus_rules: list[dict]
+) -> None:
+    dimension = _v2_dimension(
+        deduction_rules=deduction_rules,
+        bonus_rules=bonus_rules,
+    )
+    assert validate_subcategory_dimensions(_single_group_config([dimension])) is None
+
+
+def test_bonus_cap_v2_requires_both_rule_arrays_and_at_least_one_rule() -> None:
+    missing_bonus = _v2_dimension(deduction_rules=[_deduction_rule()])
+    del missing_bonus["bonus_rules"]
+    with pytest.raises(DimensionCompositionError) as missing_exc:
+        validate_subcategory_dimensions(_single_group_config([missing_bonus]))
+    assert missing_exc.value.code.endswith("bonus_rules_missing")
+
+    empty = _v2_dimension()
+    with pytest.raises(DimensionCompositionError) as empty_exc:
+        validate_subcategory_dimensions(_single_group_config([empty]))
+    assert empty_exc.value.code.endswith("rules_empty")
+
+
+def test_bonus_cap_v2_and_grade_fallback_cannot_mix_within_track() -> None:
+    grade = {
+        "key": "legacy_grade",
+        "weight": 0.5,
+        "grade_points": dict(_GRADE_POINTS),
+    }
+    v2 = _v2_dimension(
+        key="rule_v2",
+        bonus_rules=[_bonus_rule()],
+    )
+    v2["weight"] = 0.5
+    with pytest.raises(DimensionCompositionError) as excinfo:
+        validate_subcategory_dimensions(_single_group_config([grade, v2]))
+    assert excinfo.value.code == "dimension_rule_mode_mixed"
 
 
 # --- Compose → aggregator round-trip on the inspiration class_one contract. ---

@@ -1,24 +1,13 @@
 from __future__ import annotations
 from copy import deepcopy
+from math import isfinite
 from typing import Any, Mapping
 
 class ProposalTextContractError(ValueError): pass
 
 PROPOSAL_REDLINE_TYPES=("页数不足","竞品水印","内容异常","核心方案缺失","类目不符或禁用类型","内容安全违规")
-_TRACKS={"A":(45,45,10),"B":(27,63,10),"C":(63,27,10),"balanced":(45,45,10)}
-_BANDS={"L1":[90,100],"L2":[75,89],"L3":[60,74],"L4":[21,59],"L5":[0,20]}
-_CONTRACT_VERSIONS={
-    "proposal-text-v1-baseline-20260806": {
-        "call_a_version": "proposal-text-a-v1-baseline-20260806",
-        "call_b_version": "proposal-text-b-v1-baseline-20260806",
-        "information_merge": "first_seen_conflict_manual_review",
-    },
-    "proposal-text-v2-document-aggregate-20260807": {
-        "call_a_version": "proposal-text-a-v2-document-aggregate-20260807",
-        "call_b_version": "proposal-text-b-v2-document-aggregate-20260807",
-        "information_merge": "document_first_seen_with_audit",
-    },
-}
+_TRACK_NAMES={"A","B","C","balanced"}
+_LEVEL_ORDER=("L5","L4","L3","L2","L1")
 _A_KEYS={"预检结果","材料扫描","红线检查","信息提取","待复核项","置信度"}
 _B_KEYS={"scoring_track","visual_score","narrative_score","innovation_timeliness_score","reason","evidence_notes"}
 
@@ -31,19 +20,42 @@ def _exact(v:Mapping[str,Any],keys:set[str],path:str)->None:
 def _text(v:object,path:str)->None:
     if not isinstance(v,str) or not v.strip(): _fail(f"{path}必须是非空字符串")
 def _int(v:object)->bool: return isinstance(v,int) and not isinstance(v,bool)
+def _version_text(v:object,path:str)->None:
+    _text(v,path)
+    if len(v)>128 or not v.isprintable(): _fail(f"{path}格式不合法")
+def _bounded_int(v:object,path:str,minimum:int,maximum:int)->None:
+    if not _int(v) or not minimum<=v<=maximum: _fail(f"{path}必须是{minimum}..{maximum}的整数")
+def _bounded_number(v:object,path:str,minimum:float,maximum:float)->None:
+    if isinstance(v,bool) or not isinstance(v,(int,float)) or not isfinite(v) or not minimum<=v<=maximum:
+        _fail(f"{path}必须是{minimum:g}..{maximum:g}的有限数值")
+
+def _validate_grade_bands(raw:object)->Mapping[str,Any]:
+    bands=_map(raw,"grade_bands")
+    if bands.get("computed_by")!="engine": _fail("等级必须由引擎计算")
+    expected_low=0
+    for level in _LEVEL_ORDER:
+        interval=bands.get(level)
+        if not isinstance(interval,list) or len(interval)!=2:
+            _fail(f"{level}区间必须是两个整数的闭区间")
+        low,high=interval
+        if not _int(low) or not _int(high) or not 0<=low<=high<=100:
+            _fail(f"{level}区间不合法")
+        if low!=expected_low:
+            _fail("等级区间必须连续且完整覆盖0..100")
+        expected_low=high+1
+    if expected_low!=101:
+        _fail("等级区间必须连续且完整覆盖0..100")
+    return bands
 
 def validate_proposal_text_contract(contract:Mapping[str,Any])->dict[str,Any]:
     d=_map(contract,"contract")
     fixed={"contract_version":"evaluation-category-profile-v3","profile_type":"text-proposal-additive-v1","category_key":"proposal_text_pdf"}
     for k,v in fixed.items():
         if d.get(k)!=v: _fail(f"{k}不匹配")
-    version = d.get("spec_version")
-    version_config = _CONTRACT_VERSIONS.get(str(version))
-    if version_config is None:
-        _fail("spec_version不匹配")
-    for key in ("call_a_version", "call_b_version"):
-        if d.get(key) != version_config[key]:
-            _fail(f"{key}不匹配")
+    for key in ("display_name","source_standard"):
+        _text(d.get(key),key)
+    for key in ("spec_version","call_a_version","call_b_version"):
+        _version_text(d.get(key),key)
     channel=_map(d.get("pdf_input_channel"),"pdf_input_channel")
     text_layer=_map(channel.get("text_layer"),"pdf_input_channel.text_layer")
     call_a=_map(channel.get("call_a"),"pdf_input_channel.call_a")
@@ -54,19 +66,19 @@ def validate_proposal_text_contract(contract:Mapping[str,Any])->dict[str,Any]:
     if (text_layer.get("primary"),text_layer.get("extract_all_pages"),text_layer.get("ocr_only_without_text"))!=(True,True,True):
         _fail("PDF文本层策略不匹配")
     if (
-        call_a.get("mode"),call_a.get("batch_size"),call_a.get("max_side_px"),
-        call_a.get("scan_all_pages"),call_a.get("stop_on_redline"),
-        call_a.get("redline_merge"),call_a.get("information_merge"),
-    )!=(
-        "paged_batches",16,1024,True,True,"union",
-        version_config["information_merge"],
-    ):
+        call_a.get("mode"),call_a.get("scan_all_pages"),
+        call_a.get("stop_on_redline"),call_a.get("redline_merge"),
+    )!=("paged_batches",True,True,"union"):
         _fail("调用A分批策略不匹配")
+    _bounded_int(call_a.get("batch_size"),"pdf_input_channel.call_a.batch_size",1,32)
+    _bounded_int(call_a.get("max_side_px"),"pdf_input_channel.call_a.max_side_px",512,2048)
+    _version_text(call_a.get("information_merge"),"pdf_input_channel.call_a.information_merge")
     if (
-        call_b.get("mode"),call_b.get("sample_size"),
+        call_b.get("mode"),
         call_b.get("high_fidelity"),call_b.get("model_page_selection"),
-    )!=("deterministic_representative_pages",16,True,False):
+    )!=("deterministic_representative_pages",True,False):
         _fail("调用B代表页策略不匹配")
+    _bounded_int(call_b.get("sample_size"),"pdf_input_channel.call_b.sample_size",1,32)
     if call_b.get("required_inputs")!=["table_of_contents","text_layer_summary","sampled_pages"]:
         _fail("调用B输入集合不匹配")
     if (
@@ -75,24 +87,33 @@ def validate_proposal_text_contract(contract:Mapping[str,Any])->dict[str,Any]:
     )!=(True,True,True):
         _fail("PDF审计策略不匹配")
     r=_map(d.get("redline_policy"),"redline_policy")
-    if (r.get("enabled"),r.get("signal"),r.get("hit_level"),r.get("hit_score_cap"),r.get("terminal"))!=(True,"precheck.红线检查.命中项[].类型","L5",20,True): _fail("红线语义不匹配")
+    if (r.get("enabled"),r.get("signal"),r.get("hit_level"),r.get("terminal"))!=(True,"precheck.红线检查.命中项[].类型","L5",True): _fail("红线语义不匹配")
+    _bounded_number(r.get("hit_score_cap"),"redline_policy.hit_score_cap",0,100)
     rules=r.get("rules")
     if not isinstance(rules,list): _fail("红线规则必须是数组")
     found={x for rule in rules if isinstance(rule,Mapping) for x in rule.get("match_any",[]) if isinstance(x,str)}
     if found!=set(PROPOSAL_REDLINE_TYPES): _fail("红线枚举不匹配")
+    manual=_map(d.get("manual_review_policy"),"manual_review_policy")
+    if manual.get("behavior")!="fail_closed" or manual.get("grade_output") is not None:
+        _fail("人工复核必须保持fail-closed且不自动产出等级")
     tracks=_map(_map(d.get("track_classification"),"track_classification").get("tracks"),"tracks")
-    if set(tracks)!=set(_TRACKS): _fail("赛道集合不匹配")
-    for name,expected in _TRACKS.items():
+    if set(tracks)!=_TRACK_NAMES: _fail("赛道集合不匹配")
+    for name in sorted(_TRACK_NAMES):
         t=_map(tracks[name],f"tracks.{name}")
-        if (t.get("visual_max"),t.get("narrative_max"),t.get("innovation_max"))!=expected: _fail(f"赛道{name}上限不匹配")
+        _text(t.get("display_name"),f"tracks.{name}.display_name")
+        members=t.get("members")
+        if not isinstance(members,list) or not all(isinstance(item,str) and item.strip() for item in members):
+            _fail(f"tracks.{name}.members必须是非空字符串数组")
+        if len(set(members))!=len(members): _fail(f"tracks.{name}.members不得重复")
+        maxima=[]
+        for key in ("visual_max","narrative_max","innovation_max"):
+            value=t.get(key);_bounded_int(value,f"tracks.{name}.{key}",0,100);maxima.append(value)
+        if sum(maxima)>100: _fail(f"赛道{name}三分项上限之和不得超过100")
     s=_map(d.get("scoring"),"scoring")
     if s.get("mode")!="additive" or s.get("components")!=["visual_score","narrative_score","innovation_timeliness_score"] or s.get("computed_by")!="engine" or s.get("model_must_not_output")!=["score","rate","grade"]: _fail("评分语义不匹配")
     base=_map(d.get("aesthetic_base_score"),"aesthetic_base_score")
     if base.get("field")!="proposal_aesthetic_score" or base.get("immutable") is not True: _fail("基础分语义不匹配")
-    bands=_map(d.get("grade_bands"),"grade_bands")
-    if bands.get("computed_by")!="engine": _fail("等级必须由引擎计算")
-    for k,v in _BANDS.items():
-        if bands.get(k)!=v: _fail(f"{k}区间不匹配")
+    _validate_grade_bands(d.get("grade_bands"))
     return deepcopy(dict(d))
 
 def validate_proposal_call_a_output(payload:Mapping[str,Any])->dict[str,Any]:
