@@ -77,6 +77,7 @@ MIGRATION_NAMES = [
     "add_model_thinking_mode",
     "add_model_registry_entries",
     "add_mechanism_release_axes",
+    "add_category_evaluation_v3_revisions",
 ]
 
 
@@ -814,6 +815,224 @@ def test_repeated_migration_is_idempotent(tmp_path) -> None:
         assert [row[0] for row in versions] == list(
             range(1, len(MIGRATION_NAMES) + 1)
         )
+    finally:
+        engine.dispose()
+
+
+def test_v63_backfills_immutable_category_evaluation_revisions(tmp_path) -> None:
+    engine = _engine(tmp_path, "v63-category-evaluation-revisions.db")
+    try:
+        with engine.begin() as connection:
+            connection.exec_driver_sql("""
+                CREATE TABLE schema_migrations (
+                    version INTEGER PRIMARY KEY,
+                    name VARCHAR(200) NOT NULL,
+                    applied_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            for version, name in enumerate(MIGRATION_NAMES[:-1], start=1):
+                connection.exec_driver_sql(
+                    "INSERT INTO schema_migrations(version, name) VALUES (?, ?)",
+                    (version, name),
+                )
+            connection.exec_driver_sql("""
+                CREATE TABLE category_evaluation_v3_configs (
+                    id INTEGER PRIMARY KEY,
+                    category_key VARCHAR(40) NOT NULL UNIQUE,
+                    display_name VARCHAR(120) NOT NULL,
+                    status VARCHAR(20) NOT NULL,
+                    contract_json TEXT NOT NULL,
+                    classification_map_json TEXT NOT NULL,
+                    subcategory_dimensions_json TEXT NOT NULL,
+                    dimension_deduction_rules_json TEXT NOT NULL,
+                    media_penalty_enabled BOOLEAN NOT NULL,
+                    revision INTEGER NOT NULL,
+                    contract_hash VARCHAR(64) NOT NULL,
+                    created_by VARCHAR(80) NOT NULL,
+                    created_at DATETIME NOT NULL,
+                    updated_at DATETIME NOT NULL,
+                    CHECK (status IN ('draft','active','retired'))
+                )
+            """)
+            rows = [
+                (
+                    1,
+                    "active_image",
+                    "现役图像",
+                    "active",
+                    '{"contract":"active"}',
+                    '{"map":"active"}',
+                    '{"dimensions":"active"}',
+                    '{"rules":"active"}',
+                    1,
+                    7,
+                    "a" * 64,
+                ),
+                (
+                    2,
+                    "draft_image",
+                    "草稿图像",
+                    "draft",
+                    '{"contract":"draft"}',
+                    '{"map":"draft"}',
+                    '{"dimensions":"draft"}',
+                    '{"rules":"draft"}',
+                    0,
+                    2,
+                    "d" * 64,
+                ),
+                (
+                    3,
+                    "retired_image",
+                    "退役图像",
+                    "retired",
+                    '{"contract":"retired"}',
+                    '{"map":"retired"}',
+                    '{"dimensions":"retired"}',
+                    '{"rules":"retired"}',
+                    1,
+                    9,
+                    "r" * 64,
+                ),
+            ]
+            for row in rows:
+                connection.exec_driver_sql(
+                    """
+                    INSERT INTO category_evaluation_v3_configs (
+                        id, category_key, display_name, status, contract_json,
+                        classification_map_json, subcategory_dimensions_json,
+                        dimension_deduction_rules_json, media_penalty_enabled,
+                        revision, contract_hash, created_by, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'migration-test',
+                              '2026-08-11 00:00:00', '2026-08-11 00:00:00')
+                    """,
+                    row,
+                )
+
+            run_migrations(connection)
+
+            revision_columns = {
+                row[1]
+                for row in connection.exec_driver_sql(
+                    "PRAGMA table_info(category_evaluation_v3_revisions)"
+                )
+            }
+            config_columns = {
+                row[1]
+                for row in connection.exec_driver_sql(
+                    "PRAGMA table_info(category_evaluation_v3_configs)"
+                )
+            }
+            assert {
+                "category_key",
+                "revision",
+                "status",
+                "parent_revision_id",
+                "contract_json",
+                "classification_map_json",
+                "subcategory_dimensions_json",
+                "dimension_deduction_rules_json",
+                "media_penalty_enabled",
+                "contract_hash",
+            } <= revision_columns
+            assert "projected_revision_id" in config_columns
+
+            backfilled = connection.exec_driver_sql("""
+                SELECT
+                    c.category_key, c.projected_revision_id,
+                    r.revision, r.status, r.contract_json,
+                    r.classification_map_json, r.subcategory_dimensions_json,
+                    r.dimension_deduction_rules_json, r.media_penalty_enabled,
+                    r.contract_hash
+                FROM category_evaluation_v3_configs AS c
+                JOIN category_evaluation_v3_revisions AS r
+                  ON r.id = c.projected_revision_id
+                ORDER BY c.id
+            """).all()
+            assert backfilled == [
+                (
+                    "active_image",
+                    backfilled[0][1],
+                    7,
+                    "active",
+                    '{"contract":"active"}',
+                    '{"map":"active"}',
+                    '{"dimensions":"active"}',
+                    '{"rules":"active"}',
+                    1,
+                    "a" * 64,
+                ),
+                (
+                    "draft_image",
+                    backfilled[1][1],
+                    2,
+                    "draft",
+                    '{"contract":"draft"}',
+                    '{"map":"draft"}',
+                    '{"dimensions":"draft"}',
+                    '{"rules":"draft"}',
+                    0,
+                    "d" * 64,
+                ),
+                (
+                    "retired_image",
+                    backfilled[2][1],
+                    9,
+                    "retired",
+                    '{"contract":"retired"}',
+                    '{"map":"retired"}',
+                    '{"dimensions":"retired"}',
+                    '{"rules":"retired"}',
+                    1,
+                    "r" * 64,
+                ),
+            ]
+
+        with pytest.raises(IntegrityError, match="UNIQUE constraint failed"):
+            with engine.begin() as connection:
+                connection.exec_driver_sql("""
+                    INSERT INTO category_evaluation_v3_revisions (
+                        category_key, display_name, revision, status,
+                        parent_revision_id, contract_json,
+                        classification_map_json, subcategory_dimensions_json,
+                        dimension_deduction_rules_json, media_penalty_enabled,
+                        contract_hash, created_by, created_at, updated_at
+                    ) SELECT
+                        category_key, display_name, revision, 'candidate',
+                        projected_revision_id, contract_json,
+                        classification_map_json, subcategory_dimensions_json,
+                        dimension_deduction_rules_json, media_penalty_enabled,
+                        contract_hash, 'duplicate-test', CURRENT_TIMESTAMP,
+                        CURRENT_TIMESTAMP
+                    FROM category_evaluation_v3_configs WHERE id = 1
+                """)
+
+        for statement, message in (
+            (
+                "UPDATE category_evaluation_v3_revisions "
+                "SET contract_json='{}' WHERE category_key='active_image'",
+                "category evaluation revision artifacts are immutable",
+            ),
+            (
+                "DELETE FROM category_evaluation_v3_revisions "
+                "WHERE category_key='active_image'",
+                "category evaluation revision cannot be deleted",
+            ),
+        ):
+            with pytest.raises(IntegrityError, match=message):
+                with engine.begin() as connection:
+                    connection.exec_driver_sql(statement)
+
+        with engine.begin() as connection:
+            connection.exec_driver_sql(
+                "UPDATE category_evaluation_v3_revisions "
+                "SET status='retired', updated_at=CURRENT_TIMESTAMP "
+                "WHERE category_key='active_image'"
+            )
+            assert connection.exec_driver_sql(
+                "SELECT status FROM category_evaluation_v3_revisions "
+                "WHERE category_key='active_image'"
+            ).scalar_one() == "retired"
     finally:
         engine.dispose()
 

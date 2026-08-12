@@ -7118,6 +7118,145 @@ def _migration_062_add_mechanism_release_axes(connection: Connection) -> None:
     )
 
 
+def _migration_063_add_category_evaluation_v3_revisions(
+    connection: Connection,
+) -> None:
+    """Append immutable mechanism revisions beside the runtime projection."""
+    tables = {
+        row[0]
+        for row in connection.exec_driver_sql(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )
+    }
+    if "category_evaluation_v3_configs" not in tables:
+        return
+
+    connection.exec_driver_sql("""
+        CREATE TABLE IF NOT EXISTS category_evaluation_v3_revisions (
+            id INTEGER PRIMARY KEY,
+            category_key VARCHAR(40) NOT NULL,
+            display_name VARCHAR(120) NOT NULL,
+            revision INTEGER NOT NULL,
+            status VARCHAR(20) NOT NULL DEFAULT 'candidate',
+            parent_revision_id INTEGER
+                REFERENCES category_evaluation_v3_revisions(id)
+                ON DELETE RESTRICT,
+            contract_json TEXT NOT NULL,
+            classification_map_json TEXT NOT NULL,
+            subcategory_dimensions_json TEXT NOT NULL,
+            dimension_deduction_rules_json TEXT NOT NULL DEFAULT '{}',
+            media_penalty_enabled BOOLEAN NOT NULL DEFAULT 1,
+            contract_hash VARCHAR(64) NOT NULL,
+            created_by VARCHAR(80) NOT NULL DEFAULT 'system',
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            CONSTRAINT ck_category_evaluation_v3_revisions_status
+                CHECK (status IN ('draft','candidate','active','retired')),
+            CONSTRAINT uq_category_evaluation_v3_revisions_key_revision
+                UNIQUE(category_key, revision)
+        )
+    """)
+    for statement in (
+        "CREATE INDEX IF NOT EXISTS ix_category_evaluation_v3_revisions_key "
+        "ON category_evaluation_v3_revisions(category_key, revision DESC)",
+        "CREATE INDEX IF NOT EXISTS ix_category_evaluation_v3_revisions_status "
+        "ON category_evaluation_v3_revisions(status, updated_at)",
+        "CREATE INDEX IF NOT EXISTS ix_category_evaluation_v3_revisions_parent "
+        "ON category_evaluation_v3_revisions(parent_revision_id)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS "
+        "uq_category_evaluation_v3_revisions_active "
+        "ON category_evaluation_v3_revisions(category_key) "
+        "WHERE status = 'active'",
+    ):
+        connection.exec_driver_sql(statement)
+
+    config_columns = {
+        row[1]
+        for row in connection.exec_driver_sql(
+            "PRAGMA table_info(category_evaluation_v3_configs)"
+        )
+    }
+    if "projected_revision_id" not in config_columns:
+        connection.exec_driver_sql(
+            "ALTER TABLE category_evaluation_v3_configs "
+            "ADD COLUMN projected_revision_id INTEGER "
+            "REFERENCES category_evaluation_v3_revisions(id) ON DELETE RESTRICT"
+        )
+    connection.exec_driver_sql(
+        "CREATE INDEX IF NOT EXISTS ix_category_evaluation_v3_configs_projected "
+        "ON category_evaluation_v3_configs(projected_revision_id)"
+    )
+
+    connection.exec_driver_sql("""
+        INSERT INTO category_evaluation_v3_revisions (
+            category_key, display_name, revision, status, parent_revision_id,
+            contract_json, classification_map_json,
+            subcategory_dimensions_json, dimension_deduction_rules_json,
+            media_penalty_enabled, contract_hash, created_by,
+            created_at, updated_at
+        )
+        SELECT
+            c.category_key, c.display_name, c.revision, c.status, NULL,
+            c.contract_json, c.classification_map_json,
+            c.subcategory_dimensions_json,
+            c.dimension_deduction_rules_json, c.media_penalty_enabled,
+            c.contract_hash, c.created_by, c.created_at, c.updated_at
+        FROM category_evaluation_v3_configs AS c
+        WHERE c.projected_revision_id IS NULL
+          AND NOT EXISTS (
+              SELECT 1
+              FROM category_evaluation_v3_revisions AS r
+              WHERE r.category_key = c.category_key
+                AND r.revision = c.revision
+          )
+    """)
+    connection.exec_driver_sql("""
+        UPDATE category_evaluation_v3_configs
+        SET projected_revision_id = (
+            SELECT r.id
+            FROM category_evaluation_v3_revisions AS r
+            WHERE r.category_key = category_evaluation_v3_configs.category_key
+              AND r.revision = category_evaluation_v3_configs.revision
+        )
+        WHERE projected_revision_id IS NULL
+    """)
+    if connection.exec_driver_sql(
+        "SELECT id FROM category_evaluation_v3_configs "
+        "WHERE projected_revision_id IS NULL LIMIT 1"
+    ).first() is not None:
+        raise RuntimeError("v3 revision 迁移未能为全部运行时合同建立投影指针")
+
+    connection.exec_driver_sql(
+        "DROP TRIGGER IF EXISTS trg_category_evaluation_v3_revision_no_delete"
+    )
+    connection.exec_driver_sql("""
+        CREATE TRIGGER trg_category_evaluation_v3_revision_no_delete
+        BEFORE DELETE ON category_evaluation_v3_revisions
+        BEGIN
+            SELECT RAISE(ABORT, 'category evaluation revision cannot be deleted');
+        END
+    """)
+    connection.exec_driver_sql(
+        "DROP TRIGGER IF EXISTS "
+        "trg_category_evaluation_v3_revision_artifacts_immutable"
+    )
+    connection.exec_driver_sql("""
+        CREATE TRIGGER trg_category_evaluation_v3_revision_artifacts_immutable
+        BEFORE UPDATE OF
+            category_key, display_name, revision, parent_revision_id,
+            contract_json, classification_map_json,
+            subcategory_dimensions_json, dimension_deduction_rules_json,
+            media_penalty_enabled, contract_hash, created_by, created_at
+        ON category_evaluation_v3_revisions
+        BEGIN
+            SELECT RAISE(
+                ABORT,
+                'category evaluation revision artifacts are immutable'
+            );
+        END
+    """)
+
+
 MIGRATIONS = [
     Migration(1, "add_sample_expected_level", _migration_001_add_sample_expected_level),
     Migration(2, "add_review_corrections", _migration_002_add_review_corrections),
@@ -7384,6 +7523,11 @@ MIGRATIONS = [
         62,
         "add_mechanism_release_axes",
         _migration_062_add_mechanism_release_axes,
+    ),
+    Migration(
+        63,
+        "add_category_evaluation_v3_revisions",
+        _migration_063_add_category_evaluation_v3_revisions,
     ),
 ]
 

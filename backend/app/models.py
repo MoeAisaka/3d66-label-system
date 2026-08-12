@@ -474,6 +474,71 @@ class CategoryEvaluationV3Config(Base):
     )
     revision: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
     contract_hash: Mapped[str] = mapped_column(String(64), default="")
+    projected_revision_id: Mapped[int | None] = mapped_column(
+        ForeignKey("category_evaluation_v3_revisions.id", ondelete="RESTRICT"),
+        nullable=True,
+        index=True,
+    )
+    created_by: Mapped[str] = mapped_column(String(80), default="system")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+
+class CategoryEvaluationV3Revision(Base):
+    """Append-only category mechanism artifact revision.
+
+    ``CategoryEvaluationV3Config`` remains the runtime projection consumed by
+    workers.  These rows preserve every candidate and projected artifact so an
+    editor can append changes without mutating the active runtime contract.
+    Database triggers installed by migration 63 freeze identity and artifact
+    fields; only lifecycle ``status`` and ``updated_at`` may change later.
+    """
+
+    __tablename__ = "category_evaluation_v3_revisions"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('draft','candidate','active','retired')",
+            name="ck_category_evaluation_v3_revisions_status",
+        ),
+        UniqueConstraint(
+            "category_key",
+            "revision",
+            name="uq_category_evaluation_v3_revisions_key_revision",
+        ),
+        Index(
+            "uq_category_evaluation_v3_revisions_active",
+            "category_key",
+            unique=True,
+            sqlite_where=sql_text("status = 'active'"),
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    category_key: Mapped[str] = mapped_column(String(40), index=True)
+    display_name: Mapped[str] = mapped_column(String(120))
+    revision: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(
+        String(20), default="candidate", server_default="candidate", index=True
+    )
+    parent_revision_id: Mapped[int | None] = mapped_column(
+        ForeignKey("category_evaluation_v3_revisions.id", ondelete="RESTRICT"),
+        nullable=True,
+        index=True,
+    )
+    contract_json: Mapped[str] = mapped_column(Text)
+    classification_map_json: Mapped[str] = mapped_column(Text)
+    subcategory_dimensions_json: Mapped[str] = mapped_column(Text)
+    dimension_deduction_rules_json: Mapped[str] = mapped_column(
+        Text, default="{}", server_default="{}"
+    )
+    media_penalty_enabled: Mapped[bool] = mapped_column(
+        Boolean, default=True, server_default="1"
+    )
+    contract_hash: Mapped[str] = mapped_column(String(64))
     created_by: Mapped[str] = mapped_column(String(80), default="system")
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow
