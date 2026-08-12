@@ -37,9 +37,8 @@ import type {
   ReviewCorrection,
   User,
 } from "@/lib/types"
-import { NodeCorrectionEditor } from "@/pages/node-correction-editor"
 import { ReviewCorrectionForm } from "@/pages/review-correction-form"
-import { baselineAcceptanceProgress } from "@/features/baseline-regression/baseline-regression-contract"
+import { baselineAcceptanceProgressFromPages } from "@/features/baseline-regression/baseline-regression-contract"
 import { BaselineSetDialog } from "@/features/baseline-regression/baseline-set-dialog"
 import { CorrectionWorkbench } from "@/features/baseline-regression/correction-workbench"
 import { MetricsDrawer } from "@/features/baseline-regression/metrics-drawer"
@@ -57,6 +56,7 @@ const levelNames: Record<BaselineLevel, string> = {
 
 const ASSET_PAGE_SIZE = 200
 const RUN_PAGE_SIZE = 200
+const ACCEPTANCE_PAGE_SIZE = 1000
 
 export function BaselineRegressionPage() {
   const queryClient = useQueryClient()
@@ -131,6 +131,31 @@ export function BaselineRegressionPage() {
     enabled: selectedRunId > 0,
     refetchInterval: (query) =>
       query.state.data?.summary.status === "running" ? 3000 : false,
+  })
+  const acceptancePages = useQuery({
+    queryKey: [
+      "baseline-acceptance",
+      selectedRunId,
+      runDetail.data?.summary.total,
+      runDetail.data?.summary.completed,
+      runDetail.data?.summary.failed,
+    ],
+    queryFn: async () => {
+      const total = runDetail.data?.summary.total ?? 0
+      const pages: BaselineRegressionItem[][] = []
+      for (let offset = 0; offset < total; offset += ACCEPTANCE_PAGE_SIZE) {
+        const detail = await baselineRegressionApi.getRun(
+          selectedRunId,
+          offset,
+          ACCEPTANCE_PAGE_SIZE,
+        )
+        pages.push(detail.items)
+        if (detail.items.length < ACCEPTANCE_PAGE_SIZE) break
+      }
+      return pages
+    },
+    enabled: selectedRunId > 0 && Boolean(runDetail.data?.summary),
+    refetchInterval: runDetail.data?.summary.status === "running" ? 3000 : false,
   })
 
   const promptAOptions = useMemo(
@@ -997,17 +1022,28 @@ export function BaselineRegressionPage() {
                 <>
                 <StatusSummaryStrip className="mt-5">
                   {(() => {
-                    const progress = baselineAcceptanceProgress(runDetail.data?.items ?? [], summary.status !== "running")
-                    const blockers = (runDetail.data?.items ?? []).filter((item) => item.status !== "completed" || !item.evaluation).length
+                    const acceptanceRows = acceptancePages.data?.flat() ?? []
+                    const progress = baselineAcceptanceProgressFromPages(
+                      acceptancePages.data ?? [],
+                      summary.status !== "running",
+                    )
+                    const allRowsLoaded = acceptanceRows.length === summary.total
+                    const blockers = acceptanceRows.filter(
+                      (item) => item.status !== "completed" || !item.evaluation,
+                    ).length
                     return (
                       <div className="flex flex-wrap items-center justify-between gap-3">
                         <div>
                           <p className="text-xs font-semibold">逐条确认与纠偏</p>
-                          <p className="mt-1 text-xs text-[var(--muted)]">已确认 {progress.reviewed}/{progress.total} · 未评分/失败阻塞 {blockers}</p>
+                          <p className="mt-1 text-xs text-[var(--muted)]">
+                            {acceptancePages.isLoading
+                              ? "正在汇总全轮人工验收进度"
+                              : `已确认 ${progress.reviewed}/${progress.total} · 未评分/失败阻塞 ${blockers}`}
+                          </p>
                         </div>
                         <Button
                           size="sm"
-                          disabled={!progress.complete}
+                          disabled={!allRowsLoaded || !progress.complete}
                           onClick={() => toast.success("本轮人工验收条件已满足；当前仅展示本地完成摘要，不写入新状态。")}
                         >
                           完成人工验收
@@ -1167,6 +1203,7 @@ function RegressionResults({
         queryClient.invalidateQueries({
           queryKey: ["baseline-regression", run.id],
         }),
+        queryClient.invalidateQueries({ queryKey: ["baseline-acceptance", run.id] }),
         queryClient.invalidateQueries({ queryKey: ["evaluations"] }),
         queryClient.invalidateQueries({ queryKey: ["dashboard"] }),
         queryClient.invalidateQueries({ queryKey: ["optimization-cases"] }),
@@ -1197,6 +1234,7 @@ function RegressionResults({
         onCorrected={async () => {
           await Promise.all([
             queryClient.invalidateQueries({ queryKey: ["baseline-regression", run.id] }),
+            queryClient.invalidateQueries({ queryKey: ["baseline-acceptance", run.id] }),
             queryClient.invalidateQueries({ queryKey: ["evaluations"] }),
             queryClient.invalidateQueries({ queryKey: ["dashboard"] }),
           ])

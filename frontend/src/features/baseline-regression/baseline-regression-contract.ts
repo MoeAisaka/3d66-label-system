@@ -13,6 +13,13 @@ export type BaselineAcceptanceProgress = {
   complete: boolean
 }
 
+export function baselineAcceptanceProgressFromPages(
+  pages: BaselineAcceptanceRow[][],
+  runTerminal = true,
+): BaselineAcceptanceProgress {
+  return baselineAcceptanceProgress(pages.flat(), runTerminal)
+}
+
 export function baselineAcceptanceProgress(
   rows: BaselineAcceptanceRow[],
   runTerminal = true,

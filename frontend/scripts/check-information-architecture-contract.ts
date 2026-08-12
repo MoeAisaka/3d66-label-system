@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs"
 
 import {
   baselineAcceptanceProgress,
+  baselineAcceptanceProgressFromPages,
 } from "../src/features/baseline-regression/baseline-regression-contract.ts"
 
 const appShell = readFileSync(new URL("../src/components/app-shell.tsx", import.meta.url), "utf8")
@@ -35,6 +36,11 @@ assert.match(baselinePage, /RunConfigDrawer/)
 assert.match(baselinePage, /MetricsDrawer/)
 assert.match(baselinePage, /RunHistoryDrawer/)
 assert.match(baselinePage, /CorrectionWorkbench/)
+assert.match(baselinePage, /baselineAcceptanceProgressFromPages/)
+assert.equal(
+  (baselinePage.match(/queryKey: \["baseline-acceptance", run\.id\]/g) ?? []).length,
+  2,
+)
 assert.doesNotMatch(baselinePage, /function BaselineCorrectionPanel/)
 assert.match(workbenchSource, /<NodeCorrectionEditor/)
 assert.match(workbenchSource, /返回轮次列表/)
@@ -53,6 +59,13 @@ assert.deepEqual(
     { status: "failed", evaluation: null },
   ]),
   { reviewed: 1, total: 2, complete: false },
+)
+assert.deepEqual(
+  baselineAcceptanceProgressFromPages([
+    [{ status: "completed", evaluation: { human_review: { decision: "approved" } } }],
+    [{ status: "completed", evaluation: { human_review: { decision: "corrected" } } }],
+  ]),
+  { reviewed: 2, total: 2, complete: true },
 )
 
 console.log("information architecture contract: ok")
