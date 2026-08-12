@@ -38,7 +38,11 @@ import type {
   User,
 } from "@/lib/types"
 import { ReviewCorrectionForm } from "@/pages/review-correction-form"
-import { baselineAcceptanceProgressFromPages } from "@/features/baseline-regression/baseline-regression-contract"
+import {
+  baselineAcceptanceProgressFromPages,
+  baselineRunContextPatch,
+  baselineRunIdAfterSetLoad,
+} from "@/features/baseline-regression/baseline-regression-contract"
 import { BaselineSetDialog } from "@/features/baseline-regression/baseline-set-dialog"
 import { CorrectionWorkbench } from "@/features/baseline-regression/correction-workbench"
 import { MetricsDrawer } from "@/features/baseline-regression/metrics-drawer"
@@ -244,11 +248,11 @@ export function BaselineRegressionPage() {
   }, [baselineSets.data?.items, selectedSetId])
 
   useEffect(() => {
-    const runs = selectedSet.data?.runs ?? []
-    if (runs.length && !runs.some((run) => run.id === selectedRunId)) {
-      setSelectedRunId(runs[0].id)
-    }
-    if (!runs.length) setSelectedRunId(0)
+    const nextRunId = baselineRunIdAfterSetLoad(
+      selectedRunId,
+      selectedSet.data?.runs ?? null,
+    )
+    if (nextRunId !== selectedRunId) setSelectedRunId(nextRunId)
   }, [selectedRunId, selectedSet.data?.runs])
 
   useEffect(() => {
@@ -411,9 +415,25 @@ export function BaselineRegressionPage() {
     : 0
 
   useEffect(() => {
+    const categoryKey = runDetail.data?.summary.category_key
     const baselineSetId = runDetail.data?.baseline_set.id
-    if (baselineSetId && baselineSetId !== selectedSetId) setSelectedSetId(baselineSetId)
-  }, [runDetail.data?.baseline_set.id, selectedSetId])
+    if (!categoryKey || !baselineSetId) return
+    const patch = baselineRunContextPatch(
+      selectedCategoryKey,
+      selectedSetId,
+      { categoryKey, baselineSetId },
+    )
+    if (patch.categoryKey) {
+      setSelectedCategoryKey(patch.categoryKey)
+      return
+    }
+    if (patch.baselineSetId) setSelectedSetId(patch.baselineSetId)
+  }, [
+    runDetail.data?.baseline_set.id,
+    runDetail.data?.summary.category_key,
+    selectedCategoryKey,
+    selectedSetId,
+  ])
 
   function toggleAsset(assetId: number) {
     setSelectedAssetIds((current) => {

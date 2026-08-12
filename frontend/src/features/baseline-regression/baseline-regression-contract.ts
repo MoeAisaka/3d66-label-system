@@ -13,6 +13,29 @@ export type BaselineAcceptanceProgress = {
   complete: boolean
 }
 
+export function baselineRunIdAfterSetLoad(
+  currentRunId: number,
+  runs: Array<{ id: number }> | null,
+): number {
+  if (runs === null) return currentRunId
+  if (runs.some((run) => run.id === currentRunId)) return currentRunId
+  return runs[0]?.id ?? 0
+}
+
+export function baselineRunContextPatch(
+  currentCategoryKey: string,
+  currentBaselineSetId: number,
+  target: { categoryKey: string; baselineSetId: number },
+): { categoryKey?: string; baselineSetId?: number } {
+  if (target.categoryKey !== currentCategoryKey) {
+    return { categoryKey: target.categoryKey }
+  }
+  if (target.baselineSetId !== currentBaselineSetId) {
+    return { baselineSetId: target.baselineSetId }
+  }
+  return {}
+}
+
 export function baselineAcceptanceProgressFromPages(
   pages: BaselineAcceptanceRow[][],
   runTerminal = true,

@@ -4,6 +4,8 @@ import { readFileSync } from "node:fs"
 import {
   baselineAcceptanceProgress,
   baselineAcceptanceProgressFromPages,
+  baselineRunContextPatch,
+  baselineRunIdAfterSetLoad,
 } from "../src/features/baseline-regression/baseline-regression-contract.ts"
 
 const appShell = readFileSync(new URL("../src/components/app-shell.tsx", import.meta.url), "utf8")
@@ -66,6 +68,24 @@ assert.deepEqual(
     [{ status: "completed", evaluation: { human_review: { decision: "corrected" } } }],
   ]),
   { reviewed: 2, total: 2, complete: true },
+)
+assert.equal(baselineRunIdAfterSetLoad(17, null), 17)
+assert.equal(baselineRunIdAfterSetLoad(17, [{ id: 17 }]), 17)
+assert.equal(baselineRunIdAfterSetLoad(17, [{ id: 21 }]), 21)
+assert.equal(baselineRunIdAfterSetLoad(17, []), 0)
+assert.deepEqual(
+  baselineRunContextPatch("space_image", 0, {
+    categoryKey: "inspiration_image",
+    baselineSetId: 8,
+  }),
+  { categoryKey: "inspiration_image" },
+)
+assert.deepEqual(
+  baselineRunContextPatch("inspiration_image", 0, {
+    categoryKey: "inspiration_image",
+    baselineSetId: 8,
+  }),
+  { baselineSetId: 8 },
 )
 
 console.log("information architecture contract: ok")
