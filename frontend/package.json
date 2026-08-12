@@ -14,6 +14,7 @@
     "contract:level-scale-thinking": "node --experimental-strip-types scripts/check-level-scale-thinking-controls.ts",
     "contract:model-registry": "node --experimental-strip-types scripts/check-model-registry-contract.ts",
     "contract:information-architecture": "node --experimental-strip-types scripts/check-information-architecture-contract.ts && node --experimental-strip-types scripts/check-workspace-components.ts",
+    "contract:mechanism-editor": "node --experimental-strip-types scripts/check-mechanism-editor-contract.ts",
     "test:lightbox": "node --experimental-strip-types scripts/check-baseline-lightbox.ts",
     "lint": "tsc -b --pretty false",
     "preview": "vite preview --host 0.0.0.0"
