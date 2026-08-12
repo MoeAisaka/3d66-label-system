@@ -19,6 +19,8 @@ Coverage:
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from typing import Any, Iterator
 
 import pytest
@@ -41,6 +43,12 @@ from app.migrations import run_migrations
 
 
 _BASE = "/api/category-evaluation/v3-config"
+_PROPOSAL_CONTRACT = (
+    Path(__file__).parents[1]
+    / "app"
+    / "proposal_text_assets"
+    / "v3_contract_proposal_text_v1.json"
+)
 
 
 def _valid_body(category_key: str = "inspiration_image") -> dict[str, Any]:
@@ -50,6 +58,22 @@ def _valid_body(category_key: str = "inspiration_image") -> dict[str, Any]:
         "contract": build_inspiration_v3_contract(),
         "classification_map": build_inspiration_classification_map(),
         "subcategory_dimensions": build_inspiration_subcategory_dimensions(),
+    }
+
+
+def _proposal_body() -> dict[str, Any]:
+    return {
+        "category_key": "proposal_text_pdf",
+        "display_name": "PDF方案文本",
+        "contract": json.loads(_PROPOSAL_CONTRACT.read_text(encoding="utf-8")),
+        "classification_map": {
+            "profile_type": "text-proposal-additive-v1",
+            "source": "precheck.信息提取.项目分类.审核类别",
+        },
+        "subcategory_dimensions": {
+            "profile_type": "text-proposal-additive-v1",
+            "tracks": ["A", "B", "C", "balanced"],
+        },
     }
 
 
@@ -124,6 +148,13 @@ def test_create_get_update_round_trip(client: TestClient) -> None:
     fetched = client.get(f"{_BASE}/inspiration_image")
     assert fetched.status_code == 200
     assert fetched.json()["contract"] == build_inspiration_v3_contract()
+    assert fetched.json()["mechanism_profile"] == {
+        "profile_type": "image-rule-deduction-v1",
+        "source": "legacy_image_shape",
+        "supported": True,
+        "editable": True,
+        "reason": None,
+    }
 
     # Mutate the contract (drop AI-image penalty magnitude) → hash must change.
     updated_body = _valid_body()
@@ -137,6 +168,84 @@ def test_create_get_update_round_trip(client: TestClient) -> None:
     assert updated_json["revision"] == 2
     assert updated_json["display_name"] == "灵感图 v3（改）"
     assert updated_json["contract_hash"] != original_hash
+
+
+def test_proposal_profile_reads_and_validates_without_image_fields(client: TestClient) -> None:
+    created = client.post(f"{_BASE}/", json=_proposal_body())
+    assert created.status_code == 201, created.text
+    body = created.json()
+    assert body["mechanism_profile"] == {
+        "profile_type": "text-proposal-additive-v1",
+        "source": "explicit",
+        "supported": True,
+        "editable": True,
+        "reason": None,
+    }
+    assert body["dimension_deduction_rules"] == {}
+    assert body["media_penalty_enabled"] is False
+
+    validated = client.post(
+        f"{_BASE}/proposal_text_pdf/validate", json=_proposal_body()
+    )
+    assert validated.status_code == 200, validated.text
+    assert validated.json() == {"ok": True, "errors": []}
+
+
+def test_unknown_explicit_profile_is_readable_but_validation_is_fail_closed(
+    client: TestClient, sessions: sessionmaker[Session]
+) -> None:
+    with sessions() as db:
+        from app.category_evaluation_contract import canonical_contract_hash
+        from app.dimension_schema_registry import canonical_json
+        from app.models import CategoryEvaluationV3Config
+
+        contract = {"profile_type": "future-3d-v1", "category_key": "future_3d"}
+        db.add(
+            CategoryEvaluationV3Config(
+                category_key="future_3d",
+                display_name="未来 3D 机制",
+                status="draft",
+                contract_json=canonical_json(contract),
+                classification_map_json="{}",
+                subcategory_dimensions_json="{}",
+                dimension_deduction_rules_json="{}",
+                media_penalty_enabled=False,
+                revision=1,
+                contract_hash=canonical_contract_hash(contract),
+                created_by="test",
+            )
+        )
+        db.commit()
+
+    fetched = client.get(f"{_BASE}/future_3d")
+    assert fetched.status_code == 200, fetched.text
+    assert fetched.json()["mechanism_profile"] == {
+        "profile_type": "future-3d-v1",
+        "source": "explicit",
+        "supported": False,
+        "editable": False,
+        "reason": "未注册机制 profile：future-3d-v1",
+    }
+
+    unknown_body = {
+        "category_key": "future_3d",
+        "display_name": "未来 3D 机制",
+        "contract": {"profile_type": "future-3d-v1", "category_key": "future_3d"},
+        "classification_map": {},
+        "subcategory_dimensions": {},
+    }
+    validated = client.post(f"{_BASE}/future_3d/validate", json=unknown_body)
+    assert validated.status_code == 200, validated.text
+    assert validated.json() == {
+        "ok": False,
+        "errors": [
+            {
+                "target": "mechanism_profile",
+                "code": "profile_type_unsupported",
+                "message": "未注册机制 profile：future-3d-v1",
+            }
+        ],
+    }
 
 
 def _five_level_scale() -> dict[str, Any]:

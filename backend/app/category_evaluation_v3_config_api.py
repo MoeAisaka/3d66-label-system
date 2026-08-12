@@ -10,11 +10,9 @@ Isolation boundaries (hard constraints — see the task brief):
 - It stores into the standalone ``category_evaluation_v3_configs`` table only.
   It shares nothing with the v1 ``EvaluationCategoryProfile`` /
   ``category-pipeline-v1`` pipeline — separate key space, separate CRUD.
-- Every write is **validated before it lands** by reusing the existing
-  deterministic framework validators (``validate_category_evaluation_contract``
-  — which delegates the redline block to ``validate_redline_policy`` — plus
-  ``validate_classification_map`` and ``validate_subcategory_dimensions``).  No
-  validation logic is re-implemented here.
+- Every write is **validated before it lands** through the mechanism-profile
+  registry, which delegates to the existing image or Proposal validators. No
+  profile-specific validation logic is re-implemented here.
 - Handlers are pure CRUD + validation: **no queue, no publish, no model calls,
   no touching of the frozen scoring path / worker.**
 
@@ -30,6 +28,7 @@ This module provides only a router *factory*
 from __future__ import annotations
 
 import json
+from dataclasses import asdict
 from typing import Any, Callable
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -42,13 +41,16 @@ from .category_evaluation_contract import (
     validate_category_evaluation_contract,
 )
 from .database import get_db
-from .dimension_composition import validate_subcategory_dimensions
-from .dimension_deduction_bridge import extract_dimension_deduction_rules
 from .dimension_schema_registry import canonical_json
 from .level_scale import resolve_level_scale
+from .mechanism_profiles import (
+    MechanismProfileError,
+    describe_mechanism_profile,
+    extract_profile_rule_mirror,
+    profile_media_penalty_enabled,
+    validate_mechanism_artifacts,
+)
 from .models import AuditEvent, CategoryEvaluationV3Config
-from .redline_policy import evaluate_redlines
-from .subcategory_resolver import validate_classification_map
 
 
 # --------------------------------------------------------------------------- #
@@ -111,6 +113,7 @@ class V3ConfigDetail(BaseModel):
     status: str
     revision: int
     contract_hash: str
+    mechanism_profile: dict[str, Any]
     contract: dict[str, Any]
     classification_map: dict[str, Any]
     subcategory_dimensions: dict[str, Any]
@@ -159,28 +162,6 @@ def _coded_400(exc: Exception) -> HTTPException:
     )
 
 
-def _extract_track_keys(contract: Any) -> set[str]:
-    """Best-effort extraction of ``track_classification.tracks[*].key``.
-
-    A malformed contract yields an empty set; the contract validator owns the
-    authoritative check, this only feeds the classification-map validator the
-    keys it needs to cross-check mapping targets.
-    """
-    if not isinstance(contract, dict):
-        return set()
-    track_classification = contract.get("track_classification")
-    if not isinstance(track_classification, dict):
-        return set()
-    tracks = track_classification.get("tracks")
-    if not isinstance(tracks, list):
-        return set()
-    return {
-        track["key"]
-        for track in tracks
-        if isinstance(track, dict) and isinstance(track.get("key"), str)
-    }
-
-
 def _collect_validation_errors(
     payload: V3ConfigWriteRequest,
 ) -> list[ValidationErrorItem]:
@@ -192,87 +173,51 @@ def _collect_validation_errors(
     validator's ``ValueError`` is captured with its ``.code``; nothing escapes
     as a 500.  An empty list means the artifacts are all valid.
     """
-    errors: list[ValidationErrorItem] = []
-
-    contract_ok = True
     try:
-        validate_category_evaluation_contract(payload.contract)
-    except ValueError as exc:
-        contract_ok = False
-        errors.append(ValidationErrorItem(
-            target="contract",
-            code=getattr(exc, "code", "invalid_contract"),
-            message=str(exc),
-        ))
-
-    # Confirm the redline policy inside the contract is actually runnable by the
-    # deterministic pre-filter (not just structurally valid).  Runs on a trivial
-    # precheck; a hit/miss is irrelevant, only that it does not raise.
-    if contract_ok:
-        try:
-            evaluate_redlines(
-                {"production_fields": {"reason": []}},
-                policy=payload.contract["redline_policy"],
-            )
-        except ValueError as exc:
-            errors.append(ValidationErrorItem(
-                target="redline_policy",
-                code=getattr(exc, "code", "invalid_redline_policy"),
-                message=str(exc),
-            ))
-
-    # Cross-check the classification map against the contract's track keys when
-    # the contract parsed; otherwise fall back to whatever keys are extractable.
-    valid_track_keys = _extract_track_keys(payload.contract)
-    try:
-        validate_classification_map(
-            payload.classification_map, valid_track_keys=valid_track_keys
+        validate_mechanism_artifacts(
+            payload.contract,
+            payload.classification_map,
+            payload.subcategory_dimensions,
         )
-    except ValueError as exc:
-        errors.append(ValidationErrorItem(
-            target="classification_map",
-            code=getattr(exc, "code", "invalid_classification_map"),
-            message=str(exc),
-        ))
-
-    if not isinstance(payload.subcategory_dimensions, dict):
-        errors.append(ValidationErrorItem(
-            target="subcategory_dimensions",
-            code="subcategory_dimensions_not_object",
-            message="subcategory_dimensions 必须是 {track_key: config} 对象",
-        ))
-    else:
-        for track_key, config in payload.subcategory_dimensions.items():
-            try:
-                validate_subcategory_dimensions(config)
-            except ValueError as exc:
-                errors.append(ValidationErrorItem(
-                    target=f"subcategory_dimensions.{track_key}",
-                    code=getattr(exc, "code", "invalid_subcategory_dimensions"),
-                    message=str(exc),
-                ))
-
-    return errors
+    except MechanismProfileError as exc:
+        return [
+            ValidationErrorItem(
+                target=exc.target,
+                code=exc.code,
+                message=str(exc),
+            )
+        ]
+    return []
 
 
-def _guard_valid(payload: V3ConfigWriteRequest) -> None:
+def _guard_valid(payload: V3ConfigWriteRequest) -> str:
     """Raise a coded HTTP 400 (aggregating every failure) if any artifact fails.
 
     The detail carries the first failure's ``code``/``message`` plus the full
     ``errors`` list so the caller can render every problem at once.  No write
     happens unless this returns cleanly.
     """
-    errors = _collect_validation_errors(payload)
-    if errors:
-        first = errors[0]
+    try:
+        return validate_mechanism_artifacts(
+            payload.contract,
+            payload.classification_map,
+            payload.subcategory_dimensions,
+        )
+    except MechanismProfileError as exc:
         raise HTTPException(
             status_code=400,
             detail={
-                "code": first.code,
-                "message": first.message,
-                "errors": [error.model_dump() for error in errors],
+                "code": exc.code,
+                "message": str(exc),
+                "errors": [
+                    ValidationErrorItem(
+                        target=exc.target,
+                        code=exc.code,
+                        message=str(exc),
+                    ).model_dump()
+                ],
             },
-        )
+        ) from exc
 
 
 def _summary(row: CategoryEvaluationV3Config) -> V3ConfigSummary:
@@ -289,6 +234,7 @@ def _summary(row: CategoryEvaluationV3Config) -> V3ConfigSummary:
 
 
 def _detail(row: CategoryEvaluationV3Config) -> V3ConfigDetail:
+    contract = json.loads(row.contract_json)
     return V3ConfigDetail(
         id=row.id,
         category_key=row.category_key,
@@ -296,7 +242,8 @@ def _detail(row: CategoryEvaluationV3Config) -> V3ConfigDetail:
         status=row.status,
         revision=row.revision,
         contract_hash=row.contract_hash,
-        contract=json.loads(row.contract_json),
+        mechanism_profile=asdict(describe_mechanism_profile(contract)),
+        contract=contract,
         classification_map=json.loads(row.classification_map_json),
         subcategory_dimensions=json.loads(row.subcategory_dimensions_json),
         dimension_deduction_rules=json.loads(
@@ -504,7 +451,7 @@ def build_category_evaluation_v3_config_router(
         anything lands; a failure becomes a coded 400 and nothing is written.
         A duplicate ``category_key`` is a coded 409.
         """
-        _guard_valid(payload)
+        profile_type = _guard_valid(payload)
         existing = db.scalar(
             select(CategoryEvaluationV3Config).where(
                 CategoryEvaluationV3Config.category_key == payload.category_key
@@ -531,11 +478,13 @@ def build_category_evaluation_v3_config_router(
                 payload.subcategory_dimensions
             ),
             dimension_deduction_rules_json=canonical_json(
-                extract_dimension_deduction_rules(payload.subcategory_dimensions)
+                extract_profile_rule_mirror(
+                    profile_type, payload.subcategory_dimensions
+                )
             ),
-            media_penalty_enabled=payload.contract["common_modifiers"][
-                "media_type_penalty"
-            ].get("enabled", True),
+            media_penalty_enabled=profile_media_penalty_enabled(
+                profile_type, payload.contract
+            ),
             revision=1,
             contract_hash=canonical_contract_hash(payload.contract),
             created_by=created_by,
@@ -567,7 +516,7 @@ def build_category_evaluation_v3_config_router(
                     "message": "请求体 category_key 必须与路径一致",
                 },
             )
-        _guard_valid(payload)
+        profile_type = _guard_valid(payload)
         row = _load(db, category_key)
         row.display_name = payload.display_name
         row.contract_json = canonical_json(payload.contract)
@@ -576,11 +525,11 @@ def build_category_evaluation_v3_config_router(
             payload.subcategory_dimensions
         )
         row.dimension_deduction_rules_json = canonical_json(
-            extract_dimension_deduction_rules(payload.subcategory_dimensions)
+            extract_profile_rule_mirror(profile_type, payload.subcategory_dimensions)
         )
-        row.media_penalty_enabled = payload.contract["common_modifiers"][
-            "media_type_penalty"
-        ].get("enabled", True)
+        row.media_penalty_enabled = profile_media_penalty_enabled(
+            profile_type, payload.contract
+        )
         row.revision = row.revision + 1
         row.contract_hash = canonical_contract_hash(payload.contract)
         db.commit()
