@@ -1,5 +1,8 @@
 FROM node:22-alpine AS frontend-build
 
+ARG LABEL_LAB_BUILD_SHA=dev
+ENV LABEL_LAB_BUILD_SHA=$LABEL_LAB_BUILD_SHA
+
 WORKDIR /build/frontend
 COPY frontend/package.json frontend/package-lock.json ./
 RUN npm config set registry https://registry.npmmirror.com && npm ci

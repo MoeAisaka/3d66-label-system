@@ -14,6 +14,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query"
 
 import { Button } from "@/components/ui/button"
 import { api } from "@/lib/api"
+import { AppVersion } from "@/lib/app-version"
 import type { User } from "@/lib/types"
 import { cn } from "@/lib/utils"
 
@@ -94,11 +95,6 @@ const advancedWorkflowDomain =
     index: "A",
     label: "高级设置",
     icon: SlidersHorizontal,
-    tabs: [
-      { to: "/workflow/governance", label: "高级设置首页" },
-      { to: "/workflow/optimization/category-evaluation-preview", label: "类目评测底座预览" },
-      { to: "/workflow/optimization/category-evaluation-v3-config", label: "类目评测 v3 合同配置" },
-    ],
   } as const
 
 export const workflowDomains = [...primaryWorkflowDomains, advancedWorkflowDomain] as const
@@ -221,6 +217,7 @@ export function AppShell({ user }: { user: User }) {
             </NavLink>
           </div>
           <div className="border-t border-[var(--line)] p-4">
+            <div className="mb-3"><AppVersion /></div>
             <div className="mb-3 flex items-center gap-3">
               <div className="flex size-9 items-center justify-center rounded-[4px] bg-[#eef1eb] text-xs font-bold">
                 {user.display_name.slice(0, 1)}
@@ -244,7 +241,7 @@ export function AppShell({ user }: { user: User }) {
       </aside>
 
       <main className="min-h-[100dvh] min-w-0 lg:pl-[252px]">
-        {active && (
+        {active && "tabs" in active && active.tabs.length > 0 && (
           <nav
             className="sticky top-16 z-20 flex min-h-12 overflow-x-auto border-b border-[var(--line)] bg-white lg:top-0"
             aria-label={`${active.label}二级导航`}
@@ -253,11 +250,11 @@ export function AppShell({ user }: { user: User }) {
               <NavLink
                 key={tab.to}
                 to={tab.to}
-                end={tab.to === "/workflow/governance"}
+                end={tab.to === active.to}
                 className={({ isActive }) =>
                   cn(
                     "flex shrink-0 items-center border-r border-[var(--line)] px-5 py-3 text-xs font-bold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-primary",
-                    isActive || active.to === advancedWorkflowDomain.to
+                    isActive
                       ? "bg-primary text-primary-foreground"
                       : "text-[#555b53] hover:bg-[#f7f9f3] hover:text-foreground",
                   )

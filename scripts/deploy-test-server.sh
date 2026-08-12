@@ -19,7 +19,9 @@ git_as_deploy_user() {
 }
 
 compose_up() {
-  docker compose up -d --build
+  local build_sha
+  build_sha=$(git_as_deploy_user rev-parse --short=7 HEAD) || return 1
+  LABEL_LAB_BUILD_SHA="$build_sha" docker compose up -d --build
 }
 
 wait_for_health() {
