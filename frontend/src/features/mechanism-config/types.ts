@@ -83,6 +83,7 @@ export type MechanismEditorPlugin = {
   canEdit: boolean
   Editor: ComponentType<MechanismEditorProps>
   buildSummary: (revision: ConfigRevision | null) => string
+  prepareForSave?: (draft: Editable) => Editable
 }
 
 export function cloneEditable<T>(value: T): T {

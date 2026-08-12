@@ -4,6 +4,7 @@ import type { ReactNode } from "react"
 import { Button } from "@/components/ui/button"
 
 import { isNewMechanismDraft } from "./types"
+import { imageRuleViewDefaults } from "./image-rule-contract"
 import type {
   Editable,
   JsonObject,
@@ -649,6 +650,16 @@ function GroupEditor({
           <div className="mt-2 space-y-2">
             {dimensions.map((dim, idx) => (
               <div key={idx} className="border border-[var(--line)] bg-white px-3 py-3">
+                {isImageRuleDimension(dim) && (() => {
+                  const defaults = imageRuleViewDefaults(dim)
+                  const duplicateRuleIds = duplicateIds(defaults.deductionRules, defaults.bonusRules)
+                  return <div className="mb-3 grid gap-2 border-b border-dashed border-[var(--line)] pb-3 sm:grid-cols-[180px_1fr] sm:items-end">
+                    <label className="grid gap-1 text-[0.68rem]"><span className="font-semibold">维度分数上限</span>
+                      <input type="number" min={0} max={100} step={1} className={numberClass} value={defaults.dimensionScoreCap} onChange={(e) => onPatch((n) => { n.subcategory_dimensions[trackKey][groupKey].schema_definition.dimensions[idx].dimension_score_cap = Number(e.target.value) })} />
+                    </label>
+                    <div className="text-[0.68rem] leading-5 text-[var(--muted)]">该维度按 0–100 内部分数计算，最终贡献受当前维度权重和上限共同约束。{duplicateRuleIds.length > 0 && <span className="ml-2 font-semibold text-[#8d2924]">规则 ID 重复：{duplicateRuleIds.join("、")}</span>}</div>
+                  </div>
+                })()}
                 <div className="grid gap-2 sm:grid-cols-[1fr_1fr_110px_auto] sm:items-end">
                   <label className="grid gap-1 text-[0.68rem]"><span className="font-semibold">维度标识</span>
                     <input className={inputClass} placeholder="如 color_aesthetics" value={dim.key ?? ""} onChange={(e) => onPatch((n) => { n.subcategory_dimensions[trackKey][groupKey].schema_definition.dimensions[idx].key = e.target.value })} />
@@ -683,6 +694,7 @@ function GroupEditor({
                     ))}
                   </div>
                 </div>
+                {isImageRuleDimension(dim) && <BonusRuleEditor trackKey={trackKey} groupKey={groupKey} dimensionIndex={idx} dimension={dim} onPatch={onPatch} />}
               </div>
             ))}
           </div>
@@ -694,6 +706,8 @@ function GroupEditor({
               n.subcategory_dimensions[trackKey][groupKey].schema_definition.dimensions.push({
                 key: "", label: "新维度", weight: 1,
                 deduction_rules: placeholderRules("新维度"),
+                bonus_rules: [],
+                dimension_score_cap: 100,
                 grade_points: { "1": 20, "2": 45, "3": 65, "4": 82, "5": 95 },
               })
             })}
@@ -704,6 +718,59 @@ function GroupEditor({
       )}
     </div>
   )
+}
+
+function isImageRuleDimension(dimension: Json): boolean {
+  return Array.isArray(dimension.deduction_rules) || "bonus_rules" in dimension || "dimension_score_cap" in dimension
+}
+
+function duplicateIds(deductionRules: Json[], bonusRules: Json[]): string[] {
+  const seen = new Set<string>()
+  const duplicates = new Set<string>()
+  for (const rule of [...deductionRules, ...bonusRules]) {
+    const id = typeof rule.rule_id === "string" ? rule.rule_id.trim() : ""
+    if (!id) continue
+    if (seen.has(id)) duplicates.add(id)
+    seen.add(id)
+  }
+  return [...duplicates]
+}
+
+function BonusRuleEditor({
+  trackKey,
+  groupKey,
+  dimensionIndex,
+  dimension,
+  onPatch,
+}: {
+  trackKey: string
+  groupKey: "common_group" | "specific_group"
+  dimensionIndex: number
+  dimension: Json
+  onPatch: (mutator: (next: Editable) => void) => void
+}) {
+  const rules: Json[] = Array.isArray(dimension.bonus_rules) ? dimension.bonus_rules : []
+  return <div className="mt-3 border-t border-dashed border-[var(--line)] pt-2">
+    <div className="mb-2 flex items-center justify-between">
+      <span className="text-[0.68rem] font-semibold">加分规则（调用B逐条判定）</span>
+      <Button variant="ghost" size="sm" onClick={() => onPatch((n) => {
+        const target = n.subcategory_dimensions[trackKey][groupKey].schema_definition.dimensions[dimensionIndex]
+        const next = target.bonus_rules ??= []
+        next.push({ rule_id: "", description: "", bonus: 5, tags: [] })
+      })}><Plus />新增加分规则</Button>
+    </div>
+    <div className="space-y-1">
+      {rules.map((rule, ruleIdx) => (
+        <div key={ruleIdx} className="grid gap-2 sm:grid-cols-[160px_1fr_110px_1fr_auto] sm:items-end">
+          <label className="grid gap-1 text-[0.68rem]"><span>规则标识</span><input className={inputClass} value={rule.rule_id ?? ""} onChange={(e) => onPatch((n) => { n.subcategory_dimensions[trackKey][groupKey].schema_definition.dimensions[dimensionIndex].bonus_rules[ruleIdx].rule_id = e.target.value })} /></label>
+          <label className="grid gap-1 text-[0.68rem]"><span>中文规则描述</span><input className={inputClass} value={rule.description ?? ""} onChange={(e) => onPatch((n) => { n.subcategory_dimensions[trackKey][groupKey].schema_definition.dimensions[dimensionIndex].bonus_rules[ruleIdx].description = e.target.value })} /></label>
+          <label className="grid gap-1 text-[0.68rem]"><span>加分值</span><input type="number" min={0.1} max={100} className={numberClass} value={rule.bonus ?? 0} onChange={(e) => onPatch((n) => { n.subcategory_dimensions[trackKey][groupKey].schema_definition.dimensions[dimensionIndex].bonus_rules[ruleIdx].bonus = Number(e.target.value) })} /></label>
+          <label className="grid gap-1 text-[0.68rem]"><span>标签（逗号分隔）</span><input className={inputClass} value={(rule.tags ?? []).join(",")} onChange={(e) => onPatch((n) => { n.subcategory_dimensions[trackKey][groupKey].schema_definition.dimensions[dimensionIndex].bonus_rules[ruleIdx].tags = e.target.value.split(",").map((s) => s.trim()).filter(Boolean) })} /></label>
+          <IconButton danger title="删除加分规则" onClick={() => onPatch((n) => { n.subcategory_dimensions[trackKey][groupKey].schema_definition.dimensions[dimensionIndex].bonus_rules.splice(ruleIdx, 1) })} />
+        </div>
+      ))}
+    </div>
+  </div>
 }
 
 function ClassificationMapEditor({

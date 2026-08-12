@@ -1,6 +1,7 @@
 import { lazy } from "react"
 
 import type { MechanismEditorPlugin } from "./types.ts"
+import { prepareImageRulePayload } from "./image-rule-contract.ts"
 
 const ImageRuleEditor = lazy(async () => {
   const module = await import("./image-rule-editor")
@@ -17,6 +18,7 @@ const PLUGINS: Record<string, MechanismEditorPlugin> = {
     profileType: "image-rule-deduction-v1",
     canEdit: true,
     Editor: ImageRuleEditor,
+    prepareForSave: prepareImageRulePayload,
     buildSummary: (revision) => revision
       ? `图像规则扣分机制 · revision ${revision.revision}`
       : "图像规则扣分机制 · 新建配置",

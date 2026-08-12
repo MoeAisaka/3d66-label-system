@@ -185,6 +185,11 @@ export function CategoryEvaluationV3ConfigPage() {
     if (!isNew && selectedRevision) setDraft(revisionToEditable(selectedRevision))
   }, [isNew, selectedRevision])
 
+  const profileType = isNew
+    ? "image-rule-deduction-v1"
+    : selectedRevision?.mechanism_profile.profile_type ?? null
+  const plugin = getMechanismEditorPlugin(profileType)
+
   const startNew = () => {
     setIsNew(true)
     setSelectedKey(null)
@@ -215,13 +220,14 @@ export function CategoryEvaluationV3ConfigPage() {
 
   const runValidate = async () => {
     if (!draft) return
+    const outgoingDraft = plugin?.prepareForSave?.(draft) ?? draft
     setBusy(true)
     setBanner(null)
     try {
       const key = draft.category_key.trim() || "candidate"
       const result = await api<ValidateResponse>(
         `${BASE}/${encodeURIComponent(key)}/validate`,
-        { method: "POST", body: JSON.stringify(requestBody(draft)) },
+        { method: "POST", body: JSON.stringify(requestBody(outgoingDraft)) },
       )
       setErrors(result.errors)
       setBanner(result.ok ? "校验通过，可以创建候选版本。" : `校验发现 ${result.errors.length} 处问题。`)
@@ -234,6 +240,7 @@ export function CategoryEvaluationV3ConfigPage() {
 
   const createCandidate = async () => {
     if (!draft) return
+    const outgoingDraft = plugin?.prepareForSave?.(draft) ?? draft
     if (!draft.category_key.trim()) {
       setBanner("请先填写 category_key。")
       return
@@ -245,7 +252,7 @@ export function CategoryEvaluationV3ConfigPage() {
       if (isNew) {
         const created = await api<ConfigDetail>(`${BASE}/`, {
           method: "POST",
-          body: JSON.stringify(requestBody(draft)),
+          body: JSON.stringify(requestBody(outgoingDraft)),
         })
         setIsNew(false)
         setSelectedKey(created.category_key)
@@ -261,7 +268,7 @@ export function CategoryEvaluationV3ConfigPage() {
           {
             method: "POST",
             body: JSON.stringify({
-              ...requestBody(draft),
+              ...requestBody(outgoingDraft),
               parent_revision_id: selectedRevision.id,
               expected_projected_revision: detailQuery.data.revision,
               expected_projected_contract_hash: detailQuery.data.contract_hash,
@@ -306,10 +313,6 @@ export function CategoryEvaluationV3ConfigPage() {
   const selectedLoadError = detailQuery.error ?? revisionsQuery.error
   const selectedLoading = !isNew && selectedKey !== null
     && (detailQuery.isLoading || revisionsQuery.isLoading)
-  const profileType = isNew
-    ? "image-rule-deduction-v1"
-    : selectedRevision?.mechanism_profile.profile_type ?? null
-  const plugin = getMechanismEditorPlugin(profileType)
   const items = listQuery.data?.items ?? []
 
   return (
