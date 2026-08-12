@@ -1,4 +1,5 @@
 import { ArrowClockwise, ArrowLeft, WarningCircle } from "@phosphor-icons/react"
+import { Component, Fragment, type ErrorInfo, type ReactNode } from "react"
 import { useNavigate } from "react-router-dom"
 
 import { Button } from "@/components/ui/button"
@@ -8,6 +9,15 @@ export interface RouteErrorStateProps {
   message: string
   onRetry?: () => void
   backTo?: string
+}
+
+export interface RouteErrorBoundaryProps extends RouteErrorStateProps {
+  children: ReactNode
+}
+
+interface RouteErrorBoundaryState {
+  failed: boolean
+  resetKey: number
 }
 
 export function RouteErrorState({ title, message, onRetry, backTo }: RouteErrorStateProps) {
@@ -25,4 +35,29 @@ export function RouteErrorState({ title, message, onRetry, backTo }: RouteErrorS
       </div>
     </div>
   )
+}
+
+export class RouteErrorBoundary extends Component<RouteErrorBoundaryProps, RouteErrorBoundaryState> {
+  state: RouteErrorBoundaryState = { failed: false, resetKey: 0 }
+
+  static getDerivedStateFromError(): Partial<RouteErrorBoundaryState> {
+    return { failed: true }
+  }
+
+  componentDidCatch(error: Error, info: ErrorInfo) {
+    console.error("Route render failed", error, info.componentStack)
+  }
+
+  private retry = () => {
+    this.props.onRetry?.()
+    this.setState(({ resetKey }) => ({ failed: false, resetKey: resetKey + 1 }))
+  }
+
+  render() {
+    const { children, title, message, backTo } = this.props
+    if (this.state.failed) {
+      return <RouteErrorState title={title} message={message} onRetry={this.retry} backTo={backTo} />
+    }
+    return <Fragment key={this.state.resetKey}>{children}</Fragment>
+  }
 }

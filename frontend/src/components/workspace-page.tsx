@@ -1,6 +1,6 @@
 import * as Dialog from "@radix-ui/react-dialog"
 import { X } from "@phosphor-icons/react"
-import type { ReactNode } from "react"
+import { useRef, type ReactNode } from "react"
 
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
@@ -54,12 +54,32 @@ export interface SecondaryDrawerProps {
   footer?: ReactNode
 }
 
+function useDialogReturnFocus(open: boolean) {
+  const returnFocusRef = useRef<HTMLElement | null>(null)
+  const wasOpenRef = useRef(false)
+
+  if (open && !wasOpenRef.current && typeof document !== "undefined") {
+    returnFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null
+  }
+  wasOpenRef.current = open
+
+  return returnFocusRef
+}
+
 export function SecondaryDrawer({ open, onOpenChange, title, description, children, footer }: SecondaryDrawerProps) {
+  const returnFocusRef = useDialogReturnFocus(open)
+
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
       <Dialog.Portal>
         <Dialog.Overlay className="fixed inset-0 z-50 bg-black/20" />
-        <Dialog.Content className="fixed inset-y-0 right-0 z-50 flex w-[min(680px,calc(100vw-1rem))] flex-col border-l border-[var(--line-strong)] bg-white shadow-2xl focus:outline-none">
+        <Dialog.Content
+          className="fixed inset-y-0 right-0 z-50 flex w-[min(680px,calc(100vw-1rem))] flex-col border-l border-[var(--line-strong)] bg-white shadow-2xl focus:outline-none"
+          onCloseAutoFocus={(event) => {
+            event.preventDefault()
+            returnFocusRef.current?.focus()
+          }}
+        >
           <div className="flex items-start justify-between gap-4 border-b border-[var(--line)] px-6 py-5">
             <div>
               <Dialog.Title className="font-editorial text-2xl font-bold">{title}</Dialog.Title>
@@ -96,11 +116,19 @@ export function ConfirmDialog({
   onConfirm: () => void
   children?: ReactNode
 }) {
+  const returnFocusRef = useDialogReturnFocus(open)
+
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
       <Dialog.Portal>
         <Dialog.Overlay className="fixed inset-0 z-50 bg-black/20" />
-        <Dialog.Content className="fixed left-1/2 top-1/2 z-50 w-[min(460px,calc(100vw-2rem))] -translate-x-1/2 -translate-y-1/2 border border-[var(--line-strong)] bg-white p-6 shadow-2xl focus:outline-none">
+        <Dialog.Content
+          className="fixed left-1/2 top-1/2 z-50 w-[min(460px,calc(100vw-2rem))] -translate-x-1/2 -translate-y-1/2 border border-[var(--line-strong)] bg-white p-6 shadow-2xl focus:outline-none"
+          onCloseAutoFocus={(event) => {
+            event.preventDefault()
+            returnFocusRef.current?.focus()
+          }}
+        >
           <Dialog.Title className="font-editorial text-2xl font-bold">{title}</Dialog.Title>
           {description && <Dialog.Description className="mt-2 text-sm leading-6 text-[var(--muted)]">{description}</Dialog.Description>}
           {children && <div className="mt-4">{children}</div>}
