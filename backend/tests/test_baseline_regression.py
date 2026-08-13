@@ -1004,6 +1004,13 @@ def test_category_dimension_snapshot_and_isolated_correction_retry(
         password_hash="unused",
         display_name="基准分析测试员",
     )
+    manager = User(
+        username="baseline-analysis-manager",
+        password_hash="unused",
+        display_name="基准分析项目管理员",
+        role="manager",
+        is_admin=False,
+    )
     asset = Asset(
         original_name="material-L1.jpg",
         stored_name="material-L1.jpg",
@@ -1050,7 +1057,7 @@ def test_category_dimension_snapshot_and_isolated_correction_retry(
         rubric_version="R-material-1",
         created_by=user.username,
     )
-    db.add_all([user, asset, model, prompt, profile])
+    db.add_all([user, manager, asset, model, prompt, profile])
     db.commit()
 
     app.dependency_overrides[get_db] = lambda: (yield db)
@@ -1362,6 +1369,145 @@ def test_category_dimension_snapshot_and_isolated_correction_retry(
         assert ready_payload["report"]["candidate_regression"][
             "recommendation"
         ] == "approve"
+
+        frozen_profile_prompt_id = profile.prompt_a_id
+        frozen_projection_before_decisions = (
+            active_config.projected_revision_id,
+            active_config.revision,
+            active_config.contract_hash,
+        )
+
+        rejected_correction = BaselineCorrectionRun(
+            idempotency_key="material-correction-reject-boundary",
+            baseline_run_id=run.id,
+            category_key=run.category_key,
+            selected_item_ids_json=canonical_json(
+                correction_payload["selected_item_ids"]
+            ),
+            input_snapshot_json=canonical_json({"boundary_test": "rejection"}),
+            status="awaiting_decision",
+            stage="decision",
+            progress=100,
+            report_json=canonical_json(ready_payload["report"]),
+            blockers_json="[]",
+            orchestration_json=canonical_json(correction_payload["orchestration"]),
+            candidate_revision_id=candidate_revision.id,
+            regression_run_id=candidate_run.id,
+            created_by=user.username,
+        )
+        db.add(rejected_correction)
+        db.commit()
+        app.dependency_overrides[current_user] = lambda: manager
+        manager_decision = client.post(
+            f"/api/baseline-corrections/{rejected_correction.id}/decision",
+            json={"decision": "rejected", "note": "项目管理员不应具备发布权"},
+        )
+        assert manager_decision.status_code == 403
+        db.refresh(rejected_correction)
+        assert rejected_correction.status == "awaiting_decision"
+        app.dependency_overrides[current_user] = lambda: user
+        rejected = client.post(
+            f"/api/baseline-corrections/{rejected_correction.id}/decision",
+            json={"decision": "rejected", "note": "保留现役机制"},
+        )
+        assert rejected.status_code == 200, rejected.text
+        assert rejected.json()["status"] == "rejected"
+        db.refresh(profile)
+        db.refresh(active_config)
+        assert profile.prompt_a_id == frozen_profile_prompt_id
+        assert (
+            active_config.projected_revision_id,
+            active_config.revision,
+            active_config.contract_hash,
+        ) == frozen_projection_before_decisions
+
+        failed_recommendation_report = deepcopy(ready_payload["report"])
+        failed_recommendation_report["candidate_regression"].update(
+            {
+                "approval_allowed": False,
+                "recommendation": "reject",
+                "regressions": [
+                    {
+                        "code": "exact_accuracy_regressed",
+                        "message": "Exact Accuracy 低于基准",
+                        "delta": -0.1,
+                    }
+                ],
+            }
+        )
+        failed_recommendation = BaselineCorrectionRun(
+            idempotency_key="material-correction-failed-recommendation",
+            baseline_run_id=run.id,
+            category_key=run.category_key,
+            selected_item_ids_json=canonical_json(correction_payload["selected_item_ids"]),
+            input_snapshot_json=canonical_json(
+                {"boundary_test": "failed_recommendation"}
+            ),
+            status="awaiting_decision",
+            stage="decision",
+            progress=100,
+            report_json=canonical_json(failed_recommendation_report),
+            blockers_json="[]",
+            orchestration_json=canonical_json(correction_payload["orchestration"]),
+            candidate_revision_id=candidate_revision.id,
+            regression_run_id=candidate_run.id,
+            created_by=user.username,
+        )
+        db.add(failed_recommendation)
+        db.commit()
+        forbidden_approval = client.post(
+            f"/api/baseline-corrections/{failed_recommendation.id}/decision",
+            json={"decision": "approved", "note": "不应允许启用"},
+        )
+        assert forbidden_approval.status_code == 409
+        assert forbidden_approval.json()["detail"] == "候选回归未通过，不能启用"
+        db.refresh(profile)
+        db.refresh(active_config)
+        assert profile.prompt_a_id == frozen_profile_prompt_id
+        assert (
+            active_config.projected_revision_id,
+            active_config.revision,
+            active_config.contract_hash,
+        ) == frozen_projection_before_decisions
+
+        drifted_orchestration = deepcopy(correction_payload["orchestration"])
+        drifted_orchestration["base_projection"]["revision"] -= 1
+        projection_drift = BaselineCorrectionRun(
+            idempotency_key="material-correction-projection-drift",
+            baseline_run_id=run.id,
+            category_key=run.category_key,
+            selected_item_ids_json=canonical_json(correction_payload["selected_item_ids"]),
+            input_snapshot_json=canonical_json(
+                {"boundary_test": "projection_drift"}
+            ),
+            status="awaiting_decision",
+            stage="decision",
+            progress=100,
+            report_json=canonical_json(ready_payload["report"]),
+            blockers_json="[]",
+            orchestration_json=canonical_json(drifted_orchestration),
+            candidate_revision_id=candidate_revision.id,
+            regression_run_id=candidate_run.id,
+            created_by=user.username,
+        )
+        db.add(projection_drift)
+        db.commit()
+        drift_conflict = client.post(
+            f"/api/baseline-corrections/{projection_drift.id}/decision",
+            json={"decision": "approved", "note": "现役已漂移"},
+        )
+        assert drift_conflict.status_code == 409
+        assert drift_conflict.json()["detail"]["code"] == (
+            "projected_revision_conflict"
+        )
+        db.refresh(profile)
+        db.refresh(active_config)
+        assert profile.prompt_a_id == frozen_profile_prompt_id
+        assert (
+            active_config.projected_revision_id,
+            active_config.revision,
+            active_config.contract_hash,
+        ) == frozen_projection_before_decisions
 
         approved = client.post(
             f"/api/baseline-corrections/{correction_payload['id']}/decision",

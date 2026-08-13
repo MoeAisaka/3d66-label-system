@@ -1364,8 +1364,10 @@ function RegressionResults({
         aria-label="基准回归工作区"
       >
         <button
+          id="baseline-results-tab"
           type="button"
           role="tab"
+          aria-controls="baseline-results-panel"
           aria-selected={activeView === "results"}
           className={`min-h-11 shrink-0 border-x border-t px-4 text-sm font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary ${activeView === "results" ? "border-[var(--line-strong)] bg-white" : "border-transparent bg-[#f3f5f0] text-[var(--muted)]"}`}
           onClick={() => setActiveView("results")}
@@ -1373,8 +1375,10 @@ function RegressionResults({
           回归结果
         </button>
         <button
+          id="baseline-correction-tab"
           type="button"
           role="tab"
+          aria-controls="baseline-correction-panel"
           aria-selected={activeView === "correction"}
           className={`min-h-11 shrink-0 border-x border-t px-4 text-sm font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary ${activeView === "correction" ? "border-[var(--line-strong)] bg-white" : "border-transparent bg-[#f3f5f0] text-[var(--muted)]"}`}
           onClick={() => setActiveView("correction")}
@@ -1384,7 +1388,7 @@ function RegressionResults({
       </div>
 
       {activeView === "results" ? (
-        <>
+        <div id="baseline-results-panel" role="tabpanel" aria-labelledby="baseline-results-tab">
       <section className="mt-6 grid gap-px border-y border-[var(--line)] bg-[var(--line)] sm:grid-cols-2 xl:grid-cols-5">
         <Metric label="总体准确率" value={percent(metrics.exact_accuracy)} />
         <Metric label="相邻等级准确率" value={percent(metrics.adjacent_accuracy)} />
@@ -1609,13 +1613,14 @@ function RegressionResults({
           </div>
         </div>
       </section>
-        </>
+        </div>
       ) : (
         <CorrectionAnalysisPanel
           run={run}
           items={items}
           loading={loading}
           onPreview={onPreview}
+          canDecide={me.data?.is_admin === true}
         />
       )}
     </>
@@ -1627,11 +1632,13 @@ function CorrectionAnalysisPanel({
   items,
   loading,
   onPreview,
+  canDecide,
 }: {
   run: BaselineRegressionRun
   items: BaselineRegressionItem[]
   loading: boolean
   onPreview: (preview: ImagePreview) => void
+  canDecide: boolean
 }) {
   const queryClient = useQueryClient()
   const deviations = useMemo(
@@ -1661,7 +1668,7 @@ function CorrectionAnalysisPanel({
     ),
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: ["baseline-correction-runs", run.id] })
-      toast.success("纠偏分析已启动；只生成报告与建议，不会自动发布")
+      toast.success("纠偏分析已启动；AI 将自动生成候选并执行回归")
     },
     onError: (error) => toast.error(error.message),
   })
@@ -1673,30 +1680,75 @@ function CorrectionAnalysisPanel({
     },
     onError: (error) => toast.error(error.message),
   })
+  const decideCorrection = useMutation({
+    mutationFn: ({
+      correctionRunId,
+      decision,
+      note,
+    }: {
+      correctionRunId: number
+      decision: "approved" | "rejected"
+      note: string
+    }) => baselineRegressionApi.decideCorrectionRun(correctionRunId, decision, note),
+    onSuccess: async (result) => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["baseline-correction-runs", run.id] }),
+        queryClient.invalidateQueries({ queryKey: ["evaluation-categories"] }),
+        queryClient.invalidateQueries({ queryKey: ["prompts", run.category_key] }),
+      ])
+      toast.success(result.status === "approved" ? "候选已启用" : "候选已拒绝")
+    },
+    onError: (error) => toast.error(error.message),
+  })
 
   const allSelected = deviations.length > 0 && selectedIds.size === deviations.length
   const report = latest?.report ?? {}
-  const accuracyReport = recordValue(report.accuracy_report)
-  const reportMetrics = recordValue(accuracyReport.run_metrics)
-  const directionCounts = recordValue(accuracyReport.direction_counts)
   const promptSuggestions = recordArray(report.prompt_suggestions)
   const dimensionSuggestions = recordArray(report.dimension_suggestions)
   const risks = stringArray(report.risks)
+  const candidateRegression = recordValue(report.candidate_regression)
+  const baselineMetrics = recordValue(candidateRegression.baseline_metrics)
+  const candidateMetrics = recordValue(candidateRegression.candidate_metrics)
+  const regressions = recordArray(candidateRegression.regressions)
+  const approvalAllowed = candidateRegression.approval_allowed === true
+  const recommendation = stringValue(candidateRegression.recommendation)
   const blockers = (latest?.blockers ?? []).map((blocker) => (
     typeof blocker === "string" ? blocker : readableRecord(blocker)
   )).filter(Boolean)
+  const latestLocked = latest?.status === "processing" || latest?.status === "awaiting_decision"
+
+  const requestDecision = (decision: "approved" | "rejected") => {
+    if (!latest || latest.status !== "awaiting_decision") return
+    const approved = decision === "approved"
+    const confirmed = window.confirm(
+      approved
+        ? "确认启用该机制候选？启用后会切换当前类目的现役提示词与 v3 机制版本，但不会发布标签事实。"
+        : "确认拒绝该机制候选？本次候选与回归证据会保留，结论提交后不可修改。",
+    )
+    if (!confirmed) return
+    decideCorrection.mutate({
+      correctionRunId: latest.id,
+      decision,
+      note: approved ? "人工确认启用自动纠偏候选" : "人工确认拒绝自动纠偏候选",
+    })
+  }
 
   return (
-    <section className="mt-6 border-y border-[var(--line-strong)] bg-white" role="tabpanel">
+    <section
+      id="baseline-correction-panel"
+      className="mt-6 border-y border-[var(--line-strong)] bg-white"
+      role="tabpanel"
+      aria-labelledby="baseline-correction-tab"
+    >
       <div className="grid gap-5 border-b border-[var(--line)] px-5 py-5 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-end">
         <div>
           <div className="flex flex-wrap items-center gap-2">
             <h3 className="font-editorial text-2xl font-bold">基准回归处理纠偏</h3>
-            <Badge tone="active">独立分析流水线</Badge>
-            <Badge tone="neutral">不自动发布</Badge>
+            <Badge tone="active">全自动候选流水线</Badge>
+            <Badge tone="neutral">最终人工决策</Badge>
           </div>
           <p className="mt-2 max-w-3xl text-xs leading-5 text-[var(--muted)]">
-            从本轮偏差中冻结一批样本，生成准确性归因与提示词/维度改进建议。它不会改写基准结果、现役提示词、类目维度或发布指针；建议必须由人工确认后另行进入候选验证。
+            启动后，系统自动分析纠偏样本、生成并校验统一机制候选，再执行候选回归。中间无需人工配置；回归完成后只需决定启用或拒绝，系统不会自动启用候选。
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
@@ -1713,7 +1765,7 @@ function CorrectionAnalysisPanel({
               run.status === "running"
               || !selectedIds.size
               || createCorrection.isPending
-              || latest?.status === "processing"
+              || latestLocked
             }
           >
             <Play weight="fill" />
@@ -1732,7 +1784,7 @@ function CorrectionAnalysisPanel({
             <Button
               variant="ghost"
               size="sm"
-              disabled={!deviations.length || latest?.status === "processing"}
+              disabled={!deviations.length || latestLocked}
               onClick={() => setSelectedIds(allSelected ? new Set() : new Set(deviationIds))}
             >
               {allSelected ? <CheckSquare weight="fill" /> : <Square />}
@@ -1751,7 +1803,7 @@ function CorrectionAnalysisPanel({
                       aria-label={`选择偏差样本：${item.asset.name}`}
                       className="mt-4 size-4 accent-[#9dbb1c]"
                       checked={selectedIds.has(item.id)}
-                      disabled={latest?.status === "processing"}
+                      disabled={latestLocked}
                       onChange={(event) => setSelectedIds((current) => {
                         const next = new Set(current)
                         if (event.target.checked) next.add(item.id)
@@ -1787,7 +1839,7 @@ function CorrectionAnalysisPanel({
           {!latest ? (
             <div className="border-y border-[var(--line)] px-4 py-12 text-center">
               <p className="text-sm font-bold">尚未启动纠偏分析</p>
-              <p className="mt-2 text-xs leading-5 text-[var(--muted)]">选择左侧偏差样本后启动。报告只提供归因和优化建议，不执行修改或发布。</p>
+              <p className="mt-2 text-xs leading-5 text-[var(--muted)]">选择左侧偏差样本后启动，AI 将自动接管候选生成与回归，直到需要最终人工决策。</p>
             </div>
           ) : (
             <>
@@ -1802,22 +1854,44 @@ function CorrectionAnalysisPanel({
                     {latest.selected_item_ids.length} 个冻结样本 · {latest.updated_at}
                   </p>
                 </div>
-                {latest.status === "failed" && (
+                {latest.status === "failed" && latest.error?.retryable && (
                   <Button
                     variant="secondary"
                     size="sm"
                     disabled={retryCorrection.isPending}
                     onClick={() => retryCorrection.mutate(latest.id)}
                   >
-                    <ArrowClockwise />{retryCorrection.isPending ? "正在重试" : "重试分析"}
+                    <ArrowClockwise />{retryCorrection.isPending ? "正在重新执行" : "重新执行"}
                   </Button>
                 )}
+              </div>
+
+              <div className="mt-4 grid grid-cols-2 border-y border-[var(--line)] bg-[#fafbf8] 2xl:grid-cols-5">
+                {correctionStages.map((stage, index) => {
+                  const state = correctionStageState(latest, stage.key)
+                  return (
+                    <div
+                      key={stage.key}
+                      className="min-w-0 border-r border-[var(--line)] px-3 py-3 last:border-r-0"
+                    >
+                      <div className="flex items-center gap-2">
+                        <span className={`flex size-6 shrink-0 items-center justify-center rounded-full border text-[0.68rem] font-bold ${correctionStageClassName(state)}`}>
+                          {state === "completed" ? <Check weight="bold" /> : index + 1}
+                        </span>
+                        <p className="text-xs font-bold leading-4">{stage.label}</p>
+                      </div>
+                      <p className="mt-1 pl-8 text-[0.68rem] leading-4 text-[var(--muted)]">
+                        {correctionStageStateName(state)}
+                      </p>
+                    </div>
+                  )
+                })}
               </div>
 
               {latest.status === "processing" && (
                 <div className="mt-4 border border-[#d6dfb1] bg-[#f7fadf] px-4 py-3">
                   <div className="flex justify-between gap-4 text-xs font-bold">
-                    <span>正在分析偏差方向、准确率与维度信号</span>
+                    <span>{correctionStageRunningMessage(latest.stage)}</span>
                     <span className="font-data">{latest.progress}%</span>
                   </div>
                   <div className="mt-2 h-1.5 overflow-hidden bg-white">
@@ -1828,33 +1902,38 @@ function CorrectionAnalysisPanel({
 
               {latest.status === "failed" && (
                 <div className="mt-4 border border-[#e2b4af] bg-[#fff5f3] px-4 py-3 text-xs leading-5 text-[#8d2924]">
-                  <p className="font-bold">分析失败{latest.error?.code ? ` · ${latest.error.code}` : ""}</p>
-                  <p className="mt-1">{latest.error?.message || "未返回具体失败原因，可重试本次冻结样本。"}</p>
+                  <p className="font-bold">{correctionStageLabel(latest.stage)}失败{latest.error?.code ? ` · ${latest.error.code}` : ""}</p>
+                  <p className="mt-1">{latest.error?.message || "未返回具体失败原因，可重新执行本次冻结样本。"}</p>
+                  <p className="mt-1 text-[#6f3935]">重新执行会沿用本次冻结样本，不需要补充任何配置。</p>
                 </div>
               )}
 
               {(blockers.length > 0) && (
                 <div className="mt-4 border border-[#e2c188] bg-[#fff9ea] px-4 py-3 text-xs leading-5 text-[#7d4308]">
-                  <p className="font-bold">当前阻塞</p>
+                  <p className="font-bold">自动处理提示</p>
                   {blockers.map((blocker, index) => <p key={`${blocker}-${index}`} className="mt-1">{blocker}</p>)}
                 </div>
               )}
 
-              {latest.status === "awaiting_confirmation" && (
+              {(latest.status === "awaiting_decision"
+                || latest.status === "approved"
+                || latest.status === "rejected") && (
                 <>
                   <div className="mt-5 grid gap-px border-y border-[var(--line)] bg-[var(--line)] sm:grid-cols-2 xl:grid-cols-4">
-                    <Metric label="原回归准确率" value={percent(numberValue(reportMetrics.exact_accuracy) ?? run.metrics.exact_accuracy)} />
-                    <Metric label="相邻准确率" value={percent(numberValue(reportMetrics.adjacent_accuracy) ?? run.metrics.adjacent_accuracy)} />
-                    <Metric label="分析偏差样本" value={String(numberValue(accuracyReport.selected_deviation_count) ?? latest.selected_item_ids.length)} />
-                    <Metric label="平均等级距离" value={formatDecimal(numberValue(accuracyReport.average_level_distance))} />
+                    <Metric label="基准准确率" value={percent(numberValue(baselineMetrics.exact_accuracy) ?? run.metrics.exact_accuracy)} />
+                    <Metric label="候选准确率" value={formatPercent(numberValue(candidateMetrics.exact_accuracy))} />
+                    <Metric label="准确率变化" value={formatSignedPercent(numberValue(candidateRegression.exact_accuracy_delta))} />
+                    <Metric label="相邻准确率变化" value={formatSignedPercent(numberValue(candidateRegression.adjacent_accuracy_delta))} />
                   </div>
-                  <div className="mt-5 grid gap-4 sm:grid-cols-2">
-                    <ReportFact label="高估样本" value={`${numberValue(directionCounts.over_rated) ?? 0} 张`} />
-                    <ReportFact label="低估样本" value={`${numberValue(directionCounts.under_rated) ?? 0} 张`} />
+                  <div className="mt-5 grid grid-cols-4 gap-px border-y border-[var(--line)] bg-[var(--line)]">
+                    <ReportFact label="机制候选" value={latest.candidate_revision_id ? `Revision #${latest.candidate_revision_id}` : "—"} />
+                    <ReportFact label="候选提示词" value={latest.orchestration.candidate_prompt?.version ?? "—"} />
+                    <ReportFact label="候选回归" value={latest.regression_run_id ? `Run #${latest.regression_run_id}` : "—"} />
+                    <ReportFact label="回归建议" value={recommendation === "approve" ? "建议启用" : "建议拒绝"} />
                   </div>
                   <div className="mt-6">
-                    <h5 className="font-editorial text-xl font-bold">改进建议</h5>
-                    <p className="mt-1 text-xs text-[var(--muted)]">以下内容是待人工确认的分析建议，不是已生效配置。</p>
+                    <h5 className="font-editorial text-xl font-bold">AI 分析与候选变更摘要</h5>
+                    <p className="mt-1 text-xs text-[var(--muted)]">系统已把以下分析自动落入统一机制候选，并使用同一基准集完成验证。</p>
                     <div className="mt-3 divide-y divide-[var(--line)] border-y border-[var(--line)]">
                       {[...promptSuggestions, ...dimensionSuggestions].map((suggestion, index) => (
                         <div key={`${stringValue(suggestion.code) || stringValue(suggestion.dimension_key) || "suggestion"}-${index}`} className="grid gap-2 py-3 text-xs sm:grid-cols-[120px_minmax(0,1fr)]">
@@ -1876,9 +1955,64 @@ function CorrectionAnalysisPanel({
                       {risks.map((risk) => <p key={risk} className="mt-1">{risk}</p>)}
                     </div>
                   )}
-                  <div className="mt-5 border-l-2 border-primary bg-[#f8faed] px-4 py-3 text-xs leading-5">
-                    <strong>状态：等待人工确认。</strong> 当前页面不会自动修改或发布提示词、维度版本；如要落地建议，需另建候选并通过配对回归与人工发布门。
-                  </div>
+                  {regressions.length > 0 && (
+                    <div className="mt-5 border border-[#e2b4af] bg-[#fff5f3] px-4 py-3 text-xs leading-5 text-[#8d2924]">
+                      <p className="font-bold">候选回归未通过</p>
+                      {regressions.map((regression, index) => (
+                        <p key={`${stringValue(regression.code)}-${index}`} className="mt-1">
+                          {stringValue(regression.message) || readableRecord(regression)}
+                        </p>
+                      ))}
+                    </div>
+                  )}
+                  {latest.status === "awaiting_decision" && canDecide && (
+                    <div className="mt-5 border-l-2 border-primary bg-[#f8faed] px-4 py-4">
+                      <div className="flex items-center justify-between gap-5">
+                        <div>
+                          <p className="text-sm font-bold">等待人工决策</p>
+                          <p className="mt-1 text-xs leading-5 text-[var(--muted)]">
+                            中间步骤已全部完成。启用只切换机制发布轴；标签事实仍需通过独立发布流程。
+                          </p>
+                        </div>
+                        <div className="flex shrink-0 gap-2">
+                          <Button
+                            variant="danger"
+                            disabled={decideCorrection.isPending}
+                            onClick={() => requestDecision("rejected")}
+                          >
+                            拒绝候选
+                          </Button>
+                          <Button
+                            disabled={!approvalAllowed || decideCorrection.isPending}
+                            title={approvalAllowed ? undefined : "候选回归未通过，不能启用"}
+                            onClick={() => requestDecision("approved")}
+                          >
+                            <Check weight="bold" />启用候选
+                          </Button>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                  {latest.status === "awaiting_decision" && !canDecide && (
+                    <div className="mt-5 border-l-2 border-[var(--line-strong)] bg-[#fafbf8] px-4 py-4">
+                      <p className="text-sm font-bold">等待系统管理员决策</p>
+                      <p className="mt-1 text-xs leading-5 text-[var(--muted)]">
+                        候选与回归证据已就绪。只有系统管理员可以启用或拒绝机制候选。
+                      </p>
+                    </div>
+                  )}
+                  {(latest.status === "approved" || latest.status === "rejected") && (
+                    <div className={`mt-5 border-l-2 px-4 py-4 ${latest.status === "approved" ? "border-primary bg-[#f8faed]" : "border-[#b7362e] bg-[#fff5f3]"}`}>
+                      <p className="text-sm font-bold">
+                        人工结论：{latest.status === "approved" ? "已启用候选" : "已拒绝候选"}
+                      </p>
+                      <p className="mt-1 text-xs leading-5 text-[var(--muted)]">
+                        {latest.decided_by || "管理员"} · {latest.decided_at || latest.updated_at}
+                        {latest.decision_note ? ` · ${latest.decision_note}` : ""}
+                      </p>
+                      <p className="mt-1 text-xs text-[var(--muted)]">该人工结论不可修改，候选、回归与决策证据均已保留。</p>
+                    </div>
+                  )}
                 </>
               )}
             </>
@@ -1887,6 +2021,58 @@ function CorrectionAnalysisPanel({
       </div>
     </section>
   )
+}
+
+const correctionStages: Array<{
+  key: BaselineCorrectionRun["stage"]
+  label: string
+}> = [
+  { key: "analysis", label: "自动分析纠偏样本" },
+  { key: "candidate_generation", label: "生成统一机制候选" },
+  { key: "candidate_validation", label: "校验并冻结候选" },
+  { key: "regression", label: "执行候选回归" },
+  { key: "decision", label: "等待人工决策" },
+]
+
+type CorrectionStageState = "pending" | "active" | "completed" | "failed"
+
+function correctionStageState(
+  run: BaselineCorrectionRun,
+  stage: BaselineCorrectionRun["stage"],
+): CorrectionStageState {
+  const currentIndex = correctionStages.findIndex((item) => item.key === run.stage)
+  const stageIndex = correctionStages.findIndex((item) => item.key === stage)
+  if (run.status === "approved" || run.status === "rejected") return "completed"
+  if (stageIndex < currentIndex) return "completed"
+  if (stageIndex > currentIndex) return "pending"
+  if (run.status === "failed") return "failed"
+  return "active"
+}
+
+function correctionStageClassName(state: CorrectionStageState) {
+  if (state === "completed") return "border-[#9dbb1c] bg-primary text-[#263000]"
+  if (state === "active") return "border-[#9dbb1c] bg-[#f0f8c8] text-[#263000]"
+  if (state === "failed") return "border-[#b7362e] bg-[#fff0ee] text-[#8d2924]"
+  return "border-[var(--line-strong)] bg-white text-[var(--muted)]"
+}
+
+function correctionStageStateName(state: CorrectionStageState) {
+  if (state === "completed") return "已完成"
+  if (state === "active") return "进行中"
+  if (state === "failed") return "执行失败"
+  return "等待自动执行"
+}
+
+function correctionStageLabel(stage: BaselineCorrectionRun["stage"]) {
+  return correctionStages.find((item) => item.key === stage)?.label ?? "自动纠偏"
+}
+
+function correctionStageRunningMessage(stage: BaselineCorrectionRun["stage"]) {
+  if (stage === "analysis") return "AI 正在分析纠偏样本与偏差方向"
+  if (stage === "candidate_generation") return "AI 正在生成统一机制候选"
+  if (stage === "candidate_validation") return "系统正在校验并冻结候选版本"
+  if (stage === "regression") return "系统正在执行候选回归"
+  return "系统正在整理最终决策证据"
 }
 
 function recordValue(value: unknown): Record<string, unknown> {
@@ -1916,8 +2102,14 @@ function readableRecord(value: unknown): string {
   return stringValue(record.message) || stringValue(record.title) || stringValue(record.code)
 }
 
-function formatDecimal(value: number | null) {
-  return value === null ? "—" : value.toFixed(2)
+function formatSignedPercent(value: number | null) {
+  if (value === null) return "—"
+  const sign = value > 0 ? "+" : ""
+  return `${sign}${(value * 100).toFixed(1)}%`
+}
+
+function formatPercent(value: number | null) {
+  return value === null ? "—" : percent(value)
 }
 
 function priorityName(priority: string) {
@@ -1946,14 +2138,16 @@ function dimensionSelectionName(selection: BaselineRegressionRun["selection"]["d
 }
 
 function correctionStatusName(run: BaselineCorrectionRun) {
-  if (run.status === "processing") return "分析中"
-  if (run.status === "awaiting_confirmation") return "等待人工确认"
-  return "分析失败"
+  if (run.status === "processing") return correctionStageLabel(run.stage)
+  if (run.status === "awaiting_decision") return "等待人工决策"
+  if (run.status === "approved") return "已启用候选"
+  if (run.status === "rejected") return "已拒绝候选"
+  return "执行失败"
 }
 
 function correctionStatusTone(run: BaselineCorrectionRun): "active" | "success" | "danger" {
   if (run.status === "processing") return "active"
-  if (run.status === "awaiting_confirmation") return "success"
+  if (run.status === "awaiting_decision" || run.status === "approved") return "success"
   return "danger"
 }
 

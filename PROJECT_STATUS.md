@@ -1,7 +1,50 @@
 # 3d66 标签系统｜当前项目状态
 
-> 最后更新：2026-08-12
+> 最后更新：2026-08-13
 > 本文件只记录“现在做到哪里”；长期原则见 `PRODUCT.md` 和 `AGENTS.md`，历史背景见 `CODEX_HANDOFF.md`。
+
+## 最新实施：基准回归自动纠偏闭环（2026-08-13）
+
+- 当前隔离分支为 `codex/automated-correction-loop-v1`，基于前端信息架构交付分支
+  `codex/frontend-information-architecture-v1@2591e92`。本批只通过 Codeup 独立分支交付，
+  不合并、不部署到 `192.168.1.35:8081`，不清理临时验收目录。
+- “启动纠偏分析”已从人工中间阻塞改为持久化自动编排：冻结人工纠偏样本 → AI 分析 →
+  生成并校验统一机制候选 → 冻结候选 revision → 自动创建候选基准回归 → 汇总基准/候选
+  指标 → 最终人工启用或拒绝。提示词、维度、分类映射、加扣分与等级边界作为同一个机制
+  候选包处理，中间不再要求人工另建版本或配置参数。
+- `BaselineCorrectionRun` 新增自动阶段、候选 revision、候选回归、编排证据和最终决策审计；
+  旧 `awaiting_confirmation` 数据迁移为可重试失败并保留原报告。候选回归 Job 显式冻结
+  `v3_authoritative_bundle(candidate)`，不读取运行时现役投影替代候选。
+- 最终启用/拒绝接口收紧为系统管理员专属。项目管理员返回 403；回归未完成、回归建议未
+  通过或现役 projection 漂移时不能启用。批准前现役提示词和 v3 projection 均保持不变；
+  拒绝保留候选与证据；同结论幂等、冲突结论返回 409。
+- 机制发布轴与标签事实发布轴继续独立：本批批准动作只切换类目现役机制 revision 与提示词，
+  不创建 `PublishedLabel`、不发布标签事实、不触发存量重跑，也没有新增生产部署调用。
+- 前端纠偏页改为五阶段自动进度、基准/候选指标对比、退化项与最终启用/拒绝；失败时只提供
+  明确原因与重新执行，不再展示“另行创建候选版本”或“当前阻塞”。最终按钮只对系统管理员
+  展示，启用确认文案明确不会发布标签事实。
+- 本批与另一路“运行配置抽屉挤压修复”保持隔离；没有把该布局修复纳入本分支。
+
+当前验证：
+
+- 后端迁移、基准纠偏、类目 v3 revision、v3 权威 worker 四组专项：
+  `92 passed, 1 warning`（Python 3.12，隔离测试数据库）。
+- 前端信息架构合同与 workspace component browser contract 通过；TypeScript lint 通过；
+  `LABEL_LAB_BUILD_SHA=$(git rev-parse --short HEAD) npm --prefix frontend run build` 通过。
+  仅保留既有主 chunk 大于 500 kB 的构建 warning；`git diff --check` 通过。
+- Microsoft Edge `151.0.4129.72` 使用纯临时文件数据库与确定性生成器完成桌面验收：
+  `1440×900`、`1280×720` 均完整展示五阶段和指标对比，无文档级横向溢出、白屏、控制台
+  异常或 4xx/5xx；1280 宽阶段卡自动排为两列。启用按钮已打开原生确认框并按 Esc 取消，
+  随后 API 复核仍为 `awaiting_decision/decision`、`decision=null`，未发生候选启用。
+- Edge 验收目录保留在 `/tmp/labellab-edge-acceptance-final.JwLlgE`；临时 18081 服务已正常停止。
+  验收未调用真实调优模型、真实批量回归、真实生产数据或生产发布接口。
+
+仍未完成/明确交付门：
+
+- 尚未合并到 Codeup `main`，也未部署公司内网测试服务器。合并、部署、真实调优模型金丝雀、
+  真实候选回归和启用生产候选均需要后续单独复核与明确授权。
+- 统一 revision 正式纳入 `MechanismRelease/EvaluationPackage` 发布模型、追加式机制回滚入口、
+  真实存量重跑 Worker 与标签事实发布仍维持既有 Gap，不因本批自动纠偏闭环而扩大范围。
 
 ## 最新实施：前端信息架构与机制编辑器重构（2026-08-12）
 

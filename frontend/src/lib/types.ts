@@ -578,12 +578,46 @@ export type BaselineRegressionDetail = {
 
 export type BaselineCorrectionStatus =
   | "processing"
-  | "awaiting_confirmation"
+  | "awaiting_decision"
+  | "approved"
+  | "rejected"
   | "failed"
+
+export type BaselineCorrectionStage =
+  | "analysis"
+  | "candidate_generation"
+  | "candidate_validation"
+  | "regression"
+  | "decision"
+
+export type BaselineCorrectionRegressionReport = {
+  schema_version: "baseline-correction-regression-v1"
+  run_id: number
+  status: BaselineRegressionRun["status"]
+  comparable: boolean
+  baseline_metrics: BaselineLevelMetrics
+  candidate_metrics: BaselineLevelMetrics
+  exact_accuracy_delta: number | null
+  adjacent_accuracy_delta: number | null
+  regressions: Array<{
+    code: string
+    message: string
+    delta?: number
+  }>
+  recommendation: "approve" | "reject"
+  approval_allowed: boolean
+}
 
 export type BaselineCorrectionReport = {
   schema_version: "baseline-correction-report-v1"
-  status: "optimization_suggestion_pending_confirmation"
+  status: "automatic_candidate_pipeline"
+  category_key: string
+  baseline_run_id: number
+  selection: {
+    policy: "explicit_completed_deviations"
+    count: number
+    item_ids: number[]
+  }
   accuracy_report: {
     run_metrics: BaselineLevelMetrics
     selected_deviation_count: number
@@ -612,8 +646,38 @@ export type BaselineCorrectionReport = {
   risks: string[]
   publication: {
     allowed: false
-    next_state: "awaiting_confirmation"
+    next_state: "automatic_candidate_regression"
     message: string
+  }
+  candidate_regression?: BaselineCorrectionRegressionReport
+}
+
+export type BaselineCorrectionOrchestration = {
+  base_projection?: {
+    config_id: number
+    revision_id: number
+    revision: number
+    contract_hash: string
+  }
+  generated_candidate?: Record<string, unknown>
+  candidate_prompt?: {
+    id: number
+    stage: "A" | "B"
+    base_prompt_id: number
+    version: string
+  }
+  candidate_revision?: {
+    id: number
+    revision: number
+    contract_hash: string
+  }
+  candidate_summary?: Record<string, unknown>
+  tuning_model?: Record<string, unknown>
+  regression?: {
+    run_id: number
+    job_ids: number[]
+    source_run_id: number
+    baseline_set_fingerprint: string
   }
 }
 
@@ -623,15 +687,23 @@ export type BaselineCorrectionRun = {
   category_key: string
   selected_item_ids: number[]
   status: BaselineCorrectionStatus
+  stage: BaselineCorrectionStage
   progress: number
   attempt_count: number
   report: BaselineCorrectionReport | Record<string, never>
   blockers: Array<{ code: string; message: string; retryable: boolean }>
+  candidate_revision_id: number | null
+  regression_run_id: number | null
+  orchestration: BaselineCorrectionOrchestration
   error: {
     code: string
     message: string
     retryable: boolean
   } | null
+  decision: "approved" | "rejected" | null
+  decided_by: string | null
+  decided_at: string | null
+  decision_note: string
   created_by: string
   created_at: string
   updated_at: string

@@ -9910,7 +9910,7 @@ def get_baseline_correction(
 def decide_baseline_correction(
     correction_id: int,
     payload: BaselineCorrectionDecisionRequest,
-    user: User = Depends(_permission_user("releases:write")),
+    user: User = Depends(admin_user),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     row = db.get(BaselineCorrectionRun, correction_id)
