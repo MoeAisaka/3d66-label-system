@@ -7457,6 +7457,42 @@ def _migration_065_clear_legacy_correction_confirmation_blockers(
     _clear_legacy_correction_confirmation_blockers(connection)
 
 
+def _migration_066_add_workflow_kind(connection: Connection) -> None:
+    tables = {
+        row[0]
+        for row in connection.exec_driver_sql(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )
+    }
+    # Some historical forward-migration fixtures intentionally create only the
+    # tables needed by an earlier migration.  The production table is created
+    # by v44; if that table is absent, v66 must remain a no-op so the fixture
+    # can continue to the next version instead of failing on ALTER TABLE.
+    if "evaluation_production_runs" not in tables:
+        return
+    columns = {
+        row[1]
+        for row in connection.exec_driver_sql(
+            "PRAGMA table_info(evaluation_production_runs)"
+        )
+    }
+    if "workflow_kind" not in columns:
+        connection.exec_driver_sql(
+            "ALTER TABLE evaluation_production_runs "
+            "ADD COLUMN workflow_kind VARCHAR(20) NOT NULL DEFAULT 'incremental'"
+        )
+    connection.exec_driver_sql(
+        "CREATE INDEX IF NOT EXISTS ix_evaluation_production_runs_workflow_kind "
+        "ON evaluation_production_runs(workflow_kind, created_at)"
+    )
+    connection.exec_driver_sql(
+        "CREATE TRIGGER IF NOT EXISTS trg_evaluation_production_runs_workflow_kind "
+        "BEFORE INSERT ON evaluation_production_runs "
+        "WHEN NEW.workflow_kind NOT IN ('incremental','stock') "
+        "BEGIN SELECT RAISE(ABORT, 'invalid workflow_kind'); END"
+    )
+
+
 MIGRATIONS = [
     Migration(1, "add_sample_expected_level", _migration_001_add_sample_expected_level),
     Migration(2, "add_review_corrections", _migration_002_add_review_corrections),
@@ -7738,6 +7774,11 @@ MIGRATIONS = [
         65,
         "clear_legacy_correction_confirmation_blockers",
         _migration_065_clear_legacy_correction_confirmation_blockers,
+    ),
+    Migration(
+        66,
+        "add_evaluation_production_workflow_kind",
+        _migration_066_add_workflow_kind,
     ),
 ]
 

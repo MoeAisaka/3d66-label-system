@@ -623,6 +623,10 @@ class EvaluationProductionRun(Base):
             name="ck_evaluation_production_runs_status",
         ),
         CheckConstraint(
+            "workflow_kind IN ('incremental','stock')",
+            name="ck_evaluation_production_runs_workflow_kind",
+        ),
+        CheckConstraint(
             "json_valid(category_profile_snapshot_json) AND "
             "json_type(category_profile_snapshot_json, '$') = 'object'",
             name="ck_evaluation_production_runs_profile_json",
@@ -661,6 +665,9 @@ class EvaluationProductionRun(Base):
         ForeignKey("material_packages.id", ondelete="RESTRICT"), index=True
     )
     category_key: Mapped[str] = mapped_column(String(40), index=True)
+    workflow_kind: Mapped[str] = mapped_column(
+        String(20), default="incremental", server_default="incremental", index=True
+    )
     category_profile_snapshot_json: Mapped[str] = mapped_column(Text)
     category_profile_hash: Mapped[str] = mapped_column(String(64), index=True)
     job_ids_json: Mapped[str] = mapped_column(Text, default="[]")

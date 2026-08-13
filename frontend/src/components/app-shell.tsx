@@ -2,6 +2,7 @@ import { useState, type ReactNode } from "react"
 import {
   ArrowsClockwise,
   ChartLineUp,
+  Database,
   ListChecks,
   List,
   SignOut,
@@ -20,16 +21,16 @@ import { cn } from "@/lib/utils"
 
 export const primaryWorkflowDomains = [
   {
-    to: "/workflow/production-line",
+    to: "/workflow/incremental",
     matches: [
+      "/workflow/incremental",
       "/workflow/production-line",
       "/workflow/materials/packages",
       "/workflow/materials/assets",
-      "/workflow/materials/jobs",
       "/assets",
     ],
     index: "01",
-    label: "开始评测",
+    label: "增量评测",
     icon: ArrowsClockwise,
     tabs: [
       { to: "/workflow/materials/packages", label: "1 导入素材" },
@@ -38,13 +39,35 @@ export const primaryWorkflowDomains = [
     ],
   },
   {
-    to: "/workflow/optimization/baseline-regression",
-    matches: ["/workflow/optimization/baseline-regression"],
-    index: "B",
+    to: "/workflow/stock",
+    matches: ["/workflow/stock", "/workflow/optimization/baseline-regression"],
+    index: "02",
     label: "存量回归",
     icon: ChartLineUp,
     tabs: [
       { to: "/workflow/optimization/baseline-regression", label: "基准回归与处理纠偏" },
+    ],
+  },
+  {
+    to: "/workflow/operations",
+    matches: ["/workflow/operations", "/workflow/materials/jobs"],
+    index: "03",
+    label: "运行中心",
+    icon: ArrowsClockwise,
+    tabs: [
+      { to: "/workflow/operations", label: "运行总览" },
+      { to: "/workflow/materials/jobs", label: "任务明细" },
+    ],
+  },
+  {
+    to: "/workflow/quality-assets",
+    matches: ["/workflow/quality-assets", "/legacy/sample-sets"],
+    index: "04",
+    label: "质量资产",
+    icon: Database,
+    tabs: [
+      { to: "/workflow/quality-assets", label: "黄金数据集" },
+      { to: "/legacy/sample-sets", label: "完整样本库" },
     ],
   },
   {
@@ -56,7 +79,7 @@ export const primaryWorkflowDomains = [
       "/workflow/review/completed",
       "/legacy/review",
     ],
-    index: "02",
+    index: "05",
     label: "处理纠偏",
     icon: ListChecks,
     tabs: [
@@ -69,7 +92,7 @@ export const primaryWorkflowDomains = [
   {
     to: "/workflow/releases/packages",
     matches: ["/workflow/releases/packages"],
-    index: "03",
+    index: "06",
     label: "二审评测包",
     icon: SquaresFour,
     tabs: [

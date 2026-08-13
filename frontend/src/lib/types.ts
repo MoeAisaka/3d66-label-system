@@ -800,6 +800,8 @@ export type EvaluationProductionRunStatus =
   | "failed"
   | "archived"
 
+export type WorkflowKind = "incremental" | "stock"
+
 export type EvaluationProductionProgress = {
   percent: number
   current_step: string
@@ -842,6 +844,7 @@ export type EvaluationProductionRun = {
     active_asset_count: number
   }
   category_key: string
+  workflow_kind: WorkflowKind
   category: { key: string; name: string; configuration_hash: string }
   job_ids: number[]
   job_counts: {

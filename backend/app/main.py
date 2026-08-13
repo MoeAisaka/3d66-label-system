@@ -8806,6 +8806,7 @@ def _baseline_run_summary(run: BaselineRegressionRun) -> dict[str, Any]:
         "id": run.id,
         "baseline_set_id": run.baseline_set_id,
         "category_key": run.category_key,
+        "workflow_kind": "stock",
         "sequence_no": run.sequence_no,
         "previous_run_id": run.previous_run_id,
         "strategy_bundle_id": run.strategy_bundle_id,

@@ -80,6 +80,7 @@ MIGRATION_NAMES = [
     "add_category_evaluation_v3_revisions",
     "automate_baseline_correction_loop",
     "clear_legacy_correction_confirmation_blockers",
+    "add_evaluation_production_workflow_kind",
 ]
 
 
@@ -832,7 +833,7 @@ def test_v63_backfills_immutable_category_evaluation_revisions(tmp_path) -> None
                     applied_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
                 )
             """)
-            for version, name in enumerate(MIGRATION_NAMES[:-3], start=1):
+            for version, name in enumerate(MIGRATION_NAMES[:-4], start=1):
                 connection.exec_driver_sql(
                     "INSERT INTO schema_migrations(version, name) VALUES (?, ?)",
                     (version, name),
@@ -1050,7 +1051,7 @@ def test_v64_upgrades_legacy_correction_runs_to_automatic_pipeline(tmp_path) -> 
                     applied_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
                 )
             """)
-            for version, name in enumerate(MIGRATION_NAMES[:-2], start=1):
+            for version, name in enumerate(MIGRATION_NAMES[:-3], start=1):
                 connection.exec_driver_sql(
                     "INSERT INTO schema_migrations(version, name) VALUES (?, ?)",
                     (version, name),
