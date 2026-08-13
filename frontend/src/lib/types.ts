@@ -1199,12 +1199,11 @@ export type QueueStatusItem = {
 }
 
 export type QueueStatus = {
-  policy: {
-    version: string
-    global_limit: number
-    shares: Record<string, number>
-    weights: Record<string, number>
-  }
+  version: string
+  global_limit: number
+  shares: Record<string, number>
+  weights: Record<string, number>
+  validation_boost: number
   queues: QueueStatusItem[]
   credentials_configured: boolean
   control_paused: boolean

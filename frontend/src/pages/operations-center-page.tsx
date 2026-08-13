@@ -38,7 +38,7 @@ export function OperationsCenterPage() {
           <Metric label="运行" value={String(control.data?.processing_count ?? "—")} />
           <Metric label="暂停" value={String(control.data?.paused_count ?? "—")} />
           <Metric label="失败待处理" value={String(failures.length)} tone={failures.length ? "warning" : "success"} />
-          <Metric label="全局并发" value={String(queues.data?.policy.global_limit ?? "—")} tone={queues.isError ? "warning" : "success"} />
+          <Metric label="全局并发" value={String(queues.data?.global_limit ?? "—")} tone={queues.isError ? "warning" : "success"} />
         </section>
         <section className="border-y border-[var(--line-strong)] bg-white px-5 py-5 md:px-6">
           <div className="flex flex-wrap items-center justify-between gap-3"><div><p className="text-xs font-semibold text-[var(--muted)]">主要调度证据</p><h2 className="mt-1 text-lg font-bold">队列、配额与阻塞</h2></div><Badge tone={queues.data?.control_paused ? "warning" : "success"}>{queues.data?.control_paused ? "全局暂停" : "调度可用"}</Badge></div>
