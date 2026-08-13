@@ -79,6 +79,7 @@ MIGRATION_NAMES = [
     "add_mechanism_release_axes",
     "add_category_evaluation_v3_revisions",
     "automate_baseline_correction_loop",
+    "clear_legacy_correction_confirmation_blockers",
 ]
 
 
@@ -831,7 +832,7 @@ def test_v63_backfills_immutable_category_evaluation_revisions(tmp_path) -> None
                     applied_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
                 )
             """)
-            for version, name in enumerate(MIGRATION_NAMES[:-2], start=1):
+            for version, name in enumerate(MIGRATION_NAMES[:-3], start=1):
                 connection.exec_driver_sql(
                     "INSERT INTO schema_migrations(version, name) VALUES (?, ?)",
                     (version, name),
@@ -1049,7 +1050,7 @@ def test_v64_upgrades_legacy_correction_runs_to_automatic_pipeline(tmp_path) -> 
                     applied_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
                 )
             """)
-            for version, name in enumerate(MIGRATION_NAMES[:-1], start=1):
+            for version, name in enumerate(MIGRATION_NAMES[:-2], start=1):
                 connection.exec_driver_sql(
                     "INSERT INTO schema_migrations(version, name) VALUES (?, ?)",
                     (version, name),
@@ -1096,7 +1097,8 @@ def test_v64_upgrades_legacy_correction_runs_to_automatic_pipeline(tmp_path) -> 
                 ) VALUES (
                     1, 'legacy-correction', 9, 'space_image', '[10]', '{}',
                     'awaiting_confirmation', 100, '{"legacy":true}',
-                    '[{"code":"human_confirmation_required"}]', 1,
+                    '[{"code":"human_confirmation_required"},
+                      {"code":"evidence_retained"}]', 1,
                     'migration-test', '2026-08-12 12:00:00'
                 )
             """)
@@ -1129,10 +1131,44 @@ def test_v64_upgrades_legacy_correction_runs_to_automatic_pipeline(tmp_path) -> 
                 "analysis",
                 0,
                 '{"legacy":true}',
-                '[{"code":"human_confirmation_required"}]',
+                '[{"code":"evidence_retained"}]',
                 "LEGACY_CORRECTION_INCOMPLETE",
                 "旧版纠偏任务未创建候选或回归，请重新执行",
                 "2026-08-12 12:00:00",
+            )
+
+            connection.exec_driver_sql("""
+                INSERT INTO baseline_correction_runs (
+                    id, idempotency_key, baseline_run_id, category_key,
+                    selected_item_ids_json, input_snapshot_json, status,
+                    stage, progress, report_json, blockers_json,
+                    orchestration_json, error_code, error_message,
+                    attempt_count, decision_note, created_by,
+                    created_at, updated_at
+                ) VALUES (
+                    3, 'unrelated-failure', 9, 'space_image', '[12]', '{}',
+                    'failed', 'analysis', 0, '{}',
+                    '[{"code":"worker_timeout","message":"保留该失败证据"}]',
+                    '{}', 'WORKER_TIMEOUT', '保留该失败说明', 1, '',
+                    'migration-test', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                )
+            """)
+            run_migrations(connection)
+            assert connection.exec_driver_sql(
+                "SELECT blockers_json, error_code, error_message "
+                "FROM baseline_correction_runs WHERE id=1"
+            ).one() == (
+                '[{"code":"evidence_retained"}]',
+                "LEGACY_CORRECTION_INCOMPLETE",
+                "旧版纠偏任务未创建候选或回归，请重新执行",
+            )
+            assert connection.exec_driver_sql(
+                "SELECT blockers_json, error_code, error_message "
+                "FROM baseline_correction_runs WHERE id=3"
+            ).one() == (
+                '[{"code":"worker_timeout","message":"保留该失败证据"}]',
+                "WORKER_TIMEOUT",
+                "保留该失败说明",
             )
 
             connection.exec_driver_sql("""
@@ -1156,6 +1192,61 @@ def test_v64_upgrades_legacy_correction_runs_to_automatic_pipeline(tmp_path) -> 
             assert connection.exec_driver_sql(
                 "SELECT status, decision FROM baseline_correction_runs WHERE id=2"
             ).one() == ("approved", "approved")
+    finally:
+        engine.dispose()
+
+
+def test_v65_clears_only_legacy_confirmation_blockers_idempotently(tmp_path) -> None:
+    engine = _engine(tmp_path, "v65-legacy-correction-blockers.db")
+    try:
+        migration = next(item for item in MIGRATIONS if item.version == 65)
+        with engine.begin() as connection:
+            connection.exec_driver_sql("""
+                CREATE TABLE baseline_correction_runs (
+                    id INTEGER PRIMARY KEY,
+                    status VARCHAR(40) NOT NULL,
+                    error_code VARCHAR(80) NOT NULL DEFAULT '',
+                    blockers_json TEXT NOT NULL DEFAULT '[]',
+                    error_message TEXT NOT NULL DEFAULT ''
+                )
+            """)
+            connection.exec_driver_sql("""
+                INSERT INTO baseline_correction_runs (
+                    id, status, error_code, blockers_json, error_message
+                ) VALUES (
+                    101, 'failed', 'LEGACY_CORRECTION_INCOMPLETE',
+                    '[{"code":"human_confirmation_required"},
+                      {"code":"evidence_retained"}]', '失败说明'
+                )
+            """)
+            connection.exec_driver_sql("""
+                INSERT INTO baseline_correction_runs (
+                    id, status, error_code, blockers_json, error_message
+                ) VALUES (
+                    102, 'failed', 'WORKER_TIMEOUT',
+                    '[{"code":"human_confirmation_required"}]', '不要清理'
+                )
+            """)
+
+            migration.up(connection)
+            migration.up(connection)
+
+            assert connection.exec_driver_sql(
+                "SELECT blockers_json, error_code, error_message "
+                "FROM baseline_correction_runs WHERE id = 101"
+            ).one() == (
+                '[{"code":"evidence_retained"}]',
+                "LEGACY_CORRECTION_INCOMPLETE",
+                "失败说明",
+            )
+            assert connection.exec_driver_sql(
+                "SELECT blockers_json, error_code, error_message "
+                "FROM baseline_correction_runs WHERE id = 102"
+            ).one() == (
+                '[{"code":"human_confirmation_required"}]',
+                "WORKER_TIMEOUT",
+                "不要清理",
+            )
     finally:
         engine.dispose()
 

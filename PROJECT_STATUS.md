@@ -3,6 +3,31 @@
 > 最后更新：2026-08-13
 > 本文件只记录“现在做到哪里”；长期原则见 `PRODUCT.md` 和 `AGENTS.md`，历史背景见 `CODEX_HANDOFF.md`。
 
+## 最新修复：历史纠偏任务移除旧人工确认阻塞（2026-08-13）
+
+- 当前隔离分支为 `codex/legacy-correction-blocker-cleanup-v1`，基于 Codeup
+  `main@e570c4e`。本修复只处理自动纠偏闭环上线前遗留的失败记录，不修改新纠偏任务的
+  五阶段编排、最终人工启用/拒绝权限、机制发布轴、标签事实发布轴或存量重跑合同。
+- 根因是迁移 64 把旧 `awaiting_confirmation` 任务转为
+  `LEGACY_CORRECTION_INCOMPLETE` 失败记录时，原样复制了
+  `human_confirmation_required` blocker；前端因此继续显示已经废止的人工中间门禁。
+- 新增迁移 65，只对 `status=failed`、错误码为
+  `LEGACY_CORRECTION_INCOMPLETE` 的历史记录删除
+  `human_confirmation_required` blocker。失败状态、错误码、失败说明和其他 blocker 证据均
+  保留；解析失败或结构异常的数据不覆盖。迁移可重复执行且幂等。
+- 同步收紧迁移 64：新数据库从旧表升级时使用相同的精确过滤逻辑，避免未来新安装再次写入
+  误导性 blocker。失败页既有文案继续说明重新执行会沿用冻结样本，无需补充任何配置。
+
+当前验证：
+
+- TDD 红灯已确认旧迁移会保留 `human_confirmation_required`；修复后的 v64/v65 定向回归
+  `2 passed`，迁移全套 `40 passed`，基准回归专项 `11 passed, 1 warning`。
+- 后端全量使用隔离 `DATA_DIR`：`1254 passed, 1 skipped, 6 warnings`（Python 3.12）。
+- 前端全部合同脚本、lightbox 浏览器合同、TypeScript lint 与带 build SHA 的 Vite production
+  build 均通过；仅保留既有主 chunk 大于 500 kB 的构建 warning。`git diff --check` 通过。
+- Codeup MR、共享测试部署及 Edge 实机验收结果以后续部署回执为准；在完成这些步骤前不把
+  本地验证视为共享环境已修复。
+
 ## 最新实施：基准回归自动纠偏闭环（2026-08-13）
 
 - 当前隔离分支为 `codex/automated-correction-loop-v1`，基于前端信息架构交付分支
