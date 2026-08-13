@@ -1608,6 +1608,51 @@ export type QualityAssetsSummaryBucket = {
   truth_complete: number
 }
 
+export type ProjectionReconciliation = {
+  id: number
+  contract_id: number
+  manifest_id: number
+  target_table: string
+  status: "matched" | "drift" | "failed"
+  reason: string
+  row_count: number
+  missing_count: number
+  unexpected_count: number
+  expected_payload_hash: string
+  payload_hash: string
+  version_match: boolean
+  checkpoint: Record<string, unknown>
+  compensation: {
+    retryable?: boolean
+    strategy?: string
+    canonical_rows_mutated?: boolean
+  }
+  created_at: string
+}
+
+export type ProjectionContract = {
+  id: number
+  contract_key: string
+  version: number
+  target_role: "unified_dimension" | "search_labels" | "quality_governance"
+  table_name: string
+  environment: "local" | "test"
+  primary_key: string[]
+  field_mappings: Record<string, string>
+  input_versions: Record<string, unknown>
+  mode: "snapshot" | "incremental_outbox"
+  idempotency_key_template: string
+  checkpoint: Record<string, unknown>
+  reconciliation: Record<string, unknown>
+  rollback: Record<string, unknown>
+  owner: string
+  status: "draft" | "active" | "retired"
+  contract_hash: string
+  created_by: string
+  created_at: string
+  latest_reconciliation: ProjectionReconciliation | null
+}
+
 export type SampleSetItem = {
   id: number
   asset_id: number

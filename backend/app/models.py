@@ -3035,6 +3035,132 @@ class ConsumerSyncCheckpoint(Base):
     )
 
 
+class ProjectionContract(Base):
+    __tablename__ = "projection_contracts"
+    __table_args__ = (
+        UniqueConstraint(
+            "contract_key", "version", name="uq_projection_contract_version"
+        ),
+        CheckConstraint(
+            "target_role IN ('unified_dimension','search_labels','quality_governance')",
+            name="ck_projection_contract_target_role",
+        ),
+        CheckConstraint(
+            "environment IN ('local','test')",
+            name="ck_projection_contract_environment",
+        ),
+        CheckConstraint(
+            "mode IN ('snapshot','incremental_outbox')",
+            name="ck_projection_contract_mode",
+        ),
+        CheckConstraint(
+            "status IN ('draft','active','retired')",
+            name="ck_projection_contract_status",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    contract_key: Mapped[str] = mapped_column(String(120), index=True)
+    version: Mapped[int] = mapped_column(Integer)
+    target_role: Mapped[str] = mapped_column(String(40), index=True)
+    table_name: Mapped[str] = mapped_column(String(120), index=True)
+    environment: Mapped[str] = mapped_column(String(20), default="local", index=True)
+    primary_key_json: Mapped[str] = mapped_column(Text)
+    field_mappings_json: Mapped[str] = mapped_column(Text)
+    input_versions_json: Mapped[str] = mapped_column(Text, default="{}")
+    mode: Mapped[str] = mapped_column(String(30), default="snapshot")
+    idempotency_key_template: Mapped[str] = mapped_column(String(300))
+    checkpoint_json: Mapped[str] = mapped_column(Text, default="{}")
+    reconciliation_json: Mapped[str] = mapped_column(Text, default="{}")
+    rollback_json: Mapped[str] = mapped_column(Text, default="{}")
+    owner: Mapped[str] = mapped_column(String(120))
+    status: Mapped[str] = mapped_column(String(20), default="draft", index=True)
+    contract_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    created_by: Mapped[str] = mapped_column(String(80), default="system")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, index=True
+    )
+
+
+class ProjectionManifest(Base):
+    __tablename__ = "projection_manifests"
+    __table_args__ = (
+        UniqueConstraint(
+            "contract_id", "manifest_hash", name="uq_projection_contract_manifest"
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    contract_id: Mapped[int] = mapped_column(
+        ForeignKey("projection_contracts.id", ondelete="RESTRICT"), index=True
+    )
+    manifest_hash: Mapped[str] = mapped_column(String(64), index=True)
+    payload_hash: Mapped[str] = mapped_column(String(64), index=True)
+    row_count: Mapped[int] = mapped_column(Integer)
+    content_keys_json: Mapped[str] = mapped_column(Text)
+    input_versions_json: Mapped[str] = mapped_column(Text)
+    rows_json: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, index=True
+    )
+
+
+class LocalProjectionRow(Base):
+    __tablename__ = "local_projection_rows"
+    __table_args__ = (
+        UniqueConstraint(
+            "table_name", "content_key", name="uq_local_projection_table_content"
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    table_name: Mapped[str] = mapped_column(String(120), index=True)
+    content_key: Mapped[str] = mapped_column(String(320), index=True)
+    contract_id: Mapped[int] = mapped_column(
+        ForeignKey("projection_contracts.id", ondelete="RESTRICT"), index=True
+    )
+    contract_version: Mapped[int] = mapped_column(Integer)
+    published_label_id: Mapped[int] = mapped_column(Integer, index=True)
+    label_version: Mapped[int] = mapped_column(Integer)
+    payload_json: Mapped[str] = mapped_column(Text)
+    payload_hash: Mapped[str] = mapped_column(String(64), index=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+
+class ProjectionReconciliation(Base):
+    __tablename__ = "projection_reconciliations"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('matched','drift','failed')",
+            name="ck_projection_reconciliation_status",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    contract_id: Mapped[int] = mapped_column(
+        ForeignKey("projection_contracts.id", ondelete="RESTRICT"), index=True
+    )
+    manifest_id: Mapped[int] = mapped_column(
+        ForeignKey("projection_manifests.id", ondelete="RESTRICT"), index=True
+    )
+    target_table: Mapped[str] = mapped_column(String(120), index=True)
+    status: Mapped[str] = mapped_column(String(20), index=True)
+    reason: Mapped[str] = mapped_column(String(80), default="")
+    row_count: Mapped[int] = mapped_column(Integer, default=0)
+    missing_count: Mapped[int] = mapped_column(Integer, default=0)
+    unexpected_count: Mapped[int] = mapped_column(Integer, default=0)
+    expected_payload_hash: Mapped[str] = mapped_column(String(64))
+    actual_payload_hash: Mapped[str] = mapped_column(String(64))
+    version_match: Mapped[bool] = mapped_column(Boolean, default=False)
+    checkpoint_json: Mapped[str] = mapped_column(Text, default="{}")
+    compensation_json: Mapped[str] = mapped_column(Text, default="{}")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, index=True
+    )
+
+
 class AuditEvent(Base):
     __tablename__ = "audit_events"
     __table_args__ = (

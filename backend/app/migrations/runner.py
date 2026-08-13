@@ -7493,6 +7493,124 @@ def _migration_066_add_workflow_kind(connection: Connection) -> None:
     )
 
 
+def _migration_067_add_projection_contract_registry(connection: Connection) -> None:
+    """Add append-only projection contracts and local reconciliation storage."""
+    connection.exec_driver_sql("""
+        CREATE TABLE IF NOT EXISTS projection_contracts (
+            id INTEGER PRIMARY KEY,
+            contract_key VARCHAR(120) NOT NULL,
+            version INTEGER NOT NULL,
+            target_role VARCHAR(40) NOT NULL
+                CHECK(target_role IN ('unified_dimension','search_labels','quality_governance')),
+            table_name VARCHAR(120) NOT NULL,
+            environment VARCHAR(20) NOT NULL DEFAULT 'local'
+                CHECK(environment IN ('local','test')),
+            primary_key_json TEXT NOT NULL,
+            field_mappings_json TEXT NOT NULL,
+            input_versions_json TEXT NOT NULL DEFAULT '{}',
+            mode VARCHAR(30) NOT NULL DEFAULT 'snapshot'
+                CHECK(mode IN ('snapshot','incremental_outbox')),
+            idempotency_key_template VARCHAR(300) NOT NULL,
+            checkpoint_json TEXT NOT NULL DEFAULT '{}',
+            reconciliation_json TEXT NOT NULL DEFAULT '{}',
+            rollback_json TEXT NOT NULL DEFAULT '{}',
+            owner VARCHAR(120) NOT NULL,
+            status VARCHAR(20) NOT NULL DEFAULT 'draft'
+                CHECK(status IN ('draft','active','retired')),
+            contract_hash VARCHAR(64) NOT NULL UNIQUE,
+            created_by VARCHAR(80) NOT NULL DEFAULT 'system',
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(contract_key, version)
+        )
+    """)
+    connection.exec_driver_sql("""
+        CREATE TABLE IF NOT EXISTS projection_manifests (
+            id INTEGER PRIMARY KEY,
+            contract_id INTEGER NOT NULL REFERENCES projection_contracts(id) ON DELETE RESTRICT,
+            manifest_hash VARCHAR(64) NOT NULL,
+            payload_hash VARCHAR(64) NOT NULL,
+            row_count INTEGER NOT NULL,
+            content_keys_json TEXT NOT NULL,
+            input_versions_json TEXT NOT NULL,
+            rows_json TEXT NOT NULL,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(contract_id, manifest_hash)
+        )
+    """)
+    connection.exec_driver_sql("""
+        CREATE TABLE IF NOT EXISTS local_projection_rows (
+            id INTEGER PRIMARY KEY,
+            table_name VARCHAR(120) NOT NULL,
+            content_key VARCHAR(320) NOT NULL,
+            contract_id INTEGER NOT NULL REFERENCES projection_contracts(id) ON DELETE RESTRICT,
+            contract_version INTEGER NOT NULL,
+            published_label_id INTEGER NOT NULL,
+            label_version INTEGER NOT NULL,
+            payload_json TEXT NOT NULL,
+            payload_hash VARCHAR(64) NOT NULL,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(table_name, content_key)
+        )
+    """)
+    connection.exec_driver_sql("""
+        CREATE TABLE IF NOT EXISTS projection_reconciliations (
+            id INTEGER PRIMARY KEY,
+            contract_id INTEGER NOT NULL REFERENCES projection_contracts(id) ON DELETE RESTRICT,
+            manifest_id INTEGER NOT NULL REFERENCES projection_manifests(id) ON DELETE RESTRICT,
+            target_table VARCHAR(120) NOT NULL,
+            status VARCHAR(20) NOT NULL
+                CHECK(status IN ('matched','drift','failed')),
+            reason VARCHAR(80) NOT NULL DEFAULT '',
+            row_count INTEGER NOT NULL DEFAULT 0,
+            missing_count INTEGER NOT NULL DEFAULT 0,
+            unexpected_count INTEGER NOT NULL DEFAULT 0,
+            expected_payload_hash VARCHAR(64) NOT NULL,
+            actual_payload_hash VARCHAR(64) NOT NULL,
+            version_match BOOLEAN NOT NULL DEFAULT 0,
+            checkpoint_json TEXT NOT NULL DEFAULT '{}',
+            compensation_json TEXT NOT NULL DEFAULT '{}',
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    for statement in (
+        "CREATE INDEX IF NOT EXISTS ix_projection_contracts_key "
+        "ON projection_contracts(contract_key, version)",
+        "CREATE INDEX IF NOT EXISTS ix_projection_contracts_target "
+        "ON projection_contracts(target_role, table_name, status)",
+        "CREATE INDEX IF NOT EXISTS ix_projection_manifests_contract "
+        "ON projection_manifests(contract_id, id)",
+        "CREATE INDEX IF NOT EXISTS ix_local_projection_rows_table "
+        "ON local_projection_rows(table_name, content_key)",
+        "CREATE INDEX IF NOT EXISTS ix_projection_reconciliations_contract "
+        "ON projection_reconciliations(contract_id, id)",
+    ):
+        connection.exec_driver_sql(statement)
+    for statement in (
+        """CREATE TRIGGER IF NOT EXISTS trg_projection_contracts_immutable
+        BEFORE UPDATE ON projection_contracts
+        BEGIN SELECT RAISE(ABORT, 'ProjectionContract is immutable'); END""",
+        """CREATE TRIGGER IF NOT EXISTS trg_projection_contracts_no_delete
+        BEFORE DELETE ON projection_contracts
+        BEGIN SELECT RAISE(ABORT, 'ProjectionContract cannot be deleted'); END""",
+        """CREATE TRIGGER IF NOT EXISTS trg_projection_manifests_append_only
+        BEFORE UPDATE ON projection_manifests
+        BEGIN SELECT RAISE(ABORT, 'ProjectionManifest is append-only'); END""",
+        """CREATE TRIGGER IF NOT EXISTS trg_projection_manifests_no_delete
+        BEFORE DELETE ON projection_manifests
+        BEGIN SELECT RAISE(ABORT, 'ProjectionManifest cannot be deleted'); END""",
+        """CREATE TRIGGER IF NOT EXISTS trg_projection_reconciliations_append_only
+        BEFORE UPDATE ON projection_reconciliations
+        BEGIN SELECT RAISE(ABORT, 'ProjectionReconciliation is append-only'); END""",
+        """CREATE TRIGGER IF NOT EXISTS trg_projection_reconciliations_no_delete
+        BEFORE DELETE ON projection_reconciliations
+        BEGIN SELECT RAISE(ABORT, 'ProjectionReconciliation cannot be deleted'); END""",
+    ):
+        connection.exec_driver_sql(statement)
+    violations = connection.exec_driver_sql("PRAGMA foreign_key_check").fetchall()
+    if violations:
+        raise RuntimeError(f"v67 投影合同迁移外键校验失败：{violations[:3]}")
+
+
 MIGRATIONS = [
     Migration(1, "add_sample_expected_level", _migration_001_add_sample_expected_level),
     Migration(2, "add_review_corrections", _migration_002_add_review_corrections),
@@ -7779,6 +7897,11 @@ MIGRATIONS = [
         66,
         "add_evaluation_production_workflow_kind",
         _migration_066_add_workflow_kind,
+    ),
+    Migration(
+        67,
+        "add_projection_contract_registry",
+        _migration_067_add_projection_contract_registry,
     ),
 ]
 

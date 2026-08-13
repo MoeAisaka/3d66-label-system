@@ -125,9 +125,22 @@ from .models import (
     LabelRelease,
     PublishedLabel,
     ConsumerSyncCheckpoint,
+    ProjectionContract,
+    ProjectionManifest,
+    ProjectionReconciliation,
     User,
 )
 from .audit import append_audit_event, canonical_json
+from .projection_contracts import (
+    LocalProjectionAdapter,
+    ProjectionContractError,
+    build_projection_manifest,
+    contract_payload as projection_contract_payload,
+    create_contract_version,
+    manifest_payload as projection_manifest_payload,
+    persist_reconciliation,
+    reconciliation_payload as projection_reconciliation_payload,
+)
 from .quality_assets import build_quality_asset_export
 from .baseline_regression import (
     LEVELS as BASELINE_LEVELS,
@@ -579,6 +592,27 @@ class PublishedLabelExportRequest(BaseModel):
 class ConsumerCheckpointRequest(BaseModel):
     consumer_name: str = Field(min_length=1, max_length=120)
     cursor: int = Field(ge=0)
+
+
+class ProjectionContractCreateRequest(BaseModel):
+    contract_key: str = Field(min_length=1, max_length=120, pattern=r"^[a-z][a-z0-9_-]*$")
+    target_role: Literal["unified_dimension", "search_labels", "quality_governance"]
+    table_name: Literal[
+        "unified_dimension_table",
+        "search_labels_small_table",
+        "quality_governance_small_table",
+    ]
+    environment: Literal["local", "test"] = "local"
+    primary_key: list[str] = Field(min_length=1, max_length=4)
+    field_mappings: dict[str, str] = Field(min_length=1, max_length=200)
+    input_versions: dict[str, Any] = Field(default_factory=dict)
+    mode: Literal["snapshot", "incremental_outbox"] = "snapshot"
+    idempotency_key_template: str = Field(min_length=1, max_length=300)
+    checkpoint: dict[str, Any] = Field(default_factory=dict)
+    reconciliation: dict[str, Any] = Field(default_factory=dict)
+    rollback: dict[str, Any] = Field(default_factory=dict)
+    owner: str = Field(min_length=1, max_length=120)
+    status: Literal["draft", "active", "retired"] = "draft"
 
 
 class BenchmarkVariantRequest(BaseModel):
@@ -7595,6 +7629,107 @@ def integration_status(_user: User = Depends(require_permission("releases:read")
         },
         "external_writes_enabled": False,
     }
+
+
+@app.get("/api/projection-contracts")
+def list_projection_contracts(
+    _user: User = Depends(require_permission("releases:read")),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    contracts = db.scalars(
+        select(ProjectionContract).order_by(
+            ProjectionContract.contract_key.asc(),
+            ProjectionContract.version.desc(),
+        )
+    ).all()
+    latest_reconciliation_by_contract: dict[int, ProjectionReconciliation] = {}
+    for record in db.scalars(
+        select(ProjectionReconciliation).order_by(
+            ProjectionReconciliation.contract_id.asc(),
+            ProjectionReconciliation.id.desc(),
+        )
+    ).all():
+        latest_reconciliation_by_contract.setdefault(record.contract_id, record)
+    items = []
+    for contract in contracts:
+        payload = projection_contract_payload(contract)
+        latest = latest_reconciliation_by_contract.get(contract.id)
+        payload["latest_reconciliation"] = (
+            projection_reconciliation_payload(latest) if latest else None
+        )
+        items.append(payload)
+    return {"items": items}
+
+
+@app.post("/api/projection-contracts")
+def create_projection_contract(
+    payload: ProjectionContractCreateRequest,
+    user: User = Depends(admin_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    try:
+        contract = create_contract_version(
+            db,
+            contract_key=payload.contract_key,
+            target_role=payload.target_role,
+            table_name=payload.table_name,
+            environment=payload.environment,
+            primary_key=payload.primary_key,
+            field_mappings=payload.field_mappings,
+            input_versions=payload.input_versions,
+            mode=payload.mode,
+            idempotency_key_template=payload.idempotency_key_template,
+            checkpoint=payload.checkpoint,
+            reconciliation=payload.reconciliation,
+            rollback=payload.rollback,
+            owner=payload.owner,
+            status=payload.status,
+            created_by=user.username,
+        )
+    except ProjectionContractError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from None
+    db.commit()
+    db.refresh(contract)
+    return projection_contract_payload(contract)
+
+
+@app.post("/api/projection-contracts/{contract_id}/manifest")
+def create_projection_manifest(
+    contract_id: int,
+    _user: User = Depends(require_permission("releases:read")),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    contract = db.get(ProjectionContract, contract_id)
+    if contract is None:
+        raise HTTPException(status_code=404, detail="投影合同不存在")
+    manifest, payload = build_projection_manifest(db, contract=contract)
+    db.commit()
+    db.refresh(manifest)
+    return {**payload, "id": manifest.id, "created_at": manifest.created_at}
+
+
+@app.post("/api/projection-contracts/{contract_id}/reconcile")
+def reconcile_projection_contract(
+    contract_id: int,
+    _user: User = Depends(admin_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    contract = db.get(ProjectionContract, contract_id)
+    if contract is None:
+        raise HTTPException(status_code=404, detail="投影合同不存在")
+    manifest, _payload = build_projection_manifest(db, contract=contract)
+    adapter = LocalProjectionAdapter()
+    adapter.apply(db, contract=contract, manifest=manifest)
+    result = adapter.reconcile(db, contract=contract, manifest=manifest)
+    record = persist_reconciliation(
+        db,
+        contract=contract,
+        manifest=manifest,
+        result=result,
+    )
+    db.commit()
+    db.refresh(record)
+    return projection_reconciliation_payload(record)
 
 
 @app.post(

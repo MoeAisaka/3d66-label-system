@@ -342,7 +342,7 @@ git commit -m "feat: consolidate quality assets and golden exports"
 - Built-in local targets: `unified_dimension_table`, `search_labels_small_table`, `quality_governance_small_table`, all persisted under test/local storage only.
 - The adapter rejects candidate mechanisms, unpublished labels, raw model responses and manual-process fields.
 
-- [ ] **Step 1: Write failing contract/adapter tests.**
+- [x] **Step 1: Write failing contract/adapter tests.**
 
 ```python
 def test_manifest_reads_only_published_labels(db, published_label, candidate_release):
@@ -357,19 +357,19 @@ def test_reconcile_detects_hash_and_version_drift(db, published_label):
     assert result.reason == "payload_hash_mismatch"
 ```
 
-- [ ] **Step 2: Run the focused tests and confirm failure.**
+- [x] **Step 2: Run the focused tests and confirm failure.**
 
 Run: `pytest backend/tests/test_projection_contracts.py -q`
 
-- [ ] **Step 3: Add immutable/versioned registry models and deterministic manifest logic.**
+- [x] **Step 3: Add immutable/versioned registry models and deterministic manifest logic.**
 
 Use append-only contract versions. Every manifest records asset/version, mechanism version, model version and label release version. A failed table projection never mutates Canonical label rows and creates a reconciliation record with retry/compensation metadata.
 
-- [ ] **Step 4: Add the governance UI drawer.**
+- [x] **Step 4: Add the governance UI drawer.**
 
 Show the unified large table and small-table contracts as compact rows; open mapping, checkpoint, drift and rollback details in a drawer. Do not render full payload JSON on the primary page.
 
-- [ ] **Step 5: Run tests and commit.**
+- [x] **Step 5: Run tests and commit.**
 
 Run: `pytest backend/tests/test_projection_contracts.py backend/tests/test_unified_label_platform.py -q && cd frontend && npm run build`
 

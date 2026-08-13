@@ -65,6 +65,7 @@ const managementGroups = [
       { to: "/workflow/releases/decisions", label: "正式标签发布", note: "对已通过二审的评测包执行独立发布决定" },
       { to: "/workflow/releases/metrics", label: "版本指标", note: "查看正式版本的质量与运行指标" },
       { to: "/workflow/releases/history", label: "发布历史", note: "追溯每次发布、回滚和人工决定" },
+      { to: "/workflow/governance/projections", label: "下游表投影", note: "维护统一大维表和职责小表的版本合同与本地对账" },
       { to: "/workflow/review/model-evaluation", label: "全部评测结果", note: "面向诊断人员查看非默认的完整运行明细" },
       { to: "/legacy/sample-sets", label: "黄金样本集管理", note: "维护锁定真值和回归样本组成" },
     ],

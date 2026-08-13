@@ -88,6 +88,9 @@ const OperationsCenterPage = lazy(() =>
 const QualityAssetsPage = lazy(() =>
   import("@/pages/quality-assets-page").then((module) => ({ default: module.QualityAssetsPage })),
 )
+const ProjectionGovernancePage = lazy(() =>
+  import("@/pages/projection-governance-page").then((module) => ({ default: module.ProjectionGovernancePage })),
+)
 
 export default function App() {
   const me = useQuery({
@@ -164,6 +167,7 @@ export default function App() {
             <Route path="workflow/governance/users" element={<UsersPage />} />
             <Route path="workflow/governance/canary" element={<Suspense fallback={<RouteLoading />}><CanaryRunsPage /></Suspense>} />
             <Route path="workflow/governance/audit" element={<Suspense fallback={<RouteLoading />}><AuditEventsPage /></Suspense>} />
+            <Route path="workflow/governance/projections" element={<Suspense fallback={<RouteLoading />}><ProjectionGovernancePage /></Suspense>} />
 
             <Route path="assets" element={<Navigate to="/workflow/materials/packages" replace />} />
             <Route path="jobs" element={<Navigate to="/workflow/materials/jobs" replace />} />
