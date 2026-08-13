@@ -115,7 +115,7 @@
 - [x] Run the complete frontend information-architecture contract, lint, and SHA-stamped build.
 - [x] Run `git diff --check` and inspect the complete diff for accidental layout-fix overlap or production calls.
 - [x] Record exact evidence and remaining deployment gates in `PROJECT_STATUS.md`.
-- [ ] Commit to `codex/automated-correction-loop-v1` and push with the existing Codeup SSH identity; do not merge or deploy until review evidence is complete.
+- [x] Commit to `codex/automated-correction-loop-v1` and push with the existing Codeup SSH identity; do not merge or deploy until review evidence is complete.
 
 ## Verification Evidence
 
@@ -126,3 +126,4 @@
 - `git diff --check`: passed.
 - Edge `151.0.4129.72`: passed at `1440×900` and `1280×720` using a temporary file database and deterministic generator; approve confirmation was cancelled and API state remained `awaiting_decision` with no decision.
 - No real tuning-model call, real batch regression, production data access, merge, or deployment was performed during tests or acceptance.
+- Codeup branch `codex/automated-correction-loop-v1` was created and read back at feature commit `3eb2ec4df6176a370b36b082f5c6e376ffdedf7c` before this documentation closeout.
