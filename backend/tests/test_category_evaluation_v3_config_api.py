@@ -160,6 +160,17 @@ def test_create_get_round_trip_has_matching_projected_revision(
         "supported": True,
         "editable": True,
         "reason": None,
+        "version": "v1",
+        "capabilities": [
+            "structured_editor",
+            "candidate_validation",
+            "candidate_execution",
+            "workflow_incremental",
+            "workflow_stock",
+        ],
+        "editor_route": "image-rule",
+        "read_only_fallback": False,
+        "can_execute": True,
     }
     assert fetched.json()["projected_revision_id"] == body["projected_revision_id"]
     assert fetched.json()["contract_hash"] == original_hash
@@ -175,6 +186,17 @@ def test_proposal_profile_reads_and_validates_without_image_fields(client: TestC
         "supported": True,
         "editable": True,
         "reason": None,
+        "version": "v1",
+        "capabilities": [
+            "structured_editor",
+            "candidate_validation",
+            "candidate_execution",
+            "workflow_incremental",
+            "workflow_stock",
+        ],
+        "editor_route": "proposal-text",
+        "read_only_fallback": False,
+        "can_execute": True,
     }
     assert body["dimension_deduction_rules"] == {}
     assert body["media_penalty_enabled"] is False
@@ -271,6 +293,11 @@ def test_unknown_explicit_profile_is_readable_but_validation_is_fail_closed(
         "supported": False,
         "editable": False,
         "reason": "未注册机制 profile：future-3d-v1",
+        "version": "v1",
+        "capabilities": [],
+        "editor_route": None,
+        "read_only_fallback": True,
+        "can_execute": False,
     }
 
     unknown_body = {
