@@ -78,6 +78,7 @@ MIGRATION_NAMES = [
     "add_model_registry_entries",
     "add_mechanism_release_axes",
     "add_category_evaluation_v3_revisions",
+    "automate_baseline_correction_loop",
 ]
 
 
@@ -1033,6 +1034,128 @@ def test_v63_backfills_immutable_category_evaluation_revisions(tmp_path) -> None
                 "SELECT status FROM category_evaluation_v3_revisions "
                 "WHERE category_key='active_image'"
             ).scalar_one() == "retired"
+    finally:
+        engine.dispose()
+
+
+def test_v64_upgrades_legacy_correction_runs_to_automatic_pipeline(tmp_path) -> None:
+    engine = _engine(tmp_path, "v64-automatic-correction-loop.db")
+    try:
+        with engine.begin() as connection:
+            connection.exec_driver_sql("""
+                CREATE TABLE schema_migrations (
+                    version INTEGER PRIMARY KEY,
+                    name VARCHAR(200) NOT NULL,
+                    applied_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            for version, name in enumerate(MIGRATION_NAMES[:-1], start=1):
+                connection.exec_driver_sql(
+                    "INSERT INTO schema_migrations(version, name) VALUES (?, ?)",
+                    (version, name),
+                )
+            connection.exec_driver_sql("""
+                CREATE TABLE baseline_regression_runs (id INTEGER PRIMARY KEY)
+            """)
+            connection.exec_driver_sql("""
+                CREATE TABLE category_evaluation_v3_revisions (
+                    id INTEGER PRIMARY KEY
+                )
+            """)
+            connection.exec_driver_sql(
+                "INSERT INTO baseline_regression_runs(id) VALUES (9)"
+            )
+            connection.exec_driver_sql("""
+                CREATE TABLE baseline_correction_runs (
+                    id INTEGER PRIMARY KEY,
+                    idempotency_key VARCHAR(160) NOT NULL UNIQUE,
+                    baseline_run_id INTEGER NOT NULL,
+                    category_key VARCHAR(40) NOT NULL,
+                    selected_item_ids_json TEXT NOT NULL,
+                    input_snapshot_json TEXT NOT NULL,
+                    status VARCHAR(40) NOT NULL DEFAULT 'processing'
+                        CHECK(status IN ('processing','awaiting_confirmation','failed')),
+                    progress INTEGER NOT NULL DEFAULT 0,
+                    report_json TEXT NOT NULL DEFAULT '{}',
+                    blockers_json TEXT NOT NULL DEFAULT '[]',
+                    error_code VARCHAR(80) NOT NULL DEFAULT '',
+                    error_message TEXT NOT NULL DEFAULT '',
+                    attempt_count INTEGER NOT NULL DEFAULT 1,
+                    created_by VARCHAR(80) NOT NULL DEFAULT 'system',
+                    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    finished_at DATETIME
+                )
+            """)
+            connection.exec_driver_sql("""
+                INSERT INTO baseline_correction_runs (
+                    id, idempotency_key, baseline_run_id, category_key,
+                    selected_item_ids_json, input_snapshot_json, status,
+                    progress, report_json, blockers_json, attempt_count,
+                    created_by, finished_at
+                ) VALUES (
+                    1, 'legacy-correction', 9, 'space_image', '[10]', '{}',
+                    'awaiting_confirmation', 100, '{"legacy":true}',
+                    '[{"code":"human_confirmation_required"}]', 1,
+                    'migration-test', '2026-08-12 12:00:00'
+                )
+            """)
+
+            run_migrations(connection)
+
+            columns = {
+                row[1]
+                for row in connection.exec_driver_sql(
+                    "PRAGMA table_info(baseline_correction_runs)"
+                )
+            }
+            assert {
+                "stage",
+                "candidate_revision_id",
+                "regression_run_id",
+                "orchestration_json",
+                "decision",
+                "decided_by",
+                "decided_at",
+                "decision_note",
+            } <= columns
+            upgraded = connection.exec_driver_sql("""
+                SELECT status, stage, progress, report_json, blockers_json,
+                       error_code, error_message, finished_at
+                FROM baseline_correction_runs WHERE id = 1
+            """).one()
+            assert upgraded == (
+                "failed",
+                "analysis",
+                0,
+                '{"legacy":true}',
+                '[{"code":"human_confirmation_required"}]',
+                "LEGACY_CORRECTION_INCOMPLETE",
+                "旧版纠偏任务未创建候选或回归，请重新执行",
+                "2026-08-12 12:00:00",
+            )
+
+            connection.exec_driver_sql("""
+                INSERT INTO baseline_correction_runs (
+                    id, idempotency_key, baseline_run_id, category_key,
+                    selected_item_ids_json, input_snapshot_json, status,
+                    stage, progress, report_json, blockers_json,
+                    orchestration_json, attempt_count, created_by
+                ) VALUES (
+                    2, 'new-correction', 9, 'space_image', '[11]', '{}',
+                    'awaiting_decision', 'decision', 100, '{}', '[]', '{}',
+                    1, 'migration-test'
+                )
+            """)
+            connection.exec_driver_sql(
+                "UPDATE baseline_correction_runs "
+                "SET status='approved', decision='approved', "
+                "decided_by='admin', decision_note='通过', "
+                "decided_at=CURRENT_TIMESTAMP WHERE id=2"
+            )
+            assert connection.exec_driver_sql(
+                "SELECT status, decision FROM baseline_correction_runs WHERE id=2"
+            ).one() == ("approved", "approved")
     finally:
         engine.dispose()
 

@@ -59,7 +59,7 @@
 subcategory dimensions 与规则镜像全部由既有 validator 校验并冻结。现役
 `CategoryEvaluationV3Config` 在人工批准前不发生变化。
 
-候选回归继续使用既有基准回归任务模型，但所有候选评测 Job 的
+候选回归继续使用既有 `BaselineRegressionRun` 任务模型，但所有候选评测 Job 的
 `category_profile_snapshot_json.v3_authoritative_bundle` 必须绑定候选 revision；worker
 已经优先读取这个冻结 bundle，因此不需要把候选写进现役投影。
 

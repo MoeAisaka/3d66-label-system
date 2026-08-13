@@ -6159,7 +6159,7 @@ def _migration_044_add_evaluation_production_runs(connection: Connection) -> Non
             automation_run_id INTEGER
                 REFERENCES automation_optimization_runs(id) ON DELETE RESTRICT,
             regression_run_id INTEGER
-                REFERENCES prompt_regression_runs(id) ON DELETE RESTRICT,
+                REFERENCES baseline_regression_runs(id) ON DELETE RESTRICT,
             evaluation_package_id INTEGER UNIQUE
                 REFERENCES evaluation_packages(id) ON DELETE RESTRICT,
             status VARCHAR(30) NOT NULL DEFAULT 'preparing'
@@ -7257,6 +7257,143 @@ def _migration_063_add_category_evaluation_v3_revisions(
     """)
 
 
+def _migration_064_automate_baseline_correction_loop(
+    connection: Connection,
+) -> None:
+    """Replace the legacy human-intermediate gate with an automatic pipeline."""
+    tables = {
+        row[0]
+        for row in connection.exec_driver_sql(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )
+    }
+    if "baseline_correction_runs" not in tables:
+        return
+    columns = {
+        row[1]
+        for row in connection.exec_driver_sql(
+            "PRAGMA table_info(baseline_correction_runs)"
+        )
+    }
+    if {
+        "stage",
+        "candidate_revision_id",
+        "regression_run_id",
+        "orchestration_json",
+        "decision",
+        "decided_by",
+        "decided_at",
+        "decision_note",
+    } <= columns:
+        return
+
+    connection.exec_driver_sql(
+        "ALTER TABLE baseline_correction_runs "
+        "RENAME TO baseline_correction_runs_legacy_v64"
+    )
+    connection.exec_driver_sql("""
+        CREATE TABLE baseline_correction_runs (
+            id INTEGER PRIMARY KEY,
+            idempotency_key VARCHAR(160) NOT NULL UNIQUE,
+            baseline_run_id INTEGER NOT NULL
+                REFERENCES baseline_regression_runs(id) ON DELETE RESTRICT,
+            category_key VARCHAR(40) NOT NULL,
+            selected_item_ids_json TEXT NOT NULL
+                CHECK(json_valid(selected_item_ids_json)
+                      AND json_type(selected_item_ids_json, '$') = 'array'),
+            input_snapshot_json TEXT NOT NULL
+                CHECK(json_valid(input_snapshot_json)
+                      AND json_type(input_snapshot_json, '$') = 'object'),
+            status VARCHAR(40) NOT NULL DEFAULT 'processing'
+                CHECK(status IN ('processing','awaiting_decision','approved','rejected','failed')),
+            stage VARCHAR(40) NOT NULL DEFAULT 'analysis'
+                CHECK(stage IN ('analysis','candidate_generation','candidate_validation','regression','decision')),
+            progress INTEGER NOT NULL DEFAULT 0
+                CHECK(progress BETWEEN 0 AND 100),
+            report_json TEXT NOT NULL DEFAULT '{}'
+                CHECK(json_valid(report_json)
+                      AND json_type(report_json, '$') = 'object'),
+            blockers_json TEXT NOT NULL DEFAULT '[]'
+                CHECK(json_valid(blockers_json)
+                      AND json_type(blockers_json, '$') = 'array'),
+            orchestration_json TEXT NOT NULL DEFAULT '{}'
+                CHECK(json_valid(orchestration_json)
+                      AND json_type(orchestration_json, '$') = 'object'),
+            candidate_revision_id INTEGER
+                REFERENCES category_evaluation_v3_revisions(id)
+                ON DELETE RESTRICT,
+            regression_run_id INTEGER
+                REFERENCES baseline_regression_runs(id) ON DELETE RESTRICT,
+            error_code VARCHAR(80) NOT NULL DEFAULT '',
+            error_message TEXT NOT NULL DEFAULT '',
+            attempt_count INTEGER NOT NULL DEFAULT 1
+                CHECK(attempt_count >= 1),
+            decision VARCHAR(20)
+                CHECK(decision IS NULL OR decision IN ('approved','rejected')),
+            decided_by VARCHAR(80),
+            decided_at DATETIME,
+            decision_note TEXT NOT NULL DEFAULT '',
+            created_by VARCHAR(80) NOT NULL DEFAULT 'system',
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            finished_at DATETIME
+        )
+    """)
+    connection.exec_driver_sql("""
+        INSERT INTO baseline_correction_runs (
+            id, idempotency_key, baseline_run_id, category_key,
+            selected_item_ids_json, input_snapshot_json, status, stage,
+            progress, report_json, blockers_json, orchestration_json,
+            candidate_revision_id, regression_run_id,
+            error_code, error_message, attempt_count,
+            decision, decided_by, decided_at, decision_note,
+            created_by, created_at, updated_at, finished_at
+        )
+        SELECT
+            id, idempotency_key, baseline_run_id, category_key,
+            selected_item_ids_json, input_snapshot_json,
+            CASE
+                WHEN status = 'awaiting_confirmation' THEN 'failed'
+                WHEN status IN ('processing','failed') THEN status
+                ELSE 'failed'
+            END,
+            'analysis',
+            CASE WHEN status = 'awaiting_confirmation' THEN 0 ELSE progress END,
+            report_json, blockers_json, '{}', NULL, NULL,
+            CASE
+                WHEN status = 'awaiting_confirmation'
+                THEN 'LEGACY_CORRECTION_INCOMPLETE'
+                ELSE error_code
+            END,
+            CASE
+                WHEN status = 'awaiting_confirmation'
+                THEN '旧版纠偏任务未创建候选或回归，请重新执行'
+                ELSE error_message
+            END,
+            attempt_count, NULL, NULL, NULL, '',
+            created_by, created_at, updated_at, finished_at
+        FROM baseline_correction_runs_legacy_v64
+    """)
+    connection.exec_driver_sql(
+        "DROP TABLE baseline_correction_runs_legacy_v64"
+    )
+    for statement in (
+        "CREATE INDEX IF NOT EXISTS ix_baseline_corrections_run "
+        "ON baseline_correction_runs(baseline_run_id)",
+        "CREATE INDEX IF NOT EXISTS ix_baseline_corrections_category "
+        "ON baseline_correction_runs(category_key)",
+        "CREATE INDEX IF NOT EXISTS ix_baseline_corrections_status "
+        "ON baseline_correction_runs(status)",
+        "CREATE INDEX IF NOT EXISTS ix_baseline_corrections_stage "
+        "ON baseline_correction_runs(stage)",
+        "CREATE INDEX IF NOT EXISTS ix_baseline_corrections_candidate "
+        "ON baseline_correction_runs(candidate_revision_id)",
+        "CREATE INDEX IF NOT EXISTS ix_baseline_corrections_regression "
+        "ON baseline_correction_runs(regression_run_id)",
+    ):
+        connection.exec_driver_sql(statement)
+
+
 MIGRATIONS = [
     Migration(1, "add_sample_expected_level", _migration_001_add_sample_expected_level),
     Migration(2, "add_review_corrections", _migration_002_add_review_corrections),
@@ -7528,6 +7665,11 @@ MIGRATIONS = [
         63,
         "add_category_evaluation_v3_revisions",
         _migration_063_add_category_evaluation_v3_revisions,
+    ),
+    Migration(
+        64,
+        "automate_baseline_correction_loop",
+        _migration_064_automate_baseline_correction_loop,
     ),
 ]
 

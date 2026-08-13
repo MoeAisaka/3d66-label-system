@@ -32,7 +32,7 @@
 
 - [ ] Add failing model and migration tests that reject the old terminal state and prove legacy rows become retryable failures.
 - [ ] Run the focused tests and confirm RED on missing columns/statuses.
-- [ ] Add migration 65 that rebuilds `baseline_correction_runs`, preserves JSON/report evidence, maps `awaiting_confirmation` to `failed`, and installs the new constraints.
+- [ ] Add migration 64 that rebuilds `baseline_correction_runs`, preserves JSON/report evidence, maps `awaiting_confirmation` to `failed`, and installs the new constraints.
 - [ ] Update the SQLAlchemy model to match the migrated table.
 - [ ] Run the focused tests and confirm GREEN.
 
@@ -63,7 +63,7 @@
 - Modify: `backend/tests/test_worker_v3_authoritative.py`
 
 **Interfaces:**
-- Produces a new baseline regression whose jobs freeze `revision_bundle(candidate)` in `category_profile_snapshot_json.v3_authoritative_bundle`.
+- Produces a new `BaselineRegressionRun` whose jobs freeze `revision_bundle(candidate)` in `category_profile_snapshot_json.v3_authoritative_bundle`.
 - Produces `refresh_correction_run(db, correction)` that enters `awaiting_decision` only after regression terminal metrics exist.
 
 - [ ] Add failing tests proving candidate jobs use the candidate revision while ordinary jobs still use the active projection.
