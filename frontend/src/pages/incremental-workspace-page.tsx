@@ -10,7 +10,7 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { api } from "@/lib/api"
 import { evaluationProductionApi } from "@/lib/evaluation-packages"
-import type { EvaluationCategoryProfile, EvaluationProductionRun, MaterialPackage } from "@/lib/types"
+import type { AuditEvent, EvaluationCategoryProfile, EvaluationProductionRun, MaterialPackage } from "@/lib/types"
 
 export function IncrementalWorkspacePage() {
   const categories = useQuery({
@@ -26,12 +26,34 @@ export function IncrementalWorkspacePage() {
     queryFn: () => evaluationProductionApi.list("incremental"),
     refetchInterval: 4000,
   })
+  const ingressEvents = useQuery({
+    queryKey: ["audit-events", "content-ingress", "incremental"],
+    queryFn: () => api<{ items: AuditEvent[] }>("/api/audit-events?category=content_ingress&limit=500"),
+    refetchInterval: 4000,
+  })
   const activeCategoryCount = useMemo(
     () => (categories.data?.items ?? []).filter((item) => item.status === "active").length,
     [categories.data?.items],
   )
   const availablePackages = packages.data?.items ?? []
   const latestRun = (runs.data?.items ?? [])[0] as EvaluationProductionRun | undefined
+  const ingressCounts = useMemo(() => {
+    const counts = { received: 0, awaiting: 0, packaged: 0, blocked: 0, duplicate: 0 }
+    for (const event of ingressEvents.data?.items ?? []) {
+      if (event.action === "incremental_package_created") {
+        counts.packaged += 1
+      } else if (event.action === "duplicate_reused") {
+        counts.duplicate += 1
+      } else if (event.action === "awaiting_material") {
+        counts.awaiting += 1
+      } else if (event.action === "stale" || event.action === "blocked_profile") {
+        counts.blocked += 1
+      } else {
+        counts.received += 1
+      }
+    }
+    return counts
+  }, [ingressEvents.data?.items])
   const currentStep = latestRun?.status === "published" ? 8 : latestRun?.status === "awaiting_review" ? 6 : latestRun ? 4 : 2
   const steps: WorkflowStep[] = [
     { key: "category", label: "选择类目", note: `${activeCategoryCount} 个类目可用`, state: currentStep > 1 ? "completed" : "current", required: true },
@@ -63,8 +85,22 @@ export function IncrementalWorkspacePage() {
           </div>
           <aside className="bg-[#f7fadf] px-5 py-6 md:px-6"><p className="text-xs font-bold">最近一次增量运行</p>{latestRun ? <><p className="mt-3 text-lg font-semibold">{latestRun.material_package.name}</p><p className="mt-2 text-xs leading-5 text-[var(--muted)]">{latestRun.category.name} · {latestRun.current_stage_label} · {latestRun.progress.percent}%</p><Button asChild size="sm" variant="secondary" className="mt-5"><Link to={`/workflow/production-line?run=${latestRun.id}`}>查看运行详情<ArrowRight /></Link></Button></> : <p className="mt-3 text-sm leading-6 text-[var(--muted)]">还没有增量运行。先导入素材包，再进入生产线。</p>}</aside>
         </section>
+        <section className="border-y border-[var(--line)] bg-white px-5 py-5">
+          <div className="flex flex-wrap items-center justify-between gap-3"><div><p className="text-xs font-bold">本地接入合同状态</p><p className="mt-1 text-xs text-[var(--muted)]">这里只统计模拟接入与本地素材包路由，不代表真实上游已连接。</p></div><Badge tone="neutral">content-ingress-v1</Badge></div>
+          <div className="mt-4 grid gap-px bg-[var(--line)] sm:grid-cols-5">
+            <IngressMetric label="已接收" value={ingressCounts.received} />
+            <IngressMetric label="等待素材" value={ingressCounts.awaiting} />
+            <IngressMetric label="已组包" value={ingressCounts.packaged} />
+            <IngressMetric label="已阻塞/忽略" value={ingressCounts.blocked} />
+            <IngressMetric label="重复复用" value={ingressCounts.duplicate} />
+          </div>
+        </section>
         <section className="border-y border-[var(--line)] bg-white px-5 py-5"><div className="flex items-center gap-2"><Play size={18} weight="fill" /><h2 className="text-sm font-bold">主线说明</h2></div><p className="mt-2 text-xs leading-6 text-[var(--muted)]">自动 AI 迭代只负责生成完整候选机制和样本回归证据；是否启用候选、是否将正式标签事实发布给下游，仍由具备权限的人工分别决定。</p></section>
       </div>
     </>
   )
+}
+
+function IngressMetric({ label, value }: { label: string; value: number }) {
+  return <div className="bg-white px-4 py-3"><p className="text-xs text-[var(--muted)]">{label}</p><p className="mt-1 font-data text-lg font-bold">{value}</p></div>
 }

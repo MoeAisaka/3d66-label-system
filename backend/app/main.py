@@ -277,6 +277,7 @@ from .label_governance import (
     ingest_content_event,
     publish_release,
     release_payload,
+    route_content_event_to_incremental_package,
     rollback_release,
 )
 from .label_export import build_export
@@ -7420,6 +7421,15 @@ def create_content_ingress_event(
             payload=payload.payload,
             received_by=_sender,
         )
+        package, package_created, routing_status = (
+            route_content_event_to_incremental_package(
+                db,
+                event=event,
+                record=record,
+                duplicate=duplicate,
+                actor=_sender,
+            )
+        )
     except LabelIntegrationConflict as exc:
         db.rollback()
         raise HTTPException(status_code=409, detail={"code": "INGRESS_EVENT_CONFLICT", "message": str(exc)}) from None
@@ -7435,6 +7445,10 @@ def create_content_ingress_event(
         "event_status": event.status,
         "content": _content_record_payload(record),
         "material_required": record.status == "awaiting_material",
+        "workflow_kind": "incremental",
+        "material_package_id": package.id if package is not None else None,
+        "package_created": package_created,
+        "routing_status": routing_status,
         "writes_evaluation_job": False,
     }
 
