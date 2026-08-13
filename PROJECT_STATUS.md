@@ -27,9 +27,10 @@
   build 均通过；仅保留既有主 chunk 大于 500 kB 的构建 warning。`git diff --check` 通过。
 - 已通过 Codeup MR #4（创建合并节点，源分支保留）合入
   `main@8b9e5c4cff418196e93f63852ff39b9ed8f412e7`，并经受保护脚本部署到公司内网测试环境
-  `192.168.1.35:8081`。服务器 HEAD、Codeup `main`、静态资源 build SHA 均为 `8b9e5c4`；
-  容器 `3d66-label-system-test` 为 `running/healthy`、restart count=0，内外
-  `/api/health` 均为 HTTP 200。
+  `192.168.1.35:8081`。功能验收点的服务器 HEAD、Codeup `main`、静态资源 build SHA 均为
+  `8b9e5c4`；容器 `3d66-label-system-test` 为 `running/healthy`、restart count=0，内外
+  `/api/health` 均为 HTTP 200。部署回执随后通过仅文档 MR #5 合入
+  `main@ae667754389e628ab07b04b14240cb08d4fe8717`，未改变运行时行为。
 - 部署前已创建并保留 SQLite 在线快照
   `/data/database/predeploy-snapshots/app-predeploy-e570c4e4-before-8b9e5c4c-20260813T081434Z.db`
   （SHA-256 `a659c4a17ce99799e8b74b34486ccb08eb30b80cf728f3f2a10d5f6e287fb3b3`，

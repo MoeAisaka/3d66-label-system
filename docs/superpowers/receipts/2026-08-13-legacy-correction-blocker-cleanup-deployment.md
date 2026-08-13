@@ -5,6 +5,8 @@
 - 功能提交：`3cb919d8eb48241f2225e5dc12f916c50d44ce05`
 - Codeup 合并提交：`8b9e5c4cff418196e93f63852ff39b9ed8f412e7`
 - Codeup MR：#4 `fix: 清理历史纠偏人工确认阻塞`
+- 回执文档 MR：#5 `docs: record legacy correction cleanup deployment`，合并点
+  `ae667754389e628ab07b04b14240cb08d4fe8717`
 - 测试环境：`http://192.168.1.35:8081`
 - 范围仅为历史 `LEGACY_CORRECTION_INCOMPLETE` 纠偏记录移除废止的
   `human_confirmation_required` blocker；不修改自动纠偏五阶段、最终人工启用/拒绝、
@@ -40,7 +42,7 @@
 
 | 检查项 | 结果 |
 | --- | --- |
-| Codeup main / server HEAD | 均为 `8b9e5c4cff418196e93f63852ff39b9ed8f412e7` |
+| 功能验收点 Codeup main / server HEAD | 均为 `8b9e5c4cff418196e93f63852ff39b9ed8f412e7` |
 | 容器与健康检查 | `running/healthy`、restart count=0；容器内与外部 `/api/health` HTTP 200 |
 | Schema migration | 65 |
 | SQLite integrity / FK | `ok` / 0 |
