@@ -7257,6 +7257,57 @@ def _migration_063_add_category_evaluation_v3_revisions(
     """)
 
 
+def _clear_legacy_correction_confirmation_blockers(
+    connection: Connection,
+) -> None:
+    tables = {
+        row[0]
+        for row in connection.exec_driver_sql(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )
+    }
+    if "baseline_correction_runs" not in tables:
+        return
+    columns = {
+        row[1]
+        for row in connection.exec_driver_sql(
+            "PRAGMA table_info(baseline_correction_runs)"
+        )
+    }
+    required = {"status", "error_code", "blockers_json"}
+    if not required <= columns:
+        return
+
+    rows = connection.exec_driver_sql(
+        """
+        SELECT id, blockers_json
+        FROM baseline_correction_runs
+        WHERE status = 'failed'
+          AND error_code = 'LEGACY_CORRECTION_INCOMPLETE'
+        """
+    ).all()
+    for row in rows:
+        try:
+            blockers = json.loads(row[1] or "[]")
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if not isinstance(blockers, list):
+            continue
+        cleaned = [
+            blocker
+            for blocker in blockers
+            if not (
+                isinstance(blocker, dict)
+                and blocker.get("code") == "human_confirmation_required"
+            )
+        ]
+        if cleaned != blockers:
+            connection.exec_driver_sql(
+                "UPDATE baseline_correction_runs SET blockers_json = ? WHERE id = ?",
+                (json.dumps(cleaned, ensure_ascii=False, separators=(",", ":")), row[0]),
+            )
+
+
 def _migration_064_automate_baseline_correction_loop(
     connection: Connection,
 ) -> None:
@@ -7378,6 +7429,7 @@ def _migration_064_automate_baseline_correction_loop(
             created_by, created_at, updated_at, finished_at
         FROM baseline_correction_runs_legacy_v64
     """)
+    _clear_legacy_correction_confirmation_blockers(connection)
     connection.exec_driver_sql(
         "DROP TABLE baseline_correction_runs_legacy_v64"
     )
@@ -7396,6 +7448,13 @@ def _migration_064_automate_baseline_correction_loop(
         "ON baseline_correction_runs(regression_run_id)",
     ):
         connection.exec_driver_sql(statement)
+
+
+def _migration_065_clear_legacy_correction_confirmation_blockers(
+    connection: Connection,
+) -> None:
+    """Remove the obsolete manual-confirmation blocker from migrated failures."""
+    _clear_legacy_correction_confirmation_blockers(connection)
 
 
 MIGRATIONS = [
@@ -7674,6 +7733,11 @@ MIGRATIONS = [
         64,
         "automate_baseline_correction_loop",
         _migration_064_automate_baseline_correction_loop,
+    ),
+    Migration(
+        65,
+        "clear_legacy_correction_confirmation_blockers",
+        _migration_065_clear_legacy_correction_confirmation_blockers,
     ),
 ]
 
