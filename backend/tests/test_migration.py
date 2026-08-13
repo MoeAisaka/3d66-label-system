@@ -831,7 +831,7 @@ def test_v63_backfills_immutable_category_evaluation_revisions(tmp_path) -> None
                     applied_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
                 )
             """)
-            for version, name in enumerate(MIGRATION_NAMES[:-1], start=1):
+            for version, name in enumerate(MIGRATION_NAMES[:-2], start=1):
                 connection.exec_driver_sql(
                     "INSERT INTO schema_migrations(version, name) VALUES (?, ?)",
                     (version, name),

@@ -671,7 +671,7 @@ class EvaluationProductionRun(Base):
         index=True,
     )
     regression_run_id: Mapped[int | None] = mapped_column(
-        ForeignKey("baseline_regression_runs.id", ondelete="RESTRICT"),
+        ForeignKey("prompt_regression_runs.id", ondelete="RESTRICT"),
         nullable=True,
         index=True,
     )
@@ -3473,7 +3473,9 @@ class BaselineCorrectionRun(Base):
         DateTime(timezone=True), nullable=True
     )
 
-    baseline_run: Mapped[BaselineRegressionRun] = relationship()
+    baseline_run: Mapped[BaselineRegressionRun] = relationship(
+        foreign_keys=[baseline_run_id]
+    )
 
 
 class BaselineFrozenError(ValueError):

@@ -6159,7 +6159,7 @@ def _migration_044_add_evaluation_production_runs(connection: Connection) -> Non
             automation_run_id INTEGER
                 REFERENCES automation_optimization_runs(id) ON DELETE RESTRICT,
             regression_run_id INTEGER
-                REFERENCES baseline_regression_runs(id) ON DELETE RESTRICT,
+                REFERENCES prompt_regression_runs(id) ON DELETE RESTRICT,
             evaluation_package_id INTEGER UNIQUE
                 REFERENCES evaluation_packages(id) ON DELETE RESTRICT,
             status VARCHAR(30) NOT NULL DEFAULT 'preparing'
@@ -7267,7 +7267,11 @@ def _migration_064_automate_baseline_correction_loop(
             "SELECT name FROM sqlite_master WHERE type='table'"
         )
     }
-    if "baseline_correction_runs" not in tables:
+    if not {
+        "baseline_correction_runs",
+        "baseline_regression_runs",
+        "category_evaluation_v3_revisions",
+    } <= tables:
         return
     columns = {
         row[1]
