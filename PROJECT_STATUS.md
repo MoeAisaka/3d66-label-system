@@ -17,7 +17,8 @@
 - 后端专项（基准纠偏、候选解析、worker 锁退避、readiness）：`36 passed, 1 warning`。
 - 后端全量（隔离 `DATA_DIR`）：`1259 passed, 1 skipped, 6 warnings`。
 - 前端信息架构与 workspace component browser contract 通过；TypeScript lint 与 Vite production build 通过，仅保留既有主 chunk 大于 500 kB 的 warning；`git diff --check` 通过。
-- 本节记录的是待合并部署的实现状态；完成 Codeup `main` 合并、服务器快照、部署和 Edge 当前页面验收后，再补充最终 SHA 与部署回执。
+- 已完成 Codeup `main` 快进合并与测试服部署：`main@7575e6415ce89ece4a66a155672146a44de6b8ff`，服务器 HEAD、容器代码和静态构建均对齐 `7575e641`。部署前快照为 `/data/database/predeploy-snapshots/app-predeploy-7575e641-20260813T110224Z.db`，SHA-256 `bbd91409ecd997ccb4eb72224d37a0f75cced3a8ae9808d740c7d9c8339e8395`，快照 integrity=`ok`、FK=`[]`。
+- 部署后 `/api/health` 与 `/api/health/ready` 均通过；容器 `3d66-label-system-test` 为 `running/healthy`、restart count=0，8 个 worker 活跃，数据库 integrity=`ok`、FK=`[]`、migration=65，active jobs/runs/corrections 均为 0。Edge 当前纠偏页未重复提交真实业务操作；浏览器已有页面由另一会话占用，保留用户现有页面控制权，采用静态资源和接口证据完成只读验收。
 
 ## 最新修复：历史纠偏任务移除旧人工确认阻塞（2026-08-13）
 
