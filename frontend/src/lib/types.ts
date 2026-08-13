@@ -1150,6 +1150,7 @@ export type Job = {
   id: number
   asset_id: number
   asset_name: string
+  category_key: string
   prompt_a_version: string | null
   prompt_b_version: string | null
   prompt_version: string | null
@@ -1157,6 +1158,13 @@ export type Job = {
   stage: string
   progress: number
   attempts: number
+  queue_class: "validation" | "interactive" | "production_batch" | "canary" | "recovery"
+  origin_queue_class: "validation" | "interactive" | "production_batch" | "canary" | "recovery"
+  parent_job_id: number | null
+  technical_attempt: number
+  technical_error_type: string | null
+  retry_after_at: string | null
+  batch_key: string | null
   error_message: string
   created_at: string
   updated_at: string
@@ -1170,6 +1178,47 @@ export type JobControl = {
   processing_count: number
   paused_count: number
   active_count: number
+  updated_at: string
+}
+
+export type QueueStatusItem = {
+  queue_class: Job["queue_class"]
+  pending: number
+  pending_total: number
+  running: number
+  reserved: number
+  borrowed: number
+  effective_limit: number
+  weight: number
+  effective_weight: number
+  blocked_by_breaker: number
+  blocked_by_credentials: number
+  blocked_by_control: number
+  delayed_by_retry_after: number
+  dispatchable_pending: number
+}
+
+export type QueueStatus = {
+  policy: {
+    version: string
+    global_limit: number
+    shares: Record<string, number>
+    weights: Record<string, number>
+  }
+  queues: QueueStatusItem[]
+  credentials_configured: boolean
+  control_paused: boolean
+}
+
+export type CircuitBreaker = {
+  id: number
+  scope_type: "strategy" | "batch"
+  scope_key: string
+  state: "closed" | "open" | "half_open"
+  failure_count: number
+  cooldown_until: string | null
+  cooldown_elapsed: boolean
+  reason: string | null
   updated_at: string
 }
 
