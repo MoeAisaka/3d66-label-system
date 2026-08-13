@@ -25,8 +25,25 @@
 - 后端全量使用隔离 `DATA_DIR`：`1254 passed, 1 skipped, 6 warnings`（Python 3.12）。
 - 前端全部合同脚本、lightbox 浏览器合同、TypeScript lint 与带 build SHA 的 Vite production
   build 均通过；仅保留既有主 chunk 大于 500 kB 的构建 warning。`git diff --check` 通过。
-- Codeup MR、共享测试部署及 Edge 实机验收结果以后续部署回执为准；在完成这些步骤前不把
-  本地验证视为共享环境已修复。
+- 已通过 Codeup MR #4（创建合并节点，源分支保留）合入
+  `main@8b9e5c4cff418196e93f63852ff39b9ed8f412e7`，并经受保护脚本部署到公司内网测试环境
+  `192.168.1.35:8081`。服务器 HEAD、Codeup `main`、静态资源 build SHA 均为 `8b9e5c4`；
+  容器 `3d66-label-system-test` 为 `running/healthy`、restart count=0，内外
+  `/api/health` 均为 HTTP 200。
+- 部署前已创建并保留 SQLite 在线快照
+  `/data/database/predeploy-snapshots/app-predeploy-e570c4e4-before-8b9e5c4c-20260813T081434Z.db`
+  （SHA-256 `a659c4a17ce99799e8b74b34486ccb08eb30b80cf728f3f2a10d5f6e287fb3b3`，
+  integrity=`ok`、FK=0、migration=64）；完整 Codeup main bundle 保留于
+  `outputs/deployments/2026-08-13-legacy-correction-blocker-v1/`
+  （SHA-256 `e6ea440fcca4f728e61cc43b8ab6d14fd074e628e8e04e0efad57bcfaff14be5`）。
+- 部署后数据库 integrity=`ok`、FK=0、migration=65；活跃评测、基准回归、processing
+  纠偏、存量重跑均为 0。3 条目标历史记录保持 `failed`、
+  `LEGACY_CORRECTION_INCOMPLETE` 与原失败说明，`blockers_json` 均已为 `[]`。
+- Edge 桌面验收覆盖基准回归及 Proposal PDF V3 合同配置：`1440x900`、`1280x720`
+  无白屏、无文档横向溢出、无控制台错误；页面显示 `LabelLab v0.2.0 · build 8b9e5c4`。
+  历史纠偏页不再显示“提示词或维度调整必须由人工确认后另行创建候选版本”，而是明确
+  “中间无需人工配置”和“重新执行会沿用本次冻结样本，不需要补充任何配置”。未点击
+  “启动纠偏分析”或“重新执行”，未创建真实业务任务。
 
 ## 最新实施：基准回归自动纠偏闭环（2026-08-13）
 
