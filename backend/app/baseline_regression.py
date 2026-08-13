@@ -739,7 +739,7 @@ def deterministic_correction_report(
 
     return {
         "schema_version": "baseline-correction-report-v1",
-        "status": "optimization_suggestion_pending_confirmation",
+        "status": "automatic_candidate_pipeline",
         "category_key": input_snapshot.get("category_key"),
         "baseline_run_id": input_snapshot.get("baseline_run_id"),
         "selection": {
@@ -768,14 +768,14 @@ def deterministic_correction_report(
         "risks": (["差异样本少于 10，建议仅作优化候选。"] if len(raw_items) < 10 else []),
         "publication": {
             "allowed": False,
-            "next_state": "awaiting_confirmation",
-            "message": "分析仅提供纠偏建议，不创建、不覆盖、不发布提示词或维度版本。",
+            "next_state": "automatic_candidate_regression",
+            "message": "系统将自动生成候选并执行回归；仅最终启用或拒绝需要人工决策。",
         },
     }
 
 
 def execute_correction_run(correction: BaselineCorrectionRun) -> None:
-    """Advance one persisted correction run to its human confirmation gate."""
+    """Persist deterministic analysis before automatic orchestration continues."""
 
     try:
         snapshot = json.loads(correction.input_snapshot_json)
@@ -784,24 +784,16 @@ def execute_correction_run(correction: BaselineCorrectionRun) -> None:
     if not isinstance(snapshot, dict):
         raise ValueError("纠偏分析冻结输入损坏")
     correction.status = "processing"
+    correction.stage = "analysis"
     correction.progress = 25
     correction.report_json = canonical_json(
         deterministic_correction_report(snapshot)
     )
-    correction.status = "awaiting_confirmation"
-    correction.progress = 100
-    correction.blockers_json = canonical_json(
-        [
-            {
-                "code": "human_confirmation_required",
-                "message": "提示词或维度调整必须由人工确认后另行创建候选版本。",
-                "retryable": False,
-            }
-        ]
-    )
+    correction.stage = "candidate_generation"
+    correction.blockers_json = "[]"
     correction.error_code = ""
     correction.error_message = ""
-    correction.finished_at = datetime.now(timezone.utc)
+    correction.finished_at = None
 
 
 def fail_correction_run(
@@ -812,7 +804,6 @@ def fail_correction_run(
 ) -> None:
     correction.status = "failed"
     correction.progress = 0
-    correction.report_json = "{}"
     correction.blockers_json = canonical_json(
         [
             {

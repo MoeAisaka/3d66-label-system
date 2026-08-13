@@ -1,6 +1,7 @@
 import asyncio
 import json
 import importlib
+from copy import deepcopy
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -36,6 +37,8 @@ from app.models import (
     BaselineRegressionItem,
     BaselineRegressionRun,
     BaselineSetItem,
+    CategoryEvaluationV3Config,
+    CategoryEvaluationV3Revision,
     EvaluationJob,
     EvaluationCategoryProfile,
     EvaluationResult,
@@ -995,7 +998,7 @@ def test_category_dimension_snapshot_and_isolated_correction_retry(
     )
     Base.metadata.create_all(engine)
     db = Session(engine, expire_on_commit=False)
-    add_active_v3_contract(db, "material_image")
+    active_artifacts = add_active_v3_contract(db, "material_image")
     user = User(
         username="baseline-analysis-tester",
         password_hash="unused",
@@ -1167,6 +1170,64 @@ def test_category_dimension_snapshot_and_isolated_correction_retry(
             "detail_completion",
         ]
 
+        prompt_only = client.post(
+            f"/api/baseline-sets/{created_set.json()['id']}/runs",
+            json={"prompt_id": prompt.id, "dimension_mode": "none"},
+        )
+        assert prompt_only.status_code == 410
+        assert prompt_only.json()["detail"]["code"] == "legacy_dimension_write_retired"
+
+        candidate_contract = deepcopy(active_artifacts["contract"])
+        candidate_contract["spec_version"] = "material-image-auto-candidate-v2"
+        candidate_dimensions = deepcopy(
+            active_artifacts["subcategory_dimensions"]
+        )
+
+        class DeterministicGenerator:
+            def generate(self, **_kwargs):
+                return {
+                    "prompt": {
+                        "stage": "A",
+                        "system_prompt": "evaluate material with corrected anchors",
+                        "user_prompt": "evaluate with frozen correction evidence",
+                        "change_note": "自动纠偏：收紧 L1 与 L3 的材质锚点",
+                    },
+                    "revision": {
+                        "display_name": "材质图自动纠偏候选",
+                        "contract": candidate_contract,
+                        "classification_map": deepcopy(
+                            active_artifacts["classification_map"]
+                        ),
+                        "subcategory_dimensions": candidate_dimensions,
+                    },
+                    "summary": {
+                        "change_codes": ["prompt_anchor", "level_boundary"]
+                    },
+                    "model_snapshot": {
+                        "role": "tuning",
+                        "model_id": "deterministic-test-generator",
+                    },
+                }
+
+        main_module = importlib.import_module("app.main")
+        monkeypatch.setattr(
+            main_module,
+            "configured_correction_generator",
+            lambda _db: DeterministicGenerator(),
+            raising=False,
+        )
+        active_config = db.scalar(
+            select(CategoryEvaluationV3Config).where(
+                CategoryEvaluationV3Config.category_key == "material_image"
+            )
+        )
+        assert active_config is not None
+        frozen_active_projection = (
+            active_config.revision,
+            active_config.contract_hash,
+            active_config.contract_json,
+        )
+
         correction = client.post(
             f"/api/baseline-regressions/{run.id}/corrections",
             json={
@@ -1176,7 +1237,11 @@ def test_category_dimension_snapshot_and_isolated_correction_retry(
         )
         assert correction.status_code == 200
         correction_payload = correction.json()
-        assert correction_payload["status"] == "awaiting_confirmation"
+        assert correction_payload["status"] == "processing"
+        assert correction_payload["stage"] == "regression"
+        assert correction_payload["blockers"] == []
+        assert correction_payload["candidate_revision_id"] is not None
+        assert correction_payload["regression_run_id"] is not None
         assert correction_payload["report"]["accuracy_report"] == {
             "run_metrics": json.loads(run.metrics_json),
             "selected_deviation_count": 1,
@@ -1185,18 +1250,158 @@ def test_category_dimension_snapshot_and_isolated_correction_retry(
             "confusion_pairs": [{"pair": "L1→L3", "count": 1}],
         }
         assert correction_payload["report"]["publication"]["allowed"] is False
-        assert correction_payload["blockers"][0]["code"] == (
-            "human_confirmation_required"
+        assert db.query(PromptVersion).count() == 2
+        candidate_prompt = db.scalar(
+            select(PromptVersion).where(PromptVersion.id != prompt.id)
         )
-        assert db.query(PromptVersion).count() == 1
+        assert candidate_prompt is not None
+        assert candidate_prompt.status == "draft"
+        assert candidate_prompt.source == "auto_correction"
+        candidate_revision = db.get(
+            CategoryEvaluationV3Revision,
+            correction_payload["candidate_revision_id"],
+        )
+        assert candidate_revision is not None
+        assert candidate_revision.status == "candidate"
+        assert json.loads(candidate_revision.contract_json)["spec_version"] == (
+            "material-image-auto-candidate-v2"
+        )
+        db.refresh(active_config)
+        assert (
+            active_config.revision,
+            active_config.contract_hash,
+            active_config.contract_json,
+        ) == frozen_active_projection
+        candidate_run = db.get(
+            BaselineRegressionRun,
+            correction_payload["regression_run_id"],
+        )
+        assert candidate_run is not None
+        assert candidate_run.status == "running"
+        assert [item.baseline_set_item_id for item in candidate_run.items] == [
+            item.baseline_set_item_id for item in run.items
+        ]
+        candidate_job = db.get(EvaluationJob, candidate_run.items[0].job_id)
+        assert candidate_job is not None
+        frozen_candidate_job = json.loads(
+            candidate_job.category_profile_snapshot_json
+        )
+        assert frozen_candidate_job["v3_authoritative_bundle"][
+            "candidate_revision_id"
+        ] == candidate_revision.id
+        assert candidate_job.prompt_a_id == candidate_prompt.id
 
-        main_module = importlib.import_module("app.main")
-        original_builder = main_module.execute_correction_run
+        still_running = client.get(
+            f"/api/baseline-corrections/{correction_payload['id']}"
+        )
+        assert still_running.status_code == 200
+        assert still_running.json()["status"] == "processing"
+        premature = client.post(
+            f"/api/baseline-corrections/{correction_payload['id']}/decision",
+            json={"decision": "approved", "note": "回归未完成不能启用"},
+        )
+        assert premature.status_code == 409
 
-        def fail_report(_row):
-            raise ValueError("deterministic-analysis-test-failure")
+        candidate_result = EvaluationResult(
+            asset_id=asset.id,
+            job_id=candidate_job.id,
+            strategy_bundle_id=candidate_run.strategy_bundle_id,
+            strategy_snapshot_json=candidate_run.strategy_snapshot_json,
+            precheck_json=json.dumps(
+                {"classification": {"scope_status": "in_scope"}}
+            ),
+            aesthetic_json=json.dumps(
+                {
+                    "dimensions": {
+                        "color_material": {
+                            "grade": 5,
+                            "evidence": ["材质表达准确"],
+                            "defects": [],
+                        },
+                        "detail_completion": {
+                            "grade": 5,
+                            "evidence": ["细节完整"],
+                            "defects": [],
+                        },
+                    }
+                }
+            ),
+            scoring_json=json.dumps({"caps": [], "review_reasons": []}),
+            raw_response_a="{}",
+            raw_response_b=None,
+            score=95,
+            level="L1",
+            confidence=0.95,
+            needs_review=False,
+            model_id=model.model_id,
+            prompt_a_version=candidate_prompt.version,
+            prompt_b_version=None,
+            rubric_version=candidate_prompt.rubric_version,
+            engine_version=candidate_run.strategy_bundle.engine_version,
+            risk_review_version=candidate_run.strategy_bundle.risk_review_version,
+        )
+        db.add(candidate_result)
+        db.flush()
+        complete_baseline_item(
+            db,
+            item_id=candidate_run.items[0].id,
+            result=candidate_result,
+        )
+        db.commit()
 
-        monkeypatch.setattr(main_module, "execute_correction_run", fail_report)
+        ready = client.get(
+            f"/api/baseline-corrections/{correction_payload['id']}"
+        )
+        assert ready.status_code == 200
+        ready_payload = ready.json()
+        assert ready_payload["status"] == "awaiting_decision"
+        assert ready_payload["stage"] == "decision"
+        assert ready_payload["report"]["candidate_regression"][
+            "approval_allowed"
+        ] is True
+        assert ready_payload["report"]["candidate_regression"][
+            "recommendation"
+        ] == "approve"
+
+        approved = client.post(
+            f"/api/baseline-corrections/{correction_payload['id']}/decision",
+            json={"decision": "approved", "note": "回归无退化，启用候选"},
+        )
+        assert approved.status_code == 200, approved.text
+        approved_payload = approved.json()
+        assert approved_payload["status"] == "approved"
+        assert approved_payload["decision"] == "approved"
+        assert approved_payload["decided_by"] == user.username
+        db.refresh(profile)
+        db.refresh(active_config)
+        db.refresh(candidate_revision)
+        assert profile.prompt_a_id == candidate_prompt.id
+        assert candidate_prompt.status == "published"
+        assert active_config.projected_revision_id == candidate_revision.id
+        assert active_config.revision == candidate_revision.revision
+        assert active_config.contract_hash == candidate_revision.contract_hash
+        assert candidate_revision.status == "active"
+
+        repeated = client.post(
+            f"/api/baseline-corrections/{correction_payload['id']}/decision",
+            json={"decision": "approved", "note": "回归无退化，启用候选"},
+        )
+        assert repeated.status_code == 200
+        conflicting = client.post(
+            f"/api/baseline-corrections/{correction_payload['id']}/decision",
+            json={"decision": "rejected", "note": "改为拒绝"},
+        )
+        assert conflicting.status_code == 409
+
+        class FailingGenerator:
+            def generate(self, **_kwargs):
+                raise ValueError("deterministic-analysis-test-failure")
+
+        monkeypatch.setattr(
+            main_module,
+            "configured_correction_generator",
+            lambda _db: FailingGenerator(),
+        )
         failed = client.post(
             f"/api/baseline-regressions/{run.id}/corrections",
             json={
@@ -1210,28 +1415,23 @@ def test_category_dimension_snapshot_and_isolated_correction_retry(
 
         monkeypatch.setattr(
             main_module,
-            "execute_correction_run",
-            original_builder,
+            "configured_correction_generator",
+            lambda _db: DeterministicGenerator(),
         )
         retried = client.post(
             f"/api/baseline-corrections/{failed.json()['id']}/retry"
         )
         assert retried.status_code == 200
-        assert retried.json()["status"] == "awaiting_confirmation"
+        assert retried.json()["status"] == "processing"
+        assert retried.json()["stage"] == "regression"
         assert retried.json()["attempt_count"] == 2
         frozen_analysis = db.get(BaselineCorrectionRun, failed.json()["id"])
         assert frozen_analysis is not None
         assert json.loads(frozen_analysis.input_snapshot_json)["items"][0][
             "predicted_level"
         ] == "L3"
-        assert db.query(PromptVersion).count() == 1
+        assert db.query(PromptVersion).count() == 3
 
-        prompt_only = client.post(
-            f"/api/baseline-sets/{created_set.json()['id']}/runs",
-            json={"prompt_id": prompt.id, "dimension_mode": "none"},
-        )
-        assert prompt_only.status_code == 410
-        assert prompt_only.json()["detail"]["code"] == "legacy_dimension_write_retired"
     finally:
         app.dependency_overrides.clear()
         db.close()

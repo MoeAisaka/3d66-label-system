@@ -81,6 +81,8 @@ from .models import (
     BaselineCorrectionRun,
     BaselineSet,
     BaselineSetItem,
+    CategoryEvaluationV3Config,
+    CategoryEvaluationV3Revision,
     CircuitBreaker,
     DimensionRoutePolicy,
     DimensionSchema,
@@ -138,6 +140,16 @@ from .baseline_regression import (
     fail_baseline_item,
     filename_level_suggestion,
     run_comparison,
+)
+from .baseline_correction_orchestration import (
+    CorrectionOrchestrationError,
+    advance_correction_run,
+    configured_correction_generator,
+    refresh_correction_run,
+)
+from .category_evaluation_v3_revisions import (
+    CategoryEvaluationV3RevisionError,
+    activate_candidate_revision,
 )
 from .inspiration_auto_correction import (
     AutoCorrectionPolicy,
@@ -993,6 +1005,11 @@ class BaselineCorrectionCreateRequest(BaseModel):
         if len(self.item_ids) != len(set(self.item_ids)):
             raise ValueError("纠偏样本不能重复")
         return self
+
+
+class BaselineCorrectionDecisionRequest(BaseModel):
+    decision: Literal["approved", "rejected"]
+    note: str = Field(default="", max_length=2000)
 
 
 class InspirationAutoCorrectionRequest(BaseModel):
@@ -9684,15 +9701,23 @@ def _baseline_correction_payload(row: BaselineCorrectionRun) -> dict[str, Any]:
         "category_key": row.category_key,
         "selected_item_ids": json.loads(row.selected_item_ids_json),
         "status": row.status,
+        "stage": row.stage,
         "progress": row.progress,
         "report": json.loads(row.report_json or "{}"),
         "blockers": json.loads(row.blockers_json or "[]"),
+        "candidate_revision_id": row.candidate_revision_id,
+        "regression_run_id": row.regression_run_id,
+        "orchestration": json.loads(row.orchestration_json or "{}"),
         "error": {
             "code": row.error_code,
             "message": row.error_message,
             "retryable": row.status == "failed" and row.attempt_count < 3,
         } if row.error_code else None,
         "attempt_count": row.attempt_count,
+        "decision": row.decision,
+        "decided_by": row.decided_by,
+        "decided_at": row.decided_at,
+        "decision_note": row.decision_note,
         "created_by": row.created_by,
         "created_at": row.created_at,
         "updated_at": row.updated_at,
@@ -9758,11 +9783,25 @@ def _execute_baseline_correction(
     db: Session, row: BaselineCorrectionRun
 ) -> None:
     try:
-        execute_correction_run(row)
+        advance_correction_run(
+            db,
+            row,
+            configured_correction_generator(db),
+        )
     except (ValueError, TypeError, json.JSONDecodeError) as exc:
+        stage_codes = {
+            "analysis": "CORRECTION_ANALYSIS_FAILED",
+            "candidate_generation": "CORRECTION_CANDIDATE_GENERATION_FAILED",
+            "candidate_validation": "CORRECTION_CANDIDATE_VALIDATION_FAILED",
+            "regression": "CORRECTION_REGRESSION_SETUP_FAILED",
+        }
         fail_correction_run(
             row,
-            error_code="CORRECTION_ANALYSIS_FAILED",
+            error_code=(
+                exc.code
+                if isinstance(exc, CorrectionOrchestrationError)
+                else stage_codes.get(row.stage, "CORRECTION_PIPELINE_FAILED")
+            ),
             error_message=str(exc),
         )
         row.finished_at = datetime.now(timezone.utc)
@@ -9847,6 +9886,9 @@ def list_baseline_corrections(
         .where(BaselineCorrectionRun.baseline_run_id == run_id)
         .order_by(BaselineCorrectionRun.created_at.desc(), BaselineCorrectionRun.id.desc())
     ).all()
+    for row in rows:
+        refresh_correction_run(db, row)
+    db.commit()
     return {"items": [_baseline_correction_payload(row) for row in rows]}
 
 
@@ -9859,6 +9901,133 @@ def get_baseline_correction(
     row = db.get(BaselineCorrectionRun, correction_id)
     if row is None:
         raise HTTPException(status_code=404, detail="基准回归纠偏任务不存在")
+    refresh_correction_run(db, row)
+    db.commit()
+    return _baseline_correction_payload(row)
+
+
+@app.post("/api/baseline-corrections/{correction_id}/decision")
+def decide_baseline_correction(
+    correction_id: int,
+    payload: BaselineCorrectionDecisionRequest,
+    user: User = Depends(_permission_user("releases:write")),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    row = db.get(BaselineCorrectionRun, correction_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="基准回归纠偏任务不存在")
+    refresh_correction_run(db, row)
+    normalized_note = payload.note.strip()
+    if row.status in {"approved", "rejected"}:
+        if row.decision == payload.decision and row.decision_note == normalized_note:
+            return _baseline_correction_payload(row)
+        raise HTTPException(status_code=409, detail="纠偏任务已有不可变的人工结论")
+    if row.status != "awaiting_decision" or row.stage != "decision":
+        raise HTTPException(status_code=409, detail="候选回归尚未形成最终结论")
+
+    if payload.decision == "approved":
+        report = json.loads(row.report_json or "{}")
+        regression = report.get("candidate_regression")
+        if (
+            not isinstance(regression, dict)
+            or regression.get("approval_allowed") is not True
+            or regression.get("recommendation") != "approve"
+        ):
+            raise HTTPException(status_code=409, detail="候选回归未通过，不能启用")
+        candidate = db.get(
+            CategoryEvaluationV3Revision,
+            row.candidate_revision_id,
+        )
+        projected = db.scalar(
+            select(CategoryEvaluationV3Config).where(
+                CategoryEvaluationV3Config.category_key == row.category_key,
+                CategoryEvaluationV3Config.status == "active",
+            )
+        )
+        if candidate is None or projected is None:
+            raise HTTPException(status_code=409, detail="候选或现役机制不存在")
+        orchestration = json.loads(row.orchestration_json or "{}")
+        base_projection = orchestration.get("base_projection")
+        if (
+            not isinstance(base_projection, dict)
+            or projected.projected_revision_id != base_projection.get("revision_id")
+            or projected.revision != base_projection.get("revision")
+            or projected.contract_hash != base_projection.get("contract_hash")
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "projected_revision_conflict",
+                    "message": "现役机制已变化，请重新执行纠偏分析",
+                },
+            )
+        prompt_state = orchestration.get("candidate_prompt")
+        if not isinstance(prompt_state, dict):
+            raise HTTPException(status_code=409, detail="候选提示词绑定缺失")
+        candidate_prompt = db.get(PromptVersion, prompt_state.get("id"))
+        base_prompt_id = prompt_state.get("base_prompt_id")
+        stage = prompt_state.get("stage")
+        profile = db.scalar(
+            select(EvaluationCategoryProfile).where(
+                EvaluationCategoryProfile.category_key == row.category_key
+            )
+        )
+        if (
+            candidate_prompt is None
+            or profile is None
+            or stage not in {"A", "B"}
+            or candidate_prompt.stage != stage
+        ):
+            raise HTTPException(status_code=409, detail="候选提示词或类目绑定无效")
+        current_prompt_id = profile.prompt_a_id if stage == "A" else profile.prompt_b_id
+        if current_prompt_id not in {None, base_prompt_id}:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "prompt_projection_conflict",
+                    "message": "类目现役提示词已变化，请重新执行纠偏分析",
+                },
+            )
+        try:
+            activate_candidate_revision(
+                db,
+                projected,
+                candidate,
+                actor=user.username,
+            )
+        except CategoryEvaluationV3RevisionError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": exc.code, "message": str(exc)},
+            ) from exc
+        candidate_prompt.status = "published"
+        if stage == "A":
+            profile.prompt_a_id = candidate_prompt.id
+        else:
+            profile.prompt_b_id = candidate_prompt.id
+
+    row.status = payload.decision
+    row.decision = payload.decision
+    row.decided_by = user.username
+    row.decided_at = datetime.now(timezone.utc)
+    row.decision_note = normalized_note
+    row.finished_at = row.decided_at
+    append_audit_event(
+        db,
+        category="baseline_regression",
+        action=f"correction_{payload.decision}",
+        subject_type="baseline_correction_run",
+        subject_id=row.id,
+        actor=user.username,
+        payload={
+            "decision": payload.decision,
+            "candidate_revision_id": row.candidate_revision_id,
+            "regression_run_id": row.regression_run_id,
+            "note": normalized_note,
+        },
+        event_key=f"baseline-correction:{row.id}:decision:{payload.decision}",
+    )
+    db.commit()
     return _baseline_correction_payload(row)
 
 
@@ -9876,7 +10045,11 @@ def retry_baseline_correction(
     if row.attempt_count >= 3:
         raise HTTPException(status_code=409, detail="纠偏任务已达到最大重试次数")
     row.status = "processing"
+    row.stage = "analysis"
     row.progress = 10
+    row.error_code = ""
+    row.error_message = ""
+    row.finished_at = None
     row.attempt_count += 1
     _execute_baseline_correction(db, row)
     append_audit_event(

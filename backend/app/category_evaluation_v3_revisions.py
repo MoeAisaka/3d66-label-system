@@ -310,3 +310,77 @@ def sync_projected_revision(
     projected.projected_revision_id = revision.id
     db.flush()
     return revision
+
+
+def activate_candidate_revision(
+    db: Session,
+    projected: CategoryEvaluationV3Config,
+    candidate: CategoryEvaluationV3Revision,
+    *,
+    actor: str,
+) -> CategoryEvaluationV3Revision:
+    """Activate one validated direct child without creating a second revision."""
+    current = ensure_projected_revision(db, projected)
+    if candidate.category_key != projected.category_key:
+        raise CategoryEvaluationV3RevisionError(
+            "candidate_category_conflict",
+            "候选 revision 不属于当前类目",
+        )
+    if candidate.status != "candidate":
+        raise CategoryEvaluationV3RevisionError(
+            "candidate_status_conflict",
+            "只有候选状态的 revision 可以启用",
+        )
+    if candidate.parent_revision_id != current.id:
+        raise CategoryEvaluationV3RevisionError(
+            "projected_revision_conflict",
+            "现役机制已变化，请重新执行纠偏分析",
+        )
+    artifacts = RevisionArtifacts(
+        display_name=candidate.display_name,
+        contract=json.loads(candidate.contract_json),
+        classification_map=json.loads(candidate.classification_map_json),
+        subcategory_dimensions=json.loads(
+            candidate.subcategory_dimensions_json
+        ),
+    )
+    (
+        contract_json,
+        classification_map_json,
+        subcategory_dimensions_json,
+        rule_mirror_json,
+        contract_hash,
+        media_penalty_enabled,
+    ) = _canonical_artifacts(artifacts)
+    if (
+        candidate.contract_json != contract_json
+        or candidate.classification_map_json != classification_map_json
+        or candidate.subcategory_dimensions_json != subcategory_dimensions_json
+        or candidate.dimension_deduction_rules_json != rule_mirror_json
+        or candidate.contract_hash != contract_hash
+        or candidate.media_penalty_enabled != media_penalty_enabled
+    ):
+        raise CategoryEvaluationV3RevisionError(
+            "candidate_artifact_conflict",
+            "候选 revision 的冻结产物校验失败",
+        )
+
+    current.status = "retired"
+    candidate.status = "active"
+    projected.display_name = candidate.display_name
+    projected.status = "active"
+    projected.contract_json = candidate.contract_json
+    projected.classification_map_json = candidate.classification_map_json
+    projected.subcategory_dimensions_json = (
+        candidate.subcategory_dimensions_json
+    )
+    projected.dimension_deduction_rules_json = (
+        candidate.dimension_deduction_rules_json
+    )
+    projected.media_penalty_enabled = candidate.media_penalty_enabled
+    projected.revision = candidate.revision
+    projected.contract_hash = candidate.contract_hash
+    projected.projected_revision_id = candidate.id
+    projected.created_by = projected.created_by or actor
+    db.flush()
+    return candidate
