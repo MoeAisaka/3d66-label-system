@@ -76,7 +76,7 @@ def export_row(label: PublishedLabel) -> dict[str, Any]:
     }
 
 
-def _csv_text(value: Any) -> Any:
+def spreadsheet_safe_text(value: Any) -> Any:
     if not isinstance(value, str) or not value.startswith(_CSV_FORMULA_PREFIXES):
         return value
     return "'" + value
@@ -87,7 +87,9 @@ def _build_csv(rows: list[dict[str, Any]]) -> bytes:
     writer = csv.DictWriter(stream, fieldnames=EXPORT_COLUMNS, extrasaction="ignore")
     writer.writeheader()
     for row in rows:
-        writer.writerow({key: _csv_text(row.get(key, "")) for key in EXPORT_COLUMNS})
+        writer.writerow(
+            {key: spreadsheet_safe_text(row.get(key, "")) for key in EXPORT_COLUMNS}
+        )
     return ("\ufeff" + stream.getvalue()).encode("utf-8")
 
 

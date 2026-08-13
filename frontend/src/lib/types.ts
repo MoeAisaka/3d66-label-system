@@ -1587,8 +1587,25 @@ export type SampleSetSummary = {
   status: "draft" | "locked"
   item_count: number
   truth_complete_count: number
+  latest_truth_revision: number
   created_by: string
   created_at: string
+}
+
+export type QualityAssetsSummary = {
+  sample_set_count: number
+  item_count: number
+  truth_complete_count: number
+  by_kind: Record<string, QualityAssetsSummaryBucket>
+  by_category: Record<string, QualityAssetsSummaryBucket>
+  by_status: Record<string, QualityAssetsSummaryBucket>
+  by_truth_complete: Record<"true" | "false", number>
+}
+
+export type QualityAssetsSummaryBucket = {
+  sample_sets: number
+  items: number
+  truth_complete: number
 }
 
 export type SampleSetItem = {

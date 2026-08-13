@@ -128,6 +128,7 @@ from .models import (
     User,
 )
 from .audit import append_audit_event, canonical_json
+from .quality_assets import build_quality_asset_export
 from .baseline_regression import (
     LEVELS as BASELINE_LEVELS,
     TERMINAL_RUN_STATUSES as BASELINE_TERMINAL_STATUSES,
@@ -915,6 +916,10 @@ class SampleSetItemUpdateRequest(BaseModel):
 
 class SampleSetStatusRequest(BaseModel):
     status: str = Field(pattern="^(draft|locked)$")
+
+
+class SampleSetExportRequest(BaseModel):
+    format: Literal["csv", "json", "manifest"]
 
 
 class RegressionCreateRequest(BaseModel):
@@ -8555,6 +8560,10 @@ def create_review(
 
 def _sample_set_summary(sample_set: SampleSet) -> dict[str, Any]:
     truth_complete = sum(1 for item in sample_set.items if bool(json.loads(item.truth_json or "{}")))
+    latest_truth_revision = max(
+        (item.truth_revision for item in sample_set.items),
+        default=0,
+    )
     return {
         "id": sample_set.id,
         "name": sample_set.name,
@@ -8564,6 +8573,7 @@ def _sample_set_summary(sample_set: SampleSet) -> dict[str, Any]:
         "status": sample_set.status,
         "item_count": len(sample_set.items),
         "truth_complete_count": truth_complete,
+        "latest_truth_revision": latest_truth_revision,
         "created_by": sample_set.created_by,
         "created_at": sample_set.created_at,
     }
@@ -8589,6 +8599,14 @@ def _sample_set_item_payload(item: SampleSetItem) -> dict[str, Any]:
         "added_by": item.added_by,
         "created_at": item.created_at,
     }
+
+
+def _assert_sample_set_is_mutable(sample_set: SampleSet) -> None:
+    if sample_set.kind == "golden" and sample_set.status == "locked":
+        raise HTTPException(
+            status_code=409,
+            detail="已锁定黄金集不可直接修改；请复制形成新草稿版本后再调整。",
+        )
 
 
 def _create_regression_runs(
@@ -10241,6 +10259,48 @@ def list_sample_sets(
     return {"items": [_sample_set_summary(sample_set) for sample_set in sample_sets]}
 
 
+@app.get("/api/quality-assets/summary")
+def quality_assets_summary(
+    _user: User = Depends(current_user), db: Session = Depends(get_db)
+) -> dict[str, Any]:
+    sample_sets = db.scalars(select(SampleSet)).all()
+    grouped: dict[str, dict[str, dict[str, int]]] = {
+        "by_kind": {},
+        "by_category": {},
+        "by_status": {},
+    }
+    item_count = 0
+    truth_complete_count = 0
+    for sample_set in sample_sets:
+        summary = _sample_set_summary(sample_set)
+        set_items = int(summary["item_count"])
+        complete_items = int(summary["truth_complete_count"])
+        item_count += set_items
+        truth_complete_count += complete_items
+        for group_key, value in (
+            ("by_kind", sample_set.kind),
+            ("by_category", sample_set.category_key),
+            ("by_status", sample_set.status),
+        ):
+            bucket = grouped[group_key].setdefault(
+                value,
+                {"sample_sets": 0, "items": 0, "truth_complete": 0},
+            )
+            bucket["sample_sets"] += 1
+            bucket["items"] += set_items
+            bucket["truth_complete"] += complete_items
+    return {
+        "sample_set_count": len(sample_sets),
+        "item_count": item_count,
+        "truth_complete_count": truth_complete_count,
+        "by_truth_complete": {
+            "true": truth_complete_count,
+            "false": item_count - truth_complete_count,
+        },
+        **grouped,
+    }
+
+
 @app.post("/api/sample-sets")
 def create_sample_set(
     payload: SampleSetCreateRequest,
@@ -10280,6 +10340,31 @@ def sample_set_detail(
     }
 
 
+@app.post("/api/sample-sets/{sample_set_id}/export")
+def export_sample_set(
+    sample_set_id: int,
+    payload: SampleSetExportRequest,
+    _user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> Response:
+    sample_set = db.get(SampleSet, sample_set_id)
+    if not sample_set:
+        raise HTTPException(status_code=404, detail="样本集不存在")
+    export = build_quality_asset_export(sample_set, format=payload.format)
+    safe_name = re.sub(r"[^A-Za-z0-9._-]+", "-", sample_set.name).strip("-")
+    filename = f"{safe_name or f'sample-set-{sample_set.id}'}.{export.extension}"
+    return Response(
+        content=export.content,
+        media_type=export.media_type,
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "X-Export-Row-Count": str(export.row_count),
+            "X-Dataset-Version": export.dataset_version,
+            "X-Manifest-Hash": export.manifest_hash,
+        },
+    )
+
+
 @app.post("/api/sample-sets/{sample_set_id}/items")
 def add_sample_set_items(
     sample_set_id: int,
@@ -10290,6 +10375,7 @@ def add_sample_set_items(
     sample_set = db.get(SampleSet, sample_set_id)
     if not sample_set:
         raise HTTPException(status_code=404, detail="样本集不存在")
+    _assert_sample_set_is_mutable(sample_set)
     requested_ids = list(dict.fromkeys(payload.asset_ids))
     assets = db.scalars(select(Asset).where(Asset.id.in_(requested_ids))).all()
     assets_by_id = {asset.id: asset for asset in assets}
@@ -10368,6 +10454,7 @@ def update_sample_set_item(
     )
     if not item:
         raise HTTPException(status_code=404, detail="样本不存在")
+    _assert_sample_set_is_mutable(item.sample_set)
     item.expected_level = payload.expected_level
     item.note = payload.note.strip()
     if payload.truth is not None:
@@ -10401,6 +10488,8 @@ def update_sample_set_status(
     sample_set = db.get(SampleSet, sample_set_id)
     if not sample_set:
         raise HTTPException(status_code=404, detail="样本集不存在")
+    if sample_set.status == "locked" and payload.status != "locked":
+        _assert_sample_set_is_mutable(sample_set)
     if payload.status == "locked":
         if sample_set.kind != "golden":
             raise HTTPException(status_code=400, detail="只有黄金样本集需要锁定")
@@ -10503,6 +10592,7 @@ def remove_sample_set_item(
     )
     if not item:
         raise HTTPException(status_code=404, detail="样本不存在")
+    _assert_sample_set_is_mutable(item.sample_set)
     db.delete(item)
     db.commit()
     return {"ok": True}

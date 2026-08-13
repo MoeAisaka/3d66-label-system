@@ -41,7 +41,7 @@ export function IncrementalWorkspacePage() {
     { key: "review", label: "人工纠偏", note: "只处理需要人工判断的结果", state: currentStep >= 6 ? "current" : "pending" },
     { key: "candidate", label: "AI 迭代与回归", note: "候选自动生成，结果等待人工决策", state: currentStep >= 7 ? "current" : "pending" },
     { key: "release", label: "正式发布", note: "机制轴与标签事实轴分开", state: currentStep >= 8 ? "completed" : "pending" },
-  ].slice(0, 5)
+  ]
 
   return (
     <>
@@ -52,7 +52,7 @@ export function IncrementalWorkspacePage() {
         actions={<><WorkflowContextBadge kind="incremental" /><Button asChild variant="secondary"><Link to="/workflow/materials/packages"><Images />导入或整理素材</Link></Button></>}
       />
       <div className="mx-auto max-w-[1540px] space-y-6 px-5 py-7 md:px-8 lg:px-10 lg:py-9">
-        <WorkflowStepper workflowLabel="增量素材 → 评测 → 纠偏 → 候选回归 → 发布" steps={steps} />
+        <WorkflowStepper workflowLabel="增量素材 → 评测 → 纠偏 → 候选回归 → 发布" steps={steps.slice(0, 5)} />
         <section className="grid gap-px border-y border-[var(--line-strong)] bg-[var(--line)] lg:grid-cols-[minmax(0,1.3fr)_minmax(320px,0.7fr)]">
           <div className="bg-white px-5 py-6 md:px-6">
             <div className="flex flex-wrap items-start justify-between gap-4"><div><p className="text-xs font-semibold text-[var(--muted)]">主操作</p><h2 className="mt-2 font-editorial text-2xl font-bold">选择类目并进入增量生产</h2></div><Badge tone={availablePackages.length ? "success" : "warning"}>{availablePackages.length ? `${availablePackages.length} 个素材包可用` : "等待素材包"}</Badge></div>

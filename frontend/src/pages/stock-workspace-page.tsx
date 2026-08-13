@@ -22,12 +22,12 @@ export function StockWorkspacePage() {
     { key: "regress", label: "启动回归", note: "按冻结机制和真值运行", state: step >= 4 ? "current" : "pending", required: true },
     { key: "review", label: "人工纠偏与 AI 迭代", note: "候选回归结果等待人工决策", state: step >= 5 ? "current" : "pending" },
     { key: "rerun", label: "存量重跑与发布", note: "申请后再进行正式事实发布", state: step >= 6 ? "completed" : "pending" },
-  ].slice(0, 5)
+  ]
   return (
     <>
       <PageHeader index="02" title="存量回归" description="已定性素材、黄金集和存量重跑沿独立页面主线推进；与增量链路复用纠偏、候选回归、发布和对账内核。" actions={<><WorkflowContextBadge kind="stock" /><Button asChild variant="secondary"><Link to="/workflow/optimization/baseline-regression"><ChartLineUp />打开基准回归</Link></Button></>} />
       <div className="mx-auto max-w-[1540px] space-y-6 px-5 py-7 md:px-8 lg:px-10 lg:py-9">
-        <WorkflowStepper workflowLabel="存量素材/黄金集 → 回归 → 纠偏 → 候选回归 → 重跑发布" steps={steps} />
+        <WorkflowStepper workflowLabel="存量素材/黄金集 → 回归 → 纠偏 → 候选回归 → 重跑发布" steps={steps.slice(0, 5)} />
         <section className="grid gap-px border-y border-[var(--line-strong)] bg-[var(--line)] lg:grid-cols-[minmax(0,1.25fr)_minmax(320px,0.75fr)]">
           <div className="bg-white px-5 py-6 md:px-6"><div className="flex flex-wrap items-start justify-between gap-4"><div><p className="text-xs font-semibold text-[var(--muted)]">主操作</p><h2 className="mt-2 font-editorial text-2xl font-bold">选择基准集并启动存量回归</h2></div><Badge tone={sets.data?.items.length ? "success" : "warning"}>{sets.data?.items.length ? `${sets.data.items.length} 个基准集` : "等待基准集"}</Badge></div><div className="mt-6 grid gap-4 sm:grid-cols-2"><Button asChild variant="secondary"><Link to="/legacy/sample-sets"><ShieldCheck />管理黄金数据集</Link></Button><Button asChild><Link to="/workflow/optimization/baseline-regression"><Play weight="fill" />进入回归主线</Link></Button></div></div>
           <aside className="bg-[#f7fadf] px-5 py-6 md:px-6"><p className="text-xs font-bold">最近一次存量回归</p>{latest ? <><p className="mt-3 text-lg font-semibold">基准集 #{latest.baseline_set_id}</p><p className="mt-2 text-xs leading-5 text-[var(--muted)]">{latest.status} · {latest.completed}/{latest.total} 完成 · workflow_kind=stock</p><Button asChild size="sm" variant="secondary" className="mt-5"><Link to={`/workflow/optimization/baseline-regression?run=${latest.id}`}>查看回归详情<ArrowRight /></Link></Button></> : <p className="mt-3 text-sm leading-6 text-[var(--muted)]">还没有存量回归运行。先选择或创建黄金集。</p>}</aside>
