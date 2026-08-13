@@ -16,10 +16,11 @@
 
 当前聚焦验证：
 
-- profile 与权威 Worker：`45 passed, 1 warning`；机制编辑器合同、v3-only 合同和前端 production build 通过。
-- 本地增量接入与统一标签平台：`11 passed, 1 warning`；重复事件只复用一个素材包，缺现役 profile 不创建包。
-- 双工作区、信息架构与 workspace component 合同通过；运行中心 TypeScript/Vite production build 通过，仅保留既有主 chunk 大于 500 kB warning。
-- 完整后端、全部前端合同、迁移与 Edge 桌面验收将在本批最终验证后补充回执。
+- 后端本批聚焦（双工作区上下文、接入组包、质量资产、投影、字段指标、profile、v3 API 与迁移）：`83 passed, 1 warning`。
+- 后端全量（Python 3.12、隔离 `DATA_DIR`）：`1284 passed, 1 skipped, 6 warnings`；warning 仅为既有 FastAPI `httpx2` 与 PDF SWIG 弃用提示。
+- 前端 `dimensions`、`v3-only`、`node-correction`、`proposal-pdf`、`balanced-100`、`level-scale-thinking`、`model-registry`、`information-architecture`、`mechanism-editor`、`dual-workspaces`、Lightbox 合同及 TypeScript/Vite production build 全部通过；仅保留既有主 chunk 大于 500 kB warning。
+- Edge `151.0.4129.78` 使用纯临时 SQLite 和本地 `127.0.0.1:18173` 完成 `1440×900`、`1280×720` 桌面验收：增量、存量、运行中心、质量资产与 Proposal PDF 机制配置均无白屏、文档横向溢出、控制台 warning/error；运行中心二级抽屉可正常打开，页面展示 `LabelLab v0.2.0 · build 4138cc0`。
+- 首轮 Edge 验收发现运行中心把 `/api/queues/status` 顶层 `global_limit` 错读为 `policy.global_limit` 并白屏；已用失败合同冻结并修复，提交为 `4138cc0`，复验通过。
 
 当前非目标与交付门：
 
