@@ -7,8 +7,8 @@
 - Codeup MR：#4 `fix: 清理历史纠偏人工确认阻塞`
 - 回执文档 MR：#5 `docs: record legacy correction cleanup deployment`，合并点
   `ae667754389e628ab07b04b14240cb08d4fe8717`
-- 回执口径修正 MR：#6 `docs: distinguish deployment verification points`，合入后最终
-  `main@be505e498ea40235f2fac6eeaaac09e485cbab58`
+- 回执口径修正 MR：#6 `docs: distinguish deployment verification points`，合并点
+  `be505e498ea40235f2fac6eeaaac09e485cbab58`
 - 测试环境：`http://192.168.1.35:8081`
 - 范围仅为历史 `LEGACY_CORRECTION_INCOMPLETE` 纠偏记录移除废止的
   `human_confirmation_required` blocker；不修改自动纠偏五阶段、最终人工启用/拒绝、
@@ -50,7 +50,7 @@
 | SQLite integrity / FK | `ok` / 0 |
 | 活跃任务 | 活跃评测、基准回归、processing 纠偏、存量重跑均为 0 |
 | 目标历史记录 | 仍为 `failed` + `LEGACY_CORRECTION_INCOMPLETE`，保留原失败说明，`blockers_json=[]` |
-| 前端版本 | 功能验收点 `build 8b9e5c4`；最终同步后 `build be505e4` |
+| 前端版本 | 功能验收点 `LabelLab v0.2.0 · build 8b9e5c4`；文档同步重建后功能内容一致 |
 | Edge 桌面验收 | 基准回归和 Proposal PDF V3 合同配置在 `1440x900`、`1280x720` 无白屏、文档横向溢出、控制台错误 |
 
 历史纠偏失败卡片现在说明“旧版纠偏任务未创建候选或回归，请重新执行”及“重新执行会沿用
