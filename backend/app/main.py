@@ -146,6 +146,7 @@ from .baseline_regression import (
     LEVELS as BASELINE_LEVELS,
     TERMINAL_RUN_STATUSES as BASELINE_TERMINAL_STATUSES,
     baseline_set_fingerprint,
+    build_baseline_field_metrics,
     canonical_json as baseline_canonical_json,
     compute_level_metrics,
     correction_input_snapshot,
@@ -9869,6 +9870,18 @@ def baseline_run_detail(
         },
         "items": item_payloads,
     }
+
+
+@app.get("/api/baseline-regressions/{run_id}/metrics")
+def baseline_run_metrics(
+    run_id: int,
+    _user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    run = db.get(BaselineRegressionRun, run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="基准回归 run 不存在")
+    return build_baseline_field_metrics(db, run)
 
 
 def _baseline_correction_payload(row: BaselineCorrectionRun) -> dict[str, Any]:

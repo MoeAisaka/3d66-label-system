@@ -368,6 +368,68 @@ export type BaselineLevelMetrics = {
   confusion_matrix: Record<BaselineLevel, Record<BaselineLevel, number>>
 }
 
+export type BaselineFieldMetric = {
+  field_key: string
+  support: number
+  tp: number
+  fp: number
+  fn: number
+  accuracy: number
+  recall: number
+  confusion_matrix: Record<string, Record<string, number>>
+  failure_sample_ids: number[]
+}
+
+export type BaselineFieldMetrics = {
+  schema_version: "baseline-field-metrics-v1"
+  run_id: number
+  category_key: string
+  field_metrics: BaselineFieldMetric[]
+  aggregates: {
+    macro: {
+      field_count: number
+      accuracy: number
+      recall: number
+    }
+    micro: {
+      support: number
+      tp: number
+      fp: number
+      fn: number
+      accuracy: number
+      recall: number
+    }
+  }
+  failure_sample_ids: number[]
+  golden_failure_sample_ids: number[]
+  versions: {
+    model: string[]
+    prompt: { a: string[]; b: string[] }
+    mechanism: {
+      spec_version: string | null
+      rubric: string[]
+      engine: string[]
+      strategy_bundle_id: number
+      strategy_canonical_id: string
+    }
+    asset: {
+      baseline_set_fingerprint: string
+      count: number
+      payload_hash: string
+    }
+    truth: {
+      locked_sample_set_ids: number[]
+      revision_min: number
+      revision_max: number
+      matched_asset_count: number
+    }
+  }
+  decision_policy: {
+    evidence_only: true
+    auto_activate_candidate: false
+  }
+}
+
 export type BaselinePromptSelection = {
   id: number | null
   stage: "A" | "B"

@@ -14,7 +14,12 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from .audit import canonical_json
-from .baseline_regression import compute_level_metrics, deterministic_correction_report
+from .baseline_regression import (
+    build_baseline_field_metrics,
+    compute_level_metrics,
+    deterministic_correction_report,
+    field_metric_release_regressions,
+)
 from .category_evaluation_v3_revisions import (
     RevisionArtifacts,
     create_candidate_revision,
@@ -798,6 +803,14 @@ def refresh_correction_run(
                 "message": "候选回归失败条目增加",
             }
         )
+    baseline_field_metrics = build_baseline_field_metrics(db, baseline)
+    candidate_field_metrics = build_baseline_field_metrics(db, regression)
+    regressions.extend(
+        field_metric_release_regressions(
+            baseline_field_metrics,
+            candidate_field_metrics,
+        )
+    )
     approval_allowed = comparable and not regressions
     report = _json_object(correction.report_json, label="纠偏分析报告")
     report["candidate_regression"] = {
@@ -807,6 +820,8 @@ def refresh_correction_run(
         "comparable": comparable,
         "baseline_metrics": baseline_metrics,
         "candidate_metrics": candidate_metrics,
+        "baseline_field_metrics": baseline_field_metrics,
+        "candidate_field_metrics": candidate_field_metrics,
         "exact_accuracy_delta": exact_delta,
         "adjacent_accuracy_delta": adjacent_delta,
         "regressions": regressions,

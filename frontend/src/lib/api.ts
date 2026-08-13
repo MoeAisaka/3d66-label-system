@@ -1,6 +1,7 @@
 import type {
   Asset,
   BaselineCorrectionRun,
+  BaselineFieldMetrics,
   BaselineLevel,
   BaselineRegressionDetail,
   BaselineRegressionRun,
@@ -219,6 +220,9 @@ export const baselineRegressionApi = {
       `/api/baseline-regressions/${runId}?${params.toString()}`,
     )
   },
+  getMetrics: (runId: number) => api<BaselineFieldMetrics>(
+    `/api/baseline-regressions/${runId}/metrics`,
+  ),
   enqueueDeviations: (runId: number, itemIds: number[]) => api<{
     run_id: number
     case_ids: number[]
