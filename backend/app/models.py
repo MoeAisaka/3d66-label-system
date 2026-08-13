@@ -3395,8 +3395,16 @@ class BaselineCorrectionRun(Base):
     __table_args__ = (
         UniqueConstraint("idempotency_key", name="uq_baseline_correction_key"),
         CheckConstraint(
-            "status IN ('processing','awaiting_confirmation','failed')",
+            "status IN ('processing','awaiting_decision','approved','rejected','failed')",
             name="ck_baseline_correction_status",
+        ),
+        CheckConstraint(
+            "stage IN ('analysis','candidate_generation','candidate_validation','regression','decision')",
+            name="ck_baseline_correction_stage",
+        ),
+        CheckConstraint(
+            "decision IS NULL OR decision IN ('approved','rejected')",
+            name="ck_baseline_correction_decision",
         ),
         CheckConstraint("attempt_count >= 1", name="ck_baseline_correction_attempts"),
         CheckConstraint(
@@ -3432,12 +3440,30 @@ class BaselineCorrectionRun(Base):
     selected_item_ids_json: Mapped[str] = mapped_column(Text)
     input_snapshot_json: Mapped[str] = mapped_column(Text)
     status: Mapped[str] = mapped_column(String(40), default="processing", index=True)
+    stage: Mapped[str] = mapped_column(String(40), default="analysis", index=True)
     progress: Mapped[int] = mapped_column(Integer, default=0)
     report_json: Mapped[str] = mapped_column(Text, default="{}")
     blockers_json: Mapped[str] = mapped_column(Text, default="[]")
+    orchestration_json: Mapped[str] = mapped_column(Text, default="{}")
+    candidate_revision_id: Mapped[int | None] = mapped_column(
+        ForeignKey("category_evaluation_v3_revisions.id", ondelete="RESTRICT"),
+        nullable=True,
+        index=True,
+    )
+    regression_run_id: Mapped[int | None] = mapped_column(
+        ForeignKey("baseline_regression_runs.id", ondelete="RESTRICT"),
+        nullable=True,
+        index=True,
+    )
     error_code: Mapped[str] = mapped_column(String(80), default="")
     error_message: Mapped[str] = mapped_column(Text, default="")
     attempt_count: Mapped[int] = mapped_column(Integer, default=1)
+    decision: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    decided_by: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    decided_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    decision_note: Mapped[str] = mapped_column(Text, default="")
     created_by: Mapped[str] = mapped_column(String(80), default="system")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(
@@ -3447,7 +3473,9 @@ class BaselineCorrectionRun(Base):
         DateTime(timezone=True), nullable=True
     )
 
-    baseline_run: Mapped[BaselineRegressionRun] = relationship()
+    baseline_run: Mapped[BaselineRegressionRun] = relationship(
+        foreign_keys=[baseline_run_id]
+    )
 
 
 class BaselineFrozenError(ValueError):

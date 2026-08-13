@@ -246,6 +246,14 @@ export const baselineRegressionApi = {
     `/api/baseline-corrections/${correctionRunId}/retry`,
     { method: "POST" },
   ),
+  decideCorrectionRun: (
+    correctionRunId: number,
+    decision: "approved" | "rejected",
+    note: string,
+  ) => api<BaselineCorrectionRun>(
+    `/api/baseline-corrections/${correctionRunId}/decision`,
+    { method: "POST", ...jsonBody({ decision, note }) },
+  ),
 }
 
 export type PromptPipelineScope = "full_pipeline" | "baseline_regression" | "shared"
