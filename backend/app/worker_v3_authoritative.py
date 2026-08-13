@@ -19,9 +19,10 @@ from sqlalchemy.orm import Session
 from .level_semantics import UNIFIED_LEVEL_SEMANTICS_VERSION
 
 # 复用影子模块已有的只读加载与 grade 映射机件（不另造）。
-from .category_evaluation_contract import validate_category_evaluation_contract
-from .dimension_composition import validate_subcategory_dimensions
-from .subcategory_resolver import validate_classification_map
+from .mechanism_profiles import (
+    MechanismProfileError,
+    validate_mechanism_artifacts,
+)
 
 from .worker_v3_shadow import (
     _common_grades_from_aesthetic,
@@ -66,28 +67,14 @@ def _validate_v3_bundle(
         raise ValueError("合同、分类映射或赛道维度为空")
     if contract.get("category_key") != category_key:
         raise ValueError("合同 category_key 与评测类目不匹配")
-    if contract.get("profile_type") == "text-proposal-additive-v1":
-        from .proposal_text_contract import validate_proposal_text_contract
-
-        validate_proposal_text_contract(contract)
-        if classification_map.get("profile_type") != "text-proposal-additive-v1":
-            raise ValueError("proposal_text分类映射型材不匹配")
-        return
-    validate_category_evaluation_contract(contract)
-    track_keys = {
-        track["key"] for track in contract["track_classification"]["tracks"]
-    }
-    validate_classification_map(
-        classification_map, valid_track_keys=track_keys
-    )
-    if set(subcategory_dimensions) != track_keys:
-        raise ValueError("subcategory_dimensions 必须完整覆盖合同赛道")
-    for track_key, dimension_config in subcategory_dimensions.items():
-        validate_subcategory_dimensions(dimension_config)
-        if dimension_config.get("sub_category_key") != track_key:
-            raise ValueError(
-                f"赛道 {track_key} 的 sub_category_key 不匹配"
-            )
+    try:
+        validate_mechanism_artifacts(
+            contract,
+            classification_map,
+            subcategory_dimensions,
+        )
+    except MechanismProfileError as exc:
+        raise ValueError(str(exc)) from exc
 
 
 def v3_authoritative_category(db: Session, category_key: Any) -> dict:

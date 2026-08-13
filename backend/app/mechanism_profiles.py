@@ -8,6 +8,7 @@ and routes it; legacy image contracts are never rewritten merely to add a
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
 from typing import Any, Literal
 
 from .category_evaluation_contract import validate_category_evaluation_contract
@@ -20,7 +21,71 @@ from .subcategory_resolver import validate_classification_map
 
 IMAGE_PROFILE = "image-rule-deduction-v1"
 PROPOSAL_PROFILE = "text-proposal-additive-v1"
-SUPPORTED_PROFILES = frozenset({IMAGE_PROFILE, PROPOSAL_PROFILE})
+FUTURE_3D_PROFILE = "future-3d-controlled-v1"
+FUTURE_SU_PROFILE = "future-su-controlled-v1"
+
+
+@dataclass(frozen=True)
+class MechanismProfileDefinition:
+    profile_type: str
+    version: str
+    capabilities: tuple[str, ...]
+    editor_route: str | None
+    editable: bool
+    can_execute: bool
+    read_only_fallback: bool
+
+
+_EXECUTION_CAPABILITIES = (
+    "structured_editor",
+    "candidate_validation",
+    "candidate_execution",
+    "workflow_incremental",
+    "workflow_stock",
+)
+PROFILE_REGISTRY = {
+    IMAGE_PROFILE: MechanismProfileDefinition(
+        profile_type=IMAGE_PROFILE,
+        version="v1",
+        capabilities=_EXECUTION_CAPABILITIES,
+        editor_route="image-rule",
+        editable=True,
+        can_execute=True,
+        read_only_fallback=False,
+    ),
+    PROPOSAL_PROFILE: MechanismProfileDefinition(
+        profile_type=PROPOSAL_PROFILE,
+        version="v1",
+        capabilities=_EXECUTION_CAPABILITIES,
+        editor_route="proposal-text",
+        editable=True,
+        can_execute=True,
+        read_only_fallback=False,
+    ),
+    FUTURE_3D_PROFILE: MechanismProfileDefinition(
+        profile_type=FUTURE_3D_PROFILE,
+        version="v1",
+        capabilities=("dedicated_editor_slot",),
+        editor_route=None,
+        editable=False,
+        can_execute=False,
+        read_only_fallback=True,
+    ),
+    FUTURE_SU_PROFILE: MechanismProfileDefinition(
+        profile_type=FUTURE_SU_PROFILE,
+        version="v1",
+        capabilities=("dedicated_editor_slot",),
+        editor_route=None,
+        editable=False,
+        can_execute=False,
+        read_only_fallback=True,
+    ),
+}
+SUPPORTED_PROFILES = frozenset(
+    profile_type
+    for profile_type, definition in PROFILE_REGISTRY.items()
+    if definition.can_execute
+)
 
 
 @dataclass(frozen=True)
@@ -30,6 +95,11 @@ class MechanismProfileResolution:
     supported: bool
     editable: bool
     reason: str | None = None
+    version: str | None = None
+    capabilities: tuple[str, ...] = ()
+    editor_route: str | None = None
+    read_only_fallback: bool = True
+    can_execute: bool = False
 
 
 class MechanismProfileError(ValueError):
@@ -53,6 +123,67 @@ def _legacy_image_shape(contract: dict[str, Any]) -> bool:
         return False
     tracks = track_classification.get("tracks")
     return isinstance(tracks, list) and bool(tracks)
+
+
+def _profile_version(profile_type: str) -> str | None:
+    match = re.search(r"(?:^|-)v(\d+)$", profile_type)
+    return f"v{match.group(1)}" if match else None
+
+
+def mechanism_profile_catalog() -> list[dict[str, Any]]:
+    """Expose the controlled extension registry without loading plugin code."""
+    return [
+        {
+            "profile_type": definition.profile_type,
+            "version": definition.version,
+            "capabilities": list(definition.capabilities),
+            "editor_route": definition.editor_route,
+            "read_only_fallback": definition.read_only_fallback,
+            "editable": definition.editable,
+            "can_execute": definition.can_execute,
+        }
+        for definition in PROFILE_REGISTRY.values()
+    ]
+
+
+def _resolution(
+    *,
+    profile_type: str,
+    source: Literal["explicit", "legacy_image_shape"],
+    reason: str | None = None,
+) -> MechanismProfileResolution:
+    definition = PROFILE_REGISTRY.get(profile_type)
+    if definition is None:
+        return MechanismProfileResolution(
+            profile_type=profile_type,
+            source=source,
+            supported=False,
+            editable=False,
+            reason=reason or f"未注册机制 profile：{profile_type}",
+            version=_profile_version(profile_type),
+            capabilities=(),
+            editor_route=None,
+            read_only_fallback=True,
+            can_execute=False,
+        )
+    return MechanismProfileResolution(
+        profile_type=profile_type,
+        source=source,
+        supported=definition.can_execute,
+        editable=definition.editable,
+        reason=(
+            reason
+            if reason is not None
+            else None
+            if definition.can_execute
+            else f"机制 profile 尚未启用：{profile_type}"
+        ),
+        version=definition.version,
+        capabilities=definition.capabilities,
+        editor_route=definition.editor_route,
+        read_only_fallback=definition.read_only_fallback,
+        can_execute=definition.can_execute,
+    )
 
 
 def _image_candidate_shape(contract: dict[str, Any]) -> bool:
@@ -98,21 +229,12 @@ def describe_mechanism_profile(contract: Any) -> MechanismProfileResolution:
                 editable=False,
                 reason="profile_type 必须是非空字符串",
             )
-        supported = profile_type in SUPPORTED_PROFILES
-        return MechanismProfileResolution(
-            profile_type=profile_type,
-            source="explicit",
-            supported=supported,
-            editable=supported,
-            reason=None if supported else f"未注册机制 profile：{profile_type}",
-        )
+        return _resolution(profile_type=profile_type, source="explicit")
 
     if _legacy_image_shape(contract):
-        return MechanismProfileResolution(
+        return _resolution(
             profile_type=IMAGE_PROFILE,
             source="legacy_image_shape",
-            supported=True,
-            editable=True,
         )
 
     return MechanismProfileResolution(
@@ -184,6 +306,13 @@ def _validate_image_artifacts(
             "subcategory_dimensions 必须是 {track_key: config} 对象",
             target="subcategory_dimensions",
         )
+    track_keys = _image_track_keys(contract)
+    if set(subcategory_dimensions) != track_keys:
+        raise MechanismProfileError(
+            "subcategory_dimensions_track_mismatch",
+            "subcategory_dimensions 必须完整覆盖合同赛道",
+            target="subcategory_dimensions",
+        )
     for track_key, config in subcategory_dimensions.items():
         try:
             validate_subcategory_dimensions(config)
@@ -192,6 +321,12 @@ def _validate_image_artifacts(
                 exc,
                 target=f"subcategory_dimensions.{track_key}",
                 fallback_code="invalid_subcategory_dimensions",
+            )
+        if config.get("sub_category_key") != track_key:
+            raise MechanismProfileError(
+                "subcategory_dimension_key_mismatch",
+                f"赛道 {track_key} 的 sub_category_key 不匹配",
+                target=f"subcategory_dimensions.{track_key}",
             )
 
 

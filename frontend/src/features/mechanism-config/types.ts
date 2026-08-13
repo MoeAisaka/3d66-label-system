@@ -8,6 +8,21 @@ export type MechanismProfileDescription = {
   supported: boolean
   editable: boolean
   reason: string | null
+  version: string | null
+  capabilities: string[]
+  editor_route: string | null
+  read_only_fallback: boolean
+  can_execute: boolean
+}
+
+export type MechanismProfileCatalogItem = {
+  profile_type: string
+  version: string
+  capabilities: string[]
+  editor_route: string | null
+  read_only_fallback: boolean
+  editable: boolean
+  can_execute: boolean
 }
 
 export type ConfigSummary = {
@@ -67,6 +82,7 @@ export type ValidationErrorItem = {
 }
 
 export type MechanismEditorProps = {
+  workflowKind: "incremental" | "stock"
   draft: Editable
   runtimeRevision: ConfigRevision | null
   selectedRevision: ConfigRevision | null

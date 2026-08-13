@@ -1,6 +1,7 @@
 import { Suspense, useEffect, useMemo, useState } from "react"
 import { ArrowClockwise, Plus, WarningCircle } from "@phosphor-icons/react"
 import { useQuery } from "@tanstack/react-query"
+import { useSearchParams } from "react-router-dom"
 
 import { PageHeader } from "@/components/app-shell"
 import { EvaluationBoundaryNote } from "@/components/evaluation-boundary-note"
@@ -8,6 +9,7 @@ import { RouteErrorState } from "@/components/route-error-state"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { MechanismEditorBoundary } from "@/features/mechanism-config/mechanism-editor-boundary"
+import { ProfileCapabilitySummary } from "@/features/mechanism-config/profile-capability-summary"
 import { getMechanismEditorPlugin } from "@/features/mechanism-config/registry"
 import {
   cloneEditable,
@@ -17,6 +19,7 @@ import {
   type ConfigSummary,
   type Editable,
   type JsonObject,
+  type MechanismProfileCatalogItem,
   type ValidationErrorItem,
 } from "@/features/mechanism-config/types"
 import { UnknownMechanismSummary } from "@/features/mechanism-config/unknown-mechanism-summary"
@@ -135,9 +138,15 @@ function errMessage(err: unknown): string {
 }
 
 export function CategoryEvaluationV3ConfigPage() {
+  const [searchParams] = useSearchParams()
+  const workflowKind = searchParams.get("workflow_kind") === "incremental" ? "incremental" : "stock"
   const listQuery = useQuery({
     queryKey: ["category-evaluation-v3-config", "list"],
     queryFn: () => api<{ items: ConfigSummary[] }>(`${BASE}/`),
+  })
+  const profileCatalog = useQuery({
+    queryKey: ["category-evaluation-v3-config", "profiles"],
+    queryFn: () => api<{ items: MechanismProfileCatalogItem[] }>(`${BASE}/profiles`),
   })
   const [selectedKey, setSelectedKey] = useState<string | null>(null)
   const [selectedRevisionId, setSelectedRevisionId] = useState<number | null>(null)
@@ -189,6 +198,16 @@ export function CategoryEvaluationV3ConfigPage() {
     ? "image-rule-deduction-v1"
     : selectedRevision?.mechanism_profile.profile_type ?? null
   const plugin = getMechanismEditorPlugin(profileType)
+  const profileDescription = isNew
+    ? profileCatalog.data?.items.find((item) => item.profile_type === profileType)
+      ? {
+          ...profileCatalog.data.items.find((item) => item.profile_type === profileType)!,
+          source: "explicit" as const,
+          supported: true,
+          reason: null,
+        }
+      : null
+    : selectedRevision?.mechanism_profile ?? null
 
   const startNew = () => {
     setIsNew(true)
@@ -410,10 +429,22 @@ export function CategoryEvaluationV3ConfigPage() {
                     </label>
                   </section>
                 )}
-                <MechanismEditorBoundary detail={selectedRevision} onRetry={refreshSelected}>
+                <ProfileCapabilitySummary
+                  profile={profileDescription}
+                  catalog={profileCatalog.data?.items ?? []}
+                  workflowKind={workflowKind}
+                />
+                <MechanismEditorBoundary
+                  detail={selectedRevision}
+                  workflowKind={workflowKind}
+                  canExecute={profileDescription?.can_execute === true && plugin?.canEdit === true}
+                  readOnlyFallback={profileDescription?.read_only_fallback !== false}
+                  onRetry={refreshSelected}
+                >
                   <Suspense fallback={<div className="border-y border-[var(--line)] bg-white px-5 py-10 text-sm text-[var(--muted)]">加载机制编辑器…</div>}>
                     {plugin ? (
                       <plugin.Editor
+                        workflowKind={workflowKind}
                         draft={draft}
                         runtimeRevision={runtimeRevision}
                         selectedRevision={selectedRevision}

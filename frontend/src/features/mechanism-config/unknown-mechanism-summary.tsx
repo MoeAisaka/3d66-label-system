@@ -26,6 +26,7 @@ export function UnknownMechanismSummary({
       </div>
       <h2 className="font-editorial mt-4 text-2xl font-bold">当前版本不支持结构化编辑</h2>
       <p className="mt-3 max-w-[72ch] text-sm leading-6 text-[var(--muted)]">{explanation}</p>
+      <p className="mt-2 text-xs leading-5 text-[var(--muted)]">系统不会执行未知代码，也不会猜测字段结构、写回运行时投影或创建候选版本。</p>
       {detail && (
         <div className="mt-5 flex flex-wrap gap-2">
           <Button variant="secondary" onClick={() => setJsonOpen(true)}>查看完整 JSON</Button>

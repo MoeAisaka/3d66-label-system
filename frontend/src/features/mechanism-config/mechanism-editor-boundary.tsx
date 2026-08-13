@@ -5,6 +5,9 @@ import type { ConfigRevision } from "./types"
 
 type Props = {
   detail: ConfigRevision | null
+  workflowKind: "incremental" | "stock"
+  canExecute: boolean
+  readOnlyFallback: boolean
   onRetry?: () => void
   children: ReactNode
 }
@@ -28,6 +31,14 @@ export class MechanismEditorBoundary extends Component<Props, State> {
   }
 
   render() {
+    if (!this.props.canExecute || this.props.readOnlyFallback) {
+      return (
+        <UnknownMechanismSummary
+          detail={this.props.detail}
+          reason={`当前 profile 在${this.props.workflowKind === "incremental" ? "增量" : "存量"}链路仅允许只读诊断，禁止创建候选或启动执行。`}
+        />
+      )
+    }
     if (this.state.failed) {
       return (
         <div>

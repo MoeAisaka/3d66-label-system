@@ -50,6 +50,7 @@ from .mechanism_profiles import (
     MechanismProfileError,
     describe_mechanism_profile,
     extract_profile_rule_mirror,
+    mechanism_profile_catalog,
     profile_media_penalty_enabled,
     validate_mechanism_artifacts,
 )
@@ -452,6 +453,13 @@ def build_category_evaluation_v3_config_router(
             )
         ).all()
         return {"items": [_summary(db, row).model_dump() for row in rows]}
+
+    @router.get("/profiles", response_model=dict[str, Any])
+    def list_mechanism_profiles(
+        _user: Any = Depends(require_user),
+    ) -> dict[str, Any]:
+        """Expose controlled editor/execution capabilities without plugin code."""
+        return {"items": mechanism_profile_catalog()}
 
     @router.get("/{category_key}", response_model=V3ConfigDetail)
     def get_config(

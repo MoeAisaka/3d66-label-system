@@ -27,6 +27,14 @@ const proposalEditorSource = fs.readFileSync(
   path.join(root, "src/features/mechanism-config/proposal-text-editor.tsx"),
   "utf8",
 )
+const profileCapabilitySource = fs.readFileSync(
+  path.join(root, "src/features/mechanism-config/profile-capability-summary.tsx"),
+  "utf8",
+)
+const boundarySource = fs.readFileSync(
+  path.join(root, "src/features/mechanism-config/mechanism-editor-boundary.tsx"),
+  "utf8",
+)
 
 const original = { known: { value: 1 }, extension: { keep: ["x"] } }
 const next = patchProposalContract(original, ["known", "value"], 2)
@@ -103,6 +111,15 @@ assert.match(imageEditorSource, /bonus_rules/)
 assert.doesNotMatch(levelScaleContractSource, /expected_revision/)
 assert.match(levelScaleContractSource, /创建候选版本/)
 assert.match(pageSource, /MechanismEditorBoundary/)
+assert.match(pageSource, /ProfileCapabilitySummary/)
+assert.match(pageSource, /workflowKind=/)
+assert.match(profileCapabilitySource, /3D/)
+assert.match(profileCapabilitySource, /SU/)
+assert.match(profileCapabilitySource, /只读/)
+assert.match(boundarySource, /canExecute/)
+assert.match(boundarySource, /readOnlyFallback/)
+assert.match(boundarySource, /UnknownMechanismSummary/)
+assert.match(unknownSource, /不会执行未知代码/)
 assert.match(pageSource, /创建候选版本/)
 assert.match(pageSource, /plugin\?\.prepareForSave\?\.\(draft\) \?\? draft/)
 assert.match(unknownSource, /当前版本不支持结构化编辑/)
