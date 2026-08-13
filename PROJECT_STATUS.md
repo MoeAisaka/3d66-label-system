@@ -3,6 +3,22 @@
 > 最后更新：2026-08-13
 > 本文件只记录“现在做到哪里”；长期原则见 `PRODUCT.md` 和 `AGENTS.md`，历史背景见 `CODEX_HANDOFF.md`。
 
+## 最新修复：纠偏分析失败与 SQLite 并发恢复（2026-08-13）
+
+- 当前分支为 `codex/legacy-correction-deployment-receipt-v1`。本批修复两类相连故障：自动纠偏在模型调用期间长期持有 SQLite 写事务，导致人工纠偏审核面板 500；调优模型返回一层 `candidate` 包装或字段不完整时，任务只显示笼统失败。
+- 启动纠偏现在先短事务冻结样本、确定性报告和现役机制快照，再由后台任务在无数据库事务状态下调用调优模型，最后以短事务写入候选 revision、候选回归或失败证据；人工纠偏可在模型运行期间正常写入。重试继续沿用冻结样本，不新增人工配置。
+- 候选解析兼容 `candidate`、`mechanism_candidate`、`unified_candidate` 一层包装，同时严格校验完整统一机制合同；失败信息列出具体字段路径，例如 `prompt.system_prompt`、`revision.contract`。
+- Worker 对 SQLite `database is locked/busy` 做有限退避，锁冲突不再退出进程；`/api/health` 增加 worker 信息，`/api/health/ready` 在主服务存活但无活跃 worker 时返回 503，容器健康检查改用 readiness。
+- 当前纠偏区域固定说明：分析报告、候选机制、回归指标和风险提示均在“存量回归 → 基准回归 → 处理纠偏（当前区域）”查看；候选回归完成后仍在该区域“等待人工决策”，仅系统管理员在此点击“启用候选”或“拒绝候选”。不新增结果页、不自动采纳、不发布标签事实。
+- 现有管理员权限边界、双发布轴、人工真值、存量重跑和移动端非目标保持不变。
+
+当前验证：
+
+- 后端专项（基准纠偏、候选解析、worker 锁退避、readiness）：`36 passed, 1 warning`。
+- 后端全量（隔离 `DATA_DIR`）：`1259 passed, 1 skipped, 6 warnings`。
+- 前端信息架构与 workspace component browser contract 通过；TypeScript lint 与 Vite production build 通过，仅保留既有主 chunk 大于 500 kB 的 warning；`git diff --check` 通过。
+- 本节记录的是待合并部署的实现状态；完成 Codeup `main` 合并、服务器快照、部署和 Edge 当前页面验收后，再补充最终 SHA 与部署回执。
+
 ## 最新修复：历史纠偏任务移除旧人工确认阻塞（2026-08-13）
 
 - 当前隔离分支为 `codex/legacy-correction-blocker-cleanup-v1`，基于 Codeup

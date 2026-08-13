@@ -43,7 +43,7 @@ from PIL import Image, UnidentifiedImageError
 from sqlalchemy import func, select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, sessionmaker
 
 from .config import get_settings
 from .category_pipeline import (
@@ -145,6 +145,8 @@ from .baseline_correction_orchestration import (
     CorrectionOrchestrationError,
     advance_correction_run,
     configured_correction_generator,
+    generate_correction_candidate,
+    prepare_correction_generation,
     refresh_correction_run,
 )
 from .category_evaluation_v3_revisions import (
@@ -203,6 +205,7 @@ from .optimization_automation import (
     category_bundle_contract_errors,
     configured_optimization_adapter,
     consume_optimization_queue_once,
+    automation_worker_snapshot,
 )
 from .p0e_canary_api import build_canary_router
 from .category_evaluation_preview_api import (
@@ -1720,8 +1723,28 @@ def _evaluation_dimension_schema_payload(
 
 
 @app.get("/api/health")
-def health() -> dict[str, str]:
-    return {"status": "ok", "service": "3d66-label-system"}
+def health(db: Session = Depends(get_db)) -> dict[str, Any]:
+    workers = automation_worker_snapshot(db)
+    return {
+        "status": "ok",
+        "service": "3d66-label-system",
+        "workers": workers,
+    }
+
+
+@app.get("/api/health/ready")
+def health_ready(db: Session = Depends(get_db)) -> dict[str, Any]:
+    workers = automation_worker_snapshot(db)
+    if workers["active_worker_count"] < 1:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "worker_not_ready",
+                "message": "主服务已启动，但尚未检测到活跃评测 Worker",
+                "workers": workers,
+            },
+        )
+    return {"status": "ready", "service": "3d66-label-system", "workers": workers}
 
 
 def _assert_bundle_versions(
@@ -9779,38 +9802,66 @@ def inspiration_auto_correction_drift_test(
         ) from exc
 
 
-def _execute_baseline_correction(
-    db: Session, row: BaselineCorrectionRun
+def _record_baseline_correction_failure(
+    db: Session,
+    row: BaselineCorrectionRun,
+    exc: BaseException,
 ) -> None:
+    stage_codes = {
+        "analysis": "CORRECTION_ANALYSIS_FAILED",
+        "candidate_generation": "CORRECTION_CANDIDATE_GENERATION_FAILED",
+        "candidate_validation": "CORRECTION_CANDIDATE_VALIDATION_FAILED",
+        "regression": "CORRECTION_REGRESSION_SETUP_FAILED",
+    }
+    fail_correction_run(
+        row,
+        error_code=(
+            exc.code
+            if isinstance(exc, CorrectionOrchestrationError)
+            else stage_codes.get(row.stage, "CORRECTION_PIPELINE_FAILED")
+        ),
+        error_message=str(exc),
+    )
+    row.finished_at = datetime.now(timezone.utc)
+
+
+def _run_baseline_correction_background(correction_id: int, bind: Any = None) -> None:
+    """Run model work outside the request's SQLite write transaction."""
+    session_factory = SessionLocal if bind is None else sessionmaker(
+        bind=bind,
+        expire_on_commit=False,
+        autoflush=False,
+    )
     try:
-        advance_correction_run(
-            db,
-            row,
-            configured_correction_generator(db),
-        )
-    except (ValueError, TypeError, json.JSONDecodeError) as exc:
-        stage_codes = {
-            "analysis": "CORRECTION_ANALYSIS_FAILED",
-            "candidate_generation": "CORRECTION_CANDIDATE_GENERATION_FAILED",
-            "candidate_validation": "CORRECTION_CANDIDATE_VALIDATION_FAILED",
-            "regression": "CORRECTION_REGRESSION_SETUP_FAILED",
-        }
-        fail_correction_run(
-            row,
-            error_code=(
-                exc.code
-                if isinstance(exc, CorrectionOrchestrationError)
-                else stage_codes.get(row.stage, "CORRECTION_PIPELINE_FAILED")
-            ),
-            error_message=str(exc),
-        )
-        row.finished_at = datetime.now(timezone.utc)
+        with session_factory() as db:
+            row = db.get(BaselineCorrectionRun, correction_id)
+            if row is None:
+                return
+            prepared = prepare_correction_generation(db, row)
+            generator = configured_correction_generator(db)
+            db.commit()
+
+        generated = generate_correction_candidate(prepared, generator)
+
+        with session_factory() as db:
+            row = db.get(BaselineCorrectionRun, correction_id)
+            if row is None:
+                return
+            advance_correction_run(db, row, None, generated)
+            db.commit()
+    except Exception as exc:
+        with session_factory() as db:
+            row = db.get(BaselineCorrectionRun, correction_id)
+            if row is not None:
+                _record_baseline_correction_failure(db, row, exc)
+                db.commit()
 
 
 @app.post("/api/baseline-regressions/{run_id}/corrections")
 def create_baseline_correction(
     run_id: int,
     payload: BaselineCorrectionCreateRequest,
+    background_tasks: BackgroundTasks,
     user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
@@ -9858,7 +9909,6 @@ def create_baseline_correction(
     )
     db.add(row)
     db.flush()
-    _execute_baseline_correction(db, row)
     append_audit_event(
         db,
         category="baseline_regression",
@@ -9870,6 +9920,7 @@ def create_baseline_correction(
         event_key=f"baseline-correction:{row.id}:attempt:1",
     )
     db.commit()
+    background_tasks.add_task(_run_baseline_correction_background, row.id, db.get_bind())
     return _baseline_correction_payload(row)
 
 
@@ -10034,6 +10085,7 @@ def decide_baseline_correction(
 @app.post("/api/baseline-corrections/{correction_id}/retry")
 def retry_baseline_correction(
     correction_id: int,
+    background_tasks: BackgroundTasks,
     user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
@@ -10051,7 +10103,6 @@ def retry_baseline_correction(
     row.error_message = ""
     row.finished_at = None
     row.attempt_count += 1
-    _execute_baseline_correction(db, row)
     append_audit_event(
         db,
         category="baseline_regression",
@@ -10063,6 +10114,8 @@ def retry_baseline_correction(
         event_key=f"baseline-correction:{row.id}:attempt:{row.attempt_count}",
     )
     db.commit()
+    if background_tasks is not None:
+        background_tasks.add_task(_run_baseline_correction_background, row.id, db.get_bind())
     return _baseline_correction_payload(row)
 
 

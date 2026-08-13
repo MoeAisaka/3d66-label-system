@@ -20,6 +20,10 @@ from app.baseline_regression import (
     filename_level_suggestion,
     level_explanation,
 )
+from app.baseline_correction_orchestration import (
+    CorrectionOrchestrationError,
+    _normalize_generated_candidate,
+)
 from app.audit import canonical_json
 from app.category_pipeline import default_pipeline
 from app.database import Base, get_db
@@ -193,6 +197,51 @@ def test_level_explanation_freezes_neutral_dimensions_and_quality_evidence() -> 
         "confidence": 0.82,
         "evidence": ["暗部细节损失", "过曝", "第三条", "第四条", "第五条"],
     }
+
+
+def test_correction_generator_accepts_one_layer_candidate_wrapper() -> None:
+    candidate = {
+        "candidate": {
+            "prompt": {
+                "stage": "A",
+                "system_prompt": "system prompt with enough detail",
+                "user_prompt": "user prompt",
+                "change_note": "tighten anchors",
+            },
+            "revision": {
+                "display_name": "wrapped candidate",
+                "contract": {"category_key": "material_image"},
+                "classification_map": {},
+                "subcategory_dimensions": {},
+            },
+        }
+    }
+
+    normalized = _normalize_generated_candidate(candidate)
+
+    assert normalized.prompt.stage == "A"
+    assert normalized.revision.display_name == "wrapped candidate"
+
+
+def test_correction_generator_reports_invalid_field_paths() -> None:
+    with pytest.raises(
+        CorrectionOrchestrationError,
+        match=r"prompt\.system_prompt.*revision\.contract",
+    ):
+        _normalize_generated_candidate(
+            {
+                "prompt": {
+                    "stage": "A",
+                    "user_prompt": "user prompt",
+                    "change_note": "missing system",
+                },
+                "revision": {
+                    "display_name": "invalid candidate",
+                    "classification_map": {},
+                    "subcategory_dimensions": {},
+                },
+            }
+        )
 
 
 def test_baseline_api_freezes_truth_reports_and_enqueues_idempotently() -> None:
@@ -1245,6 +1294,11 @@ def test_category_dimension_snapshot_and_isolated_correction_retry(
         assert correction.status_code == 200
         correction_payload = correction.json()
         assert correction_payload["status"] == "processing"
+        assert correction_payload["stage"] in {"analysis", "candidate_generation", "regression"}
+        correction_payload = client.get(
+            f"/api/baseline-corrections/{correction_payload['id']}"
+        ).json()
+        assert correction_payload["status"] == "processing"
         assert correction_payload["stage"] == "regression"
         assert correction_payload["blockers"] == []
         assert correction_payload["candidate_revision_id"] is not None
@@ -1556,8 +1610,11 @@ def test_category_dimension_snapshot_and_isolated_correction_retry(
             },
         )
         assert failed.status_code == 200
-        assert failed.json()["status"] == "failed"
-        assert failed.json()["error"]["retryable"] is True
+        failed_payload = client.get(
+            f"/api/baseline-corrections/{failed.json()['id']}"
+        ).json()
+        assert failed_payload["status"] == "failed"
+        assert failed_payload["error"]["retryable"] is True
 
         monkeypatch.setattr(
             main_module,
@@ -1565,12 +1622,15 @@ def test_category_dimension_snapshot_and_isolated_correction_retry(
             lambda _db: DeterministicGenerator(),
         )
         retried = client.post(
-            f"/api/baseline-corrections/{failed.json()['id']}/retry"
+            f"/api/baseline-corrections/{failed_payload['id']}/retry"
         )
         assert retried.status_code == 200
         assert retried.json()["status"] == "processing"
-        assert retried.json()["stage"] == "regression"
         assert retried.json()["attempt_count"] == 2
+        retried_payload = client.get(
+            f"/api/baseline-corrections/{failed_payload['id']}"
+        ).json()
+        assert retried_payload["stage"] == "regression"
         frozen_analysis = db.get(BaselineCorrectionRun, failed.json()["id"])
         assert frozen_analysis is not None
         assert json.loads(frozen_analysis.input_snapshot_json)["items"][0][

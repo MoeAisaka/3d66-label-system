@@ -56,11 +56,22 @@ class GeneratedMechanismCandidate:
     model_snapshot: dict[str, Any]
 
 
+@dataclass(frozen=True)
+class PreparedCorrectionGeneration:
+    correction: BaselineCorrectionRun
+    projected: CategoryEvaluationV3Config
+    active_revision: CategoryEvaluationV3Revision
+    active_prompts: Mapping[str, PromptVersion]
+    execution: dict[str, Any]
+    report: dict[str, Any]
+    orchestration: dict[str, Any]
+
+
 class CorrectionMechanismGenerator(Protocol):
     def generate(
         self,
         *,
-        db: Session,
+        db: Session | None,
         correction: BaselineCorrectionRun,
         active_revision: CategoryEvaluationV3Revision,
         active_prompts: Mapping[str, PromptVersion],
@@ -100,12 +111,31 @@ def _normalize_generated_candidate(
             "CORRECTION_GENERATOR_OUTPUT_INVALID",
             "调优模型未返回结构化机制候选",
         )
-    prompt = value.get("prompt")
-    revision = value.get("revision")
-    if not isinstance(prompt, Mapping) or not isinstance(revision, Mapping):
+    payload: Mapping[str, Any] = value
+    if not isinstance(payload.get("prompt"), Mapping) or not isinstance(
+        payload.get("revision"), Mapping
+    ):
+        for wrapper in ("candidate", "mechanism_candidate", "unified_candidate"):
+            nested = payload.get(wrapper)
+            if isinstance(nested, Mapping):
+                merged = dict(nested)
+                for key in ("summary", "model_snapshot"):
+                    if key not in merged and key in payload:
+                        merged[key] = payload[key]
+                payload = merged
+                break
+    prompt = payload.get("prompt")
+    revision = payload.get("revision")
+    invalid_fields: list[str] = []
+    if not isinstance(prompt, Mapping):
+        invalid_fields.append("prompt")
+    if not isinstance(revision, Mapping):
+        invalid_fields.append("revision")
+    if invalid_fields:
         raise CorrectionOrchestrationError(
             "CORRECTION_GENERATOR_OUTPUT_INVALID",
-            "调优模型返回的提示词或机制产物不完整",
+            "调优模型返回的统一机制候选缺少或无效字段："
+            + "、".join(invalid_fields),
         )
     stage = str(prompt.get("stage") or "").strip().upper()
     system_prompt = str(prompt.get("system_prompt") or "").strip()
@@ -115,22 +145,30 @@ def _normalize_generated_candidate(
     contract = revision.get("contract")
     classification_map = revision.get("classification_map")
     subcategory_dimensions = revision.get("subcategory_dimensions")
-    if (
-        stage not in {"A", "B"}
-        or not system_prompt
-        or not user_prompt
-        or not change_note
-        or not display_name
-        or not isinstance(contract, dict)
-        or not isinstance(classification_map, dict)
-        or not isinstance(subcategory_dimensions, dict)
-    ):
+    if stage not in {"A", "B"}:
+        invalid_fields.append("prompt.stage")
+    if not system_prompt:
+        invalid_fields.append("prompt.system_prompt")
+    if not user_prompt:
+        invalid_fields.append("prompt.user_prompt")
+    if not change_note:
+        invalid_fields.append("prompt.change_note")
+    if not display_name:
+        invalid_fields.append("revision.display_name")
+    if not isinstance(contract, dict):
+        invalid_fields.append("revision.contract")
+    if not isinstance(classification_map, dict):
+        invalid_fields.append("revision.classification_map")
+    if not isinstance(subcategory_dimensions, dict):
+        invalid_fields.append("revision.subcategory_dimensions")
+    if invalid_fields:
         raise CorrectionOrchestrationError(
             "CORRECTION_GENERATOR_OUTPUT_INVALID",
-            "调优模型返回的统一机制候选字段无效",
+            "调优模型返回的统一机制候选缺少或无效字段："
+            + "、".join(invalid_fields),
         )
-    summary = value.get("summary")
-    model_snapshot = value.get("model_snapshot")
+    summary = payload.get("summary")
+    model_snapshot = payload.get("model_snapshot")
     return GeneratedMechanismCandidate(
         prompt=GeneratedPromptCandidate(
             stage=stage,
@@ -494,10 +532,76 @@ def _create_candidate_baseline_run(
     return run
 
 
+def prepare_correction_generation(
+    db: Session,
+    correction: BaselineCorrectionRun,
+) -> PreparedCorrectionGeneration:
+    """Freeze deterministic correction inputs in a short database transaction."""
+    if correction.status in {"awaiting_decision", "approved", "rejected"}:
+        raise CorrectionOrchestrationError(
+            "CORRECTION_NOT_RUNNABLE",
+            "纠偏任务已进入终态，不能重新执行",
+        )
+    correction.status = "processing"
+    correction.stage = "analysis"
+    correction.progress = 10
+    correction.blockers_json = "[]"
+    correction.error_code = ""
+    correction.error_message = ""
+    correction.finished_at = None
+    snapshot = _json_object(correction.input_snapshot_json, label="纠偏冻结输入")
+    report = deterministic_correction_report(snapshot)
+    correction.report_json = canonical_json(report)
+    orchestration = _json_object(correction.orchestration_json, label="纠偏编排快照")
+    projected, active_revision = _active_projection(db, correction.category_key)
+    active_prompts, execution = _active_prompts(db, correction)
+    orchestration.setdefault(
+        "base_projection",
+        {
+            "config_id": projected.id,
+            "revision_id": active_revision.id,
+            "revision": projected.revision,
+            "contract_hash": projected.contract_hash,
+        },
+    )
+    correction.stage = "candidate_generation"
+    correction.progress = 35
+    correction.orchestration_json = canonical_json(orchestration)
+    return PreparedCorrectionGeneration(
+        correction=correction,
+        projected=projected,
+        active_revision=active_revision,
+        active_prompts=active_prompts,
+        execution=execution,
+        report=report,
+        orchestration=orchestration,
+    )
+
+
+def generate_correction_candidate(
+    prepared: PreparedCorrectionGeneration,
+    generator: CorrectionMechanismGenerator,
+) -> GeneratedMechanismCandidate:
+    """Call the tuning model without holding a SQLAlchemy Session or DB lock."""
+    generated = _candidate_from_orchestration(prepared.orchestration)
+    if generated is not None:
+        return generated
+    return _normalize_generated_candidate(
+        generator.generate(
+            db=None,
+            correction=prepared.correction,
+            active_revision=prepared.active_revision,
+            active_prompts=prepared.active_prompts,
+            report=prepared.report,
+        )
+    )
+
+
 def advance_correction_run(
     db: Session,
     correction: BaselineCorrectionRun,
-    generator: CorrectionMechanismGenerator,
+    generator: CorrectionMechanismGenerator | None,
+    generated_candidate: GeneratedMechanismCandidate | Mapping[str, Any] | None = None,
 ) -> None:
     """Advance a correction through analysis, candidate creation and regression."""
     if correction.status in {"awaiting_decision", "approved", "rejected"}:
@@ -529,8 +633,17 @@ def advance_correction_run(
     )
     correction.stage = "candidate_generation"
     correction.progress = 35
-    generated = _candidate_from_orchestration(orchestration)
+    if generated_candidate is not None:
+        generated = _normalize_generated_candidate(generated_candidate)
+        orchestration["generated_candidate"] = _generator_payload(generated)
+    else:
+        generated = _candidate_from_orchestration(orchestration)
     if generated is None:
+        if generator is None:
+            raise CorrectionOrchestrationError(
+                "CORRECTION_GENERATOR_MISSING",
+                "纠偏候选生成器未配置",
+            )
         generated = _normalize_generated_candidate(
             generator.generate(
                 db=db,

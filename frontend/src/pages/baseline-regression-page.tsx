@@ -1750,6 +1750,14 @@ function CorrectionAnalysisPanel({
           <p className="mt-2 max-w-3xl text-xs leading-5 text-[var(--muted)]">
             启动后，系统自动分析纠偏样本、生成并校验统一机制候选，再执行候选回归。中间无需人工配置；回归完成后只需决定启用或拒绝，系统不会自动启用候选。
           </p>
+          <div className="mt-3 grid gap-2 text-xs leading-5 text-[var(--muted)] sm:grid-cols-2">
+            <p className="border-l-2 border-[var(--line-strong)] pl-3">
+              结果查看位置：存量回归 → 基准回归 → 处理纠偏（当前区域）。分析报告、候选机制、回归指标和风险提示都在这里展示。
+            </p>
+            <p className="border-l-2 border-primary pl-3">
+              人工采纳位置：候选回归完成后仍在当前区域进入“等待人工决策”；只有系统管理员在这里点击“启用候选”或“拒绝候选”。
+            </p>
+          </div>
         </div>
         <div className="flex flex-wrap gap-2">
           <Button
