@@ -60,6 +60,7 @@
 | [0042](0042-unified-labellab-product-carrier.md) | Accepted | TPENG 标签实验台作为标签/内容中台重构统一产品载体 |
 | [0043](0043-canonical-facts-and-semantic-projection-boundaries.md) | Accepted | TPENG 中台 Canonical 事实与资产语义投影边界 |
 | [0044](0044-frontend-workspaces-and-mechanism-profile-plugins.md) | Accepted | TPENG 标签实验台工作区与机制 profile 插件边界 |
+| [0045](0045-dual-workspaces-and-table-projection-contract.md) | Accepted | TPENG 标签实验台双工作区与数据库表投影合同 |
 
 文件名格式：
 

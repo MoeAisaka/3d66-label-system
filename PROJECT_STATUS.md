@@ -3,6 +3,30 @@
 > 最后更新：2026-08-13
 > 本文件只记录“现在做到哪里”；长期原则见 `PRODUCT.md` 和 `AGENTS.md`，历史背景见 `CODEX_HANDOFF.md`。
 
+## 最新实施：TPENG 标签实验台双工作区与多表投影底座（2026-08-13）
+
+- 产品定位继续遵循 ADR-0042/0043：**TPENG 标签实验台（LabelLab）**是标签体系重构的统一产品载体和标签/内容中台通用底座，统一承载完整生产闭环；业务类目只扩展合同、提示词、维度、规则、门槛和专用视图。
+- 新增“增量评测 / 存量回归”两个串行工作区，共享素材、模型、机制、纠偏、AI 迭代、质量、发布和调度内核。一级页面只保留主线状态、决策证据和动作，复杂配置、历史、指标矩阵和失败样本继续下沉到抽屉、Dialog 或专用工作台。
+- `EvaluationProductionRun.workflow_kind` 显式区分增量上下文；本地 `content-ingress-v1` 事件经活动类目和现役 profile 校验后，幂等创建或复用 `production_import` 增量素材包。缺素材、未知/未启用 profile 或陈旧事件 fail-closed；接入不创建评测 Job，也不代表真实上游已连接。
+- 运行中心显示五类队列、全局并发、配额、熔断阻塞、重试延迟、恢复队列和最后检查点；增量与存量共享调度内核，但不混淆任务主线。
+- 质量资产工作区统一管理普通/黄金/挑战集，支持真值修订、锁定和 CSV/JSON/Manifest 导出；基准回归新增字段级准确率、召回率、混淆矩阵、失败样本以及宏/微平均。指标只作人工决策证据，不自动启用候选。
+- 类目 profile 注册表成为唯一扩展边界：标准图像和 Proposal PDF 可受控编辑/执行；3D、SU 只预留专用编辑器槽，当前只读且禁止执行；未知 profile 不加载编辑器、不创建候选并在权威 Worker 启动前失败。
+- 新增多表 Projection Contract Registry、Manifest、本地模拟适配器和对账记录。下游默认形态为一个统一大维表和数个职责小表，只投影正式发布事实，并按资产、标签、机制和模型版本完成行数、缺失、版本和哈希对账；下游表不是 Canonical 事实主库。
+- 机制发布轴与标签事实发布轴继续独立；AI 只自动生成完整候选和回归证据，最终启用/拒绝、存量重跑和正式标签发布仍由具备权限的人工分别决定。
+
+当前聚焦验证：
+
+- profile 与权威 Worker：`45 passed, 1 warning`；机制编辑器合同、v3-only 合同和前端 production build 通过。
+- 本地增量接入与统一标签平台：`11 passed, 1 warning`；重复事件只复用一个素材包，缺现役 profile 不创建包。
+- 双工作区、信息架构与 workspace component 合同通过；运行中心 TypeScript/Vite production build 通过，仅保留既有主 chunk 大于 500 kB warning。
+- 完整后端、全部前端合同、迁移与 Edge 桌面验收将在本批最终验证后补充回执。
+
+当前非目标与交付门：
+
+- 本批不连接真实上游、搜索/推荐、知识图谱或公司业务数据库，不执行真实大维表/小表写入，不实现大规模存量 Worker、Embedding 生命周期、3D/SU 专用业务编辑器或移动端验收。
+- 本批未推送 Codeup、未合并远端、未部署 `192.168.1.35:8081`；任何外部写入、推送、合并或部署仍需新的精确授权。
+- 下一阶段 Gap 见 [`docs/discussion/tpeng-labellab-gap-register-20260813.md`](docs/discussion/tpeng-labellab-gap-register-20260813.md)。Gap 将返回【标签体系】重构会话由 Owner 冻结；冻结后仍由 TPENG 标签实验台会话作为唯一代码写入方。
+
 ## 最新修复：纠偏分析失败与 SQLite 并发恢复（2026-08-13）
 
 - 当前分支为 `codex/legacy-correction-deployment-receipt-v1`。本批修复两类相连故障：自动纠偏在模型调用期间长期持有 SQLite 写事务，导致人工纠偏审核面板 500；调优模型返回一层 `candidate` 包装或字段不完整时，任务只显示笼统失败。
