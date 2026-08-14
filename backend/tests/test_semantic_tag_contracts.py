@@ -192,6 +192,84 @@ def test_parsed_contract_is_frozen() -> None:
         parsed.schema_version = "tag-demand-contract-v1"  # type: ignore[misc]
 
 
+@pytest.mark.parametrize(
+    ("name", "mutation"),
+    [
+        (
+            "semantic_schema_fields",
+            lambda parsed: parsed.semantic_schema.fields.__setitem__(
+                "new_field", parsed.semantic_schema.fields["object"]
+            ),
+        ),
+        (
+            "category_applicability",
+            lambda parsed: parsed.category_applicability.__setitem__(
+                "new_category", {}
+            ),
+        ),
+        (
+            "execution_variants",
+            lambda parsed: parsed.execution_variants.append(parsed.execution_variants[0]),
+        ),
+        (
+            "projection_targets",
+            lambda parsed: parsed.projection_targets.append(parsed.projection_targets[0]),
+        ),
+    ],
+)
+def test_named_contract_collections_reject_direct_mutation(name: str, mutation) -> None:
+    parsed = validate_tag_demand_contract(valid_contract())
+    with pytest.raises((TypeError, AttributeError)):
+        mutation(parsed)
+
+
+@pytest.mark.parametrize(
+    ("name", "mutation"),
+    [
+        (
+            "semantic_schema_fields",
+            lambda parsed: parsed.semantic_schema.fields.__setitem__(
+                "new_field", parsed.semantic_schema.fields["object"]
+            ),
+        ),
+        (
+            "category_applicability",
+            lambda parsed: parsed.category_applicability.__setitem__(
+                "new_category", {}
+            ),
+        ),
+        (
+            "execution_variants",
+            lambda parsed: parsed.execution_variants.append(parsed.execution_variants[0]),
+        ),
+        (
+            "projection_targets",
+            lambda parsed: parsed.projection_targets.append(parsed.projection_targets[0]),
+        ),
+        (
+            "semantic_default_values",
+            lambda parsed: parsed.semantic_schema.fields["style"].default_value.append(
+                parsed.semantic_schema.fields["style"].default_value[0]
+            ),
+        ),
+        (
+            "quality_gates",
+            lambda parsed: parsed.quality_gates.__setitem__(
+                "style", parsed.quality_gates["style"]
+            ),
+        ),
+    ],
+)
+def test_nested_mutation_attempts_cannot_change_contract_hash(name: str, mutation) -> None:
+    parsed = validate_tag_demand_contract(valid_contract())
+    original_hash = canonical_contract_hash(parsed)
+    try:
+        mutation(parsed)
+    except (TypeError, AttributeError):
+        pass
+    assert canonical_contract_hash(parsed) == original_hash
+
+
 def test_contract_rejects_unknown_variant_category() -> None:
     contract = deepcopy(valid_contract())
     contract["execution_variants"][0]["category_key"] = "unknown_category"

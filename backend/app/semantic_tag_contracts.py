@@ -32,6 +32,29 @@ PLATFORM_SEMANTIC_FIELD_KEYS = (
 _CATEGORY_KEY_PATTERN = re.compile(r"^[a-z][a-z0-9_]{1,39}$")
 
 
+class _FrozenDict(dict):
+    """A dict-compatible mapping that rejects all ordinary mutations."""
+
+    def _immutable(self, *args: Any, **kwargs: Any) -> None:
+        raise TypeError("contract mappings are immutable")
+
+    __setitem__ = _immutable
+    __delitem__ = _immutable
+    clear = _immutable
+    pop = _immutable
+    popitem = _immutable
+    setdefault = _immutable
+    update = _immutable
+    __ior__ = _immutable
+
+
+def _freeze_mapping(value: Mapping[str, Any], *, nested: bool = False) -> _FrozenDict:
+    items = value.items()
+    if nested:
+        items = ((key, _FrozenDict(item)) for key, item in items)
+    return _FrozenDict(items)
+
+
 class SemanticTagContractError(ValueError):
     """Raised when a semantic tag demand contract or field result is invalid."""
 
@@ -61,7 +84,7 @@ class SemanticFieldResult(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     status: Literal["required", "optional", "not_applicable", "not_detected", "needs_review"]
-    values: Sequence[SemanticTagValue] = ()
+    values: tuple[SemanticTagValue, ...] = ()
 
     @model_validator(mode="after")
     def _validate_null_semantics(self) -> "SemanticFieldResult":
@@ -75,6 +98,7 @@ class SemanticFieldResult(BaseModel):
         weights = [item.weight for item in self.values if item.weight is not None]
         if math.fsum(weights) > 1.0 + 1e-9:
             raise ValueError("values 的 weight 总和不能超过 1.0")
+        object.__setattr__(self, "values", tuple(self.values))
         return self
 
 
@@ -89,7 +113,7 @@ class SemanticFieldDefinition(BaseModel):
     localized: bool = True
     vocabulary_owner: str = Field(min_length=1, max_length=120)
     max_values: int = Field(ge=1, le=100)
-    default_value: Sequence[SemanticTagValue] = ()
+    default_value: tuple[SemanticTagValue, ...] = ()
 
     @field_validator("default_value", mode="before")
     @classmethod
@@ -110,6 +134,7 @@ class SemanticFieldDefinition(BaseModel):
         weights = [item.weight for item in self.default_value if item.weight is not None]
         if math.fsum(weights) > 1.0 + 1e-9:
             raise ValueError("default_value 的 weight 总和不能超过 1.0")
+        object.__setattr__(self, "default_value", tuple(self.default_value))
         return self
 
 
@@ -148,6 +173,11 @@ class SemanticTagSchema(BaseModel):
     schema_version: Literal["semantic-tag-schema-v1"]
     fields: dict[str, SemanticFieldDefinition]
 
+    @model_validator(mode="after")
+    def _freeze_fields(self) -> "SemanticTagSchema":
+        object.__setattr__(self, "fields", _freeze_mapping(self.fields))
+        return self
+
 
 class TagDemandContractDefinition(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -155,9 +185,9 @@ class TagDemandContractDefinition(BaseModel):
     schema_version: Literal["tag-demand-contract-v1"]
     semantic_schema: SemanticTagSchema
     category_applicability: dict[str, dict[str, SemanticApplicability]]
-    execution_variants: Sequence[ExecutionVariant]
+    execution_variants: tuple[ExecutionVariant, ...]
     quality_gates: dict[str, FieldQualityGate]
-    projection_targets: Sequence[ProjectionTargetDefinition]
+    projection_targets: tuple[ProjectionTargetDefinition, ...]
 
     @model_validator(mode="after")
     def _validate_platform_contract(self) -> "TagDemandContractDefinition":
@@ -200,6 +230,18 @@ class TagDemandContractDefinition(BaseModel):
                 raise ValueError("whole 执行变体必须满足 prompt_variant=whole")
             if variant.asset_scope == "single" and variant.prompt_variant != "single":
                 raise ValueError("single 执行变体必须满足 prompt_variant=single")
+        object.__setattr__(
+            self,
+            "category_applicability",
+            _freeze_mapping(self.category_applicability, nested=True),
+        )
+        object.__setattr__(self, "execution_variants", tuple(self.execution_variants))
+        object.__setattr__(
+            self,
+            "quality_gates",
+            _freeze_mapping(self.quality_gates),
+        )
+        object.__setattr__(self, "projection_targets", tuple(self.projection_targets))
         return self
 
 
