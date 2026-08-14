@@ -242,7 +242,7 @@ git commit -m "feat: define platform semantic tag demand contract"
 ```python
 def test_asset_version_is_immutable_and_unique_per_asset_revision(db: Session) -> None:
     version = AssetVersion(asset_id=1, version=1, asset_sha256="a" * 64,
-                           source_version="source-v1", status="active", created_by="tester")
+                           source_version="source-v1", snapshot_kind="materialized", created_by="tester")
     db.add(version)
     db.commit()
     version.asset_sha256 = "b" * 64
@@ -958,7 +958,7 @@ git commit -m "feat: show semantic quality evidence"
 
 **Interfaces:**
 - Consumes: Tasks 1–8.
-- Produces: one local active demand-contract seed and fixture-backed whole/single dry-run flow for `category_key=model_3d_su`.
+- Produces: one local draft demand-contract seed plus an explicit admin-activation fixture and whole/single dry-run flow for `category_key=model_3d_su`.
 
 - [ ] **Step 1: Write end-to-end local slice tests**
 
@@ -991,7 +991,7 @@ Include two local assets: one whole-space and one single-object sample. Each fix
 
 - [ ] **Step 4: Seed only the platform contract and category applicability**
 
-Seed an operator-reviewable candidate/active local contract with the nine platform fields and `title`. Reuse the existing `model_3d_su` prompt/v3 mechanism seed; do not clone prompt/model/version management.
+Seed an operator-reviewable draft local contract with the nine platform fields and `title`. The test fixture must activate it through the explicit admin API after sign-off fields are present; the seed itself must never activate a candidate. Reuse the existing `model_3d_su` prompt/v3 mechanism seed; do not clone prompt/model/version management.
 
 - [ ] **Step 5: Run the full slice through existing release/projection services**
 
