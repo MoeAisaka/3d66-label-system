@@ -8982,7 +8982,21 @@ def _frozen_v3_dimension_summary(execution: dict[str, Any]) -> dict[str, Any] | 
         )
     if not track_summaries:
         return None
-    return {"spec_version": spec_version.strip(), "tracks": track_summaries}
+    summary: dict[str, Any] = {
+        "spec_version": spec_version.strip(),
+        "tracks": track_summaries,
+    }
+    config_revision = bundle.get("config_revision")
+    if isinstance(config_revision, int):
+        summary["revision"] = config_revision
+    candidate_revision_id = bundle.get("candidate_revision_id")
+    if isinstance(candidate_revision_id, int):
+        summary["revision_id"] = candidate_revision_id
+        summary["candidate_revision_id"] = candidate_revision_id
+    contract_hash = bundle.get("contract_hash")
+    if isinstance(contract_hash, str) and contract_hash.strip():
+        summary["contract_hash"] = contract_hash
+    return summary
 
 
 def _baseline_run_selection(
