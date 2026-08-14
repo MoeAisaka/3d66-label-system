@@ -465,12 +465,41 @@ export type BaselineDimensionSelection = {
   contract?: Record<string, unknown> | null
   v3_contract?: {
     spec_version: string
+    revision?: number | null
+    revision_id?: number | null
+    candidate_revision_id?: number | null
+    contract_hash?: string | null
     tracks: Array<{
       key: string
       label: string
       dimension_count: number
     }>
   } | null
+}
+
+export type BaselineV3Revision = {
+  id: number
+  category_key: string
+  display_name: string
+  status: "draft" | "active" | "candidate" | "retired" | string
+  revision: number
+  parent_revision_id: number | null
+  contract_hash: string
+  mechanism_profile?: Record<string, unknown>
+  contract: Record<string, unknown>
+  classification_map?: Record<string, unknown>
+  subcategory_dimensions?: Record<string, unknown>
+  dimension_deduction_rules?: Record<string, unknown>
+  media_penalty_enabled?: boolean
+  created_by?: string
+  created_at?: string
+  updated_at?: string
+}
+
+export type BaselineV3RevisionList = {
+  projected_revision_id: number
+  candidate_count: number
+  items: BaselineV3Revision[]
 }
 
 export type BaselineRegressionRun = {
