@@ -21,7 +21,7 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from app import worker_v3_authoritative
+from app import worker, worker_v3_authoritative
 from app.worker_v3_authoritative import (
     V3AuthoritativeError,
     build_v3_authoritative_error_scoring,
@@ -37,7 +37,7 @@ from app.inspiration_category_seed import (
     build_inspiration_v3_contract,
 )
 from app.migrations import run_migrations
-from app.models import CategoryEvaluationV3Config
+from app.models import Asset, CategoryEvaluationV3Config
 
 _CATEGORY_KEY = "inspiration_image"
 
@@ -119,6 +119,69 @@ def test_historical_job_without_frozen_v3_bundle_uses_active_config(sessions) ->
         resolved = v3_authoritative_for_job(db, job)
         assert resolved is not None
         assert resolved["config_revision"] == 9
+
+
+def test_worker_resolves_candidate_l5_stored_name_from_frozen_asset_id(sessions) -> None:
+    contract = build_inspiration_v3_contract()
+    for anchor in contract["aesthetic_foundation"]["anchors"]:
+        anchor.pop("stored_name")
+    contract["aesthetic_foundation"]["anchors"].append({
+        "asset_id": 339,
+        "level": "L5",
+        "mime_type": "image/jpeg",
+        "sha256": "f" * 64,
+    })
+    with sessions() as db:
+        for index, anchor in enumerate(contract["aesthetic_foundation"]["anchors"]):
+            stored_name = (
+                "server-owned-candidate-l5.jpeg"
+                if anchor["asset_id"] == 339
+                else f"server-owned-anchor-{index}.jpeg"
+            )
+            db.add(Asset(
+                id=anchor["asset_id"],
+                original_name=f"anchor-{anchor['level']}.jpeg",
+                stored_name=stored_name,
+                mime_type=anchor["mime_type"],
+                size_bytes=1,
+                sha256=anchor["sha256"],
+                category_key=_CATEGORY_KEY,
+            ))
+        db.commit()
+
+        assets = worker.resolve_frozen_anchor_assets(db, contract)
+
+    assert assets[339].stored_name == "server-owned-candidate-l5.jpeg"
+    assert assets[339].mime_type == "image/jpeg"
+    assert assets[339].sha256 == "f" * 64
+
+
+def test_worker_keeps_legacy_four_anchor_contract_without_asset_lookup() -> None:
+    contract = build_inspiration_v3_contract()
+
+    class UnexpectedAssetLookup:
+        def scalars(self, _statement):
+            raise AssertionError("现役四锚不应查询资产表")
+
+    assert worker.resolve_frozen_anchor_assets(UnexpectedAssetLookup(), contract) is None
+
+
+def test_worker_rejects_frozen_candidate_prompt_binding_drift() -> None:
+    contract = build_inspiration_v3_contract()
+    frozen_candidate = {
+        "candidate_revision_id": 91,
+        "contract": contract,
+    }
+    strategy_bundle = SimpleNamespace(
+        prompt_a_version=contract["prompt_bindings"]["call_a_version"],
+        prompt_b_version="unexpected-old-b-version",
+    )
+
+    with pytest.raises(RuntimeError, match="候选合同 Prompt 绑定"):
+        worker.validate_candidate_strategy_prompt_bindings(
+            frozen_candidate,
+            strategy_bundle,
+        )
 
 
 # 合成的特有维度 key（仅测试用）：方案 A 的真实合同 specific_group 为空，为回归

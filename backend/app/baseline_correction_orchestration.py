@@ -26,6 +26,11 @@ from .category_evaluation_v3_revisions import (
     ensure_projected_revision,
     revision_bundle,
 )
+from .category_evaluation_contract import (
+    CategoryEvaluationPromptBindingError,
+    bind_category_evaluation_prompt_versions,
+    validate_category_evaluation_prompt_bindings,
+)
 from .doubao import DoubaoClient
 from .models import (
     BaselineCorrectionRun,
@@ -191,6 +196,61 @@ def _normalize_generated_candidate(
         model_snapshot=(
             dict(model_snapshot) if isinstance(model_snapshot, Mapping) else {}
         ),
+    )
+
+
+def _candidate_routing_constraints(
+    report: Mapping[str, Any],
+) -> dict[str, Any]:
+    routing = report.get("candidate_routing")
+    if not isinstance(routing, Mapping):
+        return {
+            "policy": "backward_compatible",
+            "affected_layers": [],
+            "allowed_prompt_stages": ["A", "B"],
+            "required_prompt_stage": None,
+        }
+    raw_allowed = routing.get("allowed_prompt_stages")
+    allowed = (
+        [stage for stage in ("A", "B") if stage in raw_allowed]
+        if isinstance(raw_allowed, list)
+        else []
+    )
+    if not allowed:
+        allowed = ["A", "B"]
+    required = routing.get("required_prompt_stage")
+    if required not in {"A", "B"}:
+        required = None
+    if required is not None:
+        allowed = [required]
+    raw_layers = routing.get("affected_layers")
+    affected_layers = (
+        [layer for layer in ("A", "B", "V3") if layer in raw_layers]
+        if isinstance(raw_layers, list)
+        else []
+    )
+    return {
+        "policy": str(routing.get("policy") or "human_evidence_only"),
+        "affected_layers": affected_layers,
+        "allowed_prompt_stages": allowed,
+        "required_prompt_stage": required,
+    }
+
+
+def _validate_candidate_routing(
+    candidate: GeneratedMechanismCandidate,
+    report: Mapping[str, Any],
+) -> None:
+    routing = _candidate_routing_constraints(report)
+    allowed = routing["allowed_prompt_stages"]
+    if candidate.prompt.stage in allowed:
+        return
+    required = routing.get("required_prompt_stage")
+    expected = required or "、".join(allowed)
+    layers = "、".join(routing.get("affected_layers") or []) or "未指定"
+    raise CorrectionOrchestrationError(
+        "CORRECTION_PROMPT_STAGE_MISMATCH",
+        f"人工纠偏证据指向 {layers} 层，候选提示词必须使用 {expected} 阶段",
     )
 
 
@@ -397,6 +457,45 @@ def _sampling_policy_for_run(
     return policy
 
 
+def _candidate_prompt_pair(
+    *,
+    candidate_prompt: PromptVersion,
+    active_prompts: Mapping[str, PromptVersion],
+) -> tuple[PromptVersion, PromptVersion | None]:
+    prompt_a = (
+        candidate_prompt
+        if candidate_prompt.stage == "A"
+        else active_prompts["A"]
+    )
+    prompt_b = active_prompts.get("B")
+    if candidate_prompt.stage == "B":
+        if prompt_b is None:
+            raise CorrectionOrchestrationError(
+                "CORRECTION_PROMPT_STAGE_INVALID",
+                "单提示词机制不能生成 B 提示词候选",
+            )
+        prompt_b = candidate_prompt
+    return prompt_a, prompt_b
+
+
+def _bound_candidate_artifacts(
+    candidate: GeneratedMechanismCandidate,
+    *,
+    prompt_a: PromptVersion,
+    prompt_b: PromptVersion | None,
+) -> RevisionArtifacts:
+    return RevisionArtifacts(
+        display_name=candidate.revision.display_name,
+        contract=bind_category_evaluation_prompt_versions(
+            candidate.revision.contract,
+            prompt_a_version=prompt_a.version,
+            prompt_b_version=prompt_b.version if prompt_b is not None else None,
+        ),
+        classification_map=candidate.revision.classification_map,
+        subcategory_dimensions=candidate.revision.subcategory_dimensions,
+    )
+
+
 def _create_candidate_baseline_run(
     db: Session,
     *,
@@ -418,19 +517,21 @@ def _create_candidate_baseline_run(
     source = correction.baseline_run
     model = _model_config_for_run(db, source, execution)
     sampling_policy = _sampling_policy_for_run(db, source)
-    prompt_a = (
-        candidate_prompt
-        if candidate_prompt.stage == "A"
-        else active_prompts["A"]
+    prompt_a, prompt_b = _candidate_prompt_pair(
+        candidate_prompt=candidate_prompt,
+        active_prompts=active_prompts,
     )
-    prompt_b = active_prompts.get("B")
-    if candidate_prompt.stage == "B":
-        if prompt_b is None:
-            raise CorrectionOrchestrationError(
-                "CORRECTION_PROMPT_STAGE_INVALID",
-                "单提示词机制不能生成 B 提示词候选",
-            )
-        prompt_b = candidate_prompt
+    try:
+        validate_category_evaluation_prompt_bindings(
+            revision_bundle(candidate_revision)["contract"],
+            prompt_a_version=prompt_a.version,
+            prompt_b_version=prompt_b.version if prompt_b is not None else None,
+        )
+    except CategoryEvaluationPromptBindingError as exc:
+        raise CorrectionOrchestrationError(
+            "CORRECTION_CANDIDATE_PROMPT_BINDING_INVALID",
+            str(exc),
+        ) from exc
     bundle = get_or_create_bundle(
         db=db,
         model_config=model,
@@ -590,8 +691,9 @@ def generate_correction_candidate(
     """Call the tuning model without holding a SQLAlchemy Session or DB lock."""
     generated = _candidate_from_orchestration(prepared.orchestration)
     if generated is not None:
+        _validate_candidate_routing(generated, prepared.report)
         return generated
-    return _normalize_generated_candidate(
+    generated = _normalize_generated_candidate(
         generator.generate(
             db=None,
             correction=prepared.correction,
@@ -600,6 +702,8 @@ def generate_correction_candidate(
             report=prepared.report,
         )
     )
+    _validate_candidate_routing(generated, prepared.report)
+    return generated
 
 
 def advance_correction_run(
@@ -660,6 +764,7 @@ def advance_correction_run(
         )
         orchestration["generated_candidate"] = _generator_payload(generated)
         correction.orchestration_json = canonical_json(orchestration)
+    _validate_candidate_routing(generated, report)
     if generated.revision.contract.get("category_key") != correction.category_key:
         raise CorrectionOrchestrationError(
             "CORRECTION_CANDIDATE_CATEGORY_MISMATCH",
@@ -667,12 +772,28 @@ def advance_correction_run(
         )
     correction.stage = "candidate_validation"
     correction.progress = 55
+    candidate_prompt = _ensure_candidate_prompt(
+        db,
+        correction=correction,
+        candidate=generated,
+        active_prompts=active_prompts,
+        orchestration=orchestration,
+    )
+    prompt_a, prompt_b = _candidate_prompt_pair(
+        candidate_prompt=candidate_prompt,
+        active_prompts=active_prompts,
+    )
+    bound_artifacts = _bound_candidate_artifacts(
+        generated,
+        prompt_a=prompt_a,
+        prompt_b=prompt_b,
+    )
     if correction.candidate_revision_id is None:
         candidate_revision, _created = create_candidate_revision(
             db,
             projected,
             parent_revision_id=active_revision.id,
-            artifacts=generated.revision,
+            artifacts=bound_artifacts,
             expected_projected_revision=projected.revision,
             expected_projected_hash=projected.contract_hash,
             actor="automatic-correction",
@@ -688,13 +809,19 @@ def advance_correction_run(
                 "CORRECTION_CANDIDATE_BINDING_INVALID",
                 "自动候选 revision 绑定已损坏",
             )
-    candidate_prompt = _ensure_candidate_prompt(
-        db,
-        correction=correction,
-        candidate=generated,
-        active_prompts=active_prompts,
-        orchestration=orchestration,
-    )
+        try:
+            validate_category_evaluation_prompt_bindings(
+                revision_bundle(candidate_revision)["contract"],
+                prompt_a_version=prompt_a.version,
+                prompt_b_version=(
+                    prompt_b.version if prompt_b is not None else None
+                ),
+            )
+        except CategoryEvaluationPromptBindingError as exc:
+            raise CorrectionOrchestrationError(
+                "CORRECTION_CANDIDATE_PROMPT_BINDING_INVALID",
+                str(exc),
+            ) from exc
     orchestration["candidate_revision"] = {
         "id": candidate_revision.id,
         "revision": candidate_revision.revision,
@@ -855,17 +982,20 @@ class RegisteredTuningMechanismGenerator:
     ) -> GeneratedMechanismCandidate:
         del db
         client = DoubaoClient(self.config)
+        routing_constraints = _candidate_routing_constraints(report)
         response = asyncio.run(
             client.chat_json(
                 "你是标签实验台的评测机制调优器。人工真值优先。根据纠偏报告生成一个完整、"
                 "可校验、可回归的统一机制候选。必须同时返回 prompt 与 revision；revision 必须"
                 "包含完整 contract、classification_map、subcategory_dimensions，不得只返回差异，"
-                "不得发布或启用。只输出合法 JSON。",
+                "不得发布或启用。候选提示词阶段必须遵守 routing_constraints 中的允许阶段，"
+                "自动纠偏记录不能冒充人工证据。只输出合法 JSON。",
                 json.dumps(
                     {
-                        "schema_version": "baseline-correction-generator-input-v1",
+                        "schema_version": "baseline-correction-generator-input-v2",
                         "category_key": correction.category_key,
                         "correction_report": report,
+                        "routing_constraints": routing_constraints,
                         "active_revision": revision_bundle(active_revision),
                         "active_prompts": {
                             stage: {

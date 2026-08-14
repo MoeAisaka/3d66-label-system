@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+from pathlib import Path
 
 from app.inspiration_aesthetic_foundation import (
     AESTHETIC_CALL_B_VERSION,
@@ -55,6 +56,41 @@ def _apply(precheck: dict, foundation: dict | None) -> dict:
     )
 
 
+def _candidate_contract_with_semantic_soft_cap() -> dict:
+    contract = build_inspiration_v3_contract()
+    foundation = contract["aesthetic_foundation"]
+    foundation["score_thresholds"] = [
+        {"min_score": 90, "level": "L1"},
+        {"min_score": 80, "level": "L2"},
+        {"min_score": 76, "level": "L3"},
+        {"min_score": 60, "level": "L4"},
+        {"min_score": 0, "level": "L5"},
+    ]
+    foundation["casual_snapshot_soft_cap"] = {
+        "key": "casual_snapshot_soft_cap",
+        "signal": "production_fields.reason",
+        "match_any": ["是随手拍"],
+        "cap_to_level": "L4",
+        "filter_escalation": {
+            "cap_to_level": "L5",
+            "dimensions_at_most": {
+                "presentation_integrity": 2,
+                "inspiration_reference": 2,
+            },
+        },
+    }
+    return contract
+
+
+def _apply_candidate(precheck: dict, foundation: dict | None) -> dict:
+    return apply_aesthetic_v3_rules(
+        contract=_candidate_contract_with_semantic_soft_cap(),
+        classification_map=build_inspiration_classification_map(),
+        precheck=precheck,
+        foundation=foundation,
+    )
+
+
 def test_l3_recall_prompt_restores_detailed_anchor_calibration() -> None:
     prompt = build_prompt()
     assert AESTHETIC_CALL_B_VERSION == (
@@ -87,6 +123,68 @@ def test_non_redline_casual_snapshot_is_soft_capped_to_l4() -> None:
     assert result["score"] == 59
     assert result["level"] == "L4"
     assert {"rule": "casual_snapshot_soft_cap", "cap_to": 59} in result["caps"]
+
+
+def test_semantic_soft_cap_keeps_casual_snapshot_in_l4_band_after_threshold_change() -> None:
+    result = _apply_candidate(_precheck(reason="是随手拍"), _foundation(88))
+
+    assert result["hard_reject"] is False
+    assert result["score"] == 75
+    assert result["level"] == "L4"
+    assert {
+        "rule": "casual_snapshot_soft_cap",
+        "cap_to_level": "L4",
+        "resolved_cap_to": 75,
+    } in result["caps"]
+
+
+def test_semantic_soft_cap_escalates_to_l5_only_for_two_low_quality_dimensions() -> None:
+    foundation = _foundation(88)
+    foundation["dimensions"]["presentation_integrity"]["grade"] = 2
+    foundation["dimensions"]["inspiration_reference"]["grade"] = 2
+
+    result = _apply_candidate(_precheck(reason="是随手拍"), foundation)
+
+    assert result["score"] == 59
+    assert result["level"] == "L5"
+    assert {
+        "rule": "casual_snapshot_filter_escalation",
+        "cap_to_level": "L5",
+        "resolved_cap_to": 59,
+    } in result["caps"]
+
+
+def test_semantic_soft_cap_does_not_escalate_with_only_one_low_quality_dimension() -> None:
+    foundation = _foundation(88)
+    foundation["dimensions"]["presentation_integrity"]["grade"] = 2
+
+    result = _apply_candidate(_precheck(reason="是随手拍"), foundation)
+
+    assert result["score"] == 75
+    assert result["level"] == "L4"
+    assert not any(
+        cap.get("rule") == "casual_snapshot_filter_escalation"
+        for cap in result["caps"]
+        if isinstance(cap, dict)
+    )
+
+
+def test_v2_candidate_prompt_keeps_b_as_aesthetic_fact_provider() -> None:
+    prompt = (
+        Path(__file__).resolve().parents[1]
+        / "prompts"
+        / "inspiration_image_call_b_aesthetic_v6.txt"
+    ).read_text(encoding="utf-8")
+
+    assert "grade=5 表示该维度明显优秀，grade=1 表示该维度严重失效" in prompt
+    assert "调用 B 不执行红线判断、内容范围判断或最终等级判断" in prompt
+    assert "普通、清晰但无多维强证据的图片默认停留在 L3 或 L4" in prompt
+    assert "前五张为 Owner 锚图（L1 至 L5），第六张才是待评图" in prompt
+    assert "overall_evidence 必须至少包含一条整体可见证据" in prompt
+    assert "shortcomings 必须记录明确可见不足" in prompt
+    assert '"aesthetic_score":70' in prompt
+    assert '"grade":3' in prompt
+    assert '"grade":1' not in prompt
 
 
 def _watermark_precheck(evidence: str) -> dict:
