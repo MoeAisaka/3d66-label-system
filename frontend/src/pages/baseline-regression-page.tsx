@@ -216,11 +216,13 @@ export function BaselineRegressionPage() {
     : promptAOptions.some((prompt) => prompt.id === selectedPromptAId)
       ? selectedPromptAId
       : publishedPromptA?.id ?? promptAOptions[0]?.id ?? 0
-  const effectivePromptBId = promptSelectionMode === "manual"
-    ? promptBOptions.some((prompt) => prompt.id === selectedPromptBId)
-      ? selectedPromptBId
-      : publishedPromptB?.id ?? promptBOptions[0]?.id ?? 0
-    : publishedPromptB?.id ?? 0
+  const effectivePromptBId = promptSelectionMode === "single"
+    ? 0
+    : promptSelectionMode === "manual"
+      ? promptBOptions.some((prompt) => prompt.id === selectedPromptBId)
+        ? selectedPromptBId
+        : publishedPromptB?.id ?? promptBOptions[0]?.id ?? 0
+      : publishedPromptB?.id ?? 0
   const activeV3Revision = v3Revisions.data?.items.find(
     (revision) => revision.id === v3Revisions.data?.projected_revision_id
       || revision.status === "active",
