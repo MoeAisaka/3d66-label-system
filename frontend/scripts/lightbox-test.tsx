@@ -62,8 +62,15 @@ setTimeout(() => {
     if (!canvasStyle.backgroundImage.includes("gradient")) {
       fail("原图检查背景不是棋盘渐变")
     }
-    if (getComputedStyle(previewImage).objectFit !== "contain") {
+    const imageStyle = getComputedStyle(previewImage)
+    if (imageStyle.objectFit !== "contain") {
       fail("原图预览发生裁切")
+    }
+    if (imageStyle.filter !== "none") {
+      fail("原图预览被应用了滤镜")
+    }
+    if (imageStyle.borderTopStyle === "none" || Number.parseFloat(imageStyle.borderTopWidth) < 1) {
+      fail("原图预览缺少图片边缘轮廓")
     }
 
     document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }))

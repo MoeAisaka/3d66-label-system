@@ -89,6 +89,53 @@ def _next_revision(db: Session, category_key: str, projected_revision: int) -> i
     return max(maximum or 0, projected_revision) + 1
 
 
+def _matches_runtime_projection(
+    revision: CategoryEvaluationV3Revision,
+    projected: CategoryEvaluationV3Config,
+) -> bool:
+    return (
+        revision.category_key == projected.category_key
+        and revision.display_name == projected.display_name
+        and revision.revision == projected.revision
+        and revision.status == projected.status
+        and revision.contract_json == projected.contract_json
+        and revision.classification_map_json == projected.classification_map_json
+        and revision.subcategory_dimensions_json
+        == projected.subcategory_dimensions_json
+        and revision.dimension_deduction_rules_json
+        == (projected.dimension_deduction_rules_json or "{}")
+        and revision.media_penalty_enabled == projected.media_penalty_enabled
+        and revision.contract_hash == projected.contract_hash
+        and revision.created_by == projected.created_by
+    )
+
+
+def _revision_from_runtime_projection(
+    projected: CategoryEvaluationV3Config,
+    *,
+    revision: int,
+    parent_revision_id: int | None,
+) -> CategoryEvaluationV3Revision:
+    return CategoryEvaluationV3Revision(
+        category_key=projected.category_key,
+        display_name=projected.display_name,
+        revision=revision,
+        status=projected.status,
+        parent_revision_id=parent_revision_id,
+        contract_json=projected.contract_json,
+        classification_map_json=projected.classification_map_json,
+        subcategory_dimensions_json=projected.subcategory_dimensions_json,
+        dimension_deduction_rules_json=(
+            projected.dimension_deduction_rules_json or "{}"
+        ),
+        media_penalty_enabled=projected.media_penalty_enabled,
+        contract_hash=projected.contract_hash,
+        created_by=projected.created_by,
+        created_at=projected.created_at,
+        updated_at=projected.updated_at,
+    )
+
+
 def ensure_projected_revision(
     db: Session,
     projected: CategoryEvaluationV3Config,
@@ -101,6 +148,10 @@ def ensure_projected_revision(
         )
         if existing is None:
             raise RuntimeError("运行时合同 projected_revision_id 指向不存在的版本")
+        if not _matches_runtime_projection(existing, projected):
+            raise RuntimeError(
+                "运行时合同 projected_revision_id 指向的冻结产物不一致，拒绝继续"
+            )
         return existing
 
     existing = db.scalar(
@@ -109,24 +160,34 @@ def ensure_projected_revision(
             CategoryEvaluationV3Revision.revision == projected.revision,
         )
     )
+    if existing is not None and not _matches_runtime_projection(
+        existing,
+        projected,
+    ):
+        if existing.status == "active" and projected.status == "active":
+            existing.status = "retired"
+        next_revision = _next_revision(
+            db,
+            projected.category_key,
+            projected.revision,
+        )
+        repaired = _revision_from_runtime_projection(
+            projected,
+            revision=next_revision,
+            parent_revision_id=existing.id,
+        )
+        db.add(repaired)
+        db.flush()
+        projected.revision = next_revision
+        projected.projected_revision_id = repaired.id
+        db.flush()
+        return repaired
+
     if existing is None:
-        existing = CategoryEvaluationV3Revision(
-            category_key=projected.category_key,
-            display_name=projected.display_name,
+        existing = _revision_from_runtime_projection(
+            projected,
             revision=projected.revision,
-            status=projected.status,
             parent_revision_id=None,
-            contract_json=projected.contract_json,
-            classification_map_json=projected.classification_map_json,
-            subcategory_dimensions_json=projected.subcategory_dimensions_json,
-            dimension_deduction_rules_json=(
-                projected.dimension_deduction_rules_json or "{}"
-            ),
-            media_penalty_enabled=projected.media_penalty_enabled,
-            contract_hash=projected.contract_hash,
-            created_by=projected.created_by,
-            created_at=projected.created_at,
-            updated_at=projected.updated_at,
         )
         db.add(existing)
         db.flush()
@@ -263,7 +324,19 @@ def sync_projected_revision(
     actor: str,
 ) -> CategoryEvaluationV3Revision:
     """Atomically append and point a known seed/runtime projection revision."""
-    current = ensure_projected_revision(db, projected)
+    if projected.projected_revision_id is None:
+        current = ensure_projected_revision(db, projected)
+    else:
+        current = db.get(
+            CategoryEvaluationV3Revision,
+            projected.projected_revision_id,
+        )
+        if current is None:
+            raise RuntimeError("运行时合同 projected_revision_id 指向不存在的版本")
+        if current.category_key != projected.category_key:
+            raise RuntimeError(
+                "运行时合同 projected_revision_id 指向其他类目的版本，拒绝继续"
+            )
     unchanged = (
         projected.display_name == display_name
         and projected.status == status
@@ -274,6 +347,8 @@ def sync_projected_revision(
         == dimension_deduction_rules_json
         and projected.media_penalty_enabled == media_penalty_enabled
         and projected.contract_hash == contract_hash
+        and projected.created_by == actor
+        and _matches_runtime_projection(current, projected)
     )
     if unchanged:
         return current
@@ -308,6 +383,7 @@ def sync_projected_revision(
     projected.revision = next_revision
     projected.contract_hash = contract_hash
     projected.projected_revision_id = revision.id
+    projected.created_by = actor
     db.flush()
     return revision
 
@@ -381,6 +457,6 @@ def activate_candidate_revision(
     projected.revision = candidate.revision
     projected.contract_hash = candidate.contract_hash
     projected.projected_revision_id = candidate.id
-    projected.created_by = projected.created_by or actor
+    projected.created_by = candidate.created_by
     db.flush()
     return candidate

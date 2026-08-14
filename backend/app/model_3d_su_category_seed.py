@@ -483,6 +483,8 @@ def seed_model_3d_su(db: Session, settings: Any) -> None:
         db.flush()
         ensure_projected_revision(db, row)
         return
+    if row.created_by != MODEL_3D_SU_CREATED_BY:
+        raise RuntimeError("model_3d_su v3 合同已存在运营/外部版本，拒绝覆盖")
     try:
         existing_contract = json.loads(row.contract_json or "{}")
     except (json.JSONDecodeError, TypeError):
@@ -490,8 +492,6 @@ def seed_model_3d_su(db: Session, settings: Any) -> None:
     if existing_contract.get("spec_version") == MODEL_3D_SU_SPEC_VERSION:
         ensure_projected_revision(db, row)
         return
-    if row.created_by != MODEL_3D_SU_CREATED_BY:
-        raise RuntimeError("model_3d_su v3 合同已存在运营/外部版本，拒绝覆盖")
     sync_projected_revision(
         db,
         row,

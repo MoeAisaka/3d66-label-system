@@ -1,13 +1,29 @@
 import assert from "node:assert/strict"
 import { spawn, spawnSync } from "node:child_process"
 import { existsSync, mkdtempSync, rmSync } from "node:fs"
+import { createServer } from "node:net"
 import { tmpdir } from "node:os"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
 
 const frontendRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..")
 const viteEntry = path.join(frontendRoot, "node_modules", "vite", "bin", "vite.js")
-const port = 4176
+const port = await new Promise<number>((resolve, reject) => {
+  const server = createServer()
+  server.once("error", reject)
+  server.listen(0, "127.0.0.1", () => {
+    const address = server.address()
+    if (!address || typeof address === "string") {
+      server.close()
+      reject(new Error("无法分配等级指标测试端口"))
+      return
+    }
+    server.close((error) => {
+      if (error) reject(error)
+      else resolve(address.port)
+    })
+  })
+})
 const testUrl = `http://127.0.0.1:${port}/scripts/baseline-level-metrics-test.html`
 const browserCandidates = [
   "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",

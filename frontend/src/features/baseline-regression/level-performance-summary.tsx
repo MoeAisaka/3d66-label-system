@@ -72,13 +72,25 @@ export function LevelPerformanceSummary({ metrics }: { metrics: BaselineLevelMet
       </div>
 
       <div className="grid gap-px border-y border-[var(--line)] bg-[var(--line)] sm:grid-cols-2">
-        <MetricCard label="精确等级准确率" value={formatPercent(metrics.exact_accuracy)} />
-        <MetricCard label="相邻等级准确率" value={formatPercent(metrics.adjacent_accuracy)} />
+        <MetricCard
+          label="精确等级准确率"
+          value={formatPercent(metrics.exact_accuracy)}
+          testId="baseline-exact-accuracy"
+        />
+        <MetricCard
+          label="相邻等级准确率"
+          value={formatPercent(metrics.adjacent_accuracy)}
+          testId="baseline-adjacent-accuracy"
+        />
       </div>
 
       <div className="grid gap-px border-y border-[var(--line)] bg-[var(--line)] md:grid-cols-3">
         {bucketMetrics.map((bucket) => (
-          <div key={bucket.key} className="bg-white px-5 py-4">
+          <div
+            key={bucket.key}
+            className="bg-white px-5 py-4"
+            data-testid={`baseline-bucket-${bucket.key}`}
+          >
             <div className="flex items-baseline justify-between gap-3">
               <p className="text-sm font-bold">{bucket.label}</p>
               <p className="font-data text-xs text-[var(--muted)]">{bucket.levels.join("–")}</p>
@@ -94,11 +106,19 @@ export function LevelPerformanceSummary({ metrics }: { metrics: BaselineLevelMet
   )
 }
 
-function MetricCard({ label, value }: { label: string; value: string }) {
+function MetricCard({
+  label,
+  value,
+  testId,
+}: {
+  label: string
+  value: string
+  testId: string
+}) {
   return (
     <div className="bg-white px-5 py-4">
       <p className="text-xs font-semibold text-[var(--muted)]">{label}</p>
-      <p className="font-data mt-2 text-2xl font-bold">{value}</p>
+      <p className="font-data mt-2 text-2xl font-bold" data-testid={testId}>{value}</p>
     </div>
   )
 }
