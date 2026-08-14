@@ -82,6 +82,7 @@ MIGRATION_NAMES = [
     "clear_legacy_correction_confirmation_blockers",
     "add_evaluation_production_workflow_kind",
     "add_projection_contract_registry",
+    "add_semantic_tag_contract_registry",
 ]
 
 
