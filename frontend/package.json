@@ -17,6 +17,7 @@
     "contract:mechanism-editor": "node --experimental-strip-types scripts/check-mechanism-editor-contract.ts",
     "contract:dual-workspaces": "node --experimental-strip-types scripts/check-dual-workspaces-contract.ts",
     "test:lightbox": "node --experimental-strip-types scripts/check-baseline-lightbox.ts",
+    "test:baseline-level-metrics": "node --experimental-strip-types scripts/check-baseline-level-metrics.ts",
     "lint": "tsc -b --pretty false",
     "preview": "vite preview --host 0.0.0.0"
   },

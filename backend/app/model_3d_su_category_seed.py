@@ -21,6 +21,10 @@ from .category_evaluation_contract import (
     validate_category_evaluation_contract,
 )
 from .category_pipeline import validate_pipeline_config
+from .category_evaluation_v3_revisions import (
+    ensure_projected_revision,
+    sync_projected_revision,
+)
 from .dimension_composition import (
     SUBCATEGORY_DIMENSIONS_FORMAT_VERSION,
     validate_subcategory_dimensions,
@@ -470,16 +474,36 @@ def seed_model_3d_su(db: Session, settings: Any) -> None:
         )
     )
     if row is None:
-        db.add(CategoryEvaluationV3Config(category_key=MODEL_3D_SU_CATEGORY_KEY, revision=1, **config_values))
+        row = CategoryEvaluationV3Config(
+            category_key=MODEL_3D_SU_CATEGORY_KEY,
+            revision=1,
+            **config_values,
+        )
+        db.add(row)
+        db.flush()
+        ensure_projected_revision(db, row)
         return
+    if row.created_by != MODEL_3D_SU_CREATED_BY:
+        raise RuntimeError("model_3d_su v3 合同已存在运营/外部版本，拒绝覆盖")
     try:
         existing_contract = json.loads(row.contract_json or "{}")
     except (json.JSONDecodeError, TypeError):
         existing_contract = {}
     if existing_contract.get("spec_version") == MODEL_3D_SU_SPEC_VERSION:
+        ensure_projected_revision(db, row)
         return
-    if row.created_by != MODEL_3D_SU_CREATED_BY:
-        raise RuntimeError("model_3d_su v3 合同已存在运营/外部版本，拒绝覆盖")
-    for field, value in config_values.items():
-        setattr(row, field, value)
-    row.revision = (row.revision or 0) + 1
+    sync_projected_revision(
+        db,
+        row,
+        display_name=config_values["display_name"],
+        status=config_values["status"],
+        contract_json=config_values["contract_json"],
+        classification_map_json=config_values["classification_map_json"],
+        subcategory_dimensions_json=config_values["subcategory_dimensions_json"],
+        dimension_deduction_rules_json=config_values[
+            "dimension_deduction_rules_json"
+        ],
+        media_penalty_enabled=config_values["media_penalty_enabled"],
+        contract_hash=config_values["contract_hash"],
+        actor=MODEL_3D_SU_CREATED_BY,
+    )

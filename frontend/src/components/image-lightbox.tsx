@@ -60,12 +60,24 @@ export function ImageLightbox({
             <X size={20} />
           </Dialog.Close>
           {preview && (
-            <img
-              data-testid="image-lightbox-image"
-              src={preview.src}
-              alt={preview.alt}
-              className="block h-auto max-h-[calc(100dvh-4rem)] w-auto max-w-full object-contain"
-            />
+            <div
+              data-testid="image-lightbox-inspection-canvas"
+              className="flex max-h-[calc(100dvh-4rem)] max-w-full items-center justify-center overflow-auto p-3"
+              style={{
+                backgroundColor: "#eef0eb",
+                backgroundImage:
+                  "linear-gradient(45deg,#cfd4ca 25%,transparent 25%),linear-gradient(-45deg,#cfd4ca 25%,transparent 25%),linear-gradient(45deg,transparent 75%,#cfd4ca 75%),linear-gradient(-45deg,transparent 75%,#cfd4ca 75%)",
+                backgroundPosition: "0 0,0 8px,8px -8px,-8px 0",
+                backgroundSize: "16px 16px",
+              }}
+            >
+              <img
+                data-testid="image-lightbox-image"
+                src={preview.src}
+                alt={preview.alt}
+                className="block h-auto max-h-[calc(100dvh-6rem)] w-auto max-w-full border border-black/60 object-contain"
+              />
+            </div>
           )}
         </Dialog.Content>
       </Dialog.Portal>

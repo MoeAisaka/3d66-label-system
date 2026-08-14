@@ -14,14 +14,22 @@ from sqlalchemy.pool import StaticPool
 from app.category_evaluation_v3_config_api import (
     build_category_evaluation_v3_config_router,
 )
+from app.category_evaluation_contract import canonical_contract_hash
+from app.category_evaluation_v3_revisions import (
+    RevisionArtifacts,
+    activate_candidate_revision,
+    create_candidate_revision,
+    ensure_projected_revision,
+)
 from app.database import Base, get_db
+from app.dimension_schema_registry import canonical_json
 from app.inspiration_category_seed import (
     build_inspiration_classification_map,
     build_inspiration_subcategory_dimensions,
     build_inspiration_v3_contract,
 )
 from app.migrations import run_migrations
-from app.models import CategoryEvaluationV3Config
+from app.models import CategoryEvaluationV3Config, CategoryEvaluationV3Revision
 
 
 _BASE = "/api/category-evaluation/v3-config"
@@ -102,6 +110,126 @@ def _candidate_payload(
         }
     )
     return payload
+
+
+def _stale_projection_pair(
+    *,
+    category_key: str,
+) -> tuple[CategoryEvaluationV3Config, CategoryEvaluationV3Revision]:
+    body = _valid_body(category_key)
+    contract_json = canonical_json(body["contract"])
+    classification_map_json = canonical_json(body["classification_map"])
+    subcategory_dimensions_json = canonical_json(body["subcategory_dimensions"])
+    shared = {
+        "category_key": category_key,
+        "status": "active",
+        "contract_json": contract_json,
+        "classification_map_json": classification_map_json,
+        "subcategory_dimensions_json": subcategory_dimensions_json,
+        "dimension_deduction_rules_json": "{}",
+        "media_penalty_enabled": True,
+        "revision": 1,
+        "contract_hash": canonical_contract_hash(body["contract"]),
+        "created_by": "system:test",
+    }
+    projected = CategoryEvaluationV3Config(
+        display_name="现役运行时合同",
+        projected_revision_id=None,
+        **shared,
+    )
+    stale = CategoryEvaluationV3Revision(
+        display_name="陈旧不可变合同",
+        parent_revision_id=None,
+        **shared,
+    )
+    return projected, stale
+
+
+def test_ensure_projected_revision_appends_when_same_revision_artifacts_are_stale(
+    sessions: sessionmaker[Session],
+) -> None:
+    with sessions() as db:
+        projected, stale = _stale_projection_pair(
+            category_key="stale_same_revision",
+        )
+        db.add_all([projected, stale])
+        db.flush()
+
+        repaired = ensure_projected_revision(db, projected)
+        db.commit()
+
+        assert repaired.id != stale.id
+        assert repaired.revision == 2
+        assert repaired.parent_revision_id == stale.id
+        assert repaired.display_name == projected.display_name
+        assert repaired.contract_json == projected.contract_json
+        assert repaired.classification_map_json == projected.classification_map_json
+        assert repaired.subcategory_dimensions_json == projected.subcategory_dimensions_json
+        assert repaired.dimension_deduction_rules_json == projected.dimension_deduction_rules_json
+        assert repaired.media_penalty_enabled == projected.media_penalty_enabled
+        assert repaired.contract_hash == projected.contract_hash
+        assert repaired.created_by == projected.created_by
+        assert stale.status == "retired"
+        assert projected.revision == 2
+        assert projected.projected_revision_id == repaired.id
+
+
+def test_ensure_projected_revision_rejects_mismatched_nonempty_pointer(
+    sessions: sessionmaker[Session],
+) -> None:
+    with sessions() as db:
+        projected, stale = _stale_projection_pair(
+            category_key="mismatched_pointer",
+        )
+        db.add_all([projected, stale])
+        db.flush()
+        projected.projected_revision_id = stale.id
+        db.flush()
+
+        with pytest.raises(RuntimeError, match="冻结产物不一致"):
+            ensure_projected_revision(db, projected)
+
+        assert projected.projected_revision_id == stale.id
+        assert projected.revision == 1
+        assert stale.status == "active"
+
+
+def test_activate_candidate_copies_frozen_provenance_to_runtime_projection(
+    sessions: sessionmaker[Session],
+) -> None:
+    with sessions() as db:
+        projected, _stale = _stale_projection_pair(
+            category_key="activation_provenance",
+        )
+        db.add(projected)
+        db.flush()
+        current = ensure_projected_revision(db, projected)
+        body = _valid_body("activation_provenance")
+        candidate, created = create_candidate_revision(
+            db,
+            projected,
+            parent_revision_id=current.id,
+            artifacts=RevisionArtifacts(
+                display_name="候选合同",
+                contract=body["contract"],
+                classification_map=body["classification_map"],
+                subcategory_dimensions=body["subcategory_dimensions"],
+            ),
+            expected_projected_revision=projected.revision,
+            expected_projected_hash=projected.contract_hash,
+            actor="candidate:author",
+        )
+        assert created is True
+
+        activate_candidate_revision(
+            db,
+            projected,
+            candidate,
+            actor="release:approver",
+        )
+
+        assert projected.created_by == candidate.created_by
+        assert ensure_projected_revision(db, projected).id == candidate.id
 
 
 def test_create_candidate_is_append_only_and_runtime_projection_is_unchanged(

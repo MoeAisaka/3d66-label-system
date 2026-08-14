@@ -46,6 +46,7 @@ import {
 } from "@/features/baseline-regression/baseline-regression-contract"
 import { BaselineSetDialog } from "@/features/baseline-regression/baseline-set-dialog"
 import { CorrectionWorkbench } from "@/features/baseline-regression/correction-workbench"
+import { LevelPerformanceSummary } from "@/features/baseline-regression/level-performance-summary"
 import { MetricsDrawer } from "@/features/baseline-regression/metrics-drawer"
 import { RunConfigDrawer } from "@/features/baseline-regression/run-config-drawer"
 import { RunHistoryDrawer } from "@/features/baseline-regression/run-history-drawer"
@@ -1391,6 +1392,7 @@ function RegressionResults({
 
       {activeView === "results" ? (
         <div id="baseline-results-panel" role="tabpanel" aria-labelledby="baseline-results-tab">
+      <LevelPerformanceSummary metrics={metrics} />
       <section className="mt-6 grid gap-px border-y border-[var(--line)] bg-[var(--line)] sm:grid-cols-2 xl:grid-cols-4">
         <Metric label="字段宏平均准确率" value={fieldMetrics ? percent(fieldMetrics.aggregates.macro.accuracy) : percent(metrics.exact_accuracy)} />
         <Metric label="字段宏平均召回率" value={fieldMetrics ? percent(fieldMetrics.aggregates.macro.recall) : "—"} />
@@ -2353,7 +2355,7 @@ function LevelSelect({
   )
 }
 
-function FieldMetricsEvidence({
+export function FieldMetricsEvidence({
   data,
   loading,
   error,
@@ -2392,7 +2394,11 @@ function FieldMetricsEvidence({
           <span>字段</span><span>支持数</span><span>准确率</span><span>召回率</span><span>失败数</span>
         </div>
         {data.field_metrics.map((item) => (
-          <details key={item.field_key} className="border-b border-[var(--line)] last:border-0">
+          <details
+            key={item.field_key}
+            className="border-b border-[var(--line)] last:border-0"
+            data-testid={`baseline-field-metric-${item.field_key}`}
+          >
             <summary className="grid cursor-pointer grid-cols-[minmax(210px,1fr)_90px_110px_110px_100px] gap-3 px-4 py-3 text-sm hover:bg-[#fbfcf5]">
               <span className="font-data break-all font-semibold">{fieldMetricLabel(item.field_key)}</span>
               <span className="font-data">{item.support}</span>
@@ -2406,7 +2412,10 @@ function FieldMetricsEvidence({
                 <EvidenceMetric label="FP" value={item.fp} />
                 <EvidenceMetric label="FN" value={item.fn} />
               </div>
-              <div className="overflow-x-auto border border-[var(--line)] bg-white">
+              <div
+                className="overflow-x-auto border border-[var(--line)] bg-white"
+                data-testid={item.field_key === "level" ? "baseline-five-level-confusion-matrix" : undefined}
+              >
                 <table className="w-full min-w-[520px] border-collapse text-left text-xs">
                   <thead><tr className="border-b border-[var(--line)] bg-[#fafbf8]"><th className="px-3 py-2">人工真值</th><th className="px-3 py-2">模型输出</th><th className="px-3 py-2">样本数</th></tr></thead>
                   <tbody>
