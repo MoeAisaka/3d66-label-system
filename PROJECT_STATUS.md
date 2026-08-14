@@ -3,6 +3,27 @@
 > 最后更新：2026-08-13
 > 本文件只记录“现在做到哪里”；长期原则见 `PRODUCT.md` 和 `AGENTS.md`，历史背景见 `CODEX_HANDOFF.md`。
 
+## 最新实施：3D & SU 模型美感评测机制适配（2026-08-14）
+
+- 当前分支为 `codex/label-mechanism-v1`，实现已提交在当前 `HEAD`。新增独立类目
+  `category_key=model_3d_su`，不修改并行 `three_d` profile/editor/只读来源/影子投影。
+- 类目包含 `space_building`、`soft_furnishing`、`functional_model` 三条赛道和五个维度；
+  调用 A 只输出分类、平台通用字段与 3D/SU 标记，调用 B 只输出逐维 grade/evidence，
+  服务端 v3 合同负责 20/50/80 规则扣分、总分与 L1 80–100、L2 61–79、L3 41–60、
+  L4 0–40 映射，L5 首版关闭。白背景与二维码只记录，不触发红线。
+- startup seed 已接入：两个独立 published A/B prompt、active 类目 profile、active v3
+  contract、分类映射、三赛道维度和扣分规则均可幂等落库；运营已修改的同版本 profile
+  描述不被覆盖，未知外部合同冲突 fail-closed。提示词从 `backend/prompts/` 读取并保留
+  根目录回退。
+- 功能性模型原始比例 35:25:20:15:10 合计 105，合同落库前按相对比例归一化为总和 1.0；
+  该取舍已记录在 ADR-0046、设计文档和专项测试中。
+
+当前验证：
+
+- 后端全量：`1211 passed, 1 skipped, 6 warnings`（Python 3.12；警告均为既有依赖弃用）。
+- 3D/SU seed 与 API 定向：`22 passed, 1 warning`；startup seed 幂等回归 `4 passed`。
+- 前端 `npm run lint` 与 `npm run build` 均通过；仅保留既有主 chunk 大于 500 kB 的 Vite 警告。
+- `git diff --check` 通过；未导入 NAS/Excel、未调用真实模型、未访问生产数据、未部署或推送。
 ## 最新实施：TPENG 标签实验台双工作区与多表投影底座（2026-08-13）
 
 - 产品定位继续遵循 ADR-0042/0043：**TPENG 标签实验台（LabelLab）**是标签体系重构的统一产品载体和标签/内容中台通用底座，统一承载完整生产闭环；业务类目只扩展合同、提示词、维度、规则、门槛和专用视图。

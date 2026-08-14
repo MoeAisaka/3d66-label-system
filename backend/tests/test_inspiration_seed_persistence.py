@@ -199,6 +199,7 @@ def test_seed_defaults_clones_active_v3_contract_and_prompts_for_all_categories(
         "material_image",
         "pdf_text",
         "proposal_text_pdf",
+        "model_3d_su",
     }
     with Session(engine) as db:
         seed_defaults(db)
@@ -243,7 +244,7 @@ def test_seed_defaults_clones_active_v3_contract_and_prompts_for_all_categories(
             assert {
                 len(config["common_group"]["schema_definition"]["dimensions"])
                 for config in dimensions_by_track.values()
-            } == {5, 6}
+            } == ({5} if row.category_key == "model_3d_su" else {5, 6})
 
             validate_category_evaluation_contract(contract)
             track_keys = {
@@ -272,13 +273,13 @@ def test_seed_defaults_clones_active_v3_contract_and_prompts_for_all_categories(
                 assert prompt.status == "published"
                 assert prompt.source == (
                     "imported"
-                    if row.category_key == "inspiration_image"
+                    if row.category_key in {"inspiration_image", "model_3d_su"}
                     else "v3_seed_clone"
                 )
 
         seed_defaults(db)
         rows_after = db.scalars(select(CategoryEvaluationV3Config)).all()
-        assert len(rows_after) == 5
+        assert len(rows_after) == len(expected_categories)
         assert {row.category_key: row.revision for row in rows_after} == revisions_before
         assert len(db.scalars(select(PromptVersion)).all()) == prompt_count_before
 

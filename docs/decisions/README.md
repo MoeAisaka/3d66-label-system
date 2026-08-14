@@ -61,6 +61,7 @@
 | [0043](0043-canonical-facts-and-semantic-projection-boundaries.md) | Accepted | TPENG 中台 Canonical 事实与资产语义投影边界 |
 | [0044](0044-frontend-workspaces-and-mechanism-profile-plugins.md) | Accepted | TPENG 标签实验台工作区与机制 profile 插件边界 |
 | [0045](0045-dual-workspaces-and-table-projection-contract.md) | Accepted | TPENG 标签实验台双工作区与数据库表投影合同 |
+| [0046](0046-model-3d-su-evaluation-mechanism.md) | Accepted | 3D & SU 模型美感评测机制独立类目与三赛道合同 |
 
 文件名格式：
 

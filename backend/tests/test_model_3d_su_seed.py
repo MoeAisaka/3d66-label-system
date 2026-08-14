@@ -1,0 +1,180 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+from sqlalchemy import create_engine, select
+from sqlalchemy.orm import Session
+from sqlalchemy.pool import StaticPool
+
+from app.category_evaluation_contract import validate_category_evaluation_contract
+from app.category_pipeline import default_pipeline
+from app.database import Base
+from app.dimension_composition import validate_subcategory_dimensions
+from app.models import (
+    CategoryEvaluationV3Config,
+    CATEGORY_PROFILE_DEFAULTS,
+    EvaluationCategoryProfile,
+    ModelConfig,
+    PromptVersion,
+)
+from app.main import CATEGORY_KEYS
+from app.model_3d_su_category_seed import (
+    MODEL_3D_SU_CALL_A_VERSION,
+    MODEL_3D_SU_CALL_B_VERSION,
+    MODEL_3D_SU_CATEGORY_KEY,
+    MODEL_3D_SU_RUBRIC_VERSION,
+    build_model_3d_su_classification_map,
+    build_model_3d_su_contract,
+    build_model_3d_su_subcategory_dimensions,
+    seed_model_3d_su,
+)
+from app.subcategory_resolver import validate_classification_map
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _engine():
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    return engine
+
+
+def test_model_3d_su_contract_freezes_l1_to_l4_and_record_only_policy() -> None:
+    contract = build_model_3d_su_contract()
+
+    validate_category_evaluation_contract(contract)
+    assert contract["category_key"] == MODEL_3D_SU_CATEGORY_KEY
+    assert contract["level_scale"]["levels"] == [
+        {"level": "L1", "enabled": True, "min_score": 80, "display_name": "好"},
+        {"level": "L2", "enabled": True, "min_score": 61, "display_name": "中等"},
+        {"level": "L3", "enabled": True, "min_score": 41, "display_name": "中差"},
+        {"level": "L4", "enabled": True, "min_score": 0, "display_name": "极差"},
+        {"level": "L5", "enabled": False, "display_name": "过滤"},
+    ]
+    assert contract["redline_policy"]["enabled"] is False
+    assert contract["common_modifiers"]["media_type_penalty"]["enabled"] is False
+    assert contract["common_modifiers"]["high_score_veto"]["enabled"] is False
+    assert contract["output_contract"]["class_specific_fields"]["unrendered"]["required"] is True
+
+
+def test_model_3d_su_has_three_tracks_and_document_weights() -> None:
+    contract = build_model_3d_su_contract()
+    classification_map = build_model_3d_su_classification_map()
+    dimensions = build_model_3d_su_subcategory_dimensions()
+    track_keys = {track["key"] for track in contract["track_classification"]["tracks"]}
+
+    validate_classification_map(classification_map, valid_track_keys=track_keys)
+    assert track_keys == {"space_building", "soft_furnishing", "functional_model"}
+    assert set(dimensions) == track_keys
+    assert classification_map["category_to_subcategory"]["电子电器"] == "functional_model"
+    assert classification_map["category_to_subcategory"]["家具"] == "soft_furnishing"
+
+    expected_weights = {
+        "space_building": [0.20, 0.25, 0.20, 0.20, 0.15],
+        "soft_furnishing": [0.25, 0.25, 0.20, 0.20, 0.10],
+        # The source document's functional-model proportions are 35:25:20:15:10
+        # (105 total).  The persisted contract keeps that relative priority but
+        # normalizes it to a strict 1.0 weight sum.
+        "functional_model": [35 / 105, 25 / 105, 20 / 105, 15 / 105, 10 / 105],
+    }
+    for track_key, config in dimensions.items():
+        validate_subcategory_dimensions(config)
+        rows = config["common_group"]["schema_definition"]["dimensions"]
+        assert [row["weight"] for row in rows] == pytest.approx(
+            expected_weights[track_key]
+        )
+        assert sum(row["weight"] for row in rows) == pytest.approx(1.0)
+        assert {rule["deduction"] for row in rows for rule in row["deduction_rules"]} == {20, 50, 80}
+
+
+def test_model_3d_su_is_registered_as_an_image_category() -> None:
+    assert "model_3d_su" in CATEGORY_KEYS
+    assert CATEGORY_PROFILE_DEFAULTS["model_3d_su"] == {
+        "display_name": "3D & SU 模型",
+        "allowed_mime_types_json": '["image/jpeg","image/png","image/webp","image/gif"]',
+        "preprocess_config_json": '{"preprocess":"image","su_unrendered_marker":true}',
+    }
+    pipeline = default_pipeline("model_3d_su")
+    assert pipeline["input_kind"] == "image"
+    assert ".gif" in pipeline["allowed_suffixes"]
+    assert pipeline["prompt_mode"] == "ab"
+
+
+def test_model_3d_su_seed_is_idempotent_and_preserves_operator_rows() -> None:
+    engine = _engine()
+    with Session(engine) as db:
+        db.add(ModelConfig(active=True))
+        db.commit()
+        settings = SimpleNamespace(project_root=PROJECT_ROOT)
+
+        seed_model_3d_su(db, settings)
+        db.commit()
+        first_profile = db.scalar(
+            select(EvaluationCategoryProfile).where(
+                EvaluationCategoryProfile.category_key == MODEL_3D_SU_CATEGORY_KEY
+            )
+        )
+        first_config = db.scalar(
+            select(CategoryEvaluationV3Config).where(
+                CategoryEvaluationV3Config.category_key == MODEL_3D_SU_CATEGORY_KEY
+            )
+        )
+        assert first_profile is not None
+        assert first_config is not None
+        assert first_profile.status == "active"
+        assert first_config.status == "active"
+        assert first_profile.rubric_version == MODEL_3D_SU_RUBRIC_VERSION
+        assert first_config.revision == 1
+
+        first_profile.description = "运营已编辑描述"
+        db.commit()
+        seed_model_3d_su(db, settings)
+        db.commit()
+
+        prompts = db.scalars(
+            select(PromptVersion).where(
+                PromptVersion.category_key == MODEL_3D_SU_CATEGORY_KEY
+            )
+        ).all()
+        assert {prompt.version for prompt in prompts} == {
+            MODEL_3D_SU_CALL_A_VERSION,
+            MODEL_3D_SU_CALL_B_VERSION,
+        }
+        assert first_config.revision == 1
+        assert first_profile.description == "运营已编辑描述"
+        assert db.scalar(
+            select(PromptVersion).where(
+                PromptVersion.version == MODEL_3D_SU_CALL_A_VERSION
+            )
+        ).status == "published"
+
+
+def test_model_3d_su_prompts_keep_common_fields_and_forbid_final_level() -> None:
+    engine = _engine()
+    with Session(engine) as db:
+        db.add(ModelConfig(active=True))
+        db.commit()
+        seed_model_3d_su(db, SimpleNamespace(project_root=PROJECT_ROOT))
+        db.commit()
+
+        prompt_a = db.scalar(
+            select(PromptVersion).where(PromptVersion.version == MODEL_3D_SU_CALL_A_VERSION)
+        )
+        prompt_b = db.scalar(
+            select(PromptVersion).where(PromptVersion.version == MODEL_3D_SU_CALL_B_VERSION)
+        )
+        assert prompt_a is not None and prompt_b is not None
+        assert prompt_a.rubric_version == MODEL_3D_SU_RUBRIC_VERSION
+        assert '"production_fields"' in prompt_a.system_prompt
+        assert '"model_3d_su_fields"' in prompt_a.system_prompt
+        assert "predicted_level" not in prompt_a.system_prompt
+        assert "不得输出 final_level" in prompt_b.system_prompt
+        assert "任何最终等级" in prompt_b.system_prompt
