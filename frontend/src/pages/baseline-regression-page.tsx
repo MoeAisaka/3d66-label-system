@@ -46,6 +46,7 @@ import {
 } from "@/features/baseline-regression/baseline-regression-contract"
 import { BaselineSetDialog } from "@/features/baseline-regression/baseline-set-dialog"
 import { CorrectionWorkbench } from "@/features/baseline-regression/correction-workbench"
+import { LevelPerformanceSummary } from "@/features/baseline-regression/level-performance-summary"
 import { MetricsDrawer } from "@/features/baseline-regression/metrics-drawer"
 import { RunConfigDrawer } from "@/features/baseline-regression/run-config-drawer"
 import { RunHistoryDrawer } from "@/features/baseline-regression/run-history-drawer"
@@ -1391,6 +1392,7 @@ function RegressionResults({
 
       {activeView === "results" ? (
         <div id="baseline-results-panel" role="tabpanel" aria-labelledby="baseline-results-tab">
+      <LevelPerformanceSummary metrics={metrics} />
       <section className="mt-6 grid gap-px border-y border-[var(--line)] bg-[var(--line)] sm:grid-cols-2 xl:grid-cols-4">
         <Metric label="字段宏平均准确率" value={fieldMetrics ? percent(fieldMetrics.aggregates.macro.accuracy) : percent(metrics.exact_accuracy)} />
         <Metric label="字段宏平均召回率" value={fieldMetrics ? percent(fieldMetrics.aggregates.macro.recall) : "—"} />
