@@ -1,4 +1,5 @@
 import type { BaselineLevel, BaselineLevelMetrics } from "@/lib/types"
+import { BASELINE_LEVELS, computeBaselineLevelMatrixMetrics } from "./level-metrics"
 
 export type BaselineLevelBucketMetric = {
   key: "recommended" | "regular" | "filtered"
@@ -60,6 +61,7 @@ export function computeBaselineLevelBucketMetrics(
 
 export function LevelPerformanceSummary({ metrics }: { metrics: BaselineLevelMetrics }) {
   const bucketMetrics = computeBaselineLevelBucketMetrics(metrics)
+  const matrixMetrics = computeBaselineLevelMatrixMetrics(metrics)
 
   return (
     <section className="mt-6 space-y-3" aria-label="等级表现">
@@ -102,6 +104,49 @@ export function LevelPerformanceSummary({ metrics }: { metrics: BaselineLevelMet
           </div>
         ))}
       </div>
+
+      <section className="space-y-3" aria-label="L1–L5 等级分布矩阵" data-testid="baseline-level-matrix">
+        <div>
+          <p className="text-sm font-bold">L1–L5 等级分布矩阵</p>
+          <p className="mt-1 text-xs text-[var(--muted)]">行是人工真值，列是模型预测；行末为召回率，底部为单档准确率（Precision）。</p>
+        </div>
+        <div className="overflow-x-auto border border-[var(--line-strong)] bg-white">
+          <div className="min-w-[620px]">
+            <div className="grid grid-cols-[88px_repeat(5,minmax(62px,1fr))_96px] border-b border-[var(--line)] bg-[#fafbf8] text-xs font-semibold text-[var(--muted)]">
+              <div className="px-3 py-3">真值＼预测</div>
+              {BASELINE_LEVELS.map((level) => <div key={`header-${level}`} className="px-3 py-3 text-center">{level}</div>)}
+              <div className="px-3 py-3 text-center">召回率</div>
+            </div>
+            {BASELINE_LEVELS.map((expected) => (
+              <div key={`row-${expected}`} className="grid grid-cols-[88px_repeat(5,minmax(62px,1fr))_96px] border-b border-[var(--line)] last:border-0">
+                <div className="flex items-center px-3 py-3 text-xs font-semibold">{expected}</div>
+                {BASELINE_LEVELS.map((predicted) => {
+                  const cell = matrixMetrics.cells.find((item) => item.expected === expected && item.predicted === predicted)
+                  const count = cell?.count ?? 0
+                  return (
+                    <div
+                      key={`${expected}-${predicted}`}
+                      className={`flex items-center justify-center border-l border-[var(--line)] px-2 py-3 font-data text-sm ${expected === predicted && count > 0 ? "bg-[#f1f8cf] font-bold" : ""}`}
+                      data-testid={`baseline-level-cell-${expected}-${predicted}`}
+                      aria-label={`${expected} 真值、${predicted} 预测：${count} 条`}
+                    >
+                      {count}
+                    </div>
+                  )
+                })}
+                <div className="flex items-center justify-center border-l border-[var(--line)] px-2 py-3 font-data text-sm" data-testid={`baseline-level-recall-${expected}`}>
+                  {formatPercent(matrixMetrics.recallByLevel[expected])}
+                </div>
+              </div>
+            ))}
+            <div className="grid grid-cols-[88px_repeat(5,minmax(62px,1fr))_96px] bg-[#fafbf8] text-xs">
+              <div className="px-3 py-3 font-semibold">准确率（Precision）</div>
+              {BASELINE_LEVELS.map((level) => <div key={`precision-${level}`} className="border-l border-[var(--line)] px-2 py-3 text-center font-data" data-testid={`baseline-level-precision-${level}`}>{formatPercent(matrixMetrics.precisionByLevel[level])}</div>)}
+              <div className="border-l border-[var(--line)] px-2 py-3 text-center text-[var(--muted)]">—</div>
+            </div>
+          </div>
+        </div>
+      </section>
     </section>
   )
 }
