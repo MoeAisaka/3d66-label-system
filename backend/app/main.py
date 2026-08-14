@@ -128,9 +128,15 @@ from .models import (
     ProjectionContract,
     ProjectionManifest,
     ProjectionReconciliation,
+    TagDemandContract,
     User,
 )
 from .audit import append_audit_event, canonical_json
+from .semantic_tag_contracts import (
+    SemanticTagContractError,
+    canonical_contract_hash,
+    validate_tag_demand_contract,
+)
 from .projection_contracts import (
     LocalProjectionAdapter,
     ProjectionContractError,
@@ -626,6 +632,12 @@ class ProjectionContractCreateRequest(BaseModel):
     rollback: dict[str, Any] = Field(default_factory=dict)
     owner: str = Field(min_length=1, max_length=120)
     status: Literal["draft", "active", "retired"] = "draft"
+
+
+class TagDemandContractCreateRequest(BaseModel):
+    contract_key: str = Field(min_length=1, max_length=120, pattern=r"^[a-z][a-z0-9_-]*$")
+    definition: dict[str, Any]
+    status: Literal["draft", "candidate"] = "draft"
 
 
 class BenchmarkVariantRequest(BaseModel):
@@ -7742,6 +7754,143 @@ def integration_status(_user: User = Depends(require_permission("releases:read")
         },
         "external_writes_enabled": False,
     }
+
+
+def _tag_demand_contract_payload(contract: TagDemandContract) -> dict[str, Any]:
+    return {
+        "id": contract.id,
+        "contract_key": contract.contract_key,
+        "version": contract.version,
+        "status": contract.status,
+        "definition": json.loads(contract.definition_json),
+        "contract_hash": contract.contract_hash,
+        "approved_by": contract.approved_by,
+        "approved_at": contract.approved_at,
+        "created_by": contract.created_by,
+        "created_at": contract.created_at,
+    }
+
+
+@app.get("/api/tag-demand-contracts")
+def list_tag_demand_contracts(
+    _user: User = Depends(require_permission("releases:read")),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    contracts = db.scalars(
+        select(TagDemandContract).order_by(
+            TagDemandContract.contract_key.asc(),
+            TagDemandContract.version.desc(),
+        )
+    ).all()
+    active_versions = {
+        contract.contract_key: contract.version
+        for contract in contracts
+        if contract.status == "active"
+    }
+    return {
+        "items": [_tag_demand_contract_payload(contract) for contract in contracts],
+        "active_versions": active_versions,
+    }
+
+
+@app.get("/api/tag-demand-contracts/{contract_id}")
+def get_tag_demand_contract(
+    contract_id: int,
+    _user: User = Depends(require_permission("releases:read")),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    contract = db.get(TagDemandContract, contract_id)
+    if contract is None:
+        raise HTTPException(status_code=404, detail="标签需求合同不存在")
+    return _tag_demand_contract_payload(contract)
+
+
+@app.post("/api/tag-demand-contracts", status_code=201)
+def create_tag_demand_contract(
+    payload: TagDemandContractCreateRequest,
+    user: User = Depends(admin_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    try:
+        definition = validate_tag_demand_contract(payload.definition)
+    except SemanticTagContractError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from None
+    latest = db.scalar(
+        select(TagDemandContract)
+        .where(TagDemandContract.contract_key == payload.contract_key)
+        .order_by(TagDemandContract.version.desc())
+        .limit(1)
+    )
+    version = (latest.version + 1) if latest else 1
+    canonical_definition = definition.model_dump(mode="json")
+    contract = TagDemandContract(
+        contract_key=payload.contract_key,
+        version=version,
+        status=payload.status,
+        definition_json=canonical_json(canonical_definition),
+        contract_hash=canonical_contract_hash(definition),
+        created_by=user.username,
+    )
+    db.add(contract)
+    db.flush()
+    db.commit()
+    db.refresh(contract)
+    return _tag_demand_contract_payload(contract)
+
+
+@app.post("/api/tag-demand-contracts/{contract_id}/activate")
+def activate_tag_demand_contract(
+    contract_id: int,
+    user: User = Depends(admin_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    contract = db.get(TagDemandContract, contract_id)
+    if contract is None:
+        raise HTTPException(status_code=404, detail="标签需求合同不存在")
+    if contract.status != "candidate":
+        raise HTTPException(status_code=409, detail="只有 candidate 合同可以显式激活")
+    try:
+        definition = validate_tag_demand_contract(json.loads(contract.definition_json))
+    except (SemanticTagContractError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=409, detail=f"合同签名或内容无效：{exc}") from None
+    if not definition.category_applicability or not definition.projection_targets:
+        raise HTTPException(status_code=409, detail="合同缺少字段适用性或投影目标，不能激活")
+    current = db.scalars(
+        select(TagDemandContract).where(
+            TagDemandContract.contract_key == contract.contract_key,
+            TagDemandContract.status == "active",
+        )
+    ).all()
+    now = datetime.now(timezone.utc)
+    for previous in current:
+        previous.status = "retired"
+    contract.status = "active"
+    contract.approved_by = user.username
+    contract.approved_at = now
+    append_audit_event(
+        db,
+        category="tag_demand_contract",
+        action="activated",
+        subject_type="tag_demand_contract",
+        subject_id=str(contract.id),
+        actor=user.username,
+        payload={
+            "contract_key": contract.contract_key,
+            "version": contract.version,
+            "contract_hash": contract.contract_hash,
+            "side_effects": {
+                "evaluation_jobs": False,
+                "label_releases": False,
+                "stock_reruns": False,
+                "projection_manifests": False,
+                "outbox_events": False,
+            },
+        },
+        event_key=f"tag-demand-contract:activated:{contract.id}",
+    )
+    db.commit()
+    db.refresh(contract)
+    return _tag_demand_contract_payload(contract)
 
 
 @app.get("/api/projection-contracts")

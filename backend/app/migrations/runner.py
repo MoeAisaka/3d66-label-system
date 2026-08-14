@@ -7637,7 +7637,7 @@ def _migration_068_add_semantic_tag_contract_registry(connection: Connection) ->
                 CHECK(status IN ('draft','candidate','active','retired')),
             definition_json TEXT NOT NULL
                 CHECK(json_valid(definition_json) AND json_type(definition_json, '$') = 'object'),
-            contract_hash VARCHAR(64) NOT NULL UNIQUE CHECK(length(contract_hash) = 64),
+            contract_hash VARCHAR(64) NOT NULL CHECK(length(contract_hash) = 64),
             approved_by VARCHAR(80),
             approved_at DATETIME,
             created_by VARCHAR(80) NOT NULL DEFAULT 'system',

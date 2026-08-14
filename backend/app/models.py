@@ -3100,7 +3100,7 @@ class TagDemandContract(Base):
     version: Mapped[int] = mapped_column(Integer)
     status: Mapped[str] = mapped_column(String(20), default="draft", index=True)
     definition_json: Mapped[str] = mapped_column(Text)
-    contract_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    contract_hash: Mapped[str] = mapped_column(String(64), index=True)
     approved_by: Mapped[str | None] = mapped_column(String(80), nullable=True)
     approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_by: Mapped[str] = mapped_column(String(80), default="system")
