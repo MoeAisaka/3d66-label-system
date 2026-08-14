@@ -550,6 +550,216 @@ def run_comparison(
     }
 
 
+_CORRECTION_LAYER_ORDER = ("A", "B", "V3")
+_HUMAN_NODE_LAYER = {
+    "call_a_field": "A",
+    "precheck_field": "A",
+    "redline": "A",
+    "track": "A",
+    "dimension_rule": "V3",
+    "final_level": "V3",
+}
+
+
+def _strict_json_list(value: str | None, *, label: str) -> list[Any]:
+    try:
+        parsed = json.loads(value or "[]")
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"{label}损坏") from exc
+    if not isinstance(parsed, list):
+        raise ValueError(f"{label}损坏")
+    return parsed
+
+
+def _evidence_timestamp(value: Any) -> str | None:
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return None
+
+
+def _node_correction_source(event: Mapping[str, Any]) -> str:
+    policy = event.get("corrector_policy")
+    if event.get("corrector_confidence") is not None or (
+        isinstance(policy, str) and policy.strip()
+    ):
+        return "automatic"
+    return "human"
+
+
+def _normalized_node_corrections(
+    evaluation: EvaluationResult,
+    *,
+    item_id: int,
+) -> list[dict[str, Any]]:
+    raw_history = _strict_json_list(
+        evaluation.correction_history_json,
+        label=f"条目 #{item_id} 节点纠偏历史",
+    )
+    normalized: list[dict[str, Any]] = []
+    for index, raw in enumerate(raw_history, start=1):
+        if not isinstance(raw, dict):
+            raise ValueError(f"条目 #{item_id} 节点纠偏历史损坏")
+        evidence = raw.get("evidence")
+        if evidence is None:
+            evidence = []
+        if not isinstance(evidence, list):
+            raise ValueError(
+                f"条目 #{item_id} 第 {index} 条节点纠偏证据损坏"
+            )
+        normalized.append(
+            {
+                "correction_key": raw.get("correction_key"),
+                "node_type": raw.get("node_type"),
+                "node_path": raw.get("node_path"),
+                "old_value": raw.get("old_value"),
+                "new_value": raw.get("new_value"),
+                "evidence": evidence,
+                "reason": raw.get("reason") or "",
+                "corrector": raw.get("corrector") or "",
+                "corrector_confidence": raw.get("corrector_confidence"),
+                "corrector_policy": raw.get("corrector_policy"),
+                "corrected_at": _evidence_timestamp(raw.get("corrected_at")),
+                "downstream_recomputed": bool(
+                    raw.get("downstream_recomputed")
+                ),
+                "source": _node_correction_source(raw),
+            }
+        )
+    return normalized
+
+
+def _visible_human_reviews(
+    evaluation: EvaluationResult,
+    *,
+    item_id: int,
+) -> tuple[list[dict[str, Any]], int | None]:
+    panel = getattr(evaluation, "review_panel", None)
+    reviews = list(getattr(evaluation, "reviews", []) or [])
+    if panel is not None and getattr(panel, "status", None) != "completed":
+        reviews = [review for review in reviews if review.panel_id is None]
+    reviews.sort(
+        key=lambda review: (
+            _evidence_timestamp(getattr(review, "created_at", None)) or "",
+            int(getattr(review, "id", 0) or 0),
+        )
+    )
+    final_review_id = None
+    if panel is not None and getattr(panel, "status", None) == "completed":
+        panel_final_id = getattr(panel, "final_review_id", None)
+        if isinstance(panel_final_id, int):
+            final_review_id = panel_final_id
+    elif getattr(evaluation, "review_stage", None) == "completed" and reviews:
+        legacy_final_id = getattr(reviews[-1], "id", None)
+        if isinstance(legacy_final_id, int):
+            final_review_id = legacy_final_id
+
+    normalized: list[dict[str, Any]] = []
+    for review in reviews:
+        corrections = _strict_json_list(
+            getattr(review, "corrections_json", None),
+            label=f"条目 #{item_id} 人工审核字段纠错",
+        )
+        if any(not isinstance(correction, dict) for correction in corrections):
+            raise ValueError(f"条目 #{item_id} 人工审核字段纠错损坏")
+        review_id = getattr(review, "id", None)
+        normalized.append(
+            {
+                "review_id": review_id,
+                "reviewer_name": getattr(review, "reviewer_name", "") or "",
+                "stage": getattr(review, "stage", None),
+                "decision": getattr(review, "decision", None),
+                "corrected_level": getattr(review, "corrected_level", None),
+                "corrected_score": getattr(review, "corrected_score", None),
+                "note": getattr(review, "note", "") or "",
+                "corrections": corrections,
+                "panel_id": getattr(review, "panel_id", None),
+                "panel_revision": getattr(review, "panel_revision", None),
+                "created_at": _evidence_timestamp(
+                    getattr(review, "created_at", None)
+                ),
+                "is_final": review_id == final_review_id,
+            }
+        )
+    return normalized, final_review_id
+
+
+def _human_evidence_layers(
+    node_corrections: Iterable[Mapping[str, Any]],
+    human_reviews: Iterable[Mapping[str, Any]],
+) -> list[str]:
+    layers: set[str] = set()
+    for event in node_corrections:
+        if event.get("source") != "human":
+            continue
+        layer = _HUMAN_NODE_LAYER.get(str(event.get("node_type") or ""))
+        if layer is not None:
+            layers.add(layer)
+    for review in human_reviews:
+        routed_correction = False
+        for correction in review.get("corrections") or []:
+            target_type = correction.get("target_type")
+            if target_type == "key_field":
+                layers.add("A")
+                routed_correction = True
+            elif target_type == "dimension":
+                layers.add("B")
+                routed_correction = True
+        if (
+            not routed_correction
+            and review.get("decision") == "corrected"
+            and review.get("corrected_level") in LEVELS
+        ):
+            layers.add("V3")
+    return [layer for layer in _CORRECTION_LAYER_ORDER if layer in layers]
+
+
+def _correction_context(
+    item: BaselineRegressionItem,
+) -> dict[str, Any]:
+    evaluation = getattr(item, "evaluation", None)
+    if evaluation is None:
+        return {
+            "schema_version": "baseline-correction-human-evidence-v1",
+            "evaluation_id": item.evaluation_id,
+            "review_stage": None,
+            "review_revision": None,
+            "final_review_id": None,
+            "node_corrections": [],
+            "human_reviews": [],
+            "human_evidence_count": 0,
+            "automatic_evidence_count": 0,
+            "affected_layers": [],
+        }
+    node_corrections = _normalized_node_corrections(
+        evaluation,
+        item_id=item.id,
+    )
+    human_reviews, final_review_id = _visible_human_reviews(
+        evaluation,
+        item_id=item.id,
+    )
+    human_node_count = sum(
+        1 for event in node_corrections if event["source"] == "human"
+    )
+    return {
+        "schema_version": "baseline-correction-human-evidence-v1",
+        "evaluation_id": evaluation.id,
+        "review_stage": evaluation.review_stage,
+        "review_revision": evaluation.review_revision,
+        "final_review_id": final_review_id,
+        "node_corrections": node_corrections,
+        "human_reviews": human_reviews,
+        "human_evidence_count": human_node_count + len(human_reviews),
+        "automatic_evidence_count": len(node_corrections) - human_node_count,
+        "affected_layers": _human_evidence_layers(
+            node_corrections,
+            human_reviews,
+        ),
+    }
+
+
 def correction_input_snapshot(
     run: BaselineRegressionRun,
     selected_items: Iterable[BaselineRegressionItem],
@@ -605,13 +815,14 @@ def correction_input_snapshot(
                 "category_key": result.get("category_key") or run.category_key,
                 "dimension_selection": result.get("dimension_selection"),
                 "versions": result.get("versions") or {},
+                "correction_context": _correction_context(item),
             }
         )
     if any(row["category_key"] != run.category_key for row in frozen_rows):
         raise ValueError("偏差样本与基准回归类目不一致")
 
     return {
-        "schema_version": "baseline-correction-input-v1",
+        "schema_version": "baseline-correction-input-v2",
         "baseline_run_id": run.id,
         "baseline_set_id": run.baseline_set_id,
         "baseline_set_fingerprint": run.baseline_set_fingerprint,
@@ -648,6 +859,11 @@ def deterministic_correction_report(
     weak_dimension_counts: dict[str, int] = {}
     quality_counts: dict[str, int] = {}
     cap_counts: dict[str, int] = {}
+    sample_evidence: list[dict[str, Any]] = []
+    samples_with_human_evidence = 0
+    human_evidence_count = 0
+    automatic_evidence_count = 0
+    affected_layer_counts: dict[str, int] = {}
     for raw in raw_items:
         if not isinstance(raw, dict):
             raise ValueError("纠偏分析样本结构损坏")
@@ -681,6 +897,77 @@ def deterministic_correction_report(
             if isinstance(reason, str) and reason.strip():
                 key = reason.strip()
                 cap_counts[key] = cap_counts.get(key, 0) + 1
+        context = raw.get("correction_context")
+        context = context if isinstance(context, dict) else {}
+        node_corrections = context.get("node_corrections")
+        node_corrections = (
+            [event for event in node_corrections if isinstance(event, dict)]
+            if isinstance(node_corrections, list)
+            else []
+        )
+        human_node_corrections = [
+            event for event in node_corrections if event.get("source") == "human"
+        ]
+        human_reviews = context.get("human_reviews")
+        human_reviews = (
+            [review for review in human_reviews if isinstance(review, dict)]
+            if isinstance(human_reviews, list)
+            else []
+        )
+        frozen_human_count = context.get("human_evidence_count")
+        sample_human_count = (
+            frozen_human_count
+            if isinstance(frozen_human_count, int)
+            and not isinstance(frozen_human_count, bool)
+            and frozen_human_count >= 0
+            else len(human_node_corrections) + len(human_reviews)
+        )
+        frozen_automatic_count = context.get("automatic_evidence_count")
+        sample_automatic_count = (
+            frozen_automatic_count
+            if isinstance(frozen_automatic_count, int)
+            and not isinstance(frozen_automatic_count, bool)
+            and frozen_automatic_count >= 0
+            else sum(
+                1
+                for event in node_corrections
+                if event.get("source") == "automatic"
+            )
+        )
+        raw_layers = context.get("affected_layers")
+        sample_layers = (
+            [
+                layer
+                for layer in _CORRECTION_LAYER_ORDER
+                if layer in raw_layers
+            ]
+            if isinstance(raw_layers, list)
+            else []
+        )
+        if sample_human_count:
+            samples_with_human_evidence += 1
+        human_evidence_count += sample_human_count
+        automatic_evidence_count += sample_automatic_count
+        for layer in sample_layers:
+            affected_layer_counts[layer] = (
+                affected_layer_counts.get(layer, 0) + 1
+            )
+        sample_evidence.append(
+            {
+                "item_id": int(raw["item_id"]),
+                "asset_id": raw.get("asset_id"),
+                "evaluation_id": context.get("evaluation_id")
+                or raw.get("evaluation_id"),
+                "review_stage": context.get("review_stage"),
+                "review_revision": context.get("review_revision"),
+                "final_review_id": context.get("final_review_id"),
+                "affected_layers": sample_layers,
+                "human_evidence_count": sample_human_count,
+                "human_node_corrections": human_node_corrections,
+                "human_reviews": human_reviews,
+                "excluded_automatic_evidence_count": sample_automatic_count,
+            }
+        )
         rows.append(
             {
                 "status": "completed",
@@ -737,8 +1024,24 @@ def deterministic_correction_report(
     else:
         dimension_recommendations = []
 
+    affected_layers = [
+        layer
+        for layer in _CORRECTION_LAYER_ORDER
+        if affected_layer_counts.get(layer, 0) > 0
+    ]
+    required_prompt_stage = (
+        affected_layers[0]
+        if affected_layers in (["A"], ["B"])
+        else None
+    )
+    allowed_prompt_stages = (
+        [required_prompt_stage]
+        if required_prompt_stage is not None
+        else ["A", "B"]
+    )
+
     return {
-        "schema_version": "baseline-correction-report-v1",
+        "schema_version": "baseline-correction-report-v2",
         "status": "automatic_candidate_pipeline",
         "category_key": input_snapshot.get("category_key"),
         "baseline_run_id": input_snapshot.get("baseline_run_id"),
@@ -761,6 +1064,25 @@ def deterministic_correction_report(
             "dominant_direction": top_direction,
             "prompt_only": dimension_selection.get("mode") == "none",
             "dimension_signal_count": len(weak_dimension_counts),
+        },
+        "evidence_summary": {
+            "selected_sample_count": len(raw_items),
+            "samples_with_human_evidence": samples_with_human_evidence,
+            "human_evidence_count": human_evidence_count,
+            "automatic_evidence_count": automatic_evidence_count,
+            "coverage_rate": round(
+                samples_with_human_evidence / len(raw_items),
+                4,
+            ),
+            "affected_layer_counts": affected_layer_counts,
+            "affected_layers": affected_layers,
+        },
+        "sample_evidence": sample_evidence,
+        "candidate_routing": {
+            "policy": "human_evidence_only",
+            "affected_layers": affected_layers,
+            "allowed_prompt_stages": allowed_prompt_stages,
+            "required_prompt_stage": required_prompt_stage,
         },
         "prompt_suggestions": prompt_recommendations,
         "dimension_suggestions": dimension_recommendations,

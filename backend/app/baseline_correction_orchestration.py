@@ -194,6 +194,61 @@ def _normalize_generated_candidate(
     )
 
 
+def _candidate_routing_constraints(
+    report: Mapping[str, Any],
+) -> dict[str, Any]:
+    routing = report.get("candidate_routing")
+    if not isinstance(routing, Mapping):
+        return {
+            "policy": "backward_compatible",
+            "affected_layers": [],
+            "allowed_prompt_stages": ["A", "B"],
+            "required_prompt_stage": None,
+        }
+    raw_allowed = routing.get("allowed_prompt_stages")
+    allowed = (
+        [stage for stage in ("A", "B") if stage in raw_allowed]
+        if isinstance(raw_allowed, list)
+        else []
+    )
+    if not allowed:
+        allowed = ["A", "B"]
+    required = routing.get("required_prompt_stage")
+    if required not in {"A", "B"}:
+        required = None
+    if required is not None:
+        allowed = [required]
+    raw_layers = routing.get("affected_layers")
+    affected_layers = (
+        [layer for layer in ("A", "B", "V3") if layer in raw_layers]
+        if isinstance(raw_layers, list)
+        else []
+    )
+    return {
+        "policy": str(routing.get("policy") or "human_evidence_only"),
+        "affected_layers": affected_layers,
+        "allowed_prompt_stages": allowed,
+        "required_prompt_stage": required,
+    }
+
+
+def _validate_candidate_routing(
+    candidate: GeneratedMechanismCandidate,
+    report: Mapping[str, Any],
+) -> None:
+    routing = _candidate_routing_constraints(report)
+    allowed = routing["allowed_prompt_stages"]
+    if candidate.prompt.stage in allowed:
+        return
+    required = routing.get("required_prompt_stage")
+    expected = required or "、".join(allowed)
+    layers = "、".join(routing.get("affected_layers") or []) or "未指定"
+    raise CorrectionOrchestrationError(
+        "CORRECTION_PROMPT_STAGE_MISMATCH",
+        f"人工纠偏证据指向 {layers} 层，候选提示词必须使用 {expected} 阶段",
+    )
+
+
 def _active_projection(
     db: Session,
     category_key: str,
@@ -631,8 +686,9 @@ def generate_correction_candidate(
     """Call the tuning model without holding a SQLAlchemy Session or DB lock."""
     generated = _candidate_from_orchestration(prepared.orchestration)
     if generated is not None:
+        _validate_candidate_routing(generated, prepared.report)
         return generated
-    return _normalize_generated_candidate(
+    generated = _normalize_generated_candidate(
         generator.generate(
             db=None,
             correction=prepared.correction,
@@ -641,6 +697,8 @@ def generate_correction_candidate(
             report=prepared.report,
         )
     )
+    _validate_candidate_routing(generated, prepared.report)
+    return generated
 
 
 def advance_correction_run(
@@ -701,6 +759,7 @@ def advance_correction_run(
         )
         orchestration["generated_candidate"] = _generator_payload(generated)
         correction.orchestration_json = canonical_json(orchestration)
+    _validate_candidate_routing(generated, report)
     if generated.revision.contract.get("category_key") != correction.category_key:
         raise CorrectionOrchestrationError(
             "CORRECTION_CANDIDATE_CATEGORY_MISMATCH",
@@ -908,17 +967,20 @@ class RegisteredTuningMechanismGenerator:
     ) -> GeneratedMechanismCandidate:
         del db
         client = DoubaoClient(self.config)
+        routing_constraints = _candidate_routing_constraints(report)
         response = asyncio.run(
             client.chat_json(
                 "你是标签实验台的评测机制调优器。人工真值优先。根据纠偏报告生成一个完整、"
                 "可校验、可回归的统一机制候选。必须同时返回 prompt 与 revision；revision 必须"
                 "包含完整 contract、classification_map、subcategory_dimensions，不得只返回差异，"
-                "不得发布或启用。只输出合法 JSON。",
+                "不得发布或启用。候选提示词阶段必须遵守 routing_constraints 中的允许阶段，"
+                "自动纠偏记录不能冒充人工证据。只输出合法 JSON。",
                 json.dumps(
                     {
-                        "schema_version": "baseline-correction-generator-input-v1",
+                        "schema_version": "baseline-correction-generator-input-v2",
                         "category_key": correction.category_key,
                         "correction_report": report,
+                        "routing_constraints": routing_constraints,
                         "active_revision": revision_bundle(active_revision),
                         "active_prompts": {
                             stage: {
