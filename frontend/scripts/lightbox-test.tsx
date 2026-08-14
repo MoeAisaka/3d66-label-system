@@ -6,6 +6,7 @@ import {
   ImagePreviewButton,
   type ImagePreview,
 } from "../src/components/image-lightbox"
+import "../src/index.css"
 
 const imageUrl = "/api/assets/42/file"
 const assetName = "竖版客厅样本.jpg"
@@ -52,6 +53,17 @@ setTimeout(() => {
     if (!previewImage) fail("点击缩略图后未打开预览")
     if (previewImage.getAttribute("src") !== imageUrl) {
       fail("预览图 src 与素材 image_url 不一致")
+    }
+    const inspectionCanvas = document.querySelector<HTMLElement>(
+      '[data-testid="image-lightbox-inspection-canvas"]',
+    )
+    if (!inspectionCanvas) fail("原图预览缺少非纯色检查背景")
+    const canvasStyle = getComputedStyle(inspectionCanvas)
+    if (!canvasStyle.backgroundImage.includes("gradient")) {
+      fail("原图检查背景不是棋盘渐变")
+    }
+    if (getComputedStyle(previewImage).objectFit !== "contain") {
+      fail("原图预览发生裁切")
     }
 
     document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }))

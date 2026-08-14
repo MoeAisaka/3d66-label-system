@@ -60,7 +60,9 @@ try {
     /data-test-status="passed"/,
     "lightbox 浏览器交互契约未通过",
   )
-  console.log("baseline lightbox browser contract: ok (open, src, Escape close)")
+  console.log(
+    "baseline lightbox browser contract: ok (open, src, inspection background, Escape close)",
+  )
 } finally {
   vite.kill("SIGTERM")
   rmSync(profileDir, { recursive: true, force: true })
