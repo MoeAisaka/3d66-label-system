@@ -15,6 +15,7 @@
 - Keep redline disabled; white background and QR code are record-only signals.
 - Preserve the shared `production_fields` contract and place class-specific markers in `model_3d_su_fields`.
 - Use deterministic rule deductions 20/50/80 for document ranges 15–30/40–60/70–100.
+- Preserve the functional-model source ratio 35:25:20:15:10 by normalizing it to a strict sum-to-one contract weight vector.
 - Do not import NAS/Excel samples, call real models, deploy, or change production data.
 - Seed idempotently; refuse unknown operator-owned conflicts instead of overwriting.
 

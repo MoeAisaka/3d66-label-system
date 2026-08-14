@@ -59,6 +59,11 @@ CATEGORY_PROFILE_DEFAULTS: dict[str, dict[str, str]] = {
         "allowed_mime_types_json": '["image/jpeg","image/png","image/webp","image/gif"]',
         "preprocess_config_json": '{"preprocess":"image"}',
     },
+    "model_3d_su": {
+        "display_name": "3D & SU 模型",
+        "allowed_mime_types_json": '["image/jpeg","image/png","image/webp","image/gif"]',
+        "preprocess_config_json": '{"preprocess":"image","su_unrendered_marker":true}',
+    },
     "proposal_text_pdf": {
         "display_name": "PDF方案文本",
         "allowed_mime_types_json": '["application/pdf"]',

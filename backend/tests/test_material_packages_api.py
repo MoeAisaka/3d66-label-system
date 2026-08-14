@@ -173,8 +173,15 @@ def test_category_contracts_keep_pdf_and_material_inputs_isolated(tmp_path: Path
         categories = client.get("/api/evaluation-categories")
         assert categories.status_code == 200
         assert {item["category_key"] for item in categories.json()["items"]} == {
-            "space_image", "pdf_text", "material_image", "inspiration_image"
+            "space_image", "pdf_text", "material_image", "inspiration_image", "model_3d_su"
         }
+        model_3d_profile = next(
+            item for item in categories.json()["items"]
+            if item["category_key"] == "model_3d_su"
+        )
+        assert model_3d_profile["status"] == "active"
+        assert model_3d_profile["pipeline_config"]["input_kind"] == "image"
+        assert model_3d_profile["pipeline_config"]["prompt_mode"] == "ab"
 
         pdf_profile = next(
             item for item in categories.json()["items"]

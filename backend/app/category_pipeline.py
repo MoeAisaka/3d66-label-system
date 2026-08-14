@@ -154,6 +154,18 @@ DEFAULT_PIPELINES: dict[str, dict[str, Any]] = {
         "dimensions": {"enabled": False, "mode": "none", "enabled_keys": []},
         "model_nodes": {"evaluation_main": True, "pdf_summary": False, "optimization": True, "benchmark": True, "diagnostic": True},
     },
+    "model_3d_su": {
+        "schema_version": "category-pipeline-v1",
+        "input_kind": "image",
+        "allowed_suffixes": list(IMAGE_SUFFIXES),
+        "processors": [_processor("image.prepare"), _processor("image.animated_contact_sheet")],
+        "prompt_mode": "ab",
+        "prompt_context": {
+            "instruction": "按 3D/SU 模型合同区分空间建筑、软装家具和功能性模型；SU 白模/线框仅标记未渲染，不因白底或二维码触发红线。"
+        },
+        "dimensions": {"enabled": True, "mode": "all", "enabled_keys": []},
+        "model_nodes": {"evaluation_main": True, "pdf_summary": False, "optimization": True, "benchmark": True, "diagnostic": True},
+    },
     "proposal_text_pdf": {
         "schema_version": "category-pipeline-v1",
         "input_kind": "pdf",
