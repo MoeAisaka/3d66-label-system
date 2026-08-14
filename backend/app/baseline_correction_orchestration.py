@@ -21,6 +21,11 @@ from .category_evaluation_v3_revisions import (
     ensure_projected_revision,
     revision_bundle,
 )
+from .category_evaluation_contract import (
+    CategoryEvaluationPromptBindingError,
+    bind_category_evaluation_prompt_versions,
+    validate_category_evaluation_prompt_bindings,
+)
 from .doubao import DoubaoClient
 from .models import (
     BaselineCorrectionRun,
@@ -392,6 +397,45 @@ def _sampling_policy_for_run(
     return policy
 
 
+def _candidate_prompt_pair(
+    *,
+    candidate_prompt: PromptVersion,
+    active_prompts: Mapping[str, PromptVersion],
+) -> tuple[PromptVersion, PromptVersion | None]:
+    prompt_a = (
+        candidate_prompt
+        if candidate_prompt.stage == "A"
+        else active_prompts["A"]
+    )
+    prompt_b = active_prompts.get("B")
+    if candidate_prompt.stage == "B":
+        if prompt_b is None:
+            raise CorrectionOrchestrationError(
+                "CORRECTION_PROMPT_STAGE_INVALID",
+                "单提示词机制不能生成 B 提示词候选",
+            )
+        prompt_b = candidate_prompt
+    return prompt_a, prompt_b
+
+
+def _bound_candidate_artifacts(
+    candidate: GeneratedMechanismCandidate,
+    *,
+    prompt_a: PromptVersion,
+    prompt_b: PromptVersion | None,
+) -> RevisionArtifacts:
+    return RevisionArtifacts(
+        display_name=candidate.revision.display_name,
+        contract=bind_category_evaluation_prompt_versions(
+            candidate.revision.contract,
+            prompt_a_version=prompt_a.version,
+            prompt_b_version=prompt_b.version if prompt_b is not None else None,
+        ),
+        classification_map=candidate.revision.classification_map,
+        subcategory_dimensions=candidate.revision.subcategory_dimensions,
+    )
+
+
 def _create_candidate_baseline_run(
     db: Session,
     *,
@@ -413,19 +457,21 @@ def _create_candidate_baseline_run(
     source = correction.baseline_run
     model = _model_config_for_run(db, source, execution)
     sampling_policy = _sampling_policy_for_run(db, source)
-    prompt_a = (
-        candidate_prompt
-        if candidate_prompt.stage == "A"
-        else active_prompts["A"]
+    prompt_a, prompt_b = _candidate_prompt_pair(
+        candidate_prompt=candidate_prompt,
+        active_prompts=active_prompts,
     )
-    prompt_b = active_prompts.get("B")
-    if candidate_prompt.stage == "B":
-        if prompt_b is None:
-            raise CorrectionOrchestrationError(
-                "CORRECTION_PROMPT_STAGE_INVALID",
-                "单提示词机制不能生成 B 提示词候选",
-            )
-        prompt_b = candidate_prompt
+    try:
+        validate_category_evaluation_prompt_bindings(
+            revision_bundle(candidate_revision)["contract"],
+            prompt_a_version=prompt_a.version,
+            prompt_b_version=prompt_b.version if prompt_b is not None else None,
+        )
+    except CategoryEvaluationPromptBindingError as exc:
+        raise CorrectionOrchestrationError(
+            "CORRECTION_CANDIDATE_PROMPT_BINDING_INVALID",
+            str(exc),
+        ) from exc
     bundle = get_or_create_bundle(
         db=db,
         model_config=model,
@@ -662,12 +708,28 @@ def advance_correction_run(
         )
     correction.stage = "candidate_validation"
     correction.progress = 55
+    candidate_prompt = _ensure_candidate_prompt(
+        db,
+        correction=correction,
+        candidate=generated,
+        active_prompts=active_prompts,
+        orchestration=orchestration,
+    )
+    prompt_a, prompt_b = _candidate_prompt_pair(
+        candidate_prompt=candidate_prompt,
+        active_prompts=active_prompts,
+    )
+    bound_artifacts = _bound_candidate_artifacts(
+        generated,
+        prompt_a=prompt_a,
+        prompt_b=prompt_b,
+    )
     if correction.candidate_revision_id is None:
         candidate_revision, _created = create_candidate_revision(
             db,
             projected,
             parent_revision_id=active_revision.id,
-            artifacts=generated.revision,
+            artifacts=bound_artifacts,
             expected_projected_revision=projected.revision,
             expected_projected_hash=projected.contract_hash,
             actor="automatic-correction",
@@ -683,13 +745,19 @@ def advance_correction_run(
                 "CORRECTION_CANDIDATE_BINDING_INVALID",
                 "自动候选 revision 绑定已损坏",
             )
-    candidate_prompt = _ensure_candidate_prompt(
-        db,
-        correction=correction,
-        candidate=generated,
-        active_prompts=active_prompts,
-        orchestration=orchestration,
-    )
+        try:
+            validate_category_evaluation_prompt_bindings(
+                revision_bundle(candidate_revision)["contract"],
+                prompt_a_version=prompt_a.version,
+                prompt_b_version=(
+                    prompt_b.version if prompt_b is not None else None
+                ),
+            )
+        except CategoryEvaluationPromptBindingError as exc:
+            raise CorrectionOrchestrationError(
+                "CORRECTION_CANDIDATE_PROMPT_BINDING_INVALID",
+                str(exc),
+            ) from exc
     orchestration["candidate_revision"] = {
         "id": candidate_revision.id,
         "revision": candidate_revision.revision,

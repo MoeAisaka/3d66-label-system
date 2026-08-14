@@ -152,6 +152,11 @@ from .baseline_correction_orchestration import (
 from .category_evaluation_v3_revisions import (
     CategoryEvaluationV3RevisionError,
     activate_candidate_revision,
+    revision_bundle,
+)
+from .category_evaluation_contract import (
+    CategoryEvaluationPromptBindingError,
+    validate_category_evaluation_prompt_bindings,
 )
 from .inspiration_auto_correction import (
     AutoCorrectionPolicy,
@@ -972,6 +977,7 @@ class BaselineRunCreateRequest(BaseModel):
     baseline_item_ids: list[int] | None = Field(
         default=None, min_length=1, max_length=1000
     )
+    candidate_revision_id: int | None = Field(default=None, ge=1)
     category_context: BaselineRunCategoryContext | None = None
 
     @model_validator(mode="after")
@@ -4323,6 +4329,92 @@ def _required_active_v3_bundle(db: Session, category_key: str) -> dict[str, Any]
             status_code=409,
             detail={"code": exc.code, "message": str(exc)},
         ) from exc
+
+
+def _required_baseline_v3_bundle(
+    db: Session,
+    category_key: str,
+    candidate_revision_id: int | None,
+) -> dict[str, Any]:
+    """Freeze the active contract or one current candidate-chain revision."""
+
+    active_bundle = _required_active_v3_bundle(db, category_key)
+    if candidate_revision_id is None:
+        return active_bundle
+    projected = db.scalar(
+        select(CategoryEvaluationV3Config).where(
+            CategoryEvaluationV3Config.category_key == category_key,
+            CategoryEvaluationV3Config.status == "active",
+        )
+    )
+    if projected is None or projected.projected_revision_id is None:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "candidate_revision_projection_missing",
+                "message": "现役合同缺少可核验的修订投影，不能冻结候选回归",
+            },
+        )
+    candidate = db.get(CategoryEvaluationV3Revision, candidate_revision_id)
+    if candidate is None:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "code": "candidate_revision_not_found",
+                "message": "候选修订不存在",
+            },
+        )
+    if candidate.category_key != category_key:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "candidate_revision_category_mismatch",
+                "message": "候选修订属于其他类目",
+            },
+        )
+    if candidate.status != "candidate":
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "candidate_revision_status_invalid",
+                "message": "只有未发布候选修订可以用于候选回归",
+            },
+        )
+    ancestor = candidate
+    seen: set[int] = set()
+    while ancestor.id != projected.projected_revision_id:
+        if ancestor.id in seen or ancestor.parent_revision_id is None:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "candidate_revision_projection_drift",
+                    "message": "现役机制已变化，请基于当前现役合同重新创建候选",
+                },
+            )
+        seen.add(ancestor.id)
+        parent = db.get(
+            CategoryEvaluationV3Revision,
+            ancestor.parent_revision_id,
+        )
+        if parent is None or parent.category_key != category_key:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "candidate_revision_projection_drift",
+                    "message": "候选祖先链已损坏，不能启动回归",
+                },
+            )
+        ancestor = parent
+    frozen = revision_bundle(candidate)
+    frozen.update(
+        {
+            "config_revision": candidate.revision,
+            "candidate_revision_id": candidate.id,
+            "base_projected_revision_id": projected.projected_revision_id,
+            "base_projected_contract_hash": projected.contract_hash,
+        }
+    )
+    return frozen
 
 
 @app.get("/api/evaluations")
@@ -9251,7 +9343,11 @@ def create_baseline_run(
     if running is not None:
         raise HTTPException(status_code=409, detail="该基准集上一轮仍在运行")
 
-    frozen_v3_bundle = _required_active_v3_bundle(db, baseline_set.category_key)
+    frozen_v3_bundle = _required_baseline_v3_bundle(
+        db,
+        baseline_set.category_key,
+        request.candidate_revision_id,
+    )
     if (
         request.dimension_schema_id is not None
         or request.dimension_mode != "category_default"
@@ -9394,6 +9490,24 @@ def create_baseline_run(
             status_code=409,
             detail="基准回归所选提示词的 rubric 版本不一致",
         )
+    if request.candidate_revision_id is not None:
+        try:
+            validate_category_evaluation_prompt_bindings(
+                frozen_v3_bundle.get("contract"),
+                prompt_a_version=prompt_a.version,
+                prompt_b_version=(
+                    prompt_b.version if prompt_b is not None else None
+                ),
+            )
+        except CategoryEvaluationPromptBindingError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "candidate_prompt_binding_mismatch",
+                    "message": str(exc),
+                    "reason": exc.code,
+                },
+            ) from exc
     sampling_policy = db.get(SamplingPolicy, 1)
     bundle = get_or_create_bundle(
         db=db,
@@ -9524,6 +9638,9 @@ def create_baseline_run(
             "dimension_schema_id": None,
             "v3_contract_only": True,
             "v3_config_revision": frozen_v3_bundle.get("config_revision"),
+            "candidate_revision_id": frozen_v3_bundle.get(
+                "candidate_revision_id"
+            ),
             "total": run.total,
         },
         event_key=f"baseline-run:{run.id}:created",

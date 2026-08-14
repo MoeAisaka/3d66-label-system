@@ -4,6 +4,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +15,11 @@ from .category_evaluation_aggregator import (
 )
 from .redline_policy import evaluate_redlines
 from .subcategory_resolver import resolve_subcategory
+from .inspiration_anchor_contract import (
+    InspirationAnchorContractError,
+    is_safe_inspiration_anchor_stored_name,
+    validate_inspiration_anchor_contract,
+)
 
 AESTHETIC_CALL_B_VERSION = "inspiration-b-v5-anchor-calibration-evidence-20260807"
 FOUNDATION_VERSION = "inspiration-aesthetic-foundation-v1"
@@ -37,6 +43,7 @@ ANCHORS = (
     {"asset_id": 1263, "level": "L3", "stored_name": "9283eaef182a4b34986c57dabb7436ff.jpg", "mime_type": "image/jpeg", "sha256": "42a81a0b5dd4952fbdbad81aac3bd9798628be83536ce427b059813c831e896f"},
     {"asset_id": 601, "level": "L4", "stored_name": "9ea4c640fc8d4702a854ce63007cb287.png", "mime_type": "image/png", "sha256": "bd563a44032bf39ea58c1bf9c14f889b96de72555b0d8627e9ec65bd628b1b91"},
 )
+
 
 
 class AestheticFoundationError(ValueError):
@@ -111,18 +118,125 @@ def foundation_sha256(payload: Any) -> str:
     return hashlib.sha256(canonical_foundation(payload).encode("utf-8")).hexdigest()
 
 
-def anchor_samples(upload_dir: Path, target: Path, target_mime: str | None) -> list[tuple[str, Path, str | None]]:
+def validate_anchor_contract(anchors: Any) -> tuple[dict[str, object], ...]:
+    """Adapt the shared frozen-anchor validator to Worker error semantics."""
+    try:
+        return validate_inspiration_anchor_contract(anchors)
+    except InspirationAnchorContractError as exc:
+        raise AestheticFoundationError(exc.code, str(exc)) from exc
+
+
+def _safe_stored_name(value: object) -> str | None:
+    if not is_safe_inspiration_anchor_stored_name(value):
+        return None
+    assert isinstance(value, str)
+    return value
+
+
+def _resolve_anchor_asset(
+    anchor: Mapping[str, object],
+    assets_by_id: Mapping[int, object] | None,
+) -> tuple[str, str]:
+    """Resolve a server-owned file name and verify frozen public metadata.
+
+    New candidate contracts intentionally omit ``stored_name`` so operators do
+    not need access to an internal upload-file namespace.  The Worker supplies
+    an asset-table snapshot for those candidates.  Legacy four-anchor contracts
+    retain their stored name and are strictly checked when that snapshot exists.
+    """
+    contract_stored_name = anchor.get("stored_name")
+    if assets_by_id is None:
+        stored_name = _safe_stored_name(contract_stored_name)
+        if stored_name is None:
+            raise AestheticFoundationError(
+                "anchor_asset_metadata_required",
+                f"锚图asset {anchor['asset_id']}缺少服务端资产元数据",
+            )
+        return stored_name, str(anchor["mime_type"])
+
+    asset_id = anchor["asset_id"]
+    asset = assets_by_id.get(asset_id) if isinstance(asset_id, int) else None
+    if asset is None:
+        raise AestheticFoundationError(
+            "anchor_asset_missing", f"锚图asset {asset_id}在资产表中不存在"
+        )
+    stored_name = _safe_stored_name(getattr(asset, "stored_name", None))
+    if stored_name is None:
+        raise AestheticFoundationError(
+            "anchor_asset_stored_name_invalid",
+            f"锚图asset {asset_id}的存储名非法",
+        )
+    if getattr(asset, "mime_type", None) != anchor["mime_type"]:
+        raise AestheticFoundationError(
+            "anchor_asset_mime_mismatch",
+            f"锚图asset {asset_id}的MIME与冻结合同不一致",
+        )
+    if getattr(asset, "sha256", None) != anchor["sha256"]:
+        raise AestheticFoundationError(
+            "anchor_asset_hash_mismatch",
+            f"锚图asset {asset_id}的资产摘要与冻结合同不一致",
+        )
+    if contract_stored_name is not None and contract_stored_name != stored_name:
+        raise AestheticFoundationError(
+            "anchor_asset_stored_name_mismatch",
+            f"锚图asset {asset_id}的存储名与旧冻结合同不一致",
+        )
+    return stored_name, str(anchor["mime_type"])
+
+
+def anchor_samples(
+    upload_dir: Path,
+    target: Path,
+    target_mime: str | None,
+    *,
+    anchors: Any,
+    assets_by_id: Mapping[int, object] | None = None,
+) -> list[tuple[str, Path, str | None]]:
+    """Load exactly the anchors recorded in a task's frozen contract."""
     samples: list[tuple[str, Path, str | None]] = []
-    for anchor in ANCHORS:
-        path = upload_dir / anchor["stored_name"]
+    for anchor in validate_anchor_contract(anchors):
+        stored_name, mime_type = _resolve_anchor_asset(anchor, assets_by_id)
+        path = upload_dir / stored_name
         if not path.is_file():
             raise AestheticFoundationError("anchor_missing", f"锚图asset {anchor['asset_id']}不存在")
         digest = hashlib.sha256(path.read_bytes()).hexdigest()
         if digest != anchor["sha256"]:
-            raise AestheticFoundationError("anchor_hash_mismatch", f"锚图asset {anchor['asset_id']}哈希不匹配")
-        samples.append((f"Owner锚图 {anchor['level']}（asset {anchor['asset_id']}）", path, anchor["mime_type"]))
+            error_code = (
+                "anchor_hash_mismatch"
+                if "stored_name" in anchor
+                else "anchor_file_hash_mismatch"
+            )
+            raise AestheticFoundationError(error_code, f"锚图asset {anchor['asset_id']}原图哈希不匹配")
+        samples.append((f"Owner锚图 {anchor['level']}（asset {anchor['asset_id']}）", path, mime_type))
     samples.append(("待评图片（禁止把锚图等级直接当作输出）", target, target_mime))
     return samples
+
+
+def anchor_request_from_contract(
+    contract: Any,
+    upload_dir: Path,
+    target: Path,
+    target_mime: str | None,
+    *,
+    assets_by_id: Mapping[int, object] | None = None,
+) -> tuple[list[tuple[str, Path, str | None]], int]:
+    """Build the provider request strictly from the frozen V3 contract."""
+    if not isinstance(contract, dict):
+        raise AestheticFoundationError("anchor_contract_missing", "任务冻结合同缺失")
+    foundation = contract.get("aesthetic_foundation")
+    if not isinstance(foundation, dict) or "anchors" not in foundation:
+        raise AestheticFoundationError("anchor_contract_missing", "任务冻结合同缺少锚图")
+    anchors = validate_anchor_contract(foundation["anchors"])
+    return (
+        anchor_samples(
+            upload_dir,
+            target,
+            target_mime,
+            anchors=anchors,
+            assets_by_id=assets_by_id,
+        ),
+        len(anchors) + 1,
+    )
 
 
 def build_prompt() -> str:
