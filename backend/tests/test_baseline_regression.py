@@ -141,6 +141,38 @@ def test_baseline_run_selection_marks_missing_v3_contract_unknown() -> None:
     assert _baseline_run_selection(run)["dimension"]["v3_contract"] is None
 
 
+def test_baseline_run_selection_preserves_frozen_v3_revision_metadata() -> None:
+    run = SimpleNamespace(
+        strategy_snapshot_json="{}",
+        execution_snapshot_json=json.dumps(
+            {
+                "dimension_selection": {"mode": "category_default"},
+                "v3_authoritative_bundle": {
+                    "config_revision": 8,
+                    "candidate_revision_id": 42,
+                    "contract_hash": "b" * 64,
+                    "contract": {
+                        "spec_version": "candidate-v3",
+                        "track_classification": {"tracks": [{"key": "main"}]},
+                    },
+                    "subcategory_dimensions": {"main": {}},
+                },
+            }
+        ),
+    )
+
+    selection = _baseline_run_selection(run)
+
+    assert selection["dimension"]["v3_contract"] == {
+        "spec_version": "candidate-v3",
+        "revision": 8,
+        "revision_id": 42,
+        "candidate_revision_id": 42,
+        "contract_hash": "b" * 64,
+        "tracks": [{"key": "main", "label": "main", "dimension_count": 0}],
+    }
+
+
 def test_baseline_run_can_freeze_candidate_v3_revision_without_changing_projection(
     monkeypatch,
 ) -> None:

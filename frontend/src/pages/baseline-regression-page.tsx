@@ -32,6 +32,7 @@ import type {
   BaselineFieldMetrics,
   BaselineRegressionItem,
   BaselineRegressionRun,
+  BaselineV3Revision,
   EvaluationCategoryProfile,
   MaterialPackage,
   PromptVersion,
@@ -41,8 +42,12 @@ import type {
 import { ReviewCorrectionForm } from "@/pages/review-correction-form"
 import {
   baselineAcceptanceProgressFromPages,
+  buildBaselineRunPayload,
+  isSelectableV3Candidate,
   baselineRunContextPatch,
   baselineRunIdAfterSetLoad,
+  resolveV3PromptBinding,
+  v3RevisionGroup,
 } from "@/features/baseline-regression/baseline-regression-contract"
 import { BaselineSetDialog } from "@/features/baseline-regression/baseline-set-dialog"
 import { CorrectionWorkbench } from "@/features/baseline-regression/correction-workbench"
@@ -81,6 +86,8 @@ export function BaselineRegressionPage() {
   const [promptSelectionMode, setPromptSelectionMode] = useState<"published" | "manual" | "single">("published")
   const [selectedPromptAId, setSelectedPromptAId] = useState(0)
   const [selectedPromptBId, setSelectedPromptBId] = useState(0)
+  const [v3SelectionMode, setV3SelectionMode] = useState<"active" | "candidate">("active")
+  const [selectedV3RevisionId, setSelectedV3RevisionId] = useState(0)
   const [executionMode, setExecutionMode] = useState<"freeform" | "structured">("freeform")
   const [assetPage, setAssetPage] = useState(0)
   const [runPage, setRunPage] = useState(0)
@@ -111,6 +118,11 @@ export function BaselineRegressionPage() {
   const prompts = useQuery({
     queryKey: ["prompts", selectedCategoryKey],
     queryFn: () => baselineRegressionApi.listPrompts(selectedCategoryKey),
+  })
+  const v3Revisions = useQuery({
+    queryKey: ["baseline-v3-revisions", selectedCategoryKey],
+    queryFn: () => baselineRegressionApi.listV3Revisions(selectedCategoryKey),
+    enabled: Boolean(selectedCategoryKey),
   })
   const baselineSets = useQuery({
     queryKey: ["baseline-sets", selectedCategoryKey],
@@ -204,11 +216,65 @@ export function BaselineRegressionPage() {
     : promptAOptions.some((prompt) => prompt.id === selectedPromptAId)
       ? selectedPromptAId
       : publishedPromptA?.id ?? promptAOptions[0]?.id ?? 0
-  const effectivePromptBId = promptSelectionMode === "manual"
-    ? promptBOptions.some((prompt) => prompt.id === selectedPromptBId)
-      ? selectedPromptBId
-      : publishedPromptB?.id ?? promptBOptions[0]?.id ?? 0
-    : publishedPromptB?.id ?? 0
+  const effectivePromptBId = promptSelectionMode === "single"
+    ? 0
+    : promptSelectionMode === "manual"
+      ? promptBOptions.some((prompt) => prompt.id === selectedPromptBId)
+        ? selectedPromptBId
+        : publishedPromptB?.id ?? promptBOptions[0]?.id ?? 0
+      : publishedPromptB?.id ?? 0
+  const activeV3Revision = v3Revisions.data?.items.find(
+    (revision) => revision.id === v3Revisions.data?.projected_revision_id
+      || revision.status === "active",
+  )
+  const selectedV3Revision = v3Revisions.data?.items.find(
+    (revision) => revision.id === selectedV3RevisionId,
+  ) ?? activeV3Revision
+  const selectableV3Candidates = (v3Revisions.data?.items ?? []).filter((revision) => (
+    isSelectableV3Candidate(
+      revision,
+      v3Revisions.data?.items ?? [],
+      v3Revisions.data?.projected_revision_id ?? 0,
+    )
+  ))
+  const candidatePromptBindingA = v3SelectionMode === "candidate" && selectedV3Revision
+    ? resolveV3PromptBinding(selectedV3Revision, "A")
+    : null
+  const candidatePromptBindingB = v3SelectionMode === "candidate" && selectedV3Revision
+    ? resolveV3PromptBinding(selectedV3Revision, "B")
+    : null
+  const selectedPromptA = promptAOptions.find((prompt) => prompt.id === effectivePromptAId)
+  const selectedPromptB = promptBOptions.find((prompt) => prompt.id === effectivePromptBId)
+  const promptBindingMismatch = v3SelectionMode === "candidate" && Boolean(
+    (candidatePromptBindingA && selectedPromptA?.version !== candidatePromptBindingA)
+      || (candidatePromptBindingB && selectedPromptB?.version !== candidatePromptBindingB),
+  )
+  const v3SelectionLoading = v3Revisions.isLoading || prompts.isLoading
+  const v3SelectionUnavailable = v3Revisions.isError || !selectedV3Revision
+
+  useEffect(() => {
+    const activeId = v3Revisions.data?.projected_revision_id ?? 0
+    if (!activeId) return
+    if (!selectedV3RevisionId || !v3Revisions.data?.items.some((item) => item.id === selectedV3RevisionId)) {
+      setSelectedV3RevisionId(activeId)
+      setV3SelectionMode("active")
+    }
+  }, [selectedCategoryKey, selectedV3RevisionId, v3Revisions.data])
+
+  useEffect(() => {
+    if (v3SelectionMode !== "candidate" || !selectedV3Revision) return
+    const bindingA = resolveV3PromptBinding(selectedV3Revision, "A")
+    const bindingB = resolveV3PromptBinding(selectedV3Revision, "B")
+    if (bindingA) {
+      const match = promptAOptions.find((prompt) => prompt.version === bindingA)
+      if (match) setSelectedPromptAId(match.id)
+    }
+    if (bindingB) {
+      const match = promptBOptions.find((prompt) => prompt.version === bindingB)
+      if (match) setSelectedPromptBId(match.id)
+    }
+    setPromptSelectionMode("manual")
+  }, [promptAOptions, promptBOptions, selectedV3Revision, v3SelectionMode])
 
   useEffect(() => {
     const runFromUrl = Number(searchParams.get("run") || 0)
@@ -380,17 +446,16 @@ export function BaselineRegressionPage() {
 
   const createRun = useMutation({
     mutationFn: () => {
-      const promptPayload = promptSelectionMode === "single"
-        ? { prompt_id: effectivePromptAId }
-        : promptSelectionMode === "manual"
-          ? {
-              prompt_a_id: effectivePromptAId,
-              prompt_b_id: effectivePromptBId,
-            }
-          : {}
+      const promptPayload = buildBaselineRunPayload({
+        mode: v3SelectionMode,
+        candidateRevisionId: selectedV3Revision?.id,
+        promptMode: promptSelectionMode,
+        promptAId: effectivePromptAId,
+        promptBId: effectivePromptBId,
+        executionMode,
+      })
       return baselineRegressionApi.createRun(selectedSetId, {
         ...promptPayload,
-        execution_mode: executionMode,
       })
     },
     onSuccess: async (run) => {
@@ -902,82 +967,142 @@ export function BaselineRegressionPage() {
                     调整运行配置
                   </Button>
                 </div>
-                <RunConfigDrawer open={runConfigDrawerOpen} onOpenChange={setRunConfigDrawerOpen}>
-                <div className="grid gap-3 border-y border-[var(--line)] bg-[#fafbf8] px-4 py-4 min-[1280px]:grid-cols-3 min-[1280px]:items-end min-[1750px]:grid-cols-[minmax(0,150px)_minmax(0,170px)_minmax(0,1fr)_minmax(0,1fr)_minmax(0,1fr)_auto]">
-                  <label>
-                    <span className="mb-2 block text-xs font-semibold">提示词取值方式</span>
-                    <select
-                      className="h-11 w-full rounded-[4px] border border-[var(--line-strong)] bg-white px-3 text-sm"
-                      value={promptSelectionMode}
-                      onChange={(event) => setPromptSelectionMode(
-                        event.target.value as "published" | "manual" | "single",
-                      )}
-                    >
-                      <option value="published">当前发布版本</option>
-                      <option value="manual">手动选择版本</option>
-                      <option value="single">单提示词（一次调用）</option>
-                    </select>
-                  </label>
-                  <label>
-                    <span className="mb-2 block text-xs font-semibold">结果判定方式</span>
-                    <select
-                      className="h-11 w-full rounded-[4px] border border-[var(--line-strong)] bg-white px-3 text-sm"
-                      value={executionMode}
-                      onChange={(event) => setExecutionMode(event.target.value as "freeform" | "structured")}
-                    >
-                      <option value="freeform">自由实验（默认）</option>
-                      <option value="structured">标准评分合同</option>
-                    </select>
-                  </label>
-                  <PromptSelect
-                    label={promptSelectionMode === "single" ? "单提示词" : "调用 A"}
-                    value={effectivePromptAId}
-                    options={promptAOptions}
-                    published={publishedPromptA}
-                    disabled={promptSelectionMode === "published"}
-                    onChange={setSelectedPromptAId}
-                  />
-                  <PromptSelect
-                    label="调用 B"
-                    value={effectivePromptBId}
-                    options={promptBOptions}
-                    published={publishedPromptB}
-                    disabled={promptSelectionMode !== "manual"}
-                    onChange={setSelectedPromptBId}
-                  />
-                  <div className="border border-[var(--line-strong)] bg-white px-3 py-2.5 text-sm">
-                    <span className="block text-xs font-semibold">评测合同</span>
-                    <span className="mt-1 block text-[var(--muted)]">启动时冻结当前类目的 active v3 合同</span>
+                <RunConfigDrawer
+                  open={runConfigDrawerOpen}
+                  onOpenChange={setRunConfigDrawerOpen}
+                  footer={(
+                    <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                      <div className="min-w-0 text-xs leading-5 text-[var(--muted)]">
+                        <p className="font-semibold text-[var(--ink)]">启动摘要</p>
+                        <p className="truncate">A {selectedPromptA?.version ?? "—"} · B {selectedPromptB?.version ?? "—"} · V3 {selectedV3Revision ? `Revision ${selectedV3Revision.revision}` : "未加载"}</p>
+                      </div>
+                      <Button
+                        className="shrink-0"
+                        disabled={
+                          createRun.isPending
+                          || v3SelectionLoading
+                          || v3SelectionUnavailable
+                          || promptBindingMismatch
+                          || selectedSet.data.runs.some((run) => run.status === "running")
+                          || (
+                            promptSelectionMode !== "published"
+                            && (!effectivePromptAId
+                              || (promptSelectionMode === "manual" && !effectivePromptBId))
+                          )
+                        }
+                        onClick={() => createRun.mutate()}
+                      >
+                        <Play weight="fill" />
+                        {createRun.isPending ? "正在启动" : "运行全量回归"}
+                      </Button>
+                    </div>
+                  )}
+                >
+                  <div className="space-y-7">
+                    <section className="space-y-4" aria-labelledby="baseline-prompt-config">
+                      <div>
+                        <p id="baseline-prompt-config" className="text-sm font-bold">提示词配置</p>
+                        <p className="mt-1 text-xs leading-5 text-[var(--muted)]">A/B 版本只影响本轮冻结快照，不改变线上发布指针。</p>
+                      </div>
+                      <label>
+                        <span className="mb-2 block text-xs font-semibold">提示词取值方式</span>
+                        <select
+                          className="h-11 w-full rounded-[4px] border border-[var(--line-strong)] bg-white px-3 text-sm"
+                          value={promptSelectionMode}
+                          onChange={(event) => setPromptSelectionMode(event.target.value as "published" | "manual" | "single")}
+                        >
+                          <option value="published">当前发布版本</option>
+                          <option value="manual">手动选择版本</option>
+                          <option value="single">单提示词（一次调用）</option>
+                        </select>
+                      </label>
+                      <div className="grid gap-4 md:grid-cols-2">
+                        <PromptSelect
+                          label={promptSelectionMode === "single" ? "单提示词" : "调用 A"}
+                          value={effectivePromptAId}
+                          options={promptAOptions}
+                          published={publishedPromptA}
+                          disabled={promptSelectionMode === "published"}
+                          onChange={setSelectedPromptAId}
+                        />
+                        <PromptSelect
+                          label="调用 B"
+                          value={effectivePromptBId}
+                          options={promptBOptions}
+                          published={publishedPromptB}
+                          disabled={promptSelectionMode !== "manual"}
+                          onChange={setSelectedPromptBId}
+                        />
+                      </div>
+                    </section>
+
+                    <section className="space-y-4 border-t border-[var(--line)] pt-6" aria-labelledby="baseline-v3-config">
+                      <div>
+                        <p id="baseline-v3-config" className="text-sm font-bold">V3 合同配置</p>
+                        <p className="mt-1 text-xs leading-5 text-[var(--muted)]">默认使用当前现役；候选只允许同类目且仍在现役祖先链上的版本。</p>
+                      </div>
+                      <label>
+                        <span className="mb-2 block text-xs font-semibold">合同取值方式</span>
+                        <select
+                          className="h-11 w-full rounded-[4px] border border-[var(--line-strong)] bg-white px-3 text-sm"
+                          value={v3SelectionMode}
+                          onChange={(event) => {
+                            const next = event.target.value as "active" | "candidate"
+                            setV3SelectionMode(next)
+                            if (next === "active") setSelectedV3RevisionId(v3Revisions.data?.projected_revision_id ?? 0)
+                          }}
+                          disabled={v3SelectionLoading || v3SelectionUnavailable}
+                        >
+                          <option value="active">当前现役版本</option>
+                          <option value="candidate">手动选择候选版本</option>
+                        </select>
+                      </label>
+                      <label>
+                        <span className="mb-2 block text-xs font-semibold">V3 合同版本</span>
+                        <select
+                          className="h-11 w-full rounded-[4px] border border-[var(--line-strong)] bg-white px-3 text-sm"
+                          value={selectedV3Revision?.id ?? 0}
+                          onChange={(event) => {
+                            const id = Number(event.target.value)
+                            setSelectedV3RevisionId(id)
+                            if (id === v3Revisions.data?.projected_revision_id) setV3SelectionMode("active")
+                            else setV3SelectionMode("candidate")
+                          }}
+                          disabled={v3SelectionLoading || v3SelectionUnavailable}
+                        >
+                          {(v3Revisions.data?.items ?? []).map((revision: BaselineV3Revision) => {
+                            const group = v3RevisionGroup(revision, v3Revisions.data?.projected_revision_id ?? 0)
+                            const selectable = group === "active" || isSelectableV3Candidate(revision, v3Revisions.data?.items ?? [], v3Revisions.data?.projected_revision_id ?? 0)
+                            return <option key={revision.id} value={revision.id} disabled={!selectable}>{`${group === "active" ? "现役" : group === "candidate" ? "候选" : "历史"} · V${revision.revision} · ${revision.display_name}`}</option>
+                          })}
+                        </select>
+                      </label>
+                      {v3Revisions.isError && <div className="border border-[#d7a09d] bg-[#fff5f4] px-3 py-3 text-xs text-[#8d2924]">V3 版本列表加载失败，无法启动。<button type="button" className="ml-2 underline" onClick={() => v3Revisions.refetch()}>重试</button></div>}
+                      {selectedV3Revision && <div className="border border-[var(--line)] bg-[#fafbf8] px-3 py-3 text-xs leading-5"><p className="font-semibold">{selectedV3Revision.display_name} · Revision {selectedV3Revision.revision}</p><p className="text-[var(--muted)]">状态：{selectedV3Revision.status} · Hash {selectedV3Revision.contract_hash.slice(0, 12)}</p></div>}
+                      {v3SelectionMode === "candidate" && promptBindingMismatch && <div className="border border-[#d7a09d] bg-[#fff5f4] px-3 py-3 text-xs leading-5 text-[#8d2924]">候选合同绑定版本不匹配：{candidatePromptBindingA ? `A 需要 ${candidatePromptBindingA}` : ""}{candidatePromptBindingB ? `，B 需要 ${candidatePromptBindingB}` : ""}。请调整 A/B 后再启动。</div>}
+                    </section>
+
+                    <section className="space-y-4 border-t border-[var(--line)] pt-6" aria-labelledby="baseline-execution-config">
+                      <div>
+                        <p id="baseline-execution-config" className="text-sm font-bold">执行方式</p>
+                        <p className="mt-1 text-xs leading-5 text-[var(--muted)]">运行启动后会冻结提示词、V3 合同和执行模式；历史记录不会被后续版本覆盖。</p>
+                      </div>
+                      <label>
+                        <span className="mb-2 block text-xs font-semibold">结果判定方式</span>
+                        <select
+                          className="h-11 w-full rounded-[4px] border border-[var(--line-strong)] bg-white px-3 text-sm"
+                          value={executionMode}
+                          onChange={(event) => setExecutionMode(event.target.value as "freeform" | "structured")}
+                        >
+                          <option value="freeform">自由实验（默认）</option>
+                          <option value="structured">标准评分合同</option>
+                        </select>
+                      </label>
+                      <p className="text-xs leading-5 text-[var(--muted)]">
+                        {executionMode === "freeform" ? "自由实验不会要求固定 JSON、范围字段或八维输出；系统完整保留原始回答，能安全识别时自动计分，否则进入人工判断。" : "标准评分合同沿用现有结构化协议；缺少范围、等级、分数或所选维度时会按合同失败。"}
+                      </p>
+                    </section>
                   </div>
-                  <Button
-                    disabled={
-                      createRun.isPending
-                      || selectedSet.data.runs.some((run) => run.status === "running")
-                      || (
-                        promptSelectionMode !== "published"
-                        && (!effectivePromptAId
-                          || (promptSelectionMode === "manual" && !effectivePromptBId))
-                      )
-                    }
-                    onClick={() => createRun.mutate()}
-                  >
-                    <Play weight="fill" />
-                    {createRun.isPending ? "正在启动" : "运行全量回归"}
-                  </Button>
-                </div>
-                <p className="mt-2 text-xs leading-5 text-[var(--muted)]">
-                  {executionMode === "freeform"
-                    ? "自由实验不会要求固定 JSON、范围字段或八维输出；系统完整保留原始回答，能安全识别时自动计分，否则进入人工判断，不算运行失败。"
-                    : "标准评分合同沿用现有结构化协议；缺少范围、等级、分数或所选维度时会按合同失败。"}
-                  {" "}
-                  {promptSelectionMode === "single"
-                    ? "本轮只调用所选单提示词一次，B 位保持为空；不会改变线上发布指针。"
-                    : promptSelectionMode === "manual"
-                      ? "本轮会冻结所选 A/B 的完整内容，不会改变线上发布指针。"
-                      : "本轮启动时自动冻结当时的已发布 A/B；以后发布新版本也不会改写历史 run。"}
-                  {" "}
-                  本轮维度与分类赛道只读取启动时冻结的 active v3 合同；缺少合同时服务端拒绝启动。
-                </p>
                 </RunConfigDrawer>
               </div>
 

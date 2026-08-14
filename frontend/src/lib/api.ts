@@ -7,6 +7,7 @@ import type {
   BaselineRegressionRun,
   BaselineSetDetail,
   BaselineSetSummary,
+  BaselineV3RevisionList,
   MaterialPackage,
   PromptVersion,
 } from "@/lib/types"
@@ -202,11 +203,15 @@ export const baselineRegressionApi = {
     const query = `?${params.toString()}`
     return api<{ items: PromptVersion[] }>(`/api/prompts${query}`)
   },
+  listV3Revisions: (categoryKey: string) => api<BaselineV3RevisionList>(
+    `/api/category-evaluation-v3-config/${encodeURIComponent(categoryKey)}/revisions`,
+  ),
   createRun: (setId: number, payload: {
     prompt_id?: number
     prompt_a_id?: number
     prompt_b_id?: number
     execution_mode?: "freeform" | "structured"
+    candidate_revision_id?: number
   } = {}) => api<BaselineRegressionRun & { job_ids: number[] }>(
     `/api/baseline-sets/${setId}/runs`,
     { method: "POST", ...jsonBody(payload) },
