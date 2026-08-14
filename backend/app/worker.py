@@ -31,6 +31,10 @@ from .category_pipeline import (
     processor_config,
     validate_pipeline_config,
 )
+from .category_evaluation_contract import (
+    CategoryEvaluationPromptBindingError,
+    validate_category_evaluation_prompt_bindings,
+)
 from .database import init_database, session_scope
 from .evaluation_credentials import (
     default_evaluation_model,
@@ -254,6 +258,65 @@ def _is_inspiration_baseline_job(job: EvaluationJob) -> bool:
         job.baseline_regression_item_id is not None
         and job.category_key == "inspiration_image"
     )
+
+
+def resolve_frozen_anchor_assets(
+    db,
+    proposal_contract: dict[str, object],
+) -> dict[int, SimpleNamespace] | None:
+    """Read the server-owned anchor file metadata for one frozen V3 contract.
+
+    Candidate contracts can freeze the public ``asset_id``/MIME/SHA tuple without
+    revealing the upload namespace's internal file name.  This lookup deliberately
+    performs no repair or fallback: missing assets are left for the anchor request
+    builder to reject as a closed technical failure before any provider call.
+    """
+    from .inspiration_aesthetic_foundation import validate_anchor_contract
+
+    foundation = proposal_contract.get("aesthetic_foundation")
+    if not isinstance(foundation, dict):
+        return None
+    anchors = validate_anchor_contract(foundation.get("anchors"))
+    if all("stored_name" in anchor for anchor in anchors):
+        # 现役四锚的内部文件名已随合同冻结；保持原有无资产表查询的行为。
+        return None
+    anchor_ids = [int(anchor["asset_id"]) for anchor in anchors]
+    anchor_rows = db.scalars(
+        select(Asset).where(Asset.id.in_(anchor_ids))
+    ).all()
+    return {
+        row.id: SimpleNamespace(
+            id=row.id,
+            stored_name=row.stored_name,
+            mime_type=row.mime_type,
+            sha256=row.sha256,
+        )
+        for row in anchor_rows
+    }
+
+
+def validate_candidate_strategy_prompt_bindings(
+    frozen_v3_bundle: object,
+    strategy_bundle: StrategyBundle | SimpleNamespace | None,
+) -> None:
+    """Re-verify candidate Prompt bindings before any provider call."""
+
+    if not isinstance(frozen_v3_bundle, dict) or frozen_v3_bundle.get(
+        "candidate_revision_id"
+    ) is None:
+        return
+    if strategy_bundle is None:
+        raise RuntimeError("冻结候选合同未绑定 StrategyBundle")
+    try:
+        validate_category_evaluation_prompt_bindings(
+            frozen_v3_bundle.get("contract"),
+            prompt_a_version=strategy_bundle.prompt_a_version,
+            prompt_b_version=strategy_bundle.prompt_b_version,
+        )
+    except CategoryEvaluationPromptBindingError as exc:
+        raise RuntimeError(
+            f"冻结候选合同 Prompt 绑定与 StrategyBundle 不一致：{exc}"
+        ) from exc
 
 
 def _pdf_summary_user_prompt(document_context: dict[str, object]) -> str:
@@ -1000,6 +1063,7 @@ async def evaluate_job(job_id: int) -> None:
     production_dimension_contract = None
     v3_bundle_for_job: dict[str, object] | None = None
     aesthetic_foundation_active = False
+    frozen_anchor_assets: dict[int, SimpleNamespace] | None = None
     with session_scope() as db:
         job = db.get(EvaluationJob, job_id)
         if not job:
@@ -1019,6 +1083,10 @@ async def evaluate_job(job_id: int) -> None:
         asset = db.get(Asset, job.asset_id)
         if not asset:
             raise RuntimeError("图片不存在")
+        if aesthetic_foundation_active:
+            frozen_anchor_assets = resolve_frozen_anchor_assets(
+                db, proposal_contract
+            )
         category_profile_snapshot = _frozen_category_contract(job, asset)
         if category_profile_snapshot is not None:
             category_preprocess_config = category_profile_snapshot[
@@ -1131,6 +1199,10 @@ async def evaluate_job(job_id: int) -> None:
         )
         if strategy_bundle_id is not None and frozen_bundle is None:
             raise RuntimeError("任务绑定的 StrategyBundle 不存在")
+        validate_candidate_strategy_prompt_bindings(
+            v3_bundle_for_job,
+            frozen_bundle,
+        )
         if (
             frozen_bundle is not None
             and frozen_bundle.strategy_schema_version
@@ -1743,12 +1815,19 @@ async def evaluate_job(job_id: int) -> None:
                 freeform=freeform_mode,
             )
             if aesthetic_foundation_active:
-                from .inspiration_aesthetic_foundation import anchor_samples
+                from .inspiration_aesthetic_foundation import anchor_request_from_contract
+                anchor_samples_for_request, max_anchor_images = anchor_request_from_contract(
+                    proposal_contract,
+                    settings.upload_dir,
+                    model_image_path,
+                    model_mime_type,
+                    assets_by_id=frozen_anchor_assets,
+                )
                 response_b = await client.chat_json_images(
                     prompt_b.system_prompt,
-                    anchor_samples(settings.upload_dir, model_image_path, model_mime_type),
+                    anchor_samples_for_request,
                     max_attempts=1,
-                    max_image_count=5,
+                    max_image_count=max_anchor_images,
                 )
             else:
                 response_b = await (

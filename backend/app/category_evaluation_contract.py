@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import re
 import math
+from copy import deepcopy
 from datetime import datetime
 from typing import Literal
 from typing import Any
@@ -23,6 +24,10 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from .dimension_schema_registry import canonical_hash as _canonical_hash
 from .dimension_schema_registry import canonical_json as _canonical_json
 from .level_scale import LevelScaleError, is_level_enabled, resolve_level_scale
+from .inspiration_anchor_contract import (
+    InspirationAnchorContractError,
+    validate_inspiration_anchor_contract,
+)
 from .redline_policy import (
     RedlinePolicyError,
     validate_redline_policy,
@@ -190,6 +195,71 @@ class CategoryEvaluationContractError(ValueError):
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
         self.code = code
+
+
+class CategoryEvaluationPromptBindingError(ValueError):
+    """Candidate contract and executable Prompt versions disagree."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+def bind_category_evaluation_prompt_versions(
+    contract: dict[str, Any],
+    *,
+    prompt_a_version: str,
+    prompt_b_version: str | None,
+) -> dict[str, Any]:
+    """Copy a candidate contract and bind it to one executable Prompt pair."""
+
+    bound = deepcopy(contract)
+    bound["prompt_bindings"] = {
+        "call_a_version": prompt_a_version,
+        "call_b_version": prompt_b_version,
+    }
+    foundation = bound.get("aesthetic_foundation")
+    if isinstance(foundation, dict):
+        foundation["call_b_version"] = prompt_b_version
+    return bound
+
+
+def validate_category_evaluation_prompt_bindings(
+    contract: Any,
+    *,
+    prompt_a_version: str,
+    prompt_b_version: str | None,
+) -> None:
+    """Fail closed unless a candidate contract names its executable Prompt pair."""
+
+    if not isinstance(contract, dict):
+        raise CategoryEvaluationPromptBindingError(
+            "prompt_binding_contract_invalid",
+            "候选合同不是可核验对象",
+        )
+    bindings = contract.get("prompt_bindings")
+    if not isinstance(bindings, dict):
+        raise CategoryEvaluationPromptBindingError(
+            "prompt_bindings_missing",
+            "候选合同缺少 Prompt 绑定",
+        )
+    if (
+        bindings.get("call_a_version") != prompt_a_version
+        or bindings.get("call_b_version") != prompt_b_version
+    ):
+        raise CategoryEvaluationPromptBindingError(
+            "prompt_bindings_mismatch",
+            "候选合同声明的 A/B Prompt 版本与执行策略不一致",
+        )
+    foundation = contract.get("aesthetic_foundation")
+    if (
+        isinstance(foundation, dict)
+        and foundation.get("call_b_version") != prompt_b_version
+    ):
+        raise CategoryEvaluationPromptBindingError(
+            "aesthetic_foundation_prompt_binding_mismatch",
+            "候选美感前置合同声明的调用 B 版本与执行策略不一致",
+        )
 
 
 def _is_int(value: Any) -> bool:
@@ -609,6 +679,20 @@ def validate_category_evaluation_contract(contract: Any) -> None:
             "level_scale.redline_level_disabled",
             f"红线 hit_level {hit_level} 已被当前类目关闭",
         )
+
+    if "aesthetic_foundation" in contract:
+        foundation = contract["aesthetic_foundation"]
+        if not isinstance(foundation, dict) or "anchors" not in foundation:
+            raise CategoryEvaluationContractError(
+                "aesthetic_foundation.anchor_contract_invalid",
+                "美感前置合同缺少冻结锚图",
+            )
+        try:
+            validate_inspiration_anchor_contract(foundation["anchors"])
+        except InspirationAnchorContractError as exc:
+            raise CategoryEvaluationContractError(
+                f"aesthetic_foundation.{exc.code}", str(exc)
+            ) from exc
 
 
 def canonical_contract_hash(contract: dict[str, Any]) -> str:

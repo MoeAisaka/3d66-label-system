@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import Session
@@ -26,6 +27,8 @@ from app.baseline_correction_orchestration import (
 )
 from app.audit import canonical_json
 from app.category_pipeline import default_pipeline
+from app.category_evaluation_contract import canonical_contract_hash
+from app.category_evaluation_v3_revisions import ensure_projected_revision
 from app.database import Base, get_db
 from app.dimension_schema_registry import (
     ACTIVE_V13_VERSION,
@@ -34,7 +37,12 @@ from app.dimension_schema_registry import (
     space_schema_definition_for_version,
 )
 from app.doubao import DoubaoResponse
-from app.main import _baseline_run_selection, app, current_user
+from app.main import (
+    _baseline_run_selection,
+    _required_baseline_v3_bundle,
+    app,
+    current_user,
+)
 from app.models import (
     Asset,
     BaselineCorrectionRun,
@@ -131,6 +139,352 @@ def test_baseline_run_selection_marks_missing_v3_contract_unknown() -> None:
     )
 
     assert _baseline_run_selection(run)["dimension"]["v3_contract"] is None
+
+
+def test_baseline_run_can_freeze_candidate_v3_revision_without_changing_projection(
+    monkeypatch,
+) -> None:
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    db = Session(engine, expire_on_commit=False)
+    active_artifacts = add_active_v3_contract(db, "inspiration_image")
+    projected = db.scalar(
+        select(CategoryEvaluationV3Config).where(
+            CategoryEvaluationV3Config.category_key == "inspiration_image"
+        )
+    )
+    assert projected is not None
+    active_revision = ensure_projected_revision(db, projected)
+    candidate_contract = deepcopy(active_artifacts["contract"])
+    candidate_contract["spec_version"] = "inspiration-candidate-regression-test-v1"
+    candidate_contract["prompt_bindings"] = {
+        "call_a_version": "candidate-A1",
+        "call_b_version": "candidate-B1",
+    }
+    if isinstance(candidate_contract.get("aesthetic_foundation"), dict):
+        candidate_contract["aesthetic_foundation"]["call_b_version"] = (
+            "candidate-B1"
+        )
+    candidate = CategoryEvaluationV3Revision(
+        category_key="inspiration_image",
+        display_name="灵感图候选回归测试",
+        revision=2,
+        status="candidate",
+        parent_revision_id=active_revision.id,
+        contract_json=canonical_json(candidate_contract),
+        classification_map_json=canonical_json(
+            active_artifacts["classification_map"]
+        ),
+        subcategory_dimensions_json=canonical_json(
+            active_artifacts["subcategory_dimensions"]
+        ),
+        dimension_deduction_rules_json="{}",
+        media_penalty_enabled=False,
+        contract_hash=canonical_contract_hash(candidate_contract),
+        created_by="test",
+    )
+    user = User(
+        username="candidate-runner",
+        password_hash="unused",
+        display_name="候选回归测试员",
+    )
+    asset = Asset(
+        original_name="candidate-L1.jpg",
+        stored_name="candidate-L1.jpg",
+        mime_type="image/jpeg",
+        size_bytes=10,
+        sha256="c" * 64,
+        status="uploaded",
+        category_key="inspiration_image",
+    )
+    model = ModelConfig(
+        name="candidate-model",
+        provider="doubao",
+        base_url="https://example.test",
+        api_path="/chat",
+        model_id="candidate-model",
+        active=True,
+    )
+    prompt_a = PromptVersion(
+        stage="A",
+        name="候选A",
+        version="candidate-A1",
+        system_prompt="classification prompt",
+        user_prompt="classify",
+        rubric_version="inspiration-rubric-v1",
+        status="published",
+        category_key="inspiration_image",
+    )
+    prompt_b = PromptVersion(
+        stage="B",
+        name="候选B",
+        version="candidate-B1",
+        system_prompt="aesthetic prompt",
+        user_prompt="evaluate",
+        rubric_version="inspiration-rubric-v1",
+        status="draft",
+        pipeline_scope="baseline_regression",
+        category_key="inspiration_image",
+    )
+    wrong_prompt_b = PromptVersion(
+        stage="B",
+        name="错误候选B",
+        version="candidate-B2",
+        system_prompt="wrong aesthetic prompt",
+        user_prompt="evaluate with wrong binding",
+        rubric_version="inspiration-rubric-v1",
+        status="draft",
+        pipeline_scope="baseline_regression",
+        category_key="inspiration_image",
+    )
+    db.add_all(
+        [candidate, user, asset, model, prompt_a, prompt_b, wrong_prompt_b]
+    )
+    db.commit()
+
+    frozen_projection = (
+        projected.projected_revision_id,
+        projected.revision,
+        projected.contract_hash,
+        projected.contract_json,
+    )
+    app.dependency_overrides[get_db] = lambda: (yield db)
+    app.dependency_overrides[current_user] = lambda: user
+    client = TestClient(app)
+    try:
+        baseline_set = client.post(
+            "/api/baseline-sets",
+            json={
+                "name": "候选 V3 小样本门禁",
+                "default_expected_level": "L1",
+                "category_key": "inspiration_image",
+                "items": [{"asset_id": asset.id}],
+            },
+        )
+        assert baseline_set.status_code == 200
+
+        mismatched = client.post(
+            f"/api/baseline-sets/{baseline_set.json()['id']}/runs",
+            json={
+                "prompt_a_id": prompt_a.id,
+                "prompt_b_id": wrong_prompt_b.id,
+                "candidate_revision_id": candidate.id,
+            },
+        )
+        assert mismatched.status_code == 409
+        assert mismatched.json()["detail"]["code"] == (
+            "candidate_prompt_binding_mismatch"
+        )
+        assert db.query(BaselineRegressionRun).count() == 0
+
+        run_response = client.post(
+            f"/api/baseline-sets/{baseline_set.json()['id']}/runs",
+            json={
+                "prompt_a_id": prompt_a.id,
+                "prompt_b_id": prompt_b.id,
+                "candidate_revision_id": candidate.id,
+            },
+        )
+
+        assert run_response.status_code == 200
+        run = db.get(BaselineRegressionRun, run_response.json()["id"])
+        assert run is not None
+        snapshot = json.loads(run.execution_snapshot_json)
+        assert snapshot["v3_authoritative_bundle"]["candidate_revision_id"] == candidate.id
+        assert snapshot["v3_authoritative_bundle"]["contract"]["spec_version"] == (
+            "inspiration-candidate-regression-test-v1"
+        )
+        job = db.get(EvaluationJob, run.items[0].job_id)
+        assert job is not None
+        assert json.loads(job.category_profile_snapshot_json) == snapshot
+        db.refresh(projected)
+        assert (
+            projected.projected_revision_id,
+            projected.revision,
+            projected.contract_hash,
+            projected.contract_json,
+        ) == frozen_projection
+
+        drifted_snapshot = json.loads(job.category_profile_snapshot_json)
+        drifted_snapshot["v3_authoritative_bundle"]["contract"][
+            "prompt_bindings"
+        ]["call_b_version"] = wrong_prompt_b.version
+        drifted_snapshot["v3_authoritative_bundle"]["contract"][
+            "aesthetic_foundation"
+        ]["call_b_version"] = wrong_prompt_b.version
+        job.category_profile_snapshot_json = canonical_json(drifted_snapshot)
+        job.status = "processing"
+        db.commit()
+        provider_constructions = 0
+
+        class UnexpectedProviderClient:
+            def __init__(self, _config) -> None:
+                nonlocal provider_constructions
+                provider_constructions += 1
+
+        @contextmanager
+        def test_scope():
+            try:
+                yield db
+                db.commit()
+            except Exception:
+                db.rollback()
+                raise
+
+        monkeypatch.setattr(worker, "session_scope", test_scope)
+        monkeypatch.setattr(worker, "DoubaoClient", UnexpectedProviderClient)
+        with pytest.raises(RuntimeError, match="候选合同 Prompt 绑定"):
+            asyncio.run(worker.evaluate_job(job.id))
+        assert provider_constructions == 0
+    finally:
+        app.dependency_overrides.clear()
+        db.close()
+        engine.dispose()
+
+
+def test_candidate_baseline_bundle_rejects_revision_from_another_category() -> None:
+    engine = create_engine("sqlite://", poolclass=StaticPool)
+    Base.metadata.create_all(engine)
+    db = Session(engine, expire_on_commit=False)
+    add_active_v3_contract(db, "inspiration_image")
+    inspiration_projected = db.scalar(
+        select(CategoryEvaluationV3Config).where(
+            CategoryEvaluationV3Config.category_key == "inspiration_image"
+        )
+    )
+    assert inspiration_projected is not None
+    ensure_projected_revision(db, inspiration_projected)
+    other_artifacts = add_active_v3_contract(db, "space_image")
+    other_projected = db.scalar(
+        select(CategoryEvaluationV3Config).where(
+            CategoryEvaluationV3Config.category_key == "space_image"
+        )
+    )
+    assert other_projected is not None
+    other_active = ensure_projected_revision(db, other_projected)
+    other_contract = deepcopy(other_artifacts["contract"])
+    other_contract["spec_version"] = "space-candidate-test-v1"
+    other_candidate = CategoryEvaluationV3Revision(
+        category_key="space_image",
+        display_name="空间图候选",
+        revision=2,
+        status="candidate",
+        parent_revision_id=other_active.id,
+        contract_json=canonical_json(other_contract),
+        classification_map_json=canonical_json(other_artifacts["classification_map"]),
+        subcategory_dimensions_json=canonical_json(
+            other_artifacts["subcategory_dimensions"]
+        ),
+        contract_hash=canonical_contract_hash(other_contract),
+        created_by="test",
+    )
+    db.add(other_candidate)
+    db.commit()
+
+    with pytest.raises(HTTPException) as exc_info:
+        _required_baseline_v3_bundle(
+            db,
+            "inspiration_image",
+            other_candidate.id,
+        )
+
+    assert exc_info.value.status_code == 422
+    assert exc_info.value.detail["code"] == "candidate_revision_category_mismatch"
+    db.close()
+    engine.dispose()
+
+
+def test_candidate_baseline_bundle_rejects_non_candidate_revision() -> None:
+    engine = create_engine("sqlite://", poolclass=StaticPool)
+    Base.metadata.create_all(engine)
+    db = Session(engine, expire_on_commit=False)
+    add_active_v3_contract(db, "inspiration_image")
+    projected = db.scalar(
+        select(CategoryEvaluationV3Config).where(
+            CategoryEvaluationV3Config.category_key == "inspiration_image"
+        )
+    )
+    assert projected is not None
+    active_revision = ensure_projected_revision(db, projected)
+    db.commit()
+
+    with pytest.raises(HTTPException) as exc_info:
+        _required_baseline_v3_bundle(
+            db,
+            "inspiration_image",
+            active_revision.id,
+        )
+
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.detail["code"] == "candidate_revision_status_invalid"
+    db.close()
+    engine.dispose()
+
+
+def test_candidate_baseline_bundle_rejects_projection_drift() -> None:
+    engine = create_engine("sqlite://", poolclass=StaticPool)
+    Base.metadata.create_all(engine)
+    db = Session(engine, expire_on_commit=False)
+    artifacts = add_active_v3_contract(db, "inspiration_image")
+    projected = db.scalar(
+        select(CategoryEvaluationV3Config).where(
+            CategoryEvaluationV3Config.category_key == "inspiration_image"
+        )
+    )
+    assert projected is not None
+    ensure_projected_revision(db, projected)
+    stale_contract = deepcopy(artifacts["contract"])
+    stale_contract["spec_version"] = "stale-candidate-test-v1"
+    stale_root = CategoryEvaluationV3Revision(
+        category_key="inspiration_image",
+        display_name="旧现役根",
+        revision=2,
+        status="retired",
+        parent_revision_id=None,
+        contract_json=canonical_json(stale_contract),
+        classification_map_json=canonical_json(artifacts["classification_map"]),
+        subcategory_dimensions_json=canonical_json(
+            artifacts["subcategory_dimensions"]
+        ),
+        contract_hash=canonical_contract_hash(stale_contract),
+        created_by="test",
+    )
+    db.add(stale_root)
+    db.flush()
+    drifted_contract = deepcopy(stale_contract)
+    drifted_contract["spec_version"] = "drifted-candidate-test-v1"
+    drifted_candidate = CategoryEvaluationV3Revision(
+        category_key="inspiration_image",
+        display_name="已漂移候选",
+        revision=3,
+        status="candidate",
+        parent_revision_id=stale_root.id,
+        contract_json=canonical_json(drifted_contract),
+        classification_map_json=canonical_json(artifacts["classification_map"]),
+        subcategory_dimensions_json=canonical_json(
+            artifacts["subcategory_dimensions"]
+        ),
+        contract_hash=canonical_contract_hash(drifted_contract),
+        created_by="test",
+    )
+    db.add(drifted_candidate)
+    db.commit()
+
+    with pytest.raises(HTTPException) as exc_info:
+        _required_baseline_v3_bundle(
+            db,
+            "inspiration_image",
+            drifted_candidate.id,
+        )
+
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.detail["code"] == "candidate_revision_projection_drift"
+    db.close()
+    engine.dispose()
 
 
 def test_filename_level_suggestion_is_advisory_and_conflict_safe() -> None:
@@ -1324,9 +1678,14 @@ def test_category_dimension_snapshot_and_isolated_correction_retry(
         )
         assert candidate_revision is not None
         assert candidate_revision.status == "candidate"
-        assert json.loads(candidate_revision.contract_json)["spec_version"] == (
+        frozen_candidate_contract = json.loads(candidate_revision.contract_json)
+        assert frozen_candidate_contract["spec_version"] == (
             "material-image-auto-candidate-v2"
         )
+        assert frozen_candidate_contract["prompt_bindings"] == {
+            "call_a_version": candidate_prompt.version,
+            "call_b_version": None,
+        }
         db.refresh(active_config)
         assert (
             active_config.revision,
