@@ -52,6 +52,8 @@ export interface SecondaryDrawerProps {
   description?: string
   children: ReactNode
   footer?: ReactNode
+  size?: "default" | "wide"
+  className?: string
 }
 
 function useDialogReturnFocus(open: boolean) {
@@ -66,7 +68,7 @@ function useDialogReturnFocus(open: boolean) {
   return returnFocusRef
 }
 
-export function SecondaryDrawer({ open, onOpenChange, title, description, children, footer }: SecondaryDrawerProps) {
+export function SecondaryDrawer({ open, onOpenChange, title, description, children, footer, size = "default", className }: SecondaryDrawerProps) {
   const returnFocusRef = useDialogReturnFocus(open)
 
   return (
@@ -74,7 +76,11 @@ export function SecondaryDrawer({ open, onOpenChange, title, description, childr
       <Dialog.Portal>
         <Dialog.Overlay className="fixed inset-0 z-50 bg-black/20" />
         <Dialog.Content
-          className="fixed inset-y-0 right-0 z-50 flex w-[min(680px,calc(100vw-1rem))] flex-col border-l border-[var(--line-strong)] bg-white shadow-2xl focus:outline-none"
+          className={cn(
+            "fixed inset-y-0 right-0 z-50 flex flex-col border-l border-[var(--line-strong)] bg-white shadow-2xl focus:outline-none",
+            size === "wide" ? "w-[min(820px,calc(100vw-1rem))]" : "w-[min(680px,calc(100vw-1rem))]",
+            className,
+          )}
           onCloseAutoFocus={(event) => {
             event.preventDefault()
             returnFocusRef.current?.focus()
