@@ -276,22 +276,55 @@ contract_version固定为{FOUNDATION_VERSION}。dimensions每项必须且只能�
 
 
 def _validated_quality_rules(contract: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    """读取新revision专用质量规则；形状漂移时拒绝继续定级。"""
+    """读取冻结质量规则；兼容历史绝对分数与候选语义封顶。"""
     block = contract.get("aesthetic_foundation")
     if not isinstance(block, dict):
         raise AestheticFoundationError("quality_rules_missing", "缺少美感前置质量规则")
     soft_cap = block.get("casual_snapshot_soft_cap")
-    if not isinstance(soft_cap, dict) or set(soft_cap) != {
-        "key", "signal", "match_any", "cap_to"
-    }:
+    if not isinstance(soft_cap, dict):
         raise AestheticFoundationError("soft_cap_invalid", "随手拍软封顶规则形状非法")
-    if (
-        soft_cap.get("key") != "casual_snapshot_soft_cap"
-        or soft_cap.get("signal") != "production_fields.reason"
-        or soft_cap.get("match_any") != ["是随手拍"]
-        or not _is_int(soft_cap.get("cap_to"))
-        or not 0 <= soft_cap["cap_to"] <= 100
-    ):
+    common_valid = (
+        soft_cap.get("key") == "casual_snapshot_soft_cap"
+        and soft_cap.get("signal") == "production_fields.reason"
+        and soft_cap.get("match_any") == ["是随手拍"]
+    )
+    legacy_shape = set(soft_cap) == {"key", "signal", "match_any", "cap_to"}
+    if legacy_shape and common_valid and _is_int(soft_cap.get("cap_to")) and 0 <= soft_cap["cap_to"] <= 100:
+        normalized_soft_cap = dict(soft_cap)
+    else:
+        candidate_shape = {
+            "key", "signal", "match_any", "cap_to_level", "filter_escalation"
+        }
+        escalation = soft_cap.get("filter_escalation")
+        dimensions_at_most = (
+            escalation.get("dimensions_at_most") if isinstance(escalation, dict) else None
+        )
+        if not (
+            set(soft_cap) == candidate_shape
+            and common_valid
+            and soft_cap.get("cap_to_level") == "L4"
+            and isinstance(escalation, dict)
+            and set(escalation) == {"cap_to_level", "dimensions_at_most"}
+            and escalation.get("cap_to_level") == "L5"
+            and isinstance(dimensions_at_most, dict)
+            and set(dimensions_at_most) == {"presentation_integrity", "inspiration_reference"}
+            and all(
+                _is_int(value) and 1 <= value <= 5
+                for value in dimensions_at_most.values()
+            )
+        ):
+            raise AestheticFoundationError("soft_cap_invalid", "随手拍软封顶规则内容非法")
+        normalized_soft_cap = {
+            "key": soft_cap["key"],
+            "signal": soft_cap["signal"],
+            "match_any": list(soft_cap["match_any"]),
+            "cap_to_level": soft_cap["cap_to_level"],
+            "filter_escalation": {
+                "cap_to_level": escalation["cap_to_level"],
+                "dimensions_at_most": dict(dimensions_at_most),
+            },
+        }
+    if not common_valid:
         raise AestheticFoundationError("soft_cap_invalid", "随手拍软封顶规则内容非法")
     exemptions = block.get("hard_defect_exemptions")
     if not isinstance(exemptions, list) or len(exemptions) != 1:
@@ -321,7 +354,47 @@ def _validated_quality_rules(contract: dict[str, Any]) -> tuple[dict[str, Any], 
             or key not in DIMENSION_KEYS
         ):
             raise AestheticFoundationError("defect_exemption_invalid", "品牌字样豁免的维度约束非法")
-    return soft_cap, exemptions
+    return normalized_soft_cap, exemptions
+
+
+def _score_cap_for_level(
+    thresholds: Any,
+    *,
+    level: str,
+) -> int:
+    """Return the greatest integer score still classified into ``level``.
+
+    Candidate contracts express quality ceilings in level semantics so threshold
+    retuning cannot silently change L4 caps into L5 filters.  Thresholds remain
+    frozen on each run; malformed or incomplete mappings fail closed.
+    """
+    if not isinstance(thresholds, list) or not thresholds:
+        raise AestheticFoundationError("score_thresholds_invalid", "美感分数阈值必须是非空数组")
+    normalized: list[tuple[str, int]] = []
+    seen: set[str] = set()
+    for entry in thresholds:
+        if not isinstance(entry, dict) or set(entry) != {"level", "min_score"}:
+            raise AestheticFoundationError("score_thresholds_invalid", "美感分数阈值项形状非法")
+        item_level = entry.get("level")
+        min_score = entry.get("min_score")
+        if (
+            item_level not in {"L1", "L2", "L3", "L4", "L5"}
+            or item_level in seen
+            or not _is_int(min_score)
+            or not 0 <= min_score <= 100
+        ):
+            raise AestheticFoundationError("score_thresholds_invalid", "美感分数阈值内容非法")
+        seen.add(item_level)
+        normalized.append((item_level, min_score))
+    if level not in seen:
+        raise AestheticFoundationError("score_thresholds_invalid", f"候选封顶等级 {level} 未启用")
+    ranks = {"L1": 1, "L2": 2, "L3": 3, "L4": 4, "L5": 5}
+    normalized.sort(key=lambda item: ranks[item[0]])
+    values = [min_score for _, min_score in normalized]
+    if any(left <= right for left, right in zip(values, values[1:])):
+        raise AestheticFoundationError("score_thresholds_invalid", "美感分数阈值顺序非法")
+    index = next(index for index, item in enumerate(normalized) if item[0] == level)
+    return 100 if index == 0 else normalized[index - 1][1] - 1
 
 
 def _reason_values(precheck: dict[str, Any]) -> list[str]:
@@ -417,10 +490,40 @@ def apply_aesthetic_v3_rules(
         if penalty:
             caps.append({"rule": "media_penalty", "media_key": media_key, "delta": penalty, "uncertain": uncertain})
     if any(reason in soft_cap["match_any"] for reason in _reason_values(precheck)):
-        capped = min(final_score, int(soft_cap["cap_to"]))
-        if capped != final_score:
-            caps.append({"rule": soft_cap["key"], "cap_to": int(soft_cap["cap_to"])})
-        final_score = capped
+        if "cap_to" in soft_cap:
+            capped = min(final_score, int(soft_cap["cap_to"]))
+            if capped != final_score:
+                caps.append({"rule": soft_cap["key"], "cap_to": int(soft_cap["cap_to"])})
+            final_score = capped
+        else:
+            cap_to_level = str(soft_cap["cap_to_level"])
+            resolved_cap_to = _score_cap_for_level(thresholds, level=cap_to_level)
+            capped = min(final_score, resolved_cap_to)
+            if capped != final_score:
+                caps.append({
+                    "rule": soft_cap["key"],
+                    "cap_to_level": cap_to_level,
+                    "resolved_cap_to": resolved_cap_to,
+                })
+            final_score = capped
+            escalation = soft_cap["filter_escalation"]
+            dimension_limits = escalation["dimensions_at_most"]
+            if all(
+                normalized["dimensions"][key]["grade"] <= limit
+                for key, limit in dimension_limits.items()
+            ):
+                escalation_level = str(escalation["cap_to_level"])
+                escalation_cap_to = _score_cap_for_level(
+                    thresholds, level=escalation_level
+                )
+                escalated = min(final_score, escalation_cap_to)
+                if escalated != final_score:
+                    caps.append({
+                        "rule": "casual_snapshot_filter_escalation",
+                        "cap_to_level": escalation_level,
+                        "resolved_cap_to": escalation_cap_to,
+                    })
+                final_score = escalated
     veto = modifiers["high_score_veto"]
     if "tiers" in veto:
         policy_precheck, applied_exemptions = _precheck_after_narrow_exemptions(
