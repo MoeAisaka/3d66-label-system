@@ -7118,6 +7118,499 @@ def _migration_062_add_mechanism_release_axes(connection: Connection) -> None:
     )
 
 
+def _migration_063_add_category_evaluation_v3_revisions(
+    connection: Connection,
+) -> None:
+    """Append immutable mechanism revisions beside the runtime projection."""
+    tables = {
+        row[0]
+        for row in connection.exec_driver_sql(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )
+    }
+    if "category_evaluation_v3_configs" not in tables:
+        return
+
+    connection.exec_driver_sql("""
+        CREATE TABLE IF NOT EXISTS category_evaluation_v3_revisions (
+            id INTEGER PRIMARY KEY,
+            category_key VARCHAR(40) NOT NULL,
+            display_name VARCHAR(120) NOT NULL,
+            revision INTEGER NOT NULL,
+            status VARCHAR(20) NOT NULL DEFAULT 'candidate',
+            parent_revision_id INTEGER
+                REFERENCES category_evaluation_v3_revisions(id)
+                ON DELETE RESTRICT,
+            contract_json TEXT NOT NULL,
+            classification_map_json TEXT NOT NULL,
+            subcategory_dimensions_json TEXT NOT NULL,
+            dimension_deduction_rules_json TEXT NOT NULL DEFAULT '{}',
+            media_penalty_enabled BOOLEAN NOT NULL DEFAULT 1,
+            contract_hash VARCHAR(64) NOT NULL,
+            created_by VARCHAR(80) NOT NULL DEFAULT 'system',
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            CONSTRAINT ck_category_evaluation_v3_revisions_status
+                CHECK (status IN ('draft','candidate','active','retired')),
+            CONSTRAINT uq_category_evaluation_v3_revisions_key_revision
+                UNIQUE(category_key, revision)
+        )
+    """)
+    for statement in (
+        "CREATE INDEX IF NOT EXISTS ix_category_evaluation_v3_revisions_key "
+        "ON category_evaluation_v3_revisions(category_key, revision DESC)",
+        "CREATE INDEX IF NOT EXISTS ix_category_evaluation_v3_revisions_status "
+        "ON category_evaluation_v3_revisions(status, updated_at)",
+        "CREATE INDEX IF NOT EXISTS ix_category_evaluation_v3_revisions_parent "
+        "ON category_evaluation_v3_revisions(parent_revision_id)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS "
+        "uq_category_evaluation_v3_revisions_active "
+        "ON category_evaluation_v3_revisions(category_key) "
+        "WHERE status = 'active'",
+    ):
+        connection.exec_driver_sql(statement)
+
+    config_columns = {
+        row[1]
+        for row in connection.exec_driver_sql(
+            "PRAGMA table_info(category_evaluation_v3_configs)"
+        )
+    }
+    if "projected_revision_id" not in config_columns:
+        connection.exec_driver_sql(
+            "ALTER TABLE category_evaluation_v3_configs "
+            "ADD COLUMN projected_revision_id INTEGER "
+            "REFERENCES category_evaluation_v3_revisions(id) ON DELETE RESTRICT"
+        )
+    connection.exec_driver_sql(
+        "CREATE INDEX IF NOT EXISTS ix_category_evaluation_v3_configs_projected "
+        "ON category_evaluation_v3_configs(projected_revision_id)"
+    )
+
+    connection.exec_driver_sql("""
+        INSERT INTO category_evaluation_v3_revisions (
+            category_key, display_name, revision, status, parent_revision_id,
+            contract_json, classification_map_json,
+            subcategory_dimensions_json, dimension_deduction_rules_json,
+            media_penalty_enabled, contract_hash, created_by,
+            created_at, updated_at
+        )
+        SELECT
+            c.category_key, c.display_name, c.revision, c.status, NULL,
+            c.contract_json, c.classification_map_json,
+            c.subcategory_dimensions_json,
+            c.dimension_deduction_rules_json, c.media_penalty_enabled,
+            c.contract_hash, c.created_by, c.created_at, c.updated_at
+        FROM category_evaluation_v3_configs AS c
+        WHERE c.projected_revision_id IS NULL
+          AND NOT EXISTS (
+              SELECT 1
+              FROM category_evaluation_v3_revisions AS r
+              WHERE r.category_key = c.category_key
+                AND r.revision = c.revision
+          )
+    """)
+    connection.exec_driver_sql("""
+        UPDATE category_evaluation_v3_configs
+        SET projected_revision_id = (
+            SELECT r.id
+            FROM category_evaluation_v3_revisions AS r
+            WHERE r.category_key = category_evaluation_v3_configs.category_key
+              AND r.revision = category_evaluation_v3_configs.revision
+        )
+        WHERE projected_revision_id IS NULL
+    """)
+    if connection.exec_driver_sql(
+        "SELECT id FROM category_evaluation_v3_configs "
+        "WHERE projected_revision_id IS NULL LIMIT 1"
+    ).first() is not None:
+        raise RuntimeError("v3 revision 迁移未能为全部运行时合同建立投影指针")
+
+    connection.exec_driver_sql(
+        "DROP TRIGGER IF EXISTS trg_category_evaluation_v3_revision_no_delete"
+    )
+    connection.exec_driver_sql("""
+        CREATE TRIGGER trg_category_evaluation_v3_revision_no_delete
+        BEFORE DELETE ON category_evaluation_v3_revisions
+        BEGIN
+            SELECT RAISE(ABORT, 'category evaluation revision cannot be deleted');
+        END
+    """)
+    connection.exec_driver_sql(
+        "DROP TRIGGER IF EXISTS "
+        "trg_category_evaluation_v3_revision_artifacts_immutable"
+    )
+    connection.exec_driver_sql("""
+        CREATE TRIGGER trg_category_evaluation_v3_revision_artifacts_immutable
+        BEFORE UPDATE OF
+            category_key, display_name, revision, parent_revision_id,
+            contract_json, classification_map_json,
+            subcategory_dimensions_json, dimension_deduction_rules_json,
+            media_penalty_enabled, contract_hash, created_by, created_at
+        ON category_evaluation_v3_revisions
+        BEGIN
+            SELECT RAISE(
+                ABORT,
+                'category evaluation revision artifacts are immutable'
+            );
+        END
+    """)
+
+
+def _clear_legacy_correction_confirmation_blockers(
+    connection: Connection,
+) -> None:
+    tables = {
+        row[0]
+        for row in connection.exec_driver_sql(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )
+    }
+    if "baseline_correction_runs" not in tables:
+        return
+    columns = {
+        row[1]
+        for row in connection.exec_driver_sql(
+            "PRAGMA table_info(baseline_correction_runs)"
+        )
+    }
+    required = {"status", "error_code", "blockers_json"}
+    if not required <= columns:
+        return
+
+    rows = connection.exec_driver_sql(
+        """
+        SELECT id, blockers_json
+        FROM baseline_correction_runs
+        WHERE status = 'failed'
+          AND error_code = 'LEGACY_CORRECTION_INCOMPLETE'
+        """
+    ).all()
+    for row in rows:
+        try:
+            blockers = json.loads(row[1] or "[]")
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if not isinstance(blockers, list):
+            continue
+        cleaned = [
+            blocker
+            for blocker in blockers
+            if not (
+                isinstance(blocker, dict)
+                and blocker.get("code") == "human_confirmation_required"
+            )
+        ]
+        if cleaned != blockers:
+            connection.exec_driver_sql(
+                "UPDATE baseline_correction_runs SET blockers_json = ? WHERE id = ?",
+                (json.dumps(cleaned, ensure_ascii=False, separators=(",", ":")), row[0]),
+            )
+
+
+def _migration_064_automate_baseline_correction_loop(
+    connection: Connection,
+) -> None:
+    """Replace the legacy human-intermediate gate with an automatic pipeline."""
+    tables = {
+        row[0]
+        for row in connection.exec_driver_sql(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )
+    }
+    if not {
+        "baseline_correction_runs",
+        "baseline_regression_runs",
+        "category_evaluation_v3_revisions",
+    } <= tables:
+        return
+    columns = {
+        row[1]
+        for row in connection.exec_driver_sql(
+            "PRAGMA table_info(baseline_correction_runs)"
+        )
+    }
+    if {
+        "stage",
+        "candidate_revision_id",
+        "regression_run_id",
+        "orchestration_json",
+        "decision",
+        "decided_by",
+        "decided_at",
+        "decision_note",
+    } <= columns:
+        return
+
+    connection.exec_driver_sql(
+        "ALTER TABLE baseline_correction_runs "
+        "RENAME TO baseline_correction_runs_legacy_v64"
+    )
+    connection.exec_driver_sql("""
+        CREATE TABLE baseline_correction_runs (
+            id INTEGER PRIMARY KEY,
+            idempotency_key VARCHAR(160) NOT NULL UNIQUE,
+            baseline_run_id INTEGER NOT NULL
+                REFERENCES baseline_regression_runs(id) ON DELETE RESTRICT,
+            category_key VARCHAR(40) NOT NULL,
+            selected_item_ids_json TEXT NOT NULL
+                CHECK(json_valid(selected_item_ids_json)
+                      AND json_type(selected_item_ids_json, '$') = 'array'),
+            input_snapshot_json TEXT NOT NULL
+                CHECK(json_valid(input_snapshot_json)
+                      AND json_type(input_snapshot_json, '$') = 'object'),
+            status VARCHAR(40) NOT NULL DEFAULT 'processing'
+                CHECK(status IN ('processing','awaiting_decision','approved','rejected','failed')),
+            stage VARCHAR(40) NOT NULL DEFAULT 'analysis'
+                CHECK(stage IN ('analysis','candidate_generation','candidate_validation','regression','decision')),
+            progress INTEGER NOT NULL DEFAULT 0
+                CHECK(progress BETWEEN 0 AND 100),
+            report_json TEXT NOT NULL DEFAULT '{}'
+                CHECK(json_valid(report_json)
+                      AND json_type(report_json, '$') = 'object'),
+            blockers_json TEXT NOT NULL DEFAULT '[]'
+                CHECK(json_valid(blockers_json)
+                      AND json_type(blockers_json, '$') = 'array'),
+            orchestration_json TEXT NOT NULL DEFAULT '{}'
+                CHECK(json_valid(orchestration_json)
+                      AND json_type(orchestration_json, '$') = 'object'),
+            candidate_revision_id INTEGER
+                REFERENCES category_evaluation_v3_revisions(id)
+                ON DELETE RESTRICT,
+            regression_run_id INTEGER
+                REFERENCES baseline_regression_runs(id) ON DELETE RESTRICT,
+            error_code VARCHAR(80) NOT NULL DEFAULT '',
+            error_message TEXT NOT NULL DEFAULT '',
+            attempt_count INTEGER NOT NULL DEFAULT 1
+                CHECK(attempt_count >= 1),
+            decision VARCHAR(20)
+                CHECK(decision IS NULL OR decision IN ('approved','rejected')),
+            decided_by VARCHAR(80),
+            decided_at DATETIME,
+            decision_note TEXT NOT NULL DEFAULT '',
+            created_by VARCHAR(80) NOT NULL DEFAULT 'system',
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            finished_at DATETIME
+        )
+    """)
+    connection.exec_driver_sql("""
+        INSERT INTO baseline_correction_runs (
+            id, idempotency_key, baseline_run_id, category_key,
+            selected_item_ids_json, input_snapshot_json, status, stage,
+            progress, report_json, blockers_json, orchestration_json,
+            candidate_revision_id, regression_run_id,
+            error_code, error_message, attempt_count,
+            decision, decided_by, decided_at, decision_note,
+            created_by, created_at, updated_at, finished_at
+        )
+        SELECT
+            id, idempotency_key, baseline_run_id, category_key,
+            selected_item_ids_json, input_snapshot_json,
+            CASE
+                WHEN status = 'awaiting_confirmation' THEN 'failed'
+                WHEN status IN ('processing','failed') THEN status
+                ELSE 'failed'
+            END,
+            'analysis',
+            CASE WHEN status = 'awaiting_confirmation' THEN 0 ELSE progress END,
+            report_json, blockers_json, '{}', NULL, NULL,
+            CASE
+                WHEN status = 'awaiting_confirmation'
+                THEN 'LEGACY_CORRECTION_INCOMPLETE'
+                ELSE error_code
+            END,
+            CASE
+                WHEN status = 'awaiting_confirmation'
+                THEN '旧版纠偏任务未创建候选或回归，请重新执行'
+                ELSE error_message
+            END,
+            attempt_count, NULL, NULL, NULL, '',
+            created_by, created_at, updated_at, finished_at
+        FROM baseline_correction_runs_legacy_v64
+    """)
+    _clear_legacy_correction_confirmation_blockers(connection)
+    connection.exec_driver_sql(
+        "DROP TABLE baseline_correction_runs_legacy_v64"
+    )
+    for statement in (
+        "CREATE INDEX IF NOT EXISTS ix_baseline_corrections_run "
+        "ON baseline_correction_runs(baseline_run_id)",
+        "CREATE INDEX IF NOT EXISTS ix_baseline_corrections_category "
+        "ON baseline_correction_runs(category_key)",
+        "CREATE INDEX IF NOT EXISTS ix_baseline_corrections_status "
+        "ON baseline_correction_runs(status)",
+        "CREATE INDEX IF NOT EXISTS ix_baseline_corrections_stage "
+        "ON baseline_correction_runs(stage)",
+        "CREATE INDEX IF NOT EXISTS ix_baseline_corrections_candidate "
+        "ON baseline_correction_runs(candidate_revision_id)",
+        "CREATE INDEX IF NOT EXISTS ix_baseline_corrections_regression "
+        "ON baseline_correction_runs(regression_run_id)",
+    ):
+        connection.exec_driver_sql(statement)
+
+
+def _migration_065_clear_legacy_correction_confirmation_blockers(
+    connection: Connection,
+) -> None:
+    """Remove the obsolete manual-confirmation blocker from migrated failures."""
+    _clear_legacy_correction_confirmation_blockers(connection)
+
+
+def _migration_066_add_workflow_kind(connection: Connection) -> None:
+    tables = {
+        row[0]
+        for row in connection.exec_driver_sql(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )
+    }
+    # Some historical forward-migration fixtures intentionally create only the
+    # tables needed by an earlier migration.  The production table is created
+    # by v44; if that table is absent, v66 must remain a no-op so the fixture
+    # can continue to the next version instead of failing on ALTER TABLE.
+    if "evaluation_production_runs" not in tables:
+        return
+    columns = {
+        row[1]
+        for row in connection.exec_driver_sql(
+            "PRAGMA table_info(evaluation_production_runs)"
+        )
+    }
+    if "workflow_kind" not in columns:
+        connection.exec_driver_sql(
+            "ALTER TABLE evaluation_production_runs "
+            "ADD COLUMN workflow_kind VARCHAR(20) NOT NULL DEFAULT 'incremental'"
+        )
+    connection.exec_driver_sql(
+        "CREATE INDEX IF NOT EXISTS ix_evaluation_production_runs_workflow_kind "
+        "ON evaluation_production_runs(workflow_kind, created_at)"
+    )
+    connection.exec_driver_sql(
+        "CREATE TRIGGER IF NOT EXISTS trg_evaluation_production_runs_workflow_kind "
+        "BEFORE INSERT ON evaluation_production_runs "
+        "WHEN NEW.workflow_kind NOT IN ('incremental','stock') "
+        "BEGIN SELECT RAISE(ABORT, 'invalid workflow_kind'); END"
+    )
+
+
+def _migration_067_add_projection_contract_registry(connection: Connection) -> None:
+    """Add append-only projection contracts and local reconciliation storage."""
+    connection.exec_driver_sql("""
+        CREATE TABLE IF NOT EXISTS projection_contracts (
+            id INTEGER PRIMARY KEY,
+            contract_key VARCHAR(120) NOT NULL,
+            version INTEGER NOT NULL,
+            target_role VARCHAR(40) NOT NULL
+                CHECK(target_role IN ('unified_dimension','search_labels','quality_governance')),
+            table_name VARCHAR(120) NOT NULL,
+            environment VARCHAR(20) NOT NULL DEFAULT 'local'
+                CHECK(environment IN ('local','test')),
+            primary_key_json TEXT NOT NULL,
+            field_mappings_json TEXT NOT NULL,
+            input_versions_json TEXT NOT NULL DEFAULT '{}',
+            mode VARCHAR(30) NOT NULL DEFAULT 'snapshot'
+                CHECK(mode IN ('snapshot','incremental_outbox')),
+            idempotency_key_template VARCHAR(300) NOT NULL,
+            checkpoint_json TEXT NOT NULL DEFAULT '{}',
+            reconciliation_json TEXT NOT NULL DEFAULT '{}',
+            rollback_json TEXT NOT NULL DEFAULT '{}',
+            owner VARCHAR(120) NOT NULL,
+            status VARCHAR(20) NOT NULL DEFAULT 'draft'
+                CHECK(status IN ('draft','active','retired')),
+            contract_hash VARCHAR(64) NOT NULL UNIQUE,
+            created_by VARCHAR(80) NOT NULL DEFAULT 'system',
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(contract_key, version)
+        )
+    """)
+    connection.exec_driver_sql("""
+        CREATE TABLE IF NOT EXISTS projection_manifests (
+            id INTEGER PRIMARY KEY,
+            contract_id INTEGER NOT NULL REFERENCES projection_contracts(id) ON DELETE RESTRICT,
+            manifest_hash VARCHAR(64) NOT NULL,
+            payload_hash VARCHAR(64) NOT NULL,
+            row_count INTEGER NOT NULL,
+            content_keys_json TEXT NOT NULL,
+            input_versions_json TEXT NOT NULL,
+            rows_json TEXT NOT NULL,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(contract_id, manifest_hash)
+        )
+    """)
+    connection.exec_driver_sql("""
+        CREATE TABLE IF NOT EXISTS local_projection_rows (
+            id INTEGER PRIMARY KEY,
+            table_name VARCHAR(120) NOT NULL,
+            content_key VARCHAR(320) NOT NULL,
+            contract_id INTEGER NOT NULL REFERENCES projection_contracts(id) ON DELETE RESTRICT,
+            contract_version INTEGER NOT NULL,
+            published_label_id INTEGER NOT NULL,
+            label_version INTEGER NOT NULL,
+            payload_json TEXT NOT NULL,
+            payload_hash VARCHAR(64) NOT NULL,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(table_name, content_key)
+        )
+    """)
+    connection.exec_driver_sql("""
+        CREATE TABLE IF NOT EXISTS projection_reconciliations (
+            id INTEGER PRIMARY KEY,
+            contract_id INTEGER NOT NULL REFERENCES projection_contracts(id) ON DELETE RESTRICT,
+            manifest_id INTEGER NOT NULL REFERENCES projection_manifests(id) ON DELETE RESTRICT,
+            target_table VARCHAR(120) NOT NULL,
+            status VARCHAR(20) NOT NULL
+                CHECK(status IN ('matched','drift','failed')),
+            reason VARCHAR(80) NOT NULL DEFAULT '',
+            row_count INTEGER NOT NULL DEFAULT 0,
+            missing_count INTEGER NOT NULL DEFAULT 0,
+            unexpected_count INTEGER NOT NULL DEFAULT 0,
+            expected_payload_hash VARCHAR(64) NOT NULL,
+            actual_payload_hash VARCHAR(64) NOT NULL,
+            version_match BOOLEAN NOT NULL DEFAULT 0,
+            checkpoint_json TEXT NOT NULL DEFAULT '{}',
+            compensation_json TEXT NOT NULL DEFAULT '{}',
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    for statement in (
+        "CREATE INDEX IF NOT EXISTS ix_projection_contracts_key "
+        "ON projection_contracts(contract_key, version)",
+        "CREATE INDEX IF NOT EXISTS ix_projection_contracts_target "
+        "ON projection_contracts(target_role, table_name, status)",
+        "CREATE INDEX IF NOT EXISTS ix_projection_manifests_contract "
+        "ON projection_manifests(contract_id, id)",
+        "CREATE INDEX IF NOT EXISTS ix_local_projection_rows_table "
+        "ON local_projection_rows(table_name, content_key)",
+        "CREATE INDEX IF NOT EXISTS ix_projection_reconciliations_contract "
+        "ON projection_reconciliations(contract_id, id)",
+    ):
+        connection.exec_driver_sql(statement)
+    for statement in (
+        """CREATE TRIGGER IF NOT EXISTS trg_projection_contracts_immutable
+        BEFORE UPDATE ON projection_contracts
+        BEGIN SELECT RAISE(ABORT, 'ProjectionContract is immutable'); END""",
+        """CREATE TRIGGER IF NOT EXISTS trg_projection_contracts_no_delete
+        BEFORE DELETE ON projection_contracts
+        BEGIN SELECT RAISE(ABORT, 'ProjectionContract cannot be deleted'); END""",
+        """CREATE TRIGGER IF NOT EXISTS trg_projection_manifests_append_only
+        BEFORE UPDATE ON projection_manifests
+        BEGIN SELECT RAISE(ABORT, 'ProjectionManifest is append-only'); END""",
+        """CREATE TRIGGER IF NOT EXISTS trg_projection_manifests_no_delete
+        BEFORE DELETE ON projection_manifests
+        BEGIN SELECT RAISE(ABORT, 'ProjectionManifest cannot be deleted'); END""",
+        """CREATE TRIGGER IF NOT EXISTS trg_projection_reconciliations_append_only
+        BEFORE UPDATE ON projection_reconciliations
+        BEGIN SELECT RAISE(ABORT, 'ProjectionReconciliation is append-only'); END""",
+        """CREATE TRIGGER IF NOT EXISTS trg_projection_reconciliations_no_delete
+        BEFORE DELETE ON projection_reconciliations
+        BEGIN SELECT RAISE(ABORT, 'ProjectionReconciliation cannot be deleted'); END""",
+    ):
+        connection.exec_driver_sql(statement)
+    violations = connection.exec_driver_sql("PRAGMA foreign_key_check").fetchall()
+    if violations:
+        raise RuntimeError(f"v67 投影合同迁移外键校验失败：{violations[:3]}")
+
+
 MIGRATIONS = [
     Migration(1, "add_sample_expected_level", _migration_001_add_sample_expected_level),
     Migration(2, "add_review_corrections", _migration_002_add_review_corrections),
@@ -7384,6 +7877,31 @@ MIGRATIONS = [
         62,
         "add_mechanism_release_axes",
         _migration_062_add_mechanism_release_axes,
+    ),
+    Migration(
+        63,
+        "add_category_evaluation_v3_revisions",
+        _migration_063_add_category_evaluation_v3_revisions,
+    ),
+    Migration(
+        64,
+        "automate_baseline_correction_loop",
+        _migration_064_automate_baseline_correction_loop,
+    ),
+    Migration(
+        65,
+        "clear_legacy_correction_confirmation_blockers",
+        _migration_065_clear_legacy_correction_confirmation_blockers,
+    ),
+    Migration(
+        66,
+        "add_evaluation_production_workflow_kind",
+        _migration_066_add_workflow_kind,
+    ),
+    Migration(
+        67,
+        "add_projection_contract_registry",
+        _migration_067_add_projection_contract_registry,
     ),
 ]
 

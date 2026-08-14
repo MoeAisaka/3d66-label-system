@@ -76,6 +76,21 @@ const EvaluationPackageDetailPage = lazy(() =>
 const SystemManagementPage = lazy(() =>
   import("@/pages/system-management-page").then((module) => ({ default: module.SystemManagementPage })),
 )
+const IncrementalWorkspacePage = lazy(() =>
+  import("@/pages/incremental-workspace-page").then((module) => ({ default: module.IncrementalWorkspacePage })),
+)
+const StockWorkspacePage = lazy(() =>
+  import("@/pages/stock-workspace-page").then((module) => ({ default: module.StockWorkspacePage })),
+)
+const OperationsCenterPage = lazy(() =>
+  import("@/pages/operations-center-page").then((module) => ({ default: module.OperationsCenterPage })),
+)
+const QualityAssetsPage = lazy(() =>
+  import("@/pages/quality-assets-page").then((module) => ({ default: module.QualityAssetsPage })),
+)
+const ProjectionGovernancePage = lazy(() =>
+  import("@/pages/projection-governance-page").then((module) => ({ default: module.ProjectionGovernancePage })),
+)
 
 export default function App() {
   const me = useQuery({
@@ -120,7 +135,11 @@ export default function App() {
         <Route path="/login" element={<LoginPage user={user} />} />
         {user ? (
           <Route element={<AppShell user={user} />}>
-            <Route index element={<Navigate to="/workflow/production-line" replace />} />
+            <Route index element={<Navigate to="/workflow/incremental" replace />} />
+            <Route path="workflow/incremental" element={<Suspense fallback={<RouteLoading />}><IncrementalWorkspacePage /></Suspense>} />
+            <Route path="workflow/stock" element={<Suspense fallback={<RouteLoading />}><StockWorkspacePage /></Suspense>} />
+            <Route path="workflow/operations" element={<Suspense fallback={<RouteLoading />}><OperationsCenterPage /></Suspense>} />
+            <Route path="workflow/quality-assets" element={<Suspense fallback={<RouteLoading />}><QualityAssetsPage /></Suspense>} />
             <Route path="workflow/production-line" element={<Suspense fallback={<RouteLoading />}><EvaluationPackagePipelinePage user={user} /></Suspense>} />
             <Route path="workflow/materials/packages" element={<AssetsPage />} />
             <Route path="workflow/materials/assets" element={<Navigate to="/workflow/materials/packages" replace />} />
@@ -148,6 +167,7 @@ export default function App() {
             <Route path="workflow/governance/users" element={<UsersPage />} />
             <Route path="workflow/governance/canary" element={<Suspense fallback={<RouteLoading />}><CanaryRunsPage /></Suspense>} />
             <Route path="workflow/governance/audit" element={<Suspense fallback={<RouteLoading />}><AuditEventsPage /></Suspense>} />
+            <Route path="workflow/governance/projections" element={<Suspense fallback={<RouteLoading />}><ProjectionGovernancePage /></Suspense>} />
 
             <Route path="assets" element={<Navigate to="/workflow/materials/packages" replace />} />
             <Route path="jobs" element={<Navigate to="/workflow/materials/jobs" replace />} />

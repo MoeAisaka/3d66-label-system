@@ -1,6 +1,6 @@
 # 3d66 标签系统｜当前项目状态
 
-> 最后更新：2026-08-11
+> 最后更新：2026-08-13
 > 本文件只记录“现在做到哪里”；长期原则见 `PRODUCT.md` 和 `AGENTS.md`，历史背景见 `CODEX_HANDOFF.md`。
 
 ## 最新实施：3D & SU 模型美感评测机制适配（2026-08-14）
@@ -16,7 +16,7 @@
   描述不被覆盖，未知外部合同冲突 fail-closed。提示词从 `backend/prompts/` 读取并保留
   根目录回退。
 - 功能性模型原始比例 35:25:20:15:10 合计 105，合同落库前按相对比例归一化为总和 1.0；
-  该取舍已记录在 ADR-0043、设计文档和专项测试中。
+  该取舍已记录在 ADR-0046、设计文档和专项测试中。
 
 当前验证：
 
@@ -24,6 +24,158 @@
 - 3D/SU seed 与 API 定向：`22 passed, 1 warning`；startup seed 幂等回归 `4 passed`。
 - 前端 `npm run lint` 与 `npm run build` 均通过；仅保留既有主 chunk 大于 500 kB 的 Vite 警告。
 - `git diff --check` 通过；未导入 NAS/Excel、未调用真实模型、未访问生产数据、未部署或推送。
+## 最新实施：TPENG 标签实验台双工作区与多表投影底座（2026-08-13）
+
+- 产品定位继续遵循 ADR-0042/0043：**TPENG 标签实验台（LabelLab）**是标签体系重构的统一产品载体和标签/内容中台通用底座，统一承载完整生产闭环；业务类目只扩展合同、提示词、维度、规则、门槛和专用视图。
+- 新增“增量评测 / 存量回归”两个串行工作区，共享素材、模型、机制、纠偏、AI 迭代、质量、发布和调度内核。一级页面只保留主线状态、决策证据和动作，复杂配置、历史、指标矩阵和失败样本继续下沉到抽屉、Dialog 或专用工作台。
+- `EvaluationProductionRun.workflow_kind` 显式区分增量上下文；本地 `content-ingress-v1` 事件经活动类目和现役 profile 校验后，幂等创建或复用 `production_import` 增量素材包。缺素材、未知/未启用 profile 或陈旧事件 fail-closed；接入不创建评测 Job，也不代表真实上游已连接。
+- 运行中心显示五类队列、全局并发、配额、熔断阻塞、重试延迟、恢复队列和最后检查点；增量与存量共享调度内核，但不混淆任务主线。
+- 质量资产工作区统一管理普通/黄金/挑战集，支持真值修订、锁定和 CSV/JSON/Manifest 导出；基准回归新增字段级准确率、召回率、混淆矩阵、失败样本以及宏/微平均。指标只作人工决策证据，不自动启用候选。
+- 类目 profile 注册表成为唯一扩展边界：标准图像和 Proposal PDF 可受控编辑/执行；3D、SU 只预留专用编辑器槽，当前只读且禁止执行；未知 profile 不加载编辑器、不创建候选并在权威 Worker 启动前失败。
+- 新增多表 Projection Contract Registry、Manifest、本地模拟适配器和对账记录。下游默认形态为一个统一大维表和数个职责小表，只投影正式发布事实，并按资产、标签、机制和模型版本完成行数、缺失、版本和哈希对账；下游表不是 Canonical 事实主库。
+- 机制发布轴与标签事实发布轴继续独立；AI 只自动生成完整候选和回归证据，最终启用/拒绝、存量重跑和正式标签发布仍由具备权限的人工分别决定。
+
+当前聚焦验证：
+
+- 后端本批聚焦（双工作区上下文、接入组包、质量资产、投影、字段指标、profile、v3 API 与迁移）：`83 passed, 1 warning`。
+- 后端全量（Python 3.12、隔离 `DATA_DIR`）：`1284 passed, 1 skipped, 6 warnings`；warning 仅为既有 FastAPI `httpx2` 与 PDF SWIG 弃用提示。
+- 前端 `dimensions`、`v3-only`、`node-correction`、`proposal-pdf`、`balanced-100`、`level-scale-thinking`、`model-registry`、`information-architecture`、`mechanism-editor`、`dual-workspaces`、Lightbox 合同及 TypeScript/Vite production build 全部通过；仅保留既有主 chunk 大于 500 kB warning。
+- Edge `151.0.4129.78` 使用纯临时 SQLite 和本地 `127.0.0.1:18173` 完成 `1440×900`、`1280×720` 桌面验收：增量、存量、运行中心、质量资产与 Proposal PDF 机制配置均无白屏、文档横向溢出、控制台 warning/error；运行中心二级抽屉可正常打开，页面展示 `LabelLab v0.2.0 · build 4138cc0`。
+- 首轮 Edge 验收发现运行中心把 `/api/queues/status` 顶层 `global_limit` 错读为 `policy.global_limit` 并白屏；已用失败合同冻结并修复，提交为 `4138cc0`，复验通过。
+
+当前非目标与交付门：
+
+- 本批不连接真实上游、搜索/推荐、知识图谱或公司业务数据库，不执行真实大维表/小表写入，不实现大规模存量 Worker、Embedding 生命周期、3D/SU 专用业务编辑器或移动端验收。
+- 本批未推送 Codeup、未合并远端、未部署 `192.168.1.35:8081`；任何外部写入、推送、合并或部署仍需新的精确授权。
+- 下一阶段 Gap 见 [`docs/discussion/tpeng-labellab-gap-register-20260813.md`](docs/discussion/tpeng-labellab-gap-register-20260813.md)。Gap 将返回【标签体系】重构会话由 Owner 冻结；冻结后仍由 TPENG 标签实验台会话作为唯一代码写入方。
+
+## 最新修复：纠偏分析失败与 SQLite 并发恢复（2026-08-13）
+
+- 当前分支为 `codex/legacy-correction-deployment-receipt-v1`。本批修复两类相连故障：自动纠偏在模型调用期间长期持有 SQLite 写事务，导致人工纠偏审核面板 500；调优模型返回一层 `candidate` 包装或字段不完整时，任务只显示笼统失败。
+- 启动纠偏现在先短事务冻结样本、确定性报告和现役机制快照，再由后台任务在无数据库事务状态下调用调优模型，最后以短事务写入候选 revision、候选回归或失败证据；人工纠偏可在模型运行期间正常写入。重试继续沿用冻结样本，不新增人工配置。
+- 候选解析兼容 `candidate`、`mechanism_candidate`、`unified_candidate` 一层包装，同时严格校验完整统一机制合同；失败信息列出具体字段路径，例如 `prompt.system_prompt`、`revision.contract`。
+- Worker 对 SQLite `database is locked/busy` 做有限退避，锁冲突不再退出进程；`/api/health` 增加 worker 信息，`/api/health/ready` 在主服务存活但无活跃 worker 时返回 503，容器健康检查改用 readiness。
+- 当前纠偏区域固定说明：分析报告、候选机制、回归指标和风险提示均在“存量回归 → 基准回归 → 处理纠偏（当前区域）”查看；候选回归完成后仍在该区域“等待人工决策”，仅系统管理员在此点击“启用候选”或“拒绝候选”。不新增结果页、不自动采纳、不发布标签事实。
+- 现有管理员权限边界、双发布轴、人工真值、存量重跑和移动端非目标保持不变。
+
+当前验证：
+
+- 后端专项（基准纠偏、候选解析、worker 锁退避、readiness）：`36 passed, 1 warning`。
+- 后端全量（隔离 `DATA_DIR`）：`1259 passed, 1 skipped, 6 warnings`。
+- 前端信息架构与 workspace component browser contract 通过；TypeScript lint 与 Vite production build 通过，仅保留既有主 chunk 大于 500 kB 的 warning；`git diff --check` 通过。
+- 已完成 Codeup `main` 快进合并与测试服部署：`main@7575e6415ce89ece4a66a155672146a44de6b8ff`，服务器 HEAD、容器代码和静态构建均对齐 `7575e641`。部署前快照为 `/data/database/predeploy-snapshots/app-predeploy-7575e641-20260813T110224Z.db`，SHA-256 `bbd91409ecd997ccb4eb72224d37a0f75cced3a8ae9808d740c7d9c8339e8395`，快照 integrity=`ok`、FK=`[]`。
+- 部署后 `/api/health` 与 `/api/health/ready` 均通过；容器 `3d66-label-system-test` 为 `running/healthy`、restart count=0，8 个 worker 活跃，数据库 integrity=`ok`、FK=`[]`、migration=65，active jobs/runs/corrections 均为 0。Edge 当前纠偏页未重复提交真实业务操作；浏览器已有页面由另一会话占用，保留用户现有页面控制权，采用静态资源和接口证据完成只读验收。
+
+## 最新修复：历史纠偏任务移除旧人工确认阻塞（2026-08-13）
+
+- 当前隔离分支为 `codex/legacy-correction-blocker-cleanup-v1`，基于 Codeup
+  `main@e570c4e`。本修复只处理自动纠偏闭环上线前遗留的失败记录，不修改新纠偏任务的
+  五阶段编排、最终人工启用/拒绝权限、机制发布轴、标签事实发布轴或存量重跑合同。
+- 根因是迁移 64 把旧 `awaiting_confirmation` 任务转为
+  `LEGACY_CORRECTION_INCOMPLETE` 失败记录时，原样复制了
+  `human_confirmation_required` blocker；前端因此继续显示已经废止的人工中间门禁。
+- 新增迁移 65，只对 `status=failed`、错误码为
+  `LEGACY_CORRECTION_INCOMPLETE` 的历史记录删除
+  `human_confirmation_required` blocker。失败状态、错误码、失败说明和其他 blocker 证据均
+  保留；解析失败或结构异常的数据不覆盖。迁移可重复执行且幂等。
+- 同步收紧迁移 64：新数据库从旧表升级时使用相同的精确过滤逻辑，避免未来新安装再次写入
+  误导性 blocker。失败页既有文案继续说明重新执行会沿用冻结样本，无需补充任何配置。
+
+当前验证：
+
+- TDD 红灯已确认旧迁移会保留 `human_confirmation_required`；修复后的 v64/v65 定向回归
+  `2 passed`，迁移全套 `40 passed`，基准回归专项 `11 passed, 1 warning`。
+- 后端全量使用隔离 `DATA_DIR`：`1254 passed, 1 skipped, 6 warnings`（Python 3.12）。
+- 前端全部合同脚本、lightbox 浏览器合同、TypeScript lint 与带 build SHA 的 Vite production
+  build 均通过；仅保留既有主 chunk 大于 500 kB 的构建 warning。`git diff --check` 通过。
+- 已通过 Codeup MR #4（创建合并节点，源分支保留）合入
+  `main@8b9e5c4cff418196e93f63852ff39b9ed8f412e7`，并经受保护脚本部署到公司内网测试环境
+  `192.168.1.35:8081`。功能验收点的服务器 HEAD、Codeup `main`、静态资源 build SHA 均为
+  `8b9e5c4`；容器 `3d66-label-system-test` 为 `running/healthy`、restart count=0，内外
+  `/api/health` 均为 HTTP 200。部署回执随后通过仅文档 MR #5、#6 合入；最终文档同步
+  仍未改变运行时行为，测试服按包含这些回执的 Codeup `main` bundle 再次同步。
+- 部署前已创建并保留 SQLite 在线快照
+  `/data/database/predeploy-snapshots/app-predeploy-e570c4e4-before-8b9e5c4c-20260813T081434Z.db`
+  （SHA-256 `a659c4a17ce99799e8b74b34486ccb08eb30b80cf728f3f2a10d5f6e287fb3b3`，
+  integrity=`ok`、FK=0、migration=64）；完整 Codeup main bundle 保留于
+  `outputs/deployments/2026-08-13-legacy-correction-blocker-v1/`
+  （SHA-256 `e6ea440fcca4f728e61cc43b8ab6d14fd074e628e8e04e0efad57bcfaff14be5`）。
+- 部署后数据库 integrity=`ok`、FK=0、migration=65；活跃评测、基准回归、processing
+  纠偏、存量重跑均为 0。3 条目标历史记录保持 `failed`、
+  `LEGACY_CORRECTION_INCOMPLETE` 与原失败说明，`blockers_json` 均已为 `[]`。
+- Edge 桌面验收覆盖基准回归及 Proposal PDF V3 合同配置：`1440x900`、`1280x720`
+  无白屏、无文档横向溢出、无控制台错误；功能验收点显示 `LabelLab v0.2.0 · build 8b9e5c4`，
+  文档同步重建后的页面内容与功能验收点一致。
+  历史纠偏页不再显示“提示词或维度调整必须由人工确认后另行创建候选版本”，而是明确
+  “中间无需人工配置”和“重新执行会沿用本次冻结样本，不需要补充任何配置”。未点击
+  “启动纠偏分析”或“重新执行”，未创建真实业务任务。
+
+## 最新实施：基准回归自动纠偏闭环（2026-08-13）
+
+- 当前隔离分支为 `codex/automated-correction-loop-v1`，基于前端信息架构交付分支
+  `codex/frontend-information-architecture-v1@2591e92`；功能收口提交为 `3eb2ec4`，已推送
+  Codeup 同名独立分支。本批不合并、不部署到 `192.168.1.35:8081`，不清理临时验收目录。
+- “启动纠偏分析”已从人工中间阻塞改为持久化自动编排：冻结人工纠偏样本 → AI 分析 →
+  生成并校验统一机制候选 → 冻结候选 revision → 自动创建候选基准回归 → 汇总基准/候选
+  指标 → 最终人工启用或拒绝。提示词、维度、分类映射、加扣分与等级边界作为同一个机制
+  候选包处理，中间不再要求人工另建版本或配置参数。
+- `BaselineCorrectionRun` 新增自动阶段、候选 revision、候选回归、编排证据和最终决策审计；
+  旧 `awaiting_confirmation` 数据迁移为可重试失败并保留原报告。候选回归 Job 显式冻结
+  `v3_authoritative_bundle(candidate)`，不读取运行时现役投影替代候选。
+- 最终启用/拒绝接口收紧为系统管理员专属。项目管理员返回 403；回归未完成、回归建议未
+  通过或现役 projection 漂移时不能启用。批准前现役提示词和 v3 projection 均保持不变；
+  拒绝保留候选与证据；同结论幂等、冲突结论返回 409。
+- 机制发布轴与标签事实发布轴继续独立：本批批准动作只切换类目现役机制 revision 与提示词，
+  不创建 `PublishedLabel`、不发布标签事实、不触发存量重跑，也没有新增生产部署调用。
+- 前端纠偏页改为五阶段自动进度、基准/候选指标对比、退化项与最终启用/拒绝；失败时只提供
+  明确原因与重新执行，不再展示“另行创建候选版本”或“当前阻塞”。最终按钮只对系统管理员
+  展示，启用确认文案明确不会发布标签事实。
+- 本批与另一路“运行配置抽屉挤压修复”保持隔离；没有把该布局修复纳入本分支。
+
+当前验证：
+
+- 后端迁移、基准纠偏、类目 v3 revision、v3 权威 worker 四组专项：
+  `92 passed, 1 warning`（Python 3.12，隔离测试数据库）。
+- 前端信息架构合同与 workspace component browser contract 通过；TypeScript lint 通过；
+  `LABEL_LAB_BUILD_SHA=$(git rev-parse --short HEAD) npm --prefix frontend run build` 通过。
+  仅保留既有主 chunk 大于 500 kB 的构建 warning；`git diff --check` 通过。
+- Microsoft Edge `151.0.4129.72` 使用纯临时文件数据库与确定性生成器完成桌面验收：
+  `1440×900`、`1280×720` 均完整展示五阶段和指标对比，无文档级横向溢出、白屏、控制台
+  异常或 4xx/5xx；1280 宽阶段卡自动排为两列。启用按钮已打开原生确认框并按 Esc 取消，
+  随后 API 复核仍为 `awaiting_decision/decision`、`decision=null`，未发生候选启用。
+- Edge 验收目录保留在 `/tmp/labellab-edge-acceptance-final.JwLlgE`；临时 18081 服务已正常停止。
+  验收未调用真实调优模型、真实批量回归、真实生产数据或生产发布接口。
+
+仍未完成/明确交付门：
+
+- 尚未合并到 Codeup `main`，也未部署公司内网测试服务器。合并、部署、真实调优模型金丝雀、
+  真实候选回归和启用生产候选均需要后续单独复核与明确授权。
+- 统一 revision 正式纳入 `MechanismRelease/EvaluationPackage` 发布模型、追加式机制回滚入口、
+  真实存量重跑 Worker 与标签事实发布仍维持既有 Gap，不因本批自动纠偏闭环而扩大范围。
+
+## 最新实施：前端信息架构与机制编辑器重构（2026-08-12）
+
+- 产品定位继续以 ADR-0042/0043 为准：**TPENG 标签实验台（LabelLab）**是“标签体系重构”的统一产品载体，也是标签/内容中台通用底座；业务类目只做场景扩展，不复制平台能力。
+- 当前分支为 `codex/frontend-information-architecture-v1`，已验证功能提交为 `90270fe`，Codeup `main` 基线与 merge-base 均为 `ca829b7`（MR #1 合并点）。本批通过 Codeup MR #2 向 `main` 交付；最终合并与测试服务器部署状态以 Codeup MR 和受保护部署记录为准。
+- Task 10 已完成：存量回归一级页面聚焦“选择基准集 → 启动回归 → 逐条确认与纠偏”，复杂内容进入 `BaselineSetDialog`、`RunConfigDrawer`、`MetricsDrawer`、`RunHistoryDrawer` 和 `CorrectionWorkbench`；纠偏上下文通过 `?run=<id>&item=<id>&mode=correction` 可恢复。
+- 当前批次仅做前端信息架构、合同脚本和文档边界；没有新增后端状态、机制激活、自动发布、真实存量重跑 Worker、正式标签事实写入或新权限。Proposal PDF 仍保持独立三分项加法；3D/SU 只保留受控插件注册与安全降级边界。
+- ADR-0044 与全路由审计已补齐：一级页面/二级承载、受控 `profile_type` 插件、candidate revision、双发布轴和下游正式事实消费边界已记录。候选绑定、manifest、原子 projection switch、追加式机制回滚仍列为 Owner=`标签体系` 的下一阶段 Gap。
+- 验收修复已补齐：人工验收进度按整轮分页聚合，接口失败或数量不完整时 fail-closed；`?run=<id>&item=<id>&mode=correction` 直接刷新保持 run/item 身份；`BaselineSetDialog` 与三个二级抽屉关闭后均把键盘焦点恢复到触发按钮。
+
+当前验证：
+
+- 后端完整套件：`1251 passed, 1 skipped, 1 deselected, 6 warnings`；`test_macos_keychain_real_isolated_round_trip_update_and_cleanup` 因依赖真实 macOS Keychain 环境明确排除，未宣称通过。
+- 前端 `dimensions`、`v3-only`、`node-correction`、`proposal-pdf`、`balanced-100`、`level-scale-thinking`、`model-registry`、`information-architecture`、`mechanism-editor` 合同全部通过；workspace component 与 Lightbox 浏览器合同通过。
+- TypeScript lint、带真实 Git 短 SHA 的 Vite production build、`build dev` 产物扫描和 `git diff --check` 通过；仅保留既有主 chunk 大于 500 kB 的构建 warning。
+- Microsoft Edge 桌面验收通过：`1440×900`、`1280×720` 下高级设置、V3 合同配置、存量回归与纠偏深链均无文档级横向溢出、登录后控制台错误或 4xx/5xx。
+- Proposal PDF revision 3 可从 UI 重载并保留未知 `extension`，现役仍为 revision 1；图像候选 revision 2 保留 `edge_qa_bonus`、加分 3、tags `edge,qa` 与维度上限 99，现役 hash 未变；未知 `future-3d-v1` 只读降级且无写按钮。
+- 201 条跨分页回归显示“已确认 201/201 · 未评分/失败阻塞 0”，整轮汇总请求使用 `limit=1000`，完成人工验收按钮启用；四个浮层焦点恢复和纠偏深链刷新均通过。
+
+仍未完成/明确非本阶段闭环：
+
+- 全路由审计以外的页面重构、3D/SU 专用编辑器、候选自动激活、真实生产发布和真实存量重跑执行均不在本批。
+- candidate revision → candidate-aware regression snapshot、回归证据 → `EvaluationPackage` manifest、approved package → 原子 active projection switch、追加式机制回滚仍待【标签体系】Owner 单独冻结。
+- 本批完成后继续由 TPENG 标签实验台会话作为唯一代码写入方；本状态更新不构成下一阶段实施授权。
 
 ## 最新实施：TPENG 标签实验台统一底座——标签机制与模型管理 v1（2026-08-11）
 
@@ -51,6 +203,19 @@
 - 数据库采用增量迁移 61（模型注册中心）与 62（机制发布/存量重跑）；冻结快照受数据库
   trigger 保护。迁移 61 只在旧配置表具备完整投影列时导入兼容记录，并显式写入审计
   时间，兼容最小历史表与 ORM 预建表。旧表、旧 API 和历史发布事实未删除、未覆盖。
+
+### 本次同步：TPENG 中台上层架构约束（2026-08-11）
+
+- 新增 ADR-0043，固化统一业务闭环：下游字段需求合同 → 素材接入 → 标注路径/任务 → 自动与人工标注
+  → 纠偏验收 → 版本发布 → 下游引用/对账 → Badcase 回流；产品名称和类目扩展边界继续遵循 ADR-0042。
+- 固化事实主权：`semantic.*`、`quality.*`、`governance.*` 是后续 Canonical 资产事实命名空间；人工真值、
+  证据、来源、模型/规则版本、审核和发布状态必须可追溯。搜索索引、知识图谱和向量索引只能作为可重建
+  消费投影；Query×素材相关性、排序权重、召回融合、在线实验和知识图谱内部关系属于下游策略。
+- 固化向量边界：中台后续负责资产/图片/文本/多模态 Embedding 生命周期，并以“资产语义投影服务”承载；
+  知识图谱负责实体关系与图 Embedding，搜索/推荐负责 Query Embedding、相似度、召回与排序。上述 Gap
+  只记录约束，不在本批次实现。
+- 能力映射与 Gap 清单见 [`docs/discussion/tpeng-platform-capability-map-and-gaps-20260811.md`](docs/discussion/tpeng-platform-capability-map-and-gaps-20260811.md)。当前已实现接入、评测、纠偏、双发布轴和正式消费；字段需求合同、Canonical 事实命名空间、统一资产版本、投影 registry、Embedding 生命周期和真实重跑 Worker 仍待 Owner 冻结。
+- 本次同步不扩大 ADR-0041 的实施范围、非目标、权限或验收。当前批次完成后将 Gap 清单返回【标签体系】重构会话；下一阶段冻结后仍由 TPENG 标签实验台会话作为唯一代码写入方。
 
 当前验证：
 
@@ -1458,7 +1623,7 @@ doctor 九项门禁：两个变体下均全部通过
 | 黄金回归 | 已完成基础流程 | 全量运行与比较；发布前硬门禁尚未完成 |
 | 模型迁移 | 已完成基础流程 | 旧结果基线、新模型重跑、差异/抽检人工判断 |
 | 智能抽样 v1 | 已完成 | 必审/抽审/暂缓/已审、稳定 10% 抽样、原因和优先级 |
-| 抽样策略配置 v1.1 | 已提交 | 自动测试和构建通过，待补一次真实浏览器验收 |
+| 抽样策略配置 v1.1 | 已提交 | 自动测试和构建通过，尚需一次真实浏览器验收 |
 | 初审人数弹性机制 | 当前工作树已完成 | 初期默认 1 人即时定案；支持切换 3/5/7/9 人，收齐全部冻结席位后计算多数共识；面板创建时冻结人数 |
 | P0-E 金丝雀前端编排 | 工作树已完成 | 已接 E3 认证 API；只登记门禁证据，不执行导入、下载、模型、Gold 或发布 |
 | macOS 部署生命周期 | 离线能力已完成 | 安装/诊断/前台启动/脱敏备份恢复已测试；目标 MacBook 尚未实际部署 |

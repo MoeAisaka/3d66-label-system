@@ -273,6 +273,9 @@ function NodeValueEditor({ node, value, onChange }: { node: CorrectionNode; valu
     return <div className="divide-y divide-[var(--line)] border border-[var(--line-strong)]">
       {(node.ruleDefinitions ?? []).map((rule) => {
         const hit = hits.find((item) => item.rule_id === rule.rule_id)
+        const bonus = rule.kind === "bonus"
+        const polarityLabel = bonus ? "加分" : "扣分"
+        const scoreLabel = `${polarityLabel} ${rule.value} 分`
         return <div key={rule.rule_id} className={`px-4 py-4 ${hit ? "bg-[#fffaf0]" : "bg-white"}`}>
           <div className="flex items-start gap-3">
             <input
@@ -285,7 +288,7 @@ function NodeValueEditor({ node, value, onChange }: { node: CorrectionNode; valu
             <div className="min-w-0 flex-1">
               <div className="flex flex-wrap items-start justify-between gap-2">
                 <div><p className="text-sm font-bold">{rule.description}</p><p className="font-data mt-1 text-[0.68rem] text-[var(--muted)]">规则 {rule.rule_id}{rule.tags?.length ? ` · ${rule.tags.join(" / ")}` : ""}</p></div>
-                <Badge tone={hit ? "warning" : "neutral"}>{hit ? `命中 · 扣 ${rule.deduction} 分` : `未命中 · 扣 ${rule.deduction} 分`}</Badge>
+                <Badge tone={hit ? (bonus ? "success" : "warning") : "neutral"}>{hit ? `命中 · ${scoreLabel}` : `未命中 · ${scoreLabel}`}</Badge>
               </div>
               {hit && <div className="mt-3 grid gap-3 md:grid-cols-[160px_minmax(0,1fr)]">
                 <label><span className="mb-1.5 block text-xs font-semibold">置信度</span><select className={selectClassName} value={hit.confidence} onChange={(event) => onChange(updateRuleHit(hits, rule.rule_id, { confidence: event.target.value as NodeCorrectionConfidence }))}><option value="high">高</option><option value="medium">中</option><option value="low">低</option></select></label>

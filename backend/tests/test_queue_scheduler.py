@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import asyncio
+import sqlite3
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
@@ -8,9 +10,10 @@ from datetime import datetime, timedelta, timezone
 from email.utils import format_datetime
 
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, event, func, select
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -74,6 +77,54 @@ def test_default_reserved_shares_and_small_concurrency_guarantees() -> None:
     small = reserved_capacities(QueuePolicy(global_limit=2))
     assert small["interactive"] == 1
     assert small["production_batch"] == 1
+
+
+def test_process_one_retries_transient_sqlite_claim_lock(monkeypatch) -> None:
+    attempts = iter([
+        OperationalError(
+            "BEGIN IMMEDIATE",
+            {},
+            sqlite3.OperationalError("database is locked"),
+        ),
+        None,
+    ])
+    def claim_next_job_with_lock():
+        value = next(attempts)
+        if isinstance(value, BaseException):
+            raise value
+        return value
+
+    monkeypatch.setattr(worker, "claim_next_job", claim_next_job_with_lock)
+    monkeypatch.setattr(worker.time, "sleep", lambda _seconds: None)
+
+    assert asyncio.run(worker.process_one()) is False
+
+
+def test_health_ready_fails_closed_without_active_worker(monkeypatch) -> None:
+    main_module = __import__("app.main", fromlist=["health_ready"])
+    monkeypatch.setattr(
+        main_module,
+        "automation_worker_snapshot",
+        lambda _db: {"active_worker_count": 0, "workers": []},
+    )
+
+    with pytest.raises(HTTPException) as error:
+        main_module.health_ready(object())
+
+    assert error.value.status_code == 503
+    assert error.value.detail["code"] == "worker_not_ready"
+
+
+def test_health_ready_reports_ready_with_active_worker(monkeypatch) -> None:
+    main_module = __import__("app.main", fromlist=["health_ready"])
+    workers = {"active_worker_count": 1, "workers": [{"worker_id": "w1"}]}
+    monkeypatch.setattr(main_module, "automation_worker_snapshot", lambda _db: workers)
+
+    assert main_module.health_ready(object()) == {
+        "status": "ready",
+        "service": "3d66-label-system",
+        "workers": workers,
+    }
 
 
 def test_fifo_is_preserved_inside_selected_queue() -> None:

@@ -2,6 +2,7 @@ import { useState, type ReactNode } from "react"
 import {
   ArrowsClockwise,
   ChartLineUp,
+  Database,
   ListChecks,
   List,
   SignOut,
@@ -14,21 +15,22 @@ import { useMutation, useQueryClient } from "@tanstack/react-query"
 
 import { Button } from "@/components/ui/button"
 import { api } from "@/lib/api"
+import { AppVersion } from "@/lib/app-version"
 import type { User } from "@/lib/types"
 import { cn } from "@/lib/utils"
 
 export const primaryWorkflowDomains = [
   {
-    to: "/workflow/production-line",
+    to: "/workflow/incremental",
     matches: [
+      "/workflow/incremental",
       "/workflow/production-line",
       "/workflow/materials/packages",
       "/workflow/materials/assets",
-      "/workflow/materials/jobs",
       "/assets",
     ],
     index: "01",
-    label: "开始评测",
+    label: "增量评测",
     icon: ArrowsClockwise,
     tabs: [
       { to: "/workflow/materials/packages", label: "1 导入素材" },
@@ -37,13 +39,35 @@ export const primaryWorkflowDomains = [
     ],
   },
   {
-    to: "/workflow/optimization/baseline-regression",
-    matches: ["/workflow/optimization/baseline-regression"],
-    index: "B",
+    to: "/workflow/stock",
+    matches: ["/workflow/stock", "/workflow/optimization/baseline-regression"],
+    index: "02",
     label: "存量回归",
     icon: ChartLineUp,
     tabs: [
       { to: "/workflow/optimization/baseline-regression", label: "基准回归与处理纠偏" },
+    ],
+  },
+  {
+    to: "/workflow/operations",
+    matches: ["/workflow/operations", "/workflow/materials/jobs"],
+    index: "03",
+    label: "运行中心",
+    icon: ArrowsClockwise,
+    tabs: [
+      { to: "/workflow/operations", label: "运行总览" },
+      { to: "/workflow/materials/jobs", label: "任务明细" },
+    ],
+  },
+  {
+    to: "/workflow/quality-assets",
+    matches: ["/workflow/quality-assets", "/legacy/sample-sets"],
+    index: "04",
+    label: "质量资产",
+    icon: Database,
+    tabs: [
+      { to: "/workflow/quality-assets", label: "黄金数据集" },
+      { to: "/legacy/sample-sets", label: "完整样本库" },
     ],
   },
   {
@@ -55,7 +79,7 @@ export const primaryWorkflowDomains = [
       "/workflow/review/completed",
       "/legacy/review",
     ],
-    index: "02",
+    index: "05",
     label: "处理纠偏",
     icon: ListChecks,
     tabs: [
@@ -68,7 +92,7 @@ export const primaryWorkflowDomains = [
   {
     to: "/workflow/releases/packages",
     matches: ["/workflow/releases/packages"],
-    index: "03",
+    index: "06",
     label: "二审评测包",
     icon: SquaresFour,
     tabs: [
@@ -94,11 +118,6 @@ const advancedWorkflowDomain =
     index: "A",
     label: "高级设置",
     icon: SlidersHorizontal,
-    tabs: [
-      { to: "/workflow/governance", label: "高级设置首页" },
-      { to: "/workflow/optimization/category-evaluation-preview", label: "类目评测底座预览" },
-      { to: "/workflow/optimization/category-evaluation-v3-config", label: "类目评测 v3 合同配置" },
-    ],
   } as const
 
 export const workflowDomains = [...primaryWorkflowDomains, advancedWorkflowDomain] as const
@@ -125,8 +144,8 @@ export function AppShell({ user }: { user: User }) {
     <div className="min-h-[100dvh] bg-background text-foreground">
       <header className="sticky top-0 z-30 flex h-16 items-center justify-between border-b border-[var(--line)] bg-white/96 px-4 backdrop-blur-sm lg:hidden">
         <div className="flex items-baseline gap-2">
-          <span className="font-editorial text-2xl font-bold">3d66</span>
-          <span className="text-sm font-semibold">标签系统</span>
+          <span className="font-editorial text-2xl font-bold">TPENG</span>
+          <span className="text-sm font-semibold">标签实验台</span>
         </div>
         <Button variant="ghost" size="icon" aria-label="打开导航" onClick={() => setOpen(true)}>
           <List weight="bold" />
@@ -154,12 +173,12 @@ export function AppShell({ user }: { user: User }) {
             onClick={() => setOpen(false)}
           >
             <X className="lg:hidden" />
-            <span className="hidden lg:block">3d</span>
+            <span className="hidden lg:block">LL</span>
           </button>
           <div className="mt-7 h-px w-7 bg-black/25" />
           <div className="mt-5 font-data text-2xl font-semibold">{active?.index ?? "01"}</div>
           <div className="mt-4 [writing-mode:vertical-rl] text-[0.65rem] font-semibold tracking-[0.16em]">
-            3D66 LABEL SYSTEM
+            TPENG LABEL LAB
           </div>
           <div className="mt-auto grid gap-2 pb-1" aria-hidden="true">
             {Array.from({ length: 5 }, (_, index) => (
@@ -170,8 +189,8 @@ export function AppShell({ user }: { user: User }) {
 
         <div className="flex min-w-0 flex-col">
           <div className="border-b border-[var(--line)] px-5 py-6">
-            <p className="font-editorial text-[1.65rem] font-bold leading-none">标签系统</p>
-            <p className="mt-2 text-xs text-[var(--muted)]">图片分类与美感评测</p>
+            <p className="font-editorial text-[1.45rem] font-bold leading-tight">TPENG 标签实验台</p>
+            <p className="mt-2 text-xs text-[var(--muted)]">LabelLab · 标签与内容中台底座</p>
           </div>
           <nav className="min-h-0 flex-1 overflow-y-auto py-3" aria-label="主导航">
             {primaryWorkflowDomains.map((item) => {
@@ -221,6 +240,7 @@ export function AppShell({ user }: { user: User }) {
             </NavLink>
           </div>
           <div className="border-t border-[var(--line)] p-4">
+            <div className="mb-3"><AppVersion /></div>
             <div className="mb-3 flex items-center gap-3">
               <div className="flex size-9 items-center justify-center rounded-[4px] bg-[#eef1eb] text-xs font-bold">
                 {user.display_name.slice(0, 1)}
@@ -244,7 +264,7 @@ export function AppShell({ user }: { user: User }) {
       </aside>
 
       <main className="min-h-[100dvh] min-w-0 lg:pl-[252px]">
-        {active && (
+        {active && "tabs" in active && active.tabs.length > 0 && (
           <nav
             className="sticky top-16 z-20 flex min-h-12 overflow-x-auto border-b border-[var(--line)] bg-white lg:top-0"
             aria-label={`${active.label}二级导航`}
@@ -253,11 +273,11 @@ export function AppShell({ user }: { user: User }) {
               <NavLink
                 key={tab.to}
                 to={tab.to}
-                end={tab.to === "/workflow/governance"}
+                end={tab.to === active.to}
                 className={({ isActive }) =>
                   cn(
                     "flex shrink-0 items-center border-r border-[var(--line)] px-5 py-3 text-xs font-bold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-primary",
-                    isActive || active.to === advancedWorkflowDomain.to
+                    isActive
                       ? "bg-primary text-primary-foreground"
                       : "text-[#555b53] hover:bg-[#f7f9f3] hover:text-foreground",
                   )

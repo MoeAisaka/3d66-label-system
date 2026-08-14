@@ -43,7 +43,7 @@ from PIL import Image, UnidentifiedImageError
 from sqlalchemy import func, select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, sessionmaker
 
 from .config import get_settings
 from .category_pipeline import (
@@ -81,6 +81,8 @@ from .models import (
     BaselineCorrectionRun,
     BaselineSet,
     BaselineSetItem,
+    CategoryEvaluationV3Config,
+    CategoryEvaluationV3Revision,
     CircuitBreaker,
     DimensionRoutePolicy,
     DimensionSchema,
@@ -123,13 +125,28 @@ from .models import (
     LabelRelease,
     PublishedLabel,
     ConsumerSyncCheckpoint,
+    ProjectionContract,
+    ProjectionManifest,
+    ProjectionReconciliation,
     User,
 )
 from .audit import append_audit_event, canonical_json
+from .projection_contracts import (
+    LocalProjectionAdapter,
+    ProjectionContractError,
+    build_projection_manifest,
+    contract_payload as projection_contract_payload,
+    create_contract_version,
+    manifest_payload as projection_manifest_payload,
+    persist_reconciliation,
+    reconciliation_payload as projection_reconciliation_payload,
+)
+from .quality_assets import build_quality_asset_export
 from .baseline_regression import (
     LEVELS as BASELINE_LEVELS,
     TERMINAL_RUN_STATUSES as BASELINE_TERMINAL_STATUSES,
     baseline_set_fingerprint,
+    build_baseline_field_metrics,
     canonical_json as baseline_canonical_json,
     compute_level_metrics,
     correction_input_snapshot,
@@ -138,6 +155,18 @@ from .baseline_regression import (
     fail_baseline_item,
     filename_level_suggestion,
     run_comparison,
+)
+from .baseline_correction_orchestration import (
+    CorrectionOrchestrationError,
+    advance_correction_run,
+    configured_correction_generator,
+    generate_correction_candidate,
+    prepare_correction_generation,
+    refresh_correction_run,
+)
+from .category_evaluation_v3_revisions import (
+    CategoryEvaluationV3RevisionError,
+    activate_candidate_revision,
 )
 from .inspiration_auto_correction import (
     AutoCorrectionPolicy,
@@ -191,6 +220,7 @@ from .optimization_automation import (
     category_bundle_contract_errors,
     configured_optimization_adapter,
     consume_optimization_queue_once,
+    automation_worker_snapshot,
 )
 from .p0e_canary_api import build_canary_router
 from .category_evaluation_preview_api import (
@@ -247,6 +277,7 @@ from .label_governance import (
     ingest_content_event,
     publish_release,
     release_payload,
+    route_content_event_to_incremental_package,
     rollback_release,
 )
 from .label_export import build_export
@@ -569,6 +600,27 @@ class PublishedLabelExportRequest(BaseModel):
 class ConsumerCheckpointRequest(BaseModel):
     consumer_name: str = Field(min_length=1, max_length=120)
     cursor: int = Field(ge=0)
+
+
+class ProjectionContractCreateRequest(BaseModel):
+    contract_key: str = Field(min_length=1, max_length=120, pattern=r"^[a-z][a-z0-9_-]*$")
+    target_role: Literal["unified_dimension", "search_labels", "quality_governance"]
+    table_name: Literal[
+        "unified_dimension_table",
+        "search_labels_small_table",
+        "quality_governance_small_table",
+    ]
+    environment: Literal["local", "test"] = "local"
+    primary_key: list[str] = Field(min_length=1, max_length=4)
+    field_mappings: dict[str, str] = Field(min_length=1, max_length=200)
+    input_versions: dict[str, Any] = Field(default_factory=dict)
+    mode: Literal["snapshot", "incremental_outbox"] = "snapshot"
+    idempotency_key_template: str = Field(min_length=1, max_length=300)
+    checkpoint: dict[str, Any] = Field(default_factory=dict)
+    reconciliation: dict[str, Any] = Field(default_factory=dict)
+    rollback: dict[str, Any] = Field(default_factory=dict)
+    owner: str = Field(min_length=1, max_length=120)
+    status: Literal["draft", "active", "retired"] = "draft"
 
 
 class BenchmarkVariantRequest(BaseModel):
@@ -908,6 +960,10 @@ class SampleSetStatusRequest(BaseModel):
     status: str = Field(pattern="^(draft|locked)$")
 
 
+class SampleSetExportRequest(BaseModel):
+    format: Literal["csv", "json", "manifest"]
+
+
 class RegressionCreateRequest(BaseModel):
     sample_set_id: int | None = Field(default=None, ge=1)
     prompt_a_id: int | None = Field(default=None, ge=1)
@@ -999,6 +1055,11 @@ class BaselineCorrectionCreateRequest(BaseModel):
         if len(self.item_ids) != len(set(self.item_ids)):
             raise ValueError("纠偏样本不能重复")
         return self
+
+
+class BaselineCorrectionDecisionRequest(BaseModel):
+    decision: Literal["approved", "rejected"]
+    note: str = Field(default="", max_length=2000)
 
 
 class InspirationAutoCorrectionRequest(BaseModel):
@@ -1709,8 +1770,28 @@ def _evaluation_dimension_schema_payload(
 
 
 @app.get("/api/health")
-def health() -> dict[str, str]:
-    return {"status": "ok", "service": "3d66-label-system"}
+def health(db: Session = Depends(get_db)) -> dict[str, Any]:
+    workers = automation_worker_snapshot(db)
+    return {
+        "status": "ok",
+        "service": "3d66-label-system",
+        "workers": workers,
+    }
+
+
+@app.get("/api/health/ready")
+def health_ready(db: Session = Depends(get_db)) -> dict[str, Any]:
+    workers = automation_worker_snapshot(db)
+    if workers["active_worker_count"] < 1:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "worker_not_ready",
+                "message": "主服务已启动，但尚未检测到活跃评测 Worker",
+                "workers": workers,
+            },
+        )
+    return {"status": "ready", "service": "3d66-label-system", "workers": workers}
 
 
 def _assert_bundle_versions(
@@ -7346,6 +7427,15 @@ def create_content_ingress_event(
             payload=payload.payload,
             received_by=_sender,
         )
+        package, package_created, routing_status = (
+            route_content_event_to_incremental_package(
+                db,
+                event=event,
+                record=record,
+                duplicate=duplicate,
+                actor=_sender,
+            )
+        )
     except LabelIntegrationConflict as exc:
         db.rollback()
         raise HTTPException(status_code=409, detail={"code": "INGRESS_EVENT_CONFLICT", "message": str(exc)}) from None
@@ -7361,6 +7451,10 @@ def create_content_ingress_event(
         "event_status": event.status,
         "content": _content_record_payload(record),
         "material_required": record.status == "awaiting_material",
+        "workflow_kind": "incremental",
+        "material_package_id": package.id if package is not None else None,
+        "package_created": package_created,
+        "routing_status": routing_status,
         "writes_evaluation_job": False,
     }
 
@@ -7556,6 +7650,107 @@ def integration_status(_user: User = Depends(require_permission("releases:read")
         },
         "external_writes_enabled": False,
     }
+
+
+@app.get("/api/projection-contracts")
+def list_projection_contracts(
+    _user: User = Depends(require_permission("releases:read")),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    contracts = db.scalars(
+        select(ProjectionContract).order_by(
+            ProjectionContract.contract_key.asc(),
+            ProjectionContract.version.desc(),
+        )
+    ).all()
+    latest_reconciliation_by_contract: dict[int, ProjectionReconciliation] = {}
+    for record in db.scalars(
+        select(ProjectionReconciliation).order_by(
+            ProjectionReconciliation.contract_id.asc(),
+            ProjectionReconciliation.id.desc(),
+        )
+    ).all():
+        latest_reconciliation_by_contract.setdefault(record.contract_id, record)
+    items = []
+    for contract in contracts:
+        payload = projection_contract_payload(contract)
+        latest = latest_reconciliation_by_contract.get(contract.id)
+        payload["latest_reconciliation"] = (
+            projection_reconciliation_payload(latest) if latest else None
+        )
+        items.append(payload)
+    return {"items": items}
+
+
+@app.post("/api/projection-contracts")
+def create_projection_contract(
+    payload: ProjectionContractCreateRequest,
+    user: User = Depends(admin_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    try:
+        contract = create_contract_version(
+            db,
+            contract_key=payload.contract_key,
+            target_role=payload.target_role,
+            table_name=payload.table_name,
+            environment=payload.environment,
+            primary_key=payload.primary_key,
+            field_mappings=payload.field_mappings,
+            input_versions=payload.input_versions,
+            mode=payload.mode,
+            idempotency_key_template=payload.idempotency_key_template,
+            checkpoint=payload.checkpoint,
+            reconciliation=payload.reconciliation,
+            rollback=payload.rollback,
+            owner=payload.owner,
+            status=payload.status,
+            created_by=user.username,
+        )
+    except ProjectionContractError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from None
+    db.commit()
+    db.refresh(contract)
+    return projection_contract_payload(contract)
+
+
+@app.post("/api/projection-contracts/{contract_id}/manifest")
+def create_projection_manifest(
+    contract_id: int,
+    _user: User = Depends(require_permission("releases:read")),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    contract = db.get(ProjectionContract, contract_id)
+    if contract is None:
+        raise HTTPException(status_code=404, detail="投影合同不存在")
+    manifest, payload = build_projection_manifest(db, contract=contract)
+    db.commit()
+    db.refresh(manifest)
+    return {**payload, "id": manifest.id, "created_at": manifest.created_at}
+
+
+@app.post("/api/projection-contracts/{contract_id}/reconcile")
+def reconcile_projection_contract(
+    contract_id: int,
+    _user: User = Depends(admin_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    contract = db.get(ProjectionContract, contract_id)
+    if contract is None:
+        raise HTTPException(status_code=404, detail="投影合同不存在")
+    manifest, _payload = build_projection_manifest(db, contract=contract)
+    adapter = LocalProjectionAdapter()
+    adapter.apply(db, contract=contract, manifest=manifest)
+    result = adapter.reconcile(db, contract=contract, manifest=manifest)
+    record = persist_reconciliation(
+        db,
+        contract=contract,
+        manifest=manifest,
+        result=result,
+    )
+    db.commit()
+    db.refresh(record)
+    return projection_reconciliation_payload(record)
 
 
 @app.post(
@@ -8521,6 +8716,10 @@ def create_review(
 
 def _sample_set_summary(sample_set: SampleSet) -> dict[str, Any]:
     truth_complete = sum(1 for item in sample_set.items if bool(json.loads(item.truth_json or "{}")))
+    latest_truth_revision = max(
+        (item.truth_revision for item in sample_set.items),
+        default=0,
+    )
     return {
         "id": sample_set.id,
         "name": sample_set.name,
@@ -8530,6 +8729,7 @@ def _sample_set_summary(sample_set: SampleSet) -> dict[str, Any]:
         "status": sample_set.status,
         "item_count": len(sample_set.items),
         "truth_complete_count": truth_complete,
+        "latest_truth_revision": latest_truth_revision,
         "created_by": sample_set.created_by,
         "created_at": sample_set.created_at,
     }
@@ -8555,6 +8755,14 @@ def _sample_set_item_payload(item: SampleSetItem) -> dict[str, Any]:
         "added_by": item.added_by,
         "created_at": item.created_at,
     }
+
+
+def _assert_sample_set_is_mutable(sample_set: SampleSet) -> None:
+    if sample_set.kind == "golden" and sample_set.status == "locked":
+        raise HTTPException(
+            status_code=409,
+            detail="已锁定黄金集不可直接修改；请复制形成新草稿版本后再调整。",
+        )
 
 
 def _create_regression_runs(
@@ -8772,6 +8980,7 @@ def _baseline_run_summary(run: BaselineRegressionRun) -> dict[str, Any]:
         "id": run.id,
         "baseline_set_id": run.baseline_set_id,
         "category_key": run.category_key,
+        "workflow_kind": "stock",
         "sequence_no": run.sequence_no,
         "previous_run_id": run.previous_run_id,
         "strategy_bundle_id": run.strategy_bundle_id,
@@ -9683,6 +9892,18 @@ def baseline_run_detail(
     }
 
 
+@app.get("/api/baseline-regressions/{run_id}/metrics")
+def baseline_run_metrics(
+    run_id: int,
+    _user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    run = db.get(BaselineRegressionRun, run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="基准回归 run 不存在")
+    return build_baseline_field_metrics(db, run)
+
+
 def _baseline_correction_payload(row: BaselineCorrectionRun) -> dict[str, Any]:
     return {
         "id": row.id,
@@ -9690,15 +9911,23 @@ def _baseline_correction_payload(row: BaselineCorrectionRun) -> dict[str, Any]:
         "category_key": row.category_key,
         "selected_item_ids": json.loads(row.selected_item_ids_json),
         "status": row.status,
+        "stage": row.stage,
         "progress": row.progress,
         "report": json.loads(row.report_json or "{}"),
         "blockers": json.loads(row.blockers_json or "[]"),
+        "candidate_revision_id": row.candidate_revision_id,
+        "regression_run_id": row.regression_run_id,
+        "orchestration": json.loads(row.orchestration_json or "{}"),
         "error": {
             "code": row.error_code,
             "message": row.error_message,
             "retryable": row.status == "failed" and row.attempt_count < 3,
         } if row.error_code else None,
         "attempt_count": row.attempt_count,
+        "decision": row.decision,
+        "decided_by": row.decided_by,
+        "decided_at": row.decided_at,
+        "decision_note": row.decision_note,
         "created_by": row.created_by,
         "created_at": row.created_at,
         "updated_at": row.updated_at,
@@ -9760,24 +9989,66 @@ def inspiration_auto_correction_drift_test(
         ) from exc
 
 
-def _execute_baseline_correction(
-    db: Session, row: BaselineCorrectionRun
+def _record_baseline_correction_failure(
+    db: Session,
+    row: BaselineCorrectionRun,
+    exc: BaseException,
 ) -> None:
+    stage_codes = {
+        "analysis": "CORRECTION_ANALYSIS_FAILED",
+        "candidate_generation": "CORRECTION_CANDIDATE_GENERATION_FAILED",
+        "candidate_validation": "CORRECTION_CANDIDATE_VALIDATION_FAILED",
+        "regression": "CORRECTION_REGRESSION_SETUP_FAILED",
+    }
+    fail_correction_run(
+        row,
+        error_code=(
+            exc.code
+            if isinstance(exc, CorrectionOrchestrationError)
+            else stage_codes.get(row.stage, "CORRECTION_PIPELINE_FAILED")
+        ),
+        error_message=str(exc),
+    )
+    row.finished_at = datetime.now(timezone.utc)
+
+
+def _run_baseline_correction_background(correction_id: int, bind: Any = None) -> None:
+    """Run model work outside the request's SQLite write transaction."""
+    session_factory = SessionLocal if bind is None else sessionmaker(
+        bind=bind,
+        expire_on_commit=False,
+        autoflush=False,
+    )
     try:
-        execute_correction_run(row)
-    except (ValueError, TypeError, json.JSONDecodeError) as exc:
-        fail_correction_run(
-            row,
-            error_code="CORRECTION_ANALYSIS_FAILED",
-            error_message=str(exc),
-        )
-        row.finished_at = datetime.now(timezone.utc)
+        with session_factory() as db:
+            row = db.get(BaselineCorrectionRun, correction_id)
+            if row is None:
+                return
+            prepared = prepare_correction_generation(db, row)
+            generator = configured_correction_generator(db)
+            db.commit()
+
+        generated = generate_correction_candidate(prepared, generator)
+
+        with session_factory() as db:
+            row = db.get(BaselineCorrectionRun, correction_id)
+            if row is None:
+                return
+            advance_correction_run(db, row, None, generated)
+            db.commit()
+    except Exception as exc:
+        with session_factory() as db:
+            row = db.get(BaselineCorrectionRun, correction_id)
+            if row is not None:
+                _record_baseline_correction_failure(db, row, exc)
+                db.commit()
 
 
 @app.post("/api/baseline-regressions/{run_id}/corrections")
 def create_baseline_correction(
     run_id: int,
     payload: BaselineCorrectionCreateRequest,
+    background_tasks: BackgroundTasks,
     user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
@@ -9825,7 +10096,6 @@ def create_baseline_correction(
     )
     db.add(row)
     db.flush()
-    _execute_baseline_correction(db, row)
     append_audit_event(
         db,
         category="baseline_regression",
@@ -9837,6 +10107,7 @@ def create_baseline_correction(
         event_key=f"baseline-correction:{row.id}:attempt:1",
     )
     db.commit()
+    background_tasks.add_task(_run_baseline_correction_background, row.id, db.get_bind())
     return _baseline_correction_payload(row)
 
 
@@ -9853,6 +10124,9 @@ def list_baseline_corrections(
         .where(BaselineCorrectionRun.baseline_run_id == run_id)
         .order_by(BaselineCorrectionRun.created_at.desc(), BaselineCorrectionRun.id.desc())
     ).all()
+    for row in rows:
+        refresh_correction_run(db, row)
+    db.commit()
     return {"items": [_baseline_correction_payload(row) for row in rows]}
 
 
@@ -9865,12 +10139,140 @@ def get_baseline_correction(
     row = db.get(BaselineCorrectionRun, correction_id)
     if row is None:
         raise HTTPException(status_code=404, detail="基准回归纠偏任务不存在")
+    refresh_correction_run(db, row)
+    db.commit()
+    return _baseline_correction_payload(row)
+
+
+@app.post("/api/baseline-corrections/{correction_id}/decision")
+def decide_baseline_correction(
+    correction_id: int,
+    payload: BaselineCorrectionDecisionRequest,
+    user: User = Depends(admin_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    row = db.get(BaselineCorrectionRun, correction_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="基准回归纠偏任务不存在")
+    refresh_correction_run(db, row)
+    normalized_note = payload.note.strip()
+    if row.status in {"approved", "rejected"}:
+        if row.decision == payload.decision and row.decision_note == normalized_note:
+            return _baseline_correction_payload(row)
+        raise HTTPException(status_code=409, detail="纠偏任务已有不可变的人工结论")
+    if row.status != "awaiting_decision" or row.stage != "decision":
+        raise HTTPException(status_code=409, detail="候选回归尚未形成最终结论")
+
+    if payload.decision == "approved":
+        report = json.loads(row.report_json or "{}")
+        regression = report.get("candidate_regression")
+        if (
+            not isinstance(regression, dict)
+            or regression.get("approval_allowed") is not True
+            or regression.get("recommendation") != "approve"
+        ):
+            raise HTTPException(status_code=409, detail="候选回归未通过，不能启用")
+        candidate = db.get(
+            CategoryEvaluationV3Revision,
+            row.candidate_revision_id,
+        )
+        projected = db.scalar(
+            select(CategoryEvaluationV3Config).where(
+                CategoryEvaluationV3Config.category_key == row.category_key,
+                CategoryEvaluationV3Config.status == "active",
+            )
+        )
+        if candidate is None or projected is None:
+            raise HTTPException(status_code=409, detail="候选或现役机制不存在")
+        orchestration = json.loads(row.orchestration_json or "{}")
+        base_projection = orchestration.get("base_projection")
+        if (
+            not isinstance(base_projection, dict)
+            or projected.projected_revision_id != base_projection.get("revision_id")
+            or projected.revision != base_projection.get("revision")
+            or projected.contract_hash != base_projection.get("contract_hash")
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "projected_revision_conflict",
+                    "message": "现役机制已变化，请重新执行纠偏分析",
+                },
+            )
+        prompt_state = orchestration.get("candidate_prompt")
+        if not isinstance(prompt_state, dict):
+            raise HTTPException(status_code=409, detail="候选提示词绑定缺失")
+        candidate_prompt = db.get(PromptVersion, prompt_state.get("id"))
+        base_prompt_id = prompt_state.get("base_prompt_id")
+        stage = prompt_state.get("stage")
+        profile = db.scalar(
+            select(EvaluationCategoryProfile).where(
+                EvaluationCategoryProfile.category_key == row.category_key
+            )
+        )
+        if (
+            candidate_prompt is None
+            or profile is None
+            or stage not in {"A", "B"}
+            or candidate_prompt.stage != stage
+        ):
+            raise HTTPException(status_code=409, detail="候选提示词或类目绑定无效")
+        current_prompt_id = profile.prompt_a_id if stage == "A" else profile.prompt_b_id
+        if current_prompt_id not in {None, base_prompt_id}:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "prompt_projection_conflict",
+                    "message": "类目现役提示词已变化，请重新执行纠偏分析",
+                },
+            )
+        try:
+            activate_candidate_revision(
+                db,
+                projected,
+                candidate,
+                actor=user.username,
+            )
+        except CategoryEvaluationV3RevisionError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": exc.code, "message": str(exc)},
+            ) from exc
+        candidate_prompt.status = "published"
+        if stage == "A":
+            profile.prompt_a_id = candidate_prompt.id
+        else:
+            profile.prompt_b_id = candidate_prompt.id
+
+    row.status = payload.decision
+    row.decision = payload.decision
+    row.decided_by = user.username
+    row.decided_at = datetime.now(timezone.utc)
+    row.decision_note = normalized_note
+    row.finished_at = row.decided_at
+    append_audit_event(
+        db,
+        category="baseline_regression",
+        action=f"correction_{payload.decision}",
+        subject_type="baseline_correction_run",
+        subject_id=row.id,
+        actor=user.username,
+        payload={
+            "decision": payload.decision,
+            "candidate_revision_id": row.candidate_revision_id,
+            "regression_run_id": row.regression_run_id,
+            "note": normalized_note,
+        },
+        event_key=f"baseline-correction:{row.id}:decision:{payload.decision}",
+    )
+    db.commit()
     return _baseline_correction_payload(row)
 
 
 @app.post("/api/baseline-corrections/{correction_id}/retry")
 def retry_baseline_correction(
     correction_id: int,
+    background_tasks: BackgroundTasks,
     user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
@@ -9882,9 +10284,12 @@ def retry_baseline_correction(
     if row.attempt_count >= 3:
         raise HTTPException(status_code=409, detail="纠偏任务已达到最大重试次数")
     row.status = "processing"
+    row.stage = "analysis"
     row.progress = 10
+    row.error_code = ""
+    row.error_message = ""
+    row.finished_at = None
     row.attempt_count += 1
-    _execute_baseline_correction(db, row)
     append_audit_event(
         db,
         category="baseline_regression",
@@ -9896,6 +10301,8 @@ def retry_baseline_correction(
         event_key=f"baseline-correction:{row.id}:attempt:{row.attempt_count}",
     )
     db.commit()
+    if background_tasks is not None:
+        background_tasks.add_task(_run_baseline_correction_background, row.id, db.get_bind())
     return _baseline_correction_payload(row)
 
 
@@ -10020,6 +10427,48 @@ def list_sample_sets(
     return {"items": [_sample_set_summary(sample_set) for sample_set in sample_sets]}
 
 
+@app.get("/api/quality-assets/summary")
+def quality_assets_summary(
+    _user: User = Depends(current_user), db: Session = Depends(get_db)
+) -> dict[str, Any]:
+    sample_sets = db.scalars(select(SampleSet)).all()
+    grouped: dict[str, dict[str, dict[str, int]]] = {
+        "by_kind": {},
+        "by_category": {},
+        "by_status": {},
+    }
+    item_count = 0
+    truth_complete_count = 0
+    for sample_set in sample_sets:
+        summary = _sample_set_summary(sample_set)
+        set_items = int(summary["item_count"])
+        complete_items = int(summary["truth_complete_count"])
+        item_count += set_items
+        truth_complete_count += complete_items
+        for group_key, value in (
+            ("by_kind", sample_set.kind),
+            ("by_category", sample_set.category_key),
+            ("by_status", sample_set.status),
+        ):
+            bucket = grouped[group_key].setdefault(
+                value,
+                {"sample_sets": 0, "items": 0, "truth_complete": 0},
+            )
+            bucket["sample_sets"] += 1
+            bucket["items"] += set_items
+            bucket["truth_complete"] += complete_items
+    return {
+        "sample_set_count": len(sample_sets),
+        "item_count": item_count,
+        "truth_complete_count": truth_complete_count,
+        "by_truth_complete": {
+            "true": truth_complete_count,
+            "false": item_count - truth_complete_count,
+        },
+        **grouped,
+    }
+
+
 @app.post("/api/sample-sets")
 def create_sample_set(
     payload: SampleSetCreateRequest,
@@ -10059,6 +10508,31 @@ def sample_set_detail(
     }
 
 
+@app.post("/api/sample-sets/{sample_set_id}/export")
+def export_sample_set(
+    sample_set_id: int,
+    payload: SampleSetExportRequest,
+    _user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> Response:
+    sample_set = db.get(SampleSet, sample_set_id)
+    if not sample_set:
+        raise HTTPException(status_code=404, detail="样本集不存在")
+    export = build_quality_asset_export(sample_set, format=payload.format)
+    safe_name = re.sub(r"[^A-Za-z0-9._-]+", "-", sample_set.name).strip("-")
+    filename = f"{safe_name or f'sample-set-{sample_set.id}'}.{export.extension}"
+    return Response(
+        content=export.content,
+        media_type=export.media_type,
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "X-Export-Row-Count": str(export.row_count),
+            "X-Dataset-Version": export.dataset_version,
+            "X-Manifest-Hash": export.manifest_hash,
+        },
+    )
+
+
 @app.post("/api/sample-sets/{sample_set_id}/items")
 def add_sample_set_items(
     sample_set_id: int,
@@ -10069,6 +10543,7 @@ def add_sample_set_items(
     sample_set = db.get(SampleSet, sample_set_id)
     if not sample_set:
         raise HTTPException(status_code=404, detail="样本集不存在")
+    _assert_sample_set_is_mutable(sample_set)
     requested_ids = list(dict.fromkeys(payload.asset_ids))
     assets = db.scalars(select(Asset).where(Asset.id.in_(requested_ids))).all()
     assets_by_id = {asset.id: asset for asset in assets}
@@ -10147,6 +10622,7 @@ def update_sample_set_item(
     )
     if not item:
         raise HTTPException(status_code=404, detail="样本不存在")
+    _assert_sample_set_is_mutable(item.sample_set)
     item.expected_level = payload.expected_level
     item.note = payload.note.strip()
     if payload.truth is not None:
@@ -10180,6 +10656,8 @@ def update_sample_set_status(
     sample_set = db.get(SampleSet, sample_set_id)
     if not sample_set:
         raise HTTPException(status_code=404, detail="样本集不存在")
+    if sample_set.status == "locked" and payload.status != "locked":
+        _assert_sample_set_is_mutable(sample_set)
     if payload.status == "locked":
         if sample_set.kind != "golden":
             raise HTTPException(status_code=400, detail="只有黄金样本集需要锁定")
@@ -10282,6 +10760,7 @@ def remove_sample_set_item(
     )
     if not item:
         raise HTTPException(status_code=404, detail="样本不存在")
+    _assert_sample_set_is_mutable(item.sample_set)
     db.delete(item)
     db.commit()
     return {"ok": True}

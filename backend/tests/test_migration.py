@@ -77,6 +77,11 @@ MIGRATION_NAMES = [
     "add_model_thinking_mode",
     "add_model_registry_entries",
     "add_mechanism_release_axes",
+    "add_category_evaluation_v3_revisions",
+    "automate_baseline_correction_loop",
+    "clear_legacy_correction_confirmation_blockers",
+    "add_evaluation_production_workflow_kind",
+    "add_projection_contract_registry",
 ]
 
 
@@ -814,6 +819,436 @@ def test_repeated_migration_is_idempotent(tmp_path) -> None:
         assert [row[0] for row in versions] == list(
             range(1, len(MIGRATION_NAMES) + 1)
         )
+    finally:
+        engine.dispose()
+
+
+def test_v63_backfills_immutable_category_evaluation_revisions(tmp_path) -> None:
+    engine = _engine(tmp_path, "v63-category-evaluation-revisions.db")
+    try:
+        with engine.begin() as connection:
+            connection.exec_driver_sql("""
+                CREATE TABLE schema_migrations (
+                    version INTEGER PRIMARY KEY,
+                    name VARCHAR(200) NOT NULL,
+                    applied_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            for version, name in enumerate(MIGRATION_NAMES[:62], start=1):
+                connection.exec_driver_sql(
+                    "INSERT INTO schema_migrations(version, name) VALUES (?, ?)",
+                    (version, name),
+                )
+            connection.exec_driver_sql("""
+                CREATE TABLE category_evaluation_v3_configs (
+                    id INTEGER PRIMARY KEY,
+                    category_key VARCHAR(40) NOT NULL UNIQUE,
+                    display_name VARCHAR(120) NOT NULL,
+                    status VARCHAR(20) NOT NULL,
+                    contract_json TEXT NOT NULL,
+                    classification_map_json TEXT NOT NULL,
+                    subcategory_dimensions_json TEXT NOT NULL,
+                    dimension_deduction_rules_json TEXT NOT NULL,
+                    media_penalty_enabled BOOLEAN NOT NULL,
+                    revision INTEGER NOT NULL,
+                    contract_hash VARCHAR(64) NOT NULL,
+                    created_by VARCHAR(80) NOT NULL,
+                    created_at DATETIME NOT NULL,
+                    updated_at DATETIME NOT NULL,
+                    CHECK (status IN ('draft','active','retired'))
+                )
+            """)
+            rows = [
+                (
+                    1,
+                    "active_image",
+                    "现役图像",
+                    "active",
+                    '{"contract":"active"}',
+                    '{"map":"active"}',
+                    '{"dimensions":"active"}',
+                    '{"rules":"active"}',
+                    1,
+                    7,
+                    "a" * 64,
+                ),
+                (
+                    2,
+                    "draft_image",
+                    "草稿图像",
+                    "draft",
+                    '{"contract":"draft"}',
+                    '{"map":"draft"}',
+                    '{"dimensions":"draft"}',
+                    '{"rules":"draft"}',
+                    0,
+                    2,
+                    "d" * 64,
+                ),
+                (
+                    3,
+                    "retired_image",
+                    "退役图像",
+                    "retired",
+                    '{"contract":"retired"}',
+                    '{"map":"retired"}',
+                    '{"dimensions":"retired"}',
+                    '{"rules":"retired"}',
+                    1,
+                    9,
+                    "r" * 64,
+                ),
+            ]
+            for row in rows:
+                connection.exec_driver_sql(
+                    """
+                    INSERT INTO category_evaluation_v3_configs (
+                        id, category_key, display_name, status, contract_json,
+                        classification_map_json, subcategory_dimensions_json,
+                        dimension_deduction_rules_json, media_penalty_enabled,
+                        revision, contract_hash, created_by, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'migration-test',
+                              '2026-08-11 00:00:00', '2026-08-11 00:00:00')
+                    """,
+                    row,
+                )
+
+            run_migrations(connection)
+
+            revision_columns = {
+                row[1]
+                for row in connection.exec_driver_sql(
+                    "PRAGMA table_info(category_evaluation_v3_revisions)"
+                )
+            }
+            config_columns = {
+                row[1]
+                for row in connection.exec_driver_sql(
+                    "PRAGMA table_info(category_evaluation_v3_configs)"
+                )
+            }
+            assert {
+                "category_key",
+                "revision",
+                "status",
+                "parent_revision_id",
+                "contract_json",
+                "classification_map_json",
+                "subcategory_dimensions_json",
+                "dimension_deduction_rules_json",
+                "media_penalty_enabled",
+                "contract_hash",
+            } <= revision_columns
+            assert "projected_revision_id" in config_columns
+
+            backfilled = connection.exec_driver_sql("""
+                SELECT
+                    c.category_key, c.projected_revision_id,
+                    r.revision, r.status, r.contract_json,
+                    r.classification_map_json, r.subcategory_dimensions_json,
+                    r.dimension_deduction_rules_json, r.media_penalty_enabled,
+                    r.contract_hash
+                FROM category_evaluation_v3_configs AS c
+                JOIN category_evaluation_v3_revisions AS r
+                  ON r.id = c.projected_revision_id
+                ORDER BY c.id
+            """).all()
+            assert backfilled == [
+                (
+                    "active_image",
+                    backfilled[0][1],
+                    7,
+                    "active",
+                    '{"contract":"active"}',
+                    '{"map":"active"}',
+                    '{"dimensions":"active"}',
+                    '{"rules":"active"}',
+                    1,
+                    "a" * 64,
+                ),
+                (
+                    "draft_image",
+                    backfilled[1][1],
+                    2,
+                    "draft",
+                    '{"contract":"draft"}',
+                    '{"map":"draft"}',
+                    '{"dimensions":"draft"}',
+                    '{"rules":"draft"}',
+                    0,
+                    "d" * 64,
+                ),
+                (
+                    "retired_image",
+                    backfilled[2][1],
+                    9,
+                    "retired",
+                    '{"contract":"retired"}',
+                    '{"map":"retired"}',
+                    '{"dimensions":"retired"}',
+                    '{"rules":"retired"}',
+                    1,
+                    "r" * 64,
+                ),
+            ]
+
+        with pytest.raises(IntegrityError, match="UNIQUE constraint failed"):
+            with engine.begin() as connection:
+                connection.exec_driver_sql("""
+                    INSERT INTO category_evaluation_v3_revisions (
+                        category_key, display_name, revision, status,
+                        parent_revision_id, contract_json,
+                        classification_map_json, subcategory_dimensions_json,
+                        dimension_deduction_rules_json, media_penalty_enabled,
+                        contract_hash, created_by, created_at, updated_at
+                    ) SELECT
+                        category_key, display_name, revision, 'candidate',
+                        projected_revision_id, contract_json,
+                        classification_map_json, subcategory_dimensions_json,
+                        dimension_deduction_rules_json, media_penalty_enabled,
+                        contract_hash, 'duplicate-test', CURRENT_TIMESTAMP,
+                        CURRENT_TIMESTAMP
+                    FROM category_evaluation_v3_configs WHERE id = 1
+                """)
+
+        for statement, message in (
+            (
+                "UPDATE category_evaluation_v3_revisions "
+                "SET contract_json='{}' WHERE category_key='active_image'",
+                "category evaluation revision artifacts are immutable",
+            ),
+            (
+                "DELETE FROM category_evaluation_v3_revisions "
+                "WHERE category_key='active_image'",
+                "category evaluation revision cannot be deleted",
+            ),
+        ):
+            with pytest.raises(IntegrityError, match=message):
+                with engine.begin() as connection:
+                    connection.exec_driver_sql(statement)
+
+        with engine.begin() as connection:
+            connection.exec_driver_sql(
+                "UPDATE category_evaluation_v3_revisions "
+                "SET status='retired', updated_at=CURRENT_TIMESTAMP "
+                "WHERE category_key='active_image'"
+            )
+            assert connection.exec_driver_sql(
+                "SELECT status FROM category_evaluation_v3_revisions "
+                "WHERE category_key='active_image'"
+            ).scalar_one() == "retired"
+    finally:
+        engine.dispose()
+
+
+def test_v64_upgrades_legacy_correction_runs_to_automatic_pipeline(tmp_path) -> None:
+    engine = _engine(tmp_path, "v64-automatic-correction-loop.db")
+    try:
+        with engine.begin() as connection:
+            connection.exec_driver_sql("""
+                CREATE TABLE schema_migrations (
+                    version INTEGER PRIMARY KEY,
+                    name VARCHAR(200) NOT NULL,
+                    applied_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            for version, name in enumerate(MIGRATION_NAMES[:63], start=1):
+                connection.exec_driver_sql(
+                    "INSERT INTO schema_migrations(version, name) VALUES (?, ?)",
+                    (version, name),
+                )
+            connection.exec_driver_sql("""
+                CREATE TABLE baseline_regression_runs (id INTEGER PRIMARY KEY)
+            """)
+            connection.exec_driver_sql("""
+                CREATE TABLE category_evaluation_v3_revisions (
+                    id INTEGER PRIMARY KEY
+                )
+            """)
+            connection.exec_driver_sql(
+                "INSERT INTO baseline_regression_runs(id) VALUES (9)"
+            )
+            connection.exec_driver_sql("""
+                CREATE TABLE baseline_correction_runs (
+                    id INTEGER PRIMARY KEY,
+                    idempotency_key VARCHAR(160) NOT NULL UNIQUE,
+                    baseline_run_id INTEGER NOT NULL,
+                    category_key VARCHAR(40) NOT NULL,
+                    selected_item_ids_json TEXT NOT NULL,
+                    input_snapshot_json TEXT NOT NULL,
+                    status VARCHAR(40) NOT NULL DEFAULT 'processing'
+                        CHECK(status IN ('processing','awaiting_confirmation','failed')),
+                    progress INTEGER NOT NULL DEFAULT 0,
+                    report_json TEXT NOT NULL DEFAULT '{}',
+                    blockers_json TEXT NOT NULL DEFAULT '[]',
+                    error_code VARCHAR(80) NOT NULL DEFAULT '',
+                    error_message TEXT NOT NULL DEFAULT '',
+                    attempt_count INTEGER NOT NULL DEFAULT 1,
+                    created_by VARCHAR(80) NOT NULL DEFAULT 'system',
+                    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    finished_at DATETIME
+                )
+            """)
+            connection.exec_driver_sql("""
+                INSERT INTO baseline_correction_runs (
+                    id, idempotency_key, baseline_run_id, category_key,
+                    selected_item_ids_json, input_snapshot_json, status,
+                    progress, report_json, blockers_json, attempt_count,
+                    created_by, finished_at
+                ) VALUES (
+                    1, 'legacy-correction', 9, 'space_image', '[10]', '{}',
+                    'awaiting_confirmation', 100, '{"legacy":true}',
+                    '[{"code":"human_confirmation_required"},
+                      {"code":"evidence_retained"}]', 1,
+                    'migration-test', '2026-08-12 12:00:00'
+                )
+            """)
+
+            run_migrations(connection)
+
+            columns = {
+                row[1]
+                for row in connection.exec_driver_sql(
+                    "PRAGMA table_info(baseline_correction_runs)"
+                )
+            }
+            assert {
+                "stage",
+                "candidate_revision_id",
+                "regression_run_id",
+                "orchestration_json",
+                "decision",
+                "decided_by",
+                "decided_at",
+                "decision_note",
+            } <= columns
+            upgraded = connection.exec_driver_sql("""
+                SELECT status, stage, progress, report_json, blockers_json,
+                       error_code, error_message, finished_at
+                FROM baseline_correction_runs WHERE id = 1
+            """).one()
+            assert upgraded == (
+                "failed",
+                "analysis",
+                0,
+                '{"legacy":true}',
+                '[{"code":"evidence_retained"}]',
+                "LEGACY_CORRECTION_INCOMPLETE",
+                "旧版纠偏任务未创建候选或回归，请重新执行",
+                "2026-08-12 12:00:00",
+            )
+
+            connection.exec_driver_sql("""
+                INSERT INTO baseline_correction_runs (
+                    id, idempotency_key, baseline_run_id, category_key,
+                    selected_item_ids_json, input_snapshot_json, status,
+                    stage, progress, report_json, blockers_json,
+                    orchestration_json, error_code, error_message,
+                    attempt_count, decision_note, created_by,
+                    created_at, updated_at
+                ) VALUES (
+                    3, 'unrelated-failure', 9, 'space_image', '[12]', '{}',
+                    'failed', 'analysis', 0, '{}',
+                    '[{"code":"worker_timeout","message":"保留该失败证据"}]',
+                    '{}', 'WORKER_TIMEOUT', '保留该失败说明', 1, '',
+                    'migration-test', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                )
+            """)
+            run_migrations(connection)
+            assert connection.exec_driver_sql(
+                "SELECT blockers_json, error_code, error_message "
+                "FROM baseline_correction_runs WHERE id=1"
+            ).one() == (
+                '[{"code":"evidence_retained"}]',
+                "LEGACY_CORRECTION_INCOMPLETE",
+                "旧版纠偏任务未创建候选或回归，请重新执行",
+            )
+            assert connection.exec_driver_sql(
+                "SELECT blockers_json, error_code, error_message "
+                "FROM baseline_correction_runs WHERE id=3"
+            ).one() == (
+                '[{"code":"worker_timeout","message":"保留该失败证据"}]',
+                "WORKER_TIMEOUT",
+                "保留该失败说明",
+            )
+
+            connection.exec_driver_sql("""
+                INSERT INTO baseline_correction_runs (
+                    id, idempotency_key, baseline_run_id, category_key,
+                    selected_item_ids_json, input_snapshot_json, status,
+                    stage, progress, report_json, blockers_json,
+                    orchestration_json, attempt_count, created_by
+                ) VALUES (
+                    2, 'new-correction', 9, 'space_image', '[11]', '{}',
+                    'awaiting_decision', 'decision', 100, '{}', '[]', '{}',
+                    1, 'migration-test'
+                )
+            """)
+            connection.exec_driver_sql(
+                "UPDATE baseline_correction_runs "
+                "SET status='approved', decision='approved', "
+                "decided_by='admin', decision_note='通过', "
+                "decided_at=CURRENT_TIMESTAMP WHERE id=2"
+            )
+            assert connection.exec_driver_sql(
+                "SELECT status, decision FROM baseline_correction_runs WHERE id=2"
+            ).one() == ("approved", "approved")
+    finally:
+        engine.dispose()
+
+
+def test_v65_clears_only_legacy_confirmation_blockers_idempotently(tmp_path) -> None:
+    engine = _engine(tmp_path, "v65-legacy-correction-blockers.db")
+    try:
+        migration = next(item for item in MIGRATIONS if item.version == 65)
+        with engine.begin() as connection:
+            connection.exec_driver_sql("""
+                CREATE TABLE baseline_correction_runs (
+                    id INTEGER PRIMARY KEY,
+                    status VARCHAR(40) NOT NULL,
+                    error_code VARCHAR(80) NOT NULL DEFAULT '',
+                    blockers_json TEXT NOT NULL DEFAULT '[]',
+                    error_message TEXT NOT NULL DEFAULT ''
+                )
+            """)
+            connection.exec_driver_sql("""
+                INSERT INTO baseline_correction_runs (
+                    id, status, error_code, blockers_json, error_message
+                ) VALUES (
+                    101, 'failed', 'LEGACY_CORRECTION_INCOMPLETE',
+                    '[{"code":"human_confirmation_required"},
+                      {"code":"evidence_retained"}]', '失败说明'
+                )
+            """)
+            connection.exec_driver_sql("""
+                INSERT INTO baseline_correction_runs (
+                    id, status, error_code, blockers_json, error_message
+                ) VALUES (
+                    102, 'failed', 'WORKER_TIMEOUT',
+                    '[{"code":"human_confirmation_required"}]', '不要清理'
+                )
+            """)
+
+            migration.up(connection)
+            migration.up(connection)
+
+            assert connection.exec_driver_sql(
+                "SELECT blockers_json, error_code, error_message "
+                "FROM baseline_correction_runs WHERE id = 101"
+            ).one() == (
+                '[{"code":"evidence_retained"}]',
+                "LEGACY_CORRECTION_INCOMPLETE",
+                "失败说明",
+            )
+            assert connection.exec_driver_sql(
+                "SELECT blockers_json, error_code, error_message "
+                "FROM baseline_correction_runs WHERE id = 102"
+            ).one() == (
+                '[{"code":"human_confirmation_required"}]',
+                "WORKER_TIMEOUT",
+                "不要清理",
+            )
     finally:
         engine.dispose()
 

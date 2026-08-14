@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .models import (
@@ -16,6 +17,8 @@ from .models import (
     BaselineRegressionRun,
     EvaluationJob,
     EvaluationResult,
+    SampleSet,
+    SampleSetItem,
 )
 from .category_pipeline import dimension_selection_from_job_snapshot
 
@@ -41,6 +44,18 @@ _FILENAME_TOKEN_SPLIT = re.compile(
     r"[\s._\-—–/\\,，;；:：()（）\[\]【】{}]+"
 )
 _FILENAME_LEVEL_CODE = re.compile(r"(?<![a-z0-9])l([1-5])(?![a-z0-9])")
+_RELEASE_KEY_FIELD_PREFIXES = (
+    "scope_status",
+    "primary_category",
+    "quality_severity",
+    "media_form.",
+    "media_type.",
+    "shooting_method.",
+    "hard_gate.",
+    "level_cap",
+    "dimensions.",
+    "production_fields.",
+)
 
 
 def canonical_json(value: Any) -> str:
@@ -391,6 +406,383 @@ def compute_level_metrics(items: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _field_value_key(value: Any) -> str:
+    if value is None:
+        return "__missing__"
+    if isinstance(value, str):
+        return value if value else "__empty__"
+    return canonical_json(value)
+
+
+def _flatten_metric_fields(
+    payload: Mapping[str, Any],
+    *,
+    prefix: str = "",
+) -> dict[str, Any]:
+    fields: dict[str, Any] = {}
+    for key in sorted(payload):
+        value = payload[key]
+        field_key = f"{prefix}.{key}" if prefix else str(key)
+        if isinstance(value, Mapping):
+            fields.update(_flatten_metric_fields(value, prefix=field_key))
+        else:
+            fields[field_key] = value
+    return fields
+
+
+def metric_truth_fields(
+    truth: Mapping[str, Any],
+    *,
+    expected_level: str,
+) -> dict[str, Any]:
+    """Normalize frozen human truth into stable field paths for evidence."""
+    normalized: dict[str, Any] = {"level": expected_level}
+    for key in (
+        "scope_status",
+        "primary_category",
+        "quality_severity",
+        "media_form",
+        "media_type",
+        "shooting_method",
+        "hard_gate",
+        "level_cap",
+        "dimensions",
+    ):
+        value = truth.get(key)
+        if value is not None:
+            normalized[key] = value
+    if "primary_category" not in normalized and truth.get("category") is not None:
+        normalized["primary_category"] = truth["category"]
+
+    key_fields = truth.get("key_fields")
+    if isinstance(key_fields, Mapping):
+        aliases = {
+            "classification.scope_status": "scope_status",
+            "classification.primary_category": "primary_category",
+            "image_quality.quality_severity": "quality_severity",
+        }
+        for key, value in key_fields.items():
+            normalized[aliases.get(str(key), str(key))] = value
+    return _flatten_metric_fields(normalized)
+
+
+def metric_prediction_fields(snapshot: Mapping[str, Any]) -> dict[str, Any]:
+    """Read candidate fields from the immutable baseline result snapshot."""
+    stage_a = snapshot.get("stage_a")
+    stage_a = stage_a if isinstance(stage_a, Mapping) else {}
+    classification = stage_a.get("classification")
+    classification = classification if isinstance(classification, Mapping) else {}
+    quality = stage_a.get("image_quality")
+    quality = quality if isinstance(quality, Mapping) else {}
+    predicted: dict[str, Any] = {
+        "level": snapshot.get("predicted_level"),
+        "scope_status": classification.get("scope_status"),
+        "primary_category": classification.get("primary_category"),
+        "quality_severity": quality.get("quality_severity"),
+    }
+    for key in (
+        "media_form",
+        "media_type",
+        "shooting_method",
+        "production_fields",
+    ):
+        value = stage_a.get(key)
+        if isinstance(value, Mapping):
+            predicted[key] = value
+
+    explanation = snapshot.get("level_explanation")
+    explanation = explanation if isinstance(explanation, Mapping) else {}
+    raw_dimensions = explanation.get("all_dimensions")
+    if isinstance(raw_dimensions, list):
+        dimensions = {
+            str(item["key"]): item.get("grade")
+            for item in raw_dimensions
+            if isinstance(item, Mapping) and item.get("key") is not None
+        }
+        if dimensions:
+            predicted["dimensions"] = dimensions
+    return _flatten_metric_fields(predicted)
+
+
+def compute_field_metrics(
+    items: Iterable[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Aggregate exact field evidence without making release decisions."""
+    rows = list(items)
+    field_keys = sorted(
+        {
+            field_key
+            for row in rows
+            for field_key in (row.get("truth_fields") or {})
+        }
+    )
+    field_metrics: list[dict[str, Any]] = []
+    all_failures: set[int] = set()
+
+    for field_key in field_keys:
+        confusion: dict[str, dict[str, int]] = {}
+        expected_counts: dict[str, int] = {}
+        expected_hits: dict[str, int] = {}
+        support = 0
+        tp = 0
+        failures: list[int] = []
+        for row in rows:
+            truth_fields = row.get("truth_fields") or {}
+            if field_key not in truth_fields:
+                continue
+            support += 1
+            expected = _field_value_key(truth_fields[field_key])
+            predicted_fields = row.get("prediction_fields") or {}
+            predicted = _field_value_key(predicted_fields.get(field_key))
+            confusion.setdefault(expected, {})[predicted] = (
+                confusion.setdefault(expected, {}).get(predicted, 0) + 1
+            )
+            expected_counts[expected] = expected_counts.get(expected, 0) + 1
+            if expected == predicted:
+                tp += 1
+                expected_hits[expected] = expected_hits.get(expected, 0) + 1
+            else:
+                sample_id = int(row["sample_id"])
+                failures.append(sample_id)
+                all_failures.add(sample_id)
+        mismatch_count = support - tp
+        recalls = [
+            expected_hits.get(expected, 0) / count
+            for expected, count in expected_counts.items()
+            if count
+        ]
+        field_metrics.append(
+            {
+                "field_key": field_key,
+                "support": support,
+                "tp": tp,
+                "fp": mismatch_count,
+                "fn": mismatch_count,
+                "accuracy": tp / support if support else 0.0,
+                "recall": sum(recalls) / len(recalls) if recalls else 0.0,
+                "confusion_matrix": {
+                    expected: dict(sorted(predictions.items()))
+                    for expected, predictions in sorted(confusion.items())
+                },
+                "failure_sample_ids": sorted(set(failures)),
+            }
+        )
+
+    supported = [item for item in field_metrics if item["support"]]
+    total_support = sum(item["support"] for item in supported)
+    total_tp = sum(item["tp"] for item in supported)
+    total_fp = sum(item["fp"] for item in supported)
+    total_fn = sum(item["fn"] for item in supported)
+    return {
+        "field_metrics": field_metrics,
+        "aggregates": {
+            "macro": {
+                "field_count": len(supported),
+                "accuracy": (
+                    sum(item["accuracy"] for item in supported) / len(supported)
+                    if supported
+                    else 0.0
+                ),
+                "recall": (
+                    sum(item["recall"] for item in supported) / len(supported)
+                    if supported
+                    else 0.0
+                ),
+            },
+            "micro": {
+                "support": total_support,
+                "tp": total_tp,
+                "fp": total_fp,
+                "fn": total_fn,
+                "accuracy": total_tp / total_support if total_support else 0.0,
+                "recall": total_tp / (total_tp + total_fn)
+                if total_tp + total_fn
+                else 0.0,
+            },
+        },
+        "failure_sample_ids": sorted(all_failures),
+    }
+
+
+def build_baseline_field_metrics(
+    db: Session,
+    run: BaselineRegressionRun,
+) -> dict[str, Any]:
+    """Build read-only field evidence from a frozen run and locked Gold."""
+    asset_ids = [item.asset_id for item in run.items]
+    golden_items = (
+        db.scalars(
+            select(SampleSetItem)
+            .join(SampleSet, SampleSet.id == SampleSetItem.sample_set_id)
+            .where(
+                SampleSet.category_key == run.category_key,
+                SampleSet.kind == "golden",
+                SampleSet.status == "locked",
+                SampleSetItem.asset_id.in_(asset_ids),
+            )
+            .order_by(
+                SampleSetItem.asset_id.asc(),
+                SampleSetItem.truth_revision.desc(),
+                SampleSetItem.id.desc(),
+            )
+        ).all()
+        if asset_ids
+        else []
+    )
+    golden_by_asset: dict[int, SampleSetItem] = {}
+    for item in golden_items:
+        golden_by_asset.setdefault(item.asset_id, item)
+
+    metric_rows: list[dict[str, Any]] = []
+    truth_sources: set[int] = set()
+    truth_revisions: list[int] = []
+    snapshot_versions: dict[str, set[str]] = {
+        "model": set(),
+        "prompt_a": set(),
+        "prompt_b": set(),
+        "rubric": set(),
+        "engine": set(),
+    }
+    asset_hashes: list[str] = []
+    for item in run.items:
+        snapshot = _json_object(item.result_snapshot_json)
+        golden = golden_by_asset.get(item.asset_id)
+        truth = _json_object(golden.truth_json) if golden else {}
+        if golden is not None:
+            truth_sources.add(golden.sample_set_id)
+            truth_revisions.append(golden.truth_revision)
+        asset_snapshot = _json_object(item.baseline_set_item.asset_snapshot_json)
+        asset_hash = asset_snapshot.get("sha256")
+        if isinstance(asset_hash, str):
+            asset_hashes.append(asset_hash)
+        for key, value in (snapshot.get("versions") or {}).items():
+            if key in snapshot_versions and value is not None:
+                snapshot_versions[key].add(str(value))
+        metric_rows.append(
+            {
+                "sample_id": item.asset_id,
+                "truth_fields": metric_truth_fields(
+                    truth,
+                    expected_level=item.expected_level,
+                ),
+                "prediction_fields": metric_prediction_fields(snapshot),
+            }
+        )
+
+    metrics = compute_field_metrics(metric_rows)
+    golden_asset_ids = set(golden_by_asset)
+    metrics["golden_failure_sample_ids"] = sorted(
+        golden_asset_ids & set(metrics["failure_sample_ids"])
+    )
+    execution = _json_object(run.execution_snapshot_json)
+    v3_bundle = execution.get("v3_authoritative_bundle")
+    v3_bundle = v3_bundle if isinstance(v3_bundle, dict) else {}
+    mechanism = v3_bundle.get("contract")
+    mechanism = mechanism if isinstance(mechanism, dict) else {}
+    bundle = run.strategy_bundle
+    return {
+        "schema_version": "baseline-field-metrics-v1",
+        "run_id": run.id,
+        "category_key": run.category_key,
+        **metrics,
+        "versions": {
+            "model": sorted(snapshot_versions["model"] or {bundle.model_id}),
+            "prompt": {
+                "a": sorted(
+                    snapshot_versions["prompt_a"] or {bundle.prompt_a_version}
+                ),
+                "b": sorted(
+                    snapshot_versions["prompt_b"]
+                    or ({bundle.prompt_b_version} if bundle.prompt_b_version else set())
+                ),
+            },
+            "mechanism": {
+                "spec_version": mechanism.get("spec_version"),
+                "rubric": sorted(
+                    snapshot_versions["rubric"] or {bundle.rubric_version}
+                ),
+                "engine": sorted(
+                    snapshot_versions["engine"] or {bundle.engine_version}
+                ),
+                "strategy_bundle_id": bundle.id,
+                "strategy_canonical_id": bundle.canonical_hash,
+            },
+            "asset": {
+                "baseline_set_fingerprint": run.baseline_set_fingerprint,
+                "count": len(asset_ids),
+                "payload_hash": hashlib.sha256(
+                    canonical_json(sorted(asset_hashes)).encode("utf-8")
+                ).hexdigest(),
+            },
+            "truth": {
+                "locked_sample_set_ids": sorted(truth_sources),
+                "revision_min": min(truth_revisions) if truth_revisions else 0,
+                "revision_max": max(truth_revisions) if truth_revisions else 0,
+                "matched_asset_count": len(golden_by_asset),
+            },
+        },
+        "decision_policy": {
+            "evidence_only": True,
+            "auto_activate_candidate": False,
+        },
+    }
+
+
+def field_metric_release_regressions(
+    baseline: Mapping[str, Any],
+    candidate: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    """Return field evidence that must block candidate approval."""
+    baseline_by_key = {
+        str(item.get("field_key")): item
+        for item in baseline.get("field_metrics") or []
+        if isinstance(item, Mapping)
+    }
+    candidate_by_key = {
+        str(item.get("field_key")): item
+        for item in candidate.get("field_metrics") or []
+        if isinstance(item, Mapping)
+    }
+    regressions: list[dict[str, Any]] = []
+    for field_key in sorted(set(baseline_by_key) & set(candidate_by_key)):
+        if not field_key.startswith(_RELEASE_KEY_FIELD_PREFIXES):
+            continue
+        baseline_metric = baseline_by_key[field_key]
+        candidate_metric = candidate_by_key[field_key]
+        accuracy_delta = float(candidate_metric.get("accuracy", 0.0)) - float(
+            baseline_metric.get("accuracy", 0.0)
+        )
+        recall_delta = float(candidate_metric.get("recall", 0.0)) - float(
+            baseline_metric.get("recall", 0.0)
+        )
+        if accuracy_delta < 0 or recall_delta < 0:
+            regressions.append(
+                {
+                    "code": "key_field_regressed",
+                    "message": f"关键字段 {field_key} 低于基准",
+                    "field_key": field_key,
+                    "accuracy_delta": accuracy_delta,
+                    "recall_delta": recall_delta,
+                }
+            )
+
+    failures = sorted(
+        {
+            int(item)
+            for item in candidate.get("golden_failure_sample_ids") or []
+        }
+    )
+    if failures:
+        regressions.append(
+            {
+                "code": "golden_set_failure",
+                "message": "候选在锁定黄金真值上仍存在字段失败",
+                "failure_sample_ids": failures,
+            }
+        )
+    return regressions
+
+
 def _item_metric_payload(item: BaselineRegressionItem) -> dict[str, Any]:
     snapshot = _json_object(item.result_snapshot_json)
     return {
@@ -739,7 +1131,7 @@ def deterministic_correction_report(
 
     return {
         "schema_version": "baseline-correction-report-v1",
-        "status": "optimization_suggestion_pending_confirmation",
+        "status": "automatic_candidate_pipeline",
         "category_key": input_snapshot.get("category_key"),
         "baseline_run_id": input_snapshot.get("baseline_run_id"),
         "selection": {
@@ -768,14 +1160,14 @@ def deterministic_correction_report(
         "risks": (["差异样本少于 10，建议仅作优化候选。"] if len(raw_items) < 10 else []),
         "publication": {
             "allowed": False,
-            "next_state": "awaiting_confirmation",
-            "message": "分析仅提供纠偏建议，不创建、不覆盖、不发布提示词或维度版本。",
+            "next_state": "automatic_candidate_regression",
+            "message": "系统将自动生成候选并执行回归；仅最终启用或拒绝需要人工决策。",
         },
     }
 
 
 def execute_correction_run(correction: BaselineCorrectionRun) -> None:
-    """Advance one persisted correction run to its human confirmation gate."""
+    """Persist deterministic analysis before automatic orchestration continues."""
 
     try:
         snapshot = json.loads(correction.input_snapshot_json)
@@ -784,24 +1176,16 @@ def execute_correction_run(correction: BaselineCorrectionRun) -> None:
     if not isinstance(snapshot, dict):
         raise ValueError("纠偏分析冻结输入损坏")
     correction.status = "processing"
+    correction.stage = "analysis"
     correction.progress = 25
     correction.report_json = canonical_json(
         deterministic_correction_report(snapshot)
     )
-    correction.status = "awaiting_confirmation"
-    correction.progress = 100
-    correction.blockers_json = canonical_json(
-        [
-            {
-                "code": "human_confirmation_required",
-                "message": "提示词或维度调整必须由人工确认后另行创建候选版本。",
-                "retryable": False,
-            }
-        ]
-    )
+    correction.stage = "candidate_generation"
+    correction.blockers_json = "[]"
     correction.error_code = ""
     correction.error_message = ""
-    correction.finished_at = datetime.now(timezone.utc)
+    correction.finished_at = None
 
 
 def fail_correction_run(
@@ -812,7 +1196,6 @@ def fail_correction_run(
 ) -> None:
     correction.status = "failed"
     correction.progress = 0
-    correction.report_json = "{}"
     correction.blockers_json = canonical_json(
         [
             {

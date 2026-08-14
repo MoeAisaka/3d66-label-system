@@ -18,6 +18,7 @@ const managementGroups = [
     description: "维护类目评测 v3 合同、提示词和模型配置。普通审核员开始评测时无需配置这些内容。",
     icon: SlidersHorizontal,
     entries: [
+      { to: "/workflow/optimization/category-evaluation-preview", label: "类目评测底座预览", note: "查看四类目的评测合同、校验状态和运行边界" },
       { to: "/workflow/optimization/category-evaluation-v3-config", label: "类目评测 v3 合同配置", note: "四类目的分类赛道与子类目维度唯一配置入口" },
       { to: "/workflow/optimization/candidates", label: "提示词版本", note: "查看候选、变更说明和人工发布门禁" },
       { to: "/workflow/governance/model-registry", label: "模型注册中心", note: "列表维护主模型、调优模型、协议和调用限制" },
@@ -64,6 +65,7 @@ const managementGroups = [
       { to: "/workflow/releases/decisions", label: "正式标签发布", note: "对已通过二审的评测包执行独立发布决定" },
       { to: "/workflow/releases/metrics", label: "版本指标", note: "查看正式版本的质量与运行指标" },
       { to: "/workflow/releases/history", label: "发布历史", note: "追溯每次发布、回滚和人工决定" },
+      { to: "/workflow/governance/projections", label: "下游表投影", note: "维护统一大维表和职责小表的版本合同与本地对账" },
       { to: "/workflow/review/model-evaluation", label: "全部评测结果", note: "面向诊断人员查看非默认的完整运行明细" },
       { to: "/legacy/sample-sets", label: "黄金样本集管理", note: "维护锁定真值和回归样本组成" },
     ],

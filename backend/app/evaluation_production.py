@@ -71,6 +71,7 @@ class EvaluationProductionRunCreateRequest(BaseModel):
 
     material_package_id: int = Field(ge=1)
     category_key: str = Field(pattern=r"^[a-z][a-z0-9_]{2,39}$")
+    workflow_kind: Literal["incremental", "stock"] = "incremental"
     idempotency_key: str = Field(min_length=1, max_length=160)
 
     @field_validator("idempotency_key")
@@ -113,6 +114,7 @@ def _request_hash(payload: EvaluationProductionRunCreateRequest) -> str:
         "schema_version": "evaluation-production-request-v1",
         "material_package_id": payload.material_package_id,
         "category_key": payload.category_key,
+        "workflow_kind": payload.workflow_kind,
         "idempotency_key": payload.idempotency_key,
     }
     return hashlib.sha256(_canonical_json(definition).encode("utf-8")).hexdigest()
@@ -999,6 +1001,7 @@ def production_run_payload(db: Session, run: EvaluationProductionRun) -> dict[st
             "active_asset_count": len(_active_package_asset_ids(run.material_package)),
         },
         "category_key": run.category_key,
+        "workflow_kind": run.workflow_kind,
         "category": {
             "key": run.category_key,
             "name": _loads_object(run.category_profile_snapshot_json).get("display_name") or run.category_key,
@@ -1117,6 +1120,7 @@ def create_production_run(
         request_hash=request_hash,
         material_package_id=package.id,
         category_key=payload.category_key,
+        workflow_kind=payload.workflow_kind,
         category_profile_snapshot_json=normalized_snapshot,
         category_profile_hash=profile_hash,
         job_ids_json=_canonical_json(job_ids),
@@ -1190,6 +1194,7 @@ def build_evaluation_production_router(
             "blocked", "failed", "archived",
         ] | None = None,
         category_key: str | None = None,
+        workflow_kind: Literal["incremental", "stock"] | None = None,
         limit: int = Query(default=200, ge=1, le=500),
         user: User = Depends(read_user_dependency),
         db: Session = Depends(get_db),
@@ -1202,6 +1207,8 @@ def build_evaluation_production_router(
             statement = statement.where(EvaluationProductionRun.status == status)
         if category_key is not None:
             statement = statement.where(EvaluationProductionRun.category_key == category_key)
+        if workflow_kind is not None:
+            statement = statement.where(EvaluationProductionRun.workflow_kind == workflow_kind)
         runs = db.scalars(statement.limit(limit)).all()
         items = [
             production_run_payload(

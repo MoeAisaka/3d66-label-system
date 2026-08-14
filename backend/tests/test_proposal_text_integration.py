@@ -20,6 +20,7 @@ from app.database import Base
 from app.models import (
     Asset,
     CategoryEvaluationV3Config,
+    CategoryEvaluationV3Revision,
     EvaluationCategoryProfile,
     EvaluationJob,
     EvaluationResult,
@@ -392,4 +393,45 @@ def test_seed_upgrades_known_v1_document_contract_to_v2() -> None:
         assert profile.rubric_version == PROPOSAL_SPEC_VERSION
         assert json.loads(row.contract_json)["spec_version"] == PROPOSAL_SPEC_VERSION
         assert row.revision == old_revision + 1
+    engine.dispose()
+
+
+def test_proposal_seed_preserves_operator_candidate_revision() -> None:
+    engine = _engine()
+    with Session(engine) as db:
+        seed_defaults(db)
+        projected = db.scalar(
+            select(CategoryEvaluationV3Config).where(
+                CategoryEvaluationV3Config.category_key == "proposal_text_pdf"
+            )
+        )
+        assert projected is not None and projected.projected_revision_id is not None
+        candidate_contract = json.loads(projected.contract_json)
+        candidate_contract["pdf_input_channel"]["call_a"]["batch_size"] = 12
+        candidate_json = canonical_json(candidate_contract)
+        candidate = CategoryEvaluationV3Revision(
+            category_key=projected.category_key,
+            display_name="Proposal 人工候选",
+            revision=projected.revision + 1,
+            status="candidate",
+            parent_revision_id=projected.projected_revision_id,
+            contract_json=candidate_json,
+            classification_map_json=projected.classification_map_json,
+            subcategory_dimensions_json=projected.subcategory_dimensions_json,
+            dimension_deduction_rules_json=projected.dimension_deduction_rules_json,
+            media_penalty_enabled=projected.media_penalty_enabled,
+            contract_hash="candidate-proposal-hash",
+            created_by="operator:test",
+        )
+        db.add(candidate)
+        db.commit()
+        candidate_id = candidate.id
+
+        seed_proposal_text_pdf(db)
+        db.commit()
+        preserved = db.get(CategoryEvaluationV3Revision, candidate_id)
+        assert preserved is not None
+        assert preserved.status == "candidate"
+        assert preserved.contract_json == candidate_json
+        assert preserved.contract_hash == "candidate-proposal-hash"
     engine.dispose()

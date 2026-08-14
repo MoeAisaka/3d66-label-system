@@ -92,7 +92,7 @@ export function EvaluationPackagePipelinePage({ user }: { user: User }) {
   })
   const runs = useQuery({
     queryKey: ["evaluation-production-runs"],
-    queryFn: evaluationProductionApi.list,
+    queryFn: () => evaluationProductionApi.list(),
     retry: false,
     refetchInterval: (query) => query.state.data?.items.some((item) => activeRunStatuses.has(item.status)) ? 4000 : false,
   })

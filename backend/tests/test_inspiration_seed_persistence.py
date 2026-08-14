@@ -18,7 +18,12 @@ from app.inspiration_category_seed import (
     INSPIRATION_SPEC_VERSION,
 )
 from app.proposal_text_contract import validate_proposal_text_contract
-from app.models import CategoryEvaluationV3Config, EvaluationCategoryProfile, PromptVersion
+from app.models import (
+    CategoryEvaluationV3Config,
+    CategoryEvaluationV3Revision,
+    EvaluationCategoryProfile,
+    PromptVersion,
+)
 from app.seed import (
     _seed_inspiration_image_prompts,
     _seed_inspiration_image_v3_config,
@@ -277,3 +282,50 @@ def test_seed_defaults_clones_active_v3_contract_and_prompts_for_all_categories(
         assert len(rows_after) == len(expected_categories)
         assert {row.category_key: row.revision for row in rows_after} == revisions_before
         assert len(db.scalars(select(PromptVersion)).all()) == prompt_count_before
+
+
+def test_inspiration_seed_preserves_operator_candidate_revision() -> None:
+    engine = _engine()
+    with Session(engine) as db:
+        seed_defaults(db)
+        projected = db.scalar(
+            select(CategoryEvaluationV3Config).where(
+                CategoryEvaluationV3Config.category_key == "inspiration_image"
+            )
+        )
+        assert projected is not None and projected.projected_revision_id is not None
+        candidate_contract = json.loads(projected.contract_json)
+        candidate_contract["common_modifiers"]["media_type_penalty"]["penalties"][
+            "ai_image"
+        ] = -9
+        candidate_json = json.dumps(
+            candidate_contract,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        candidate = CategoryEvaluationV3Revision(
+            category_key=projected.category_key,
+            display_name="人工候选",
+            revision=projected.revision + 1,
+            status="candidate",
+            parent_revision_id=projected.projected_revision_id,
+            contract_json=candidate_json,
+            classification_map_json=projected.classification_map_json,
+            subcategory_dimensions_json=projected.subcategory_dimensions_json,
+            dimension_deduction_rules_json=projected.dimension_deduction_rules_json,
+            media_penalty_enabled=projected.media_penalty_enabled,
+            contract_hash="candidate-inspiration-hash",
+            created_by="operator:test",
+        )
+        db.add(candidate)
+        db.commit()
+        candidate_id = candidate.id
+
+        seed_defaults(db)
+        db.commit()
+        preserved = db.get(CategoryEvaluationV3Revision, candidate_id)
+        assert preserved is not None
+        assert preserved.status == "candidate"
+        assert preserved.contract_json == candidate_json
+        assert preserved.contract_hash == "candidate-inspiration-hash"

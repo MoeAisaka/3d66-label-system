@@ -168,6 +168,41 @@ def _create(client: TestClient, package_id: int, key: str = "production-request-
     )
 
 
+def test_production_run_context_is_explicit() -> None:
+    with _context(asset_count=1) as fixture:
+        response = fixture["client"].post(
+            "/api/evaluation-production-runs",
+            json={
+                "material_package_id": fixture["package"].id,
+                "category_key": "space_image",
+                "workflow_kind": "incremental",
+                "idempotency_key": "incremental-context-1",
+            },
+        )
+        assert response.status_code == 200, response.text
+        assert response.json()["workflow_kind"] == "incremental"
+
+        listed = fixture["client"].get(
+            "/api/evaluation-production-runs?workflow_kind=incremental"
+        )
+        assert listed.status_code == 200, listed.text
+        assert all(item["workflow_kind"] == "incremental" for item in listed.json()["items"])
+
+
+def test_invalid_workflow_kind_is_rejected() -> None:
+    with _context(asset_count=1) as fixture:
+        response = fixture["client"].post(
+            "/api/evaluation-production-runs",
+            json={
+                "material_package_id": fixture["package"].id,
+                "category_key": "space_image",
+                "workflow_kind": "unknown",
+                "idempotency_key": "invalid-context-1",
+            },
+        )
+        assert response.status_code == 422
+
+
 def _complete_job(
     db: Session,
     *,

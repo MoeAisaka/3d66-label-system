@@ -96,6 +96,18 @@ def test_contract_accepts_document_level_v2_channel() -> None:
     )
 
 
+def test_contract_accepts_operator_version_and_track_cap_changes() -> None:
+    candidate = contract()
+    candidate["spec_version"] = "proposal-text-v3-owner-edit-20260812"
+    candidate["call_a_version"] = "proposal-text-a-v3-owner-edit-20260812"
+    candidate["call_b_version"] = "proposal-text-b-v3-owner-edit-20260812"
+    candidate["track_classification"]["tracks"]["A"]["visual_max"] = 44
+    candidate["track_classification"]["tracks"]["A"]["narrative_max"] = 46
+    assert validate_proposal_text_contract(candidate)["spec_version"] == candidate[
+        "spec_version"
+    ]
+
+
 def test_document_level_v2_prompt_uses_validator_readability_enum() -> None:
     prompt = (ASSET_DIR / "call_a_proposal_text_v2.txt").read_text(encoding="utf-8")
     assert '"页面可读性": "正常|部分异常|无法判断"' in prompt
@@ -106,16 +118,37 @@ def test_document_level_v2_prompt_uses_validator_readability_enum() -> None:
     ("path", "value"),
     [
         (("profile_type",), "rule-deduction-v1"),
-        (("track_classification", "tracks", "A", "visual_max"), 44),
-        (("grade_bands", "L1"), [91, 100]),
         (("redline_policy", "signal"), "production_fields.reason"),
-        (("pdf_input_channel", "call_a", "batch_size"), 8),
     ],
 )
-def test_contract_rejects_changed_frozen_semantics(
+def test_contract_rejects_fixed_identity_and_safety_semantics(
     path: tuple[str, ...], value: object
 ) -> None:
     candidate = copy.deepcopy(contract())
+    target = candidate
+    for key in path[:-1]:
+        target = target[key]
+    target[path[-1]] = value
+    with pytest.raises(ProposalTextContractError):
+        validate_proposal_text_contract(candidate)
+
+
+@pytest.mark.parametrize(
+    ("path", "value"),
+    [
+        (("pdf_input_channel", "call_a", "batch_size"), 0),
+        (("pdf_input_channel", "call_a", "max_side_px"), 4096),
+        (("pdf_input_channel", "call_b", "sample_size"), 33),
+        (("track_classification", "tracks", "A", "visual_max"), 101),
+        (("track_classification", "tracks", "A", "members"), ["建筑设计", "建筑设计"]),
+        (("redline_policy", "hit_score_cap"), 101),
+        (("grade_bands", "L2"), [80, 70]),
+    ],
+)
+def test_contract_rejects_unsafe_operator_values(
+    path: tuple[str, ...], value: object
+) -> None:
+    candidate = contract()
     target = candidate
     for key in path[:-1]:
         target = target[key]

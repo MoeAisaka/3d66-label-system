@@ -10,9 +10,11 @@ import {
   WarningCircle,
 } from "@phosphor-icons/react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
+import { useSearchParams } from "react-router-dom"
 import { toast } from "sonner"
 
 import { PageHeader } from "@/components/app-shell"
+import { StatusSummaryStrip } from "@/components/workspace-page"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -27,6 +29,7 @@ import type {
   Asset,
   BaselineLevel,
   BaselineCorrectionRun,
+  BaselineFieldMetrics,
   BaselineRegressionItem,
   BaselineRegressionRun,
   EvaluationCategoryProfile,
@@ -35,8 +38,17 @@ import type {
   ReviewCorrection,
   User,
 } from "@/lib/types"
-import { NodeCorrectionEditor } from "@/pages/node-correction-editor"
 import { ReviewCorrectionForm } from "@/pages/review-correction-form"
+import {
+  baselineAcceptanceProgressFromPages,
+  baselineRunContextPatch,
+  baselineRunIdAfterSetLoad,
+} from "@/features/baseline-regression/baseline-regression-contract"
+import { BaselineSetDialog } from "@/features/baseline-regression/baseline-set-dialog"
+import { CorrectionWorkbench } from "@/features/baseline-regression/correction-workbench"
+import { MetricsDrawer } from "@/features/baseline-regression/metrics-drawer"
+import { RunConfigDrawer } from "@/features/baseline-regression/run-config-drawer"
+import { RunHistoryDrawer } from "@/features/baseline-regression/run-history-drawer"
 
 const levels: BaselineLevel[] = ["L1", "L2", "L3", "L4", "L5"]
 const levelNames: Record<BaselineLevel, string> = {
@@ -49,9 +61,11 @@ const levelNames: Record<BaselineLevel, string> = {
 
 const ASSET_PAGE_SIZE = 200
 const RUN_PAGE_SIZE = 200
+const ACCEPTANCE_PAGE_SIZE = 1000
 
 export function BaselineRegressionPage() {
   const queryClient = useQueryClient()
+  const [searchParams, setSearchParams] = useSearchParams()
   const uploadRef = useRef<HTMLInputElement>(null)
   const [selectedCategoryKey, setSelectedCategoryKey] = useState("space_image")
   const [selectedAssetIds, setSelectedAssetIds] = useState<Set<number>>(new Set())
@@ -70,6 +84,10 @@ export function BaselineRegressionPage() {
   const [assetPage, setAssetPage] = useState(0)
   const [runPage, setRunPage] = useState(0)
   const [imagePreview, setImagePreview] = useState<ImagePreview | null>(null)
+  const [baselineSetDialogOpen, setBaselineSetDialogOpen] = useState(false)
+  const [runConfigDrawerOpen, setRunConfigDrawerOpen] = useState(false)
+  const [metricsDrawerOpen, setMetricsDrawerOpen] = useState(false)
+  const [runHistoryDrawerOpen, setRunHistoryDrawerOpen] = useState(false)
 
   const categories = useQuery({
     queryKey: ["evaluation-categories"],
@@ -119,6 +137,37 @@ export function BaselineRegressionPage() {
     refetchInterval: (query) =>
       query.state.data?.summary.status === "running" ? 3000 : false,
   })
+  const fieldMetrics = useQuery({
+    queryKey: ["baseline-field-metrics", selectedRunId],
+    queryFn: () => baselineRegressionApi.getMetrics(selectedRunId),
+    enabled: selectedRunId > 0,
+    refetchInterval: runDetail.data?.summary.status === "running" ? 3000 : false,
+  })
+  const acceptancePages = useQuery({
+    queryKey: [
+      "baseline-acceptance",
+      selectedRunId,
+      runDetail.data?.summary.total,
+      runDetail.data?.summary.completed,
+      runDetail.data?.summary.failed,
+    ],
+    queryFn: async () => {
+      const total = runDetail.data?.summary.total ?? 0
+      const pages: BaselineRegressionItem[][] = []
+      for (let offset = 0; offset < total; offset += ACCEPTANCE_PAGE_SIZE) {
+        const detail = await baselineRegressionApi.getRun(
+          selectedRunId,
+          offset,
+          ACCEPTANCE_PAGE_SIZE,
+        )
+        pages.push(detail.items)
+        if (detail.items.length < ACCEPTANCE_PAGE_SIZE) break
+      }
+      return pages
+    },
+    enabled: selectedRunId > 0 && Boolean(runDetail.data?.summary),
+    refetchInterval: runDetail.data?.summary.status === "running" ? 3000 : false,
+  })
 
   const promptAOptions = useMemo(
     () => (prompts.data?.items ?? []).filter(
@@ -161,6 +210,21 @@ export function BaselineRegressionPage() {
     : publishedPromptB?.id ?? 0
 
   useEffect(() => {
+    const runFromUrl = Number(searchParams.get("run") || 0)
+    if (runFromUrl > 0 && runFromUrl !== selectedRunId) {
+      setSelectedRunId(runFromUrl)
+    }
+  }, [searchParams, selectedRunId])
+
+  useEffect(() => {
+    const itemFromUrl = Number(searchParams.get("item") || 0)
+    if (searchParams.get("mode") === "correction" && itemFromUrl > 0 && selectedRunId <= 0) {
+      const runFromUrl = Number(searchParams.get("run") || 0)
+      if (runFromUrl > 0) setSelectedRunId(runFromUrl)
+    }
+  }, [searchParams, selectedRunId])
+
+  useEffect(() => {
     if (!activeCategories.length) return
     if (!activeCategories.some((category) => category.category_key === selectedCategoryKey)) {
       setSelectedCategoryKey(
@@ -191,11 +255,11 @@ export function BaselineRegressionPage() {
   }, [baselineSets.data?.items, selectedSetId])
 
   useEffect(() => {
-    const runs = selectedSet.data?.runs ?? []
-    if (runs.length && !runs.some((run) => run.id === selectedRunId)) {
-      setSelectedRunId(runs[0].id)
-    }
-    if (!runs.length) setSelectedRunId(0)
+    const nextRunId = baselineRunIdAfterSetLoad(
+      selectedRunId,
+      selectedSet.data?.runs ?? null,
+    )
+    if (nextRunId !== selectedRunId) setSelectedRunId(nextRunId)
   }, [selectedRunId, selectedSet.data?.runs])
 
   useEffect(() => {
@@ -353,6 +417,30 @@ export function BaselineRegressionPage() {
   )
   const selectedRun = selectedSet.data?.runs.find((run) => run.id === selectedRunId)
   const summary = runDetail.data?.summary ?? selectedRun
+  const correctionItemId = searchParams.get("mode") === "correction"
+    ? Number(searchParams.get("item") || 0)
+    : 0
+
+  useEffect(() => {
+    const categoryKey = runDetail.data?.summary.category_key
+    const baselineSetId = runDetail.data?.baseline_set.id
+    if (!categoryKey || !baselineSetId) return
+    const patch = baselineRunContextPatch(
+      selectedCategoryKey,
+      selectedSetId,
+      { categoryKey, baselineSetId },
+    )
+    if (patch.categoryKey) {
+      setSelectedCategoryKey(patch.categoryKey)
+      return
+    }
+    if (patch.baselineSetId) setSelectedSetId(patch.baselineSetId)
+  }, [
+    runDetail.data?.baseline_set.id,
+    runDetail.data?.summary.category_key,
+    selectedCategoryKey,
+    selectedSetId,
+  ])
 
   function toggleAsset(assetId: number) {
     setSelectedAssetIds((current) => {
@@ -366,6 +454,7 @@ export function BaselineRegressionPage() {
   function selectSet(setId: number) {
     setSelectedSetId(setId)
     setSelectedRunId(0)
+    setSearchParams({}, { replace: true })
   }
 
   function selectCategory(categoryKey: string) {
@@ -377,6 +466,16 @@ export function BaselineRegressionPage() {
     setExpectedByAsset({})
     setSelectedSetId(0)
     setSelectedRunId(0)
+    setSearchParams({}, { replace: true })
+  }
+
+  function openCorrection(itemId: number) {
+    if (!selectedRunId) return
+    setSearchParams({ run: String(selectedRunId), item: String(itemId), mode: "correction" })
+  }
+
+  function closeCorrection() {
+    setSearchParams({}, { replace: true })
   }
 
   return (
@@ -421,6 +520,33 @@ export function BaselineRegressionPage() {
             >
               <CheckSquare />{createBalanced100.isPending ? "正在校验" : "生成 100 张均衡基准集"}
             </Button>}
+            <Button
+              variant="secondary"
+              onClick={() => setBaselineSetDialogOpen(true)}
+            >
+              选择基准集
+            </Button>
+            <Button
+              variant="secondary"
+              onClick={() => setRunConfigDrawerOpen(true)}
+              disabled={!selectedSetId}
+            >
+              运行配置
+            </Button>
+            <Button
+              variant="secondary"
+              onClick={() => setRunHistoryDrawerOpen(true)}
+              disabled={!selectedSetId}
+            >
+              运行历史
+            </Button>
+            <Button
+              variant="secondary"
+              onClick={() => setMetricsDrawerOpen(true)}
+              disabled={!selectedRunId}
+            >
+              查看字段证据
+            </Button>
             <Button
               variant="secondary"
               onClick={() => {
@@ -512,6 +638,7 @@ export function BaselineRegressionPage() {
         </aside>
 
         <main className="min-w-0 px-5 py-7 md:px-8 lg:px-10 lg:py-9">
+          <BaselineSetDialog open={baselineSetDialogOpen} onOpenChange={setBaselineSetDialogOpen}>
           <section className="border-y border-[var(--line-strong)] bg-white">
             <div className="border-b border-[var(--line)] px-5 py-4">
               <h2 className="font-editorial text-2xl font-bold">创建冻结基准集</h2>
@@ -748,6 +875,7 @@ export function BaselineRegressionPage() {
               )}
             </div>
           </section>
+          </BaselineSetDialog>
 
           {selectedSet.data ? (
             <section className="mt-10">
@@ -757,11 +885,24 @@ export function BaselineRegressionPage() {
                     基准集 #{selectedSet.data.summary.id} · {selectedSet.data.summary.item_count} 张 · 指纹 {selectedSet.data.summary.fingerprint.slice(0, 12)}
                   </p>
                   <h2 className="font-editorial mt-2 text-3xl font-bold">{selectedSet.data.summary.name}</h2>
-                  {selectedSet.data.summary.description && (
+              {selectedSet.data.summary.description && (
                     <p className="mt-2 text-sm text-[var(--muted)]">{selectedSet.data.summary.description}</p>
                   )}
                 </div>
-                <div className="mt-5 grid gap-3 border-y border-[var(--line)] bg-[#fafbf8] px-4 py-4 min-[1280px]:grid-cols-3 min-[1280px]:items-end min-[1750px]:grid-cols-[minmax(0,150px)_minmax(0,170px)_minmax(0,1fr)_minmax(0,1fr)_minmax(0,1fr)_auto]">
+                <div className="mt-5 flex flex-wrap items-center justify-between gap-3 border-y border-[var(--line)] bg-[#fafbf8] px-4 py-3">
+                  <div className="min-w-0">
+                    <p className="text-xs font-semibold">运行配置</p>
+                    <p className="mt-1 truncate text-xs text-[var(--muted)]">
+                      {promptSelectionMode === "published" ? "当前发布版本" : promptSelectionMode === "manual" ? "手动选择版本" : "单提示词"}
+                      {" · "}{executionMode === "structured" ? "标准评分合同" : "自由实验"}
+                    </p>
+                  </div>
+                  <Button variant="secondary" size="sm" onClick={() => setRunConfigDrawerOpen(true)}>
+                    调整运行配置
+                  </Button>
+                </div>
+                <RunConfigDrawer open={runConfigDrawerOpen} onOpenChange={setRunConfigDrawerOpen}>
+                <div className="grid gap-3 border-y border-[var(--line)] bg-[#fafbf8] px-4 py-4 min-[1280px]:grid-cols-3 min-[1280px]:items-end min-[1750px]:grid-cols-[minmax(0,150px)_minmax(0,170px)_minmax(0,1fr)_minmax(0,1fr)_minmax(0,1fr)_auto]">
                   <label>
                     <span className="mb-2 block text-xs font-semibold">提示词取值方式</span>
                     <select
@@ -836,9 +977,21 @@ export function BaselineRegressionPage() {
                   {" "}
                   本轮维度与分类赛道只读取启动时冻结的 active v3 合同；缺少合同时服务端拒绝启动。
                 </p>
+                </RunConfigDrawer>
               </div>
 
-              <div className="mt-5 flex gap-2 overflow-x-auto pb-2">
+              <div className="mt-5 flex flex-wrap items-center justify-between gap-3 border-y border-[var(--line)] bg-white px-4 py-3">
+                <div>
+                  <p className="text-xs font-semibold">当前轮次</p>
+                  <p className="font-data mt-1 text-xs text-[var(--muted)]">
+                    {selectedRun ? `第 ${selectedRun.sequence_no} 轮 · ${statusName(selectedRun)} · ${selectedRun.completed}/${selectedRun.total}` : "尚未运行"}
+                  </p>
+                </div>
+                <Button variant="secondary" size="sm" onClick={() => setRunHistoryDrawerOpen(true)}>
+                  查看运行历史
+                </Button>
+              </div>
+              <div className="flex gap-2 overflow-x-auto pb-2">
                 {selectedSet.data.runs.map((run) => (
                   <button
                     key={run.id}
@@ -869,8 +1022,63 @@ export function BaselineRegressionPage() {
                   </p>
                 )}
               </div>
+              <RunHistoryDrawer open={runHistoryDrawerOpen} onOpenChange={setRunHistoryDrawerOpen}>
+                <div className="space-y-2">
+                  {selectedSet.data.runs.map((run) => (
+                    <button
+                      key={`history-${run.id}`}
+                      type="button"
+                      className="w-full border border-[var(--line)] bg-white px-4 py-3 text-left hover:bg-[#fafbf8]"
+                      onClick={() => {
+                        setSelectedRunId(run.id)
+                        setRunHistoryDrawerOpen(false)
+                      }}
+                    >
+                      <div className="flex items-center justify-between gap-3">
+                        <span className="text-sm font-semibold">第 {run.sequence_no} 轮</span>
+                        <Badge tone={statusTone(run)}>{statusName(run)}</Badge>
+                      </div>
+                      <p className="font-data mt-1 text-xs text-[var(--muted)]">{run.completed}/{run.total} · #{run.id}</p>
+                    </button>
+                  ))}
+                  {!selectedSet.data.runs.length && <p className="py-8 text-center text-sm text-[var(--muted)]">此基准集尚未运行。</p>}
+                </div>
+              </RunHistoryDrawer>
 
               {summary && (
+                <>
+                <StatusSummaryStrip className="mt-5">
+                  {(() => {
+                    const acceptanceRows = acceptancePages.data?.flat() ?? []
+                    const progress = baselineAcceptanceProgressFromPages(
+                      acceptancePages.data ?? [],
+                      summary.status !== "running",
+                    )
+                    const allRowsLoaded = acceptanceRows.length === summary.total
+                    const blockers = acceptanceRows.filter(
+                      (item) => item.status !== "completed" || !item.evaluation,
+                    ).length
+                    return (
+                      <div className="flex flex-wrap items-center justify-between gap-3">
+                        <div>
+                          <p className="text-xs font-semibold">逐条确认与纠偏</p>
+                          <p className="mt-1 text-xs text-[var(--muted)]">
+                            {acceptancePages.isLoading
+                              ? "正在汇总全轮人工验收进度"
+                              : `已确认 ${progress.reviewed}/${progress.total} · 未评分/失败阻塞 ${blockers}`}
+                          </p>
+                        </div>
+                        <Button
+                          size="sm"
+                          disabled={!allRowsLoaded || !progress.complete}
+                          onClick={() => toast.success("本轮人工验收条件已满足；当前仅展示本地完成摘要，不写入新状态。")}
+                        >
+                          完成人工验收
+                        </Button>
+                      </div>
+                    )
+                  })()}
+                </StatusSummaryStrip>
                 <RegressionResults
                   run={summary}
                   items={runDetail.data?.items ?? []}
@@ -882,8 +1090,14 @@ export function BaselineRegressionPage() {
                   page={runPage}
                   onPageChange={setRunPage}
                   loading={runDetail.isLoading}
+                  fieldMetrics={fieldMetrics.data}
                   onPreview={setImagePreview}
+                  onOpenMetrics={() => setMetricsDrawerOpen(true)}
+                  correctionItemId={correctionItemId}
+                  onOpenCorrection={openCorrection}
+                  onCloseCorrection={closeCorrection}
                 />
+                </>
               )}
             </section>
           ) : !selectedSet.isLoading && (
@@ -899,6 +1113,16 @@ export function BaselineRegressionPage() {
           if (!open) setImagePreview(null)
         }}
       />
+      {summary && (
+        <MetricsDrawer open={metricsDrawerOpen} onOpenChange={setMetricsDrawerOpen}>
+          <FieldMetricsEvidence
+            data={fieldMetrics.data}
+            loading={fieldMetrics.isLoading}
+            error={fieldMetrics.error}
+            levelMetrics={summary.metrics}
+          />
+        </MetricsDrawer>
+      )}
     </>
   )
 }
@@ -910,7 +1134,12 @@ function RegressionResults({
   page,
   onPageChange,
   loading,
+  fieldMetrics,
   onPreview,
+  onOpenMetrics,
+  correctionItemId,
+  onOpenCorrection,
+  onCloseCorrection,
 }: {
   run: BaselineRegressionRun
   items: BaselineRegressionItem[]
@@ -918,7 +1147,12 @@ function RegressionResults({
   page: number
   onPageChange: (page: number) => void
   loading: boolean
+  fieldMetrics?: BaselineFieldMetrics
   onPreview: (preview: ImagePreview) => void
+  onOpenMetrics: () => void
+  correctionItemId: number
+  onOpenCorrection: (itemId: number) => void
+  onCloseCorrection: () => void
 }) {
   const queryClient = useQueryClient()
   const me = useQuery({
@@ -939,7 +1173,6 @@ function RegressionResults({
     new Set(),
   )
   const [activeView, setActiveView] = useState<"results" | "correction">("results")
-  const [reviewingItemId, setReviewingItemId] = useState<number | null>(null)
   const [reviewNotes, setReviewNotes] = useState<Record<number, string>>({})
 
   useEffect(() => {
@@ -992,12 +1225,13 @@ function RegressionResults({
         queryClient.invalidateQueries({
           queryKey: ["baseline-regression", run.id],
         }),
+        queryClient.invalidateQueries({ queryKey: ["baseline-acceptance", run.id] }),
         queryClient.invalidateQueries({ queryKey: ["evaluations"] }),
         queryClient.invalidateQueries({ queryKey: ["dashboard"] }),
         queryClient.invalidateQueries({ queryKey: ["optimization-cases"] }),
       ])
       setReviewNotes((current) => ({ ...current, [variables.item.id]: "" }))
-      setReviewingItemId(null)
+      onCloseCorrection()
       toast.success(
         variables.decision === "corrected"
           ? "人工纠偏与最终等级已保存"
@@ -1011,6 +1245,92 @@ function RegressionResults({
 
   const metrics = run.metrics
   const pageCount = Math.max(1, Math.ceil(pagination.total / pagination.limit))
+  const correctionItem = items.find((item) => item.id === correctionItemId)
+
+  if (correctionItemId > 0 && correctionItem) {
+    return (
+      <CorrectionWorkbench
+        item={correctionItem}
+        onBack={onCloseCorrection}
+        corrector={me.data?.username ?? ""}
+        onCorrected={async () => {
+          await Promise.all([
+            queryClient.invalidateQueries({ queryKey: ["baseline-regression", run.id] }),
+            queryClient.invalidateQueries({ queryKey: ["baseline-acceptance", run.id] }),
+            queryClient.invalidateQueries({ queryKey: ["evaluations"] }),
+            queryClient.invalidateQueries({ queryKey: ["dashboard"] }),
+          ])
+        }}
+        onPreview={onPreview}
+      >
+        <div className="grid gap-4 md:grid-cols-2">
+          <LevelExplanation item={correctionItem} />
+          <div className="space-y-3">
+            <p className="text-sm font-semibold">人工决策</p>
+            <p className="text-xs leading-5 text-[var(--muted)]">确认或纠偏完成后返回轮次列表，继续处理下一条素材。</p>
+            {correctionItem.evaluation && (
+              <div className="space-y-4 border-t border-[var(--line)] pt-4">
+                <label>
+                  <span className="mb-2 block text-xs font-semibold">人工说明（可选）</span>
+                  <Input
+                    value={reviewNotes[correctionItem.id] ?? ""}
+                    disabled={correctionItem.evaluation.review_stage === "completed"}
+                    placeholder="补充确认或退回依据"
+                    onChange={(event) => setReviewNotes((current) => ({
+                      ...current,
+                      [correctionItem.id]: event.target.value,
+                    }))}
+                  />
+                </label>
+                {correctionItem.evaluation.review_stage !== "completed" && (
+                  <div className="flex flex-wrap gap-2">
+                    <Button
+                      variant="secondary"
+                      disabled={reviewResult.isPending}
+                      onClick={() => reviewResult.mutate({
+                        item: correctionItem,
+                        decision: "rejected",
+                        note: reviewNotes[correctionItem.id]?.trim() ?? "",
+                      })}
+                    >
+                      退回复核
+                    </Button>
+                    <Button
+                      disabled={reviewResult.isPending}
+                      onClick={() => reviewResult.mutate({
+                        item: correctionItem,
+                        decision: "approved",
+                        note: reviewNotes[correctionItem.id]?.trim() ?? "",
+                      })}
+                    >
+                      <Check weight="bold" />确认结果
+                    </Button>
+                  </div>
+                )}
+                {correctionItem.evaluation.scoring?.dimension_scoring_mode !== "rule_deduction" && (
+                  <ReviewCorrectionForm
+                    key={`${correctionItem.evaluation.id}-${correctionItem.evaluation.review_revision}`}
+                    dimensions={correctionItem.evaluation.aesthetic?.dimensions ?? {}}
+                    precheck={correctionItem.evaluation.precheck ?? {}}
+                    dimensionSchema={correctionItem.evaluation.dimension_schema}
+                    scoring={correctionItem.evaluation.scoring ?? {}}
+                    pending={reviewResult.isPending}
+                    editable={correctionItem.evaluation.review_stage !== "completed"}
+                    onSubmit={({ note, corrections }) => reviewResult.mutate({
+                      item: correctionItem,
+                      decision: "corrected",
+                      note,
+                      corrections,
+                    })}
+                  />
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+      </CorrectionWorkbench>
+    )
+  }
   return (
     <>
       <section className="mt-6 grid gap-px border-y border-[var(--line)] bg-[var(--line)] md:grid-cols-2 xl:grid-cols-4">
@@ -1037,14 +1357,19 @@ function RegressionResults({
           value={run.selection.execution_mode === "structured" ? "标准评分合同" : "自由实验 · 无结构也可完成"}
         />
       </section>
+      <div className="mt-4 flex justify-end">
+        <Button variant="secondary" size="sm" onClick={onOpenMetrics}>查看字段证据</Button>
+      </div>
       <div
         className="mt-6 flex gap-0 overflow-x-auto border-b border-[var(--line-strong)]"
         role="tablist"
         aria-label="基准回归工作区"
       >
         <button
+          id="baseline-results-tab"
           type="button"
           role="tab"
+          aria-controls="baseline-results-panel"
           aria-selected={activeView === "results"}
           className={`min-h-11 shrink-0 border-x border-t px-4 text-sm font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary ${activeView === "results" ? "border-[var(--line-strong)] bg-white" : "border-transparent bg-[#f3f5f0] text-[var(--muted)]"}`}
           onClick={() => setActiveView("results")}
@@ -1052,8 +1377,10 @@ function RegressionResults({
           回归结果
         </button>
         <button
+          id="baseline-correction-tab"
           type="button"
           role="tab"
+          aria-controls="baseline-correction-panel"
           aria-selected={activeView === "correction"}
           className={`min-h-11 shrink-0 border-x border-t px-4 text-sm font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary ${activeView === "correction" ? "border-[var(--line-strong)] bg-white" : "border-transparent bg-[#f3f5f0] text-[var(--muted)]"}`}
           onClick={() => setActiveView("correction")}
@@ -1063,13 +1390,12 @@ function RegressionResults({
       </div>
 
       {activeView === "results" ? (
-        <>
-      <section className="mt-6 grid gap-px border-y border-[var(--line)] bg-[var(--line)] sm:grid-cols-2 xl:grid-cols-5">
-        <Metric label="总体准确率" value={percent(metrics.exact_accuracy)} />
-        <Metric label="相邻等级准确率" value={percent(metrics.adjacent_accuracy)} />
-        <Metric label="运行进度" value={`${metrics.completed}/${metrics.total}`} />
-        <Metric label="已评分 / 待人工" value={`${metrics.valid_predictions} / ${metrics.unscored ?? metrics.manual_required ?? 0}`} />
-        <Metric label="偏差 / 失败" value={`${metrics.deviations} / ${metrics.failed}`} />
+        <div id="baseline-results-panel" role="tabpanel" aria-labelledby="baseline-results-tab">
+      <section className="mt-6 grid gap-px border-y border-[var(--line)] bg-[var(--line)] sm:grid-cols-2 xl:grid-cols-4">
+        <Metric label="字段宏平均准确率" value={fieldMetrics ? percent(fieldMetrics.aggregates.macro.accuracy) : percent(metrics.exact_accuracy)} />
+        <Metric label="字段宏平均召回率" value={fieldMetrics ? percent(fieldMetrics.aggregates.macro.recall) : "—"} />
+        <Metric label="人工门禁状态" value={run.status === "running" ? "等待运行完成" : metrics.failed ? "先处理失败" : "等待人工确认"} />
+        <Metric label="下一步" value={availableDeviationIds.length ? `纠偏 ${availableDeviationIds.length} 条` : "查看证据并决定"} />
       </section>
 
       {run.status === "running" && (
@@ -1087,44 +1413,7 @@ function RegressionResults({
         </div>
       )}
 
-      <section className="mt-7 grid gap-7 min-[1750px]:grid-cols-[minmax(0,0.8fr)_minmax(0,1.2fr)]">
-        <div className="min-w-0">
-          <div className="mb-3">
-            <h3 className="font-editorial text-2xl font-bold">L1–L5 混淆矩阵</h3>
-            <p className="mt-1 text-xs text-[var(--muted)]">行 = 期望等级，列 = 模型预测等级。</p>
-          </div>
-          <div className="overflow-x-auto border-y border-[var(--line-strong)] bg-white">
-            <table className="w-full min-w-[430px] border-collapse text-center text-sm">
-              <thead>
-                <tr className="border-b border-[var(--line)] bg-[#fafbf8]">
-                  <th className="px-3 py-3 text-left text-xs text-[var(--muted)]">期望 \ 预测</th>
-                  {levels.map((level) => <th key={level} className="font-data px-3 py-3">{level}</th>)}
-                </tr>
-              </thead>
-              <tbody>
-                {levels.map((expected) => (
-                  <tr key={expected} className="border-b border-[var(--line)] last:border-0">
-                    <th className="font-data px-3 py-3 text-left">{expected}</th>
-                    {levels.map((predicted) => {
-                      const count = metrics.confusion_matrix[expected]?.[predicted] ?? 0
-                      return (
-                        <td
-                          key={predicted}
-                          className={`font-data px-3 py-3 text-base ${
-                            expected === predicted && count ? "bg-[#eff7cb] font-bold" : ""
-                          }`}
-                        >
-                          {count}
-                        </td>
-                      )
-                    })}
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
-
+      <section className="mt-7">
         <div className="min-w-0">
           <div className="mb-3 flex flex-wrap items-end justify-between gap-3">
             <div>
@@ -1186,7 +1475,6 @@ function RegressionResults({
               <div className="divide-y divide-[var(--line)]">
                 {items.map((item) => {
                   const fallback = gradedByFallback(item.stage_a)
-                  const reviewing = reviewingItemId === item.id
                   const evaluation = item.evaluation
                   const humanStatus = reviewStatus(evaluation)
                   return (
@@ -1260,10 +1548,8 @@ function RegressionResults({
                           {evaluation && (
                             <Button
                               size="sm"
-                              variant={reviewing ? "secondary" : "ghost"}
-                              onClick={() => setReviewingItemId(
-                                reviewing ? null : item.id,
-                              )}
+                              variant="ghost"
+                              onClick={() => onOpenCorrection(item.id)}
                             >
                               <PencilSimple />
                               {evaluation.review_stage === "completed"
@@ -1279,79 +1565,6 @@ function RegressionResults({
                         </summary>
                         <LevelExplanation item={item} />
                       </details>
-                      {reviewing && evaluation && (
-                        <div className="border-t border-[var(--line-strong)] bg-white">
-                          <div className="grid gap-4 px-5 py-4 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-end">
-                            <label>
-                              <span className="mb-2 block text-xs font-semibold">人工说明（可选）</span>
-                              <Input
-                                value={reviewNotes[item.id] ?? ""}
-                                disabled={evaluation.review_stage === "completed"}
-                                placeholder="补充确认或退回依据"
-                                onChange={(event) => setReviewNotes((current) => ({
-                                  ...current,
-                                  [item.id]: event.target.value,
-                                }))}
-                              />
-                            </label>
-                            {evaluation.review_stage !== "completed" && (
-                              <div className="flex flex-wrap gap-2">
-                                <Button
-                                  variant="secondary"
-                                  disabled={reviewResult.isPending}
-                                  onClick={() => reviewResult.mutate({
-                                    item,
-                                    decision: "rejected",
-                                    note: reviewNotes[item.id]?.trim() ?? "",
-                                  })}
-                                >
-                                  退回复核
-                                </Button>
-                                <Button
-                                  disabled={reviewResult.isPending}
-                                  onClick={() => reviewResult.mutate({
-                                    item,
-                                    decision: "approved",
-                                    note: reviewNotes[item.id]?.trim() ?? "",
-                                  })}
-                                >
-                                  <Check weight="bold" />确认结果
-                                </Button>
-                              </div>
-                            )}
-                          </div>
-                          {evaluation.scoring?.dimension_scoring_mode === "rule_deduction" ? (
-                            <NodeCorrectionEditor
-                              key={`${evaluation.id}-${evaluation.review_revision}`}
-                              evaluation={evaluation}
-                              corrector={me.data?.username ?? ""}
-                              onCorrected={async () => {
-                                await Promise.all([
-                                  queryClient.invalidateQueries({ queryKey: ["baseline-regression", run.id] }),
-                                  queryClient.invalidateQueries({ queryKey: ["evaluations"] }),
-                                  queryClient.invalidateQueries({ queryKey: ["dashboard"] }),
-                                ])
-                              }}
-                            />
-                          ) : (
-                            <ReviewCorrectionForm
-                              key={`${evaluation.id}-${evaluation.review_revision}`}
-                              dimensions={evaluation.aesthetic?.dimensions ?? {}}
-                              precheck={evaluation.precheck ?? {}}
-                              dimensionSchema={evaluation.dimension_schema}
-                              scoring={evaluation.scoring ?? {}}
-                              pending={reviewResult.isPending}
-                              editable={evaluation.review_stage !== "completed"}
-                              onSubmit={({ note, corrections }) => reviewResult.mutate({
-                                item,
-                                decision: "corrected",
-                                note,
-                                corrections,
-                              })}
-                            />
-                          )}
-                        </div>
-                      )}
                     </div>
                   )
                 })}
@@ -1364,29 +1577,32 @@ function RegressionResults({
           </div>
         </div>
       </section>
-        </>
+        </div>
       ) : (
-        <BaselineCorrectionPanel
+        <CorrectionAnalysisPanel
           run={run}
           items={items}
           loading={loading}
           onPreview={onPreview}
+          canDecide={me.data?.is_admin === true}
         />
       )}
     </>
   )
 }
 
-function BaselineCorrectionPanel({
+function CorrectionAnalysisPanel({
   run,
   items,
   loading,
   onPreview,
+  canDecide,
 }: {
   run: BaselineRegressionRun
   items: BaselineRegressionItem[]
   loading: boolean
   onPreview: (preview: ImagePreview) => void
+  canDecide: boolean
 }) {
   const queryClient = useQueryClient()
   const deviations = useMemo(
@@ -1416,7 +1632,7 @@ function BaselineCorrectionPanel({
     ),
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: ["baseline-correction-runs", run.id] })
-      toast.success("纠偏分析已启动；只生成报告与建议，不会自动发布")
+      toast.success("纠偏分析已启动；AI 将自动生成候选并执行回归")
     },
     onError: (error) => toast.error(error.message),
   })
@@ -1428,31 +1644,84 @@ function BaselineCorrectionPanel({
     },
     onError: (error) => toast.error(error.message),
   })
+  const decideCorrection = useMutation({
+    mutationFn: ({
+      correctionRunId,
+      decision,
+      note,
+    }: {
+      correctionRunId: number
+      decision: "approved" | "rejected"
+      note: string
+    }) => baselineRegressionApi.decideCorrectionRun(correctionRunId, decision, note),
+    onSuccess: async (result) => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["baseline-correction-runs", run.id] }),
+        queryClient.invalidateQueries({ queryKey: ["evaluation-categories"] }),
+        queryClient.invalidateQueries({ queryKey: ["prompts", run.category_key] }),
+      ])
+      toast.success(result.status === "approved" ? "候选已启用" : "候选已拒绝")
+    },
+    onError: (error) => toast.error(error.message),
+  })
 
   const allSelected = deviations.length > 0 && selectedIds.size === deviations.length
   const report = latest?.report ?? {}
-  const accuracyReport = recordValue(report.accuracy_report)
-  const reportMetrics = recordValue(accuracyReport.run_metrics)
-  const directionCounts = recordValue(accuracyReport.direction_counts)
   const promptSuggestions = recordArray(report.prompt_suggestions)
   const dimensionSuggestions = recordArray(report.dimension_suggestions)
   const risks = stringArray(report.risks)
+  const candidateRegression = recordValue(report.candidate_regression)
+  const baselineMetrics = recordValue(candidateRegression.baseline_metrics)
+  const candidateMetrics = recordValue(candidateRegression.candidate_metrics)
+  const regressions = recordArray(candidateRegression.regressions)
+  const approvalAllowed = candidateRegression.approval_allowed === true
+  const recommendation = stringValue(candidateRegression.recommendation)
   const blockers = (latest?.blockers ?? []).map((blocker) => (
     typeof blocker === "string" ? blocker : readableRecord(blocker)
   )).filter(Boolean)
+  const latestLocked = latest?.status === "processing" || latest?.status === "awaiting_decision"
+
+  const requestDecision = (decision: "approved" | "rejected") => {
+    if (!latest || latest.status !== "awaiting_decision") return
+    const approved = decision === "approved"
+    const confirmed = window.confirm(
+      approved
+        ? "确认启用该机制候选？启用后会切换当前类目的现役提示词与 v3 机制版本，但不会发布标签事实。"
+        : "确认拒绝该机制候选？本次候选与回归证据会保留，结论提交后不可修改。",
+    )
+    if (!confirmed) return
+    decideCorrection.mutate({
+      correctionRunId: latest.id,
+      decision,
+      note: approved ? "人工确认启用自动纠偏候选" : "人工确认拒绝自动纠偏候选",
+    })
+  }
 
   return (
-    <section className="mt-6 border-y border-[var(--line-strong)] bg-white" role="tabpanel">
+    <section
+      id="baseline-correction-panel"
+      className="mt-6 border-y border-[var(--line-strong)] bg-white"
+      role="tabpanel"
+      aria-labelledby="baseline-correction-tab"
+    >
       <div className="grid gap-5 border-b border-[var(--line)] px-5 py-5 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-end">
         <div>
           <div className="flex flex-wrap items-center gap-2">
             <h3 className="font-editorial text-2xl font-bold">基准回归处理纠偏</h3>
-            <Badge tone="active">独立分析流水线</Badge>
-            <Badge tone="neutral">不自动发布</Badge>
+            <Badge tone="active">全自动候选流水线</Badge>
+            <Badge tone="neutral">最终人工决策</Badge>
           </div>
           <p className="mt-2 max-w-3xl text-xs leading-5 text-[var(--muted)]">
-            从本轮偏差中冻结一批样本，生成准确性归因与提示词/维度改进建议。它不会改写基准结果、现役提示词、类目维度或发布指针；建议必须由人工确认后另行进入候选验证。
+            启动后，系统自动分析纠偏样本、生成并校验统一机制候选，再执行候选回归。中间无需人工配置；回归完成后只需决定启用或拒绝，系统不会自动启用候选。
           </p>
+          <div className="mt-3 grid gap-2 text-xs leading-5 text-[var(--muted)] sm:grid-cols-2">
+            <p className="border-l-2 border-[var(--line-strong)] pl-3">
+              结果查看位置：存量回归 → 基准回归 → 处理纠偏（当前区域）。分析报告、候选机制、回归指标和风险提示都在这里展示。
+            </p>
+            <p className="border-l-2 border-primary pl-3">
+              人工采纳位置：候选回归完成后仍在当前区域进入“等待人工决策”；只有系统管理员在这里点击“启用候选”或“拒绝候选”。
+            </p>
+          </div>
         </div>
         <div className="flex flex-wrap gap-2">
           <Button
@@ -1468,7 +1737,7 @@ function BaselineCorrectionPanel({
               run.status === "running"
               || !selectedIds.size
               || createCorrection.isPending
-              || latest?.status === "processing"
+              || latestLocked
             }
           >
             <Play weight="fill" />
@@ -1487,7 +1756,7 @@ function BaselineCorrectionPanel({
             <Button
               variant="ghost"
               size="sm"
-              disabled={!deviations.length || latest?.status === "processing"}
+              disabled={!deviations.length || latestLocked}
               onClick={() => setSelectedIds(allSelected ? new Set() : new Set(deviationIds))}
             >
               {allSelected ? <CheckSquare weight="fill" /> : <Square />}
@@ -1506,7 +1775,7 @@ function BaselineCorrectionPanel({
                       aria-label={`选择偏差样本：${item.asset.name}`}
                       className="mt-4 size-4 accent-[#9dbb1c]"
                       checked={selectedIds.has(item.id)}
-                      disabled={latest?.status === "processing"}
+                      disabled={latestLocked}
                       onChange={(event) => setSelectedIds((current) => {
                         const next = new Set(current)
                         if (event.target.checked) next.add(item.id)
@@ -1542,7 +1811,7 @@ function BaselineCorrectionPanel({
           {!latest ? (
             <div className="border-y border-[var(--line)] px-4 py-12 text-center">
               <p className="text-sm font-bold">尚未启动纠偏分析</p>
-              <p className="mt-2 text-xs leading-5 text-[var(--muted)]">选择左侧偏差样本后启动。报告只提供归因和优化建议，不执行修改或发布。</p>
+              <p className="mt-2 text-xs leading-5 text-[var(--muted)]">选择左侧偏差样本后启动，AI 将自动接管候选生成与回归，直到需要最终人工决策。</p>
             </div>
           ) : (
             <>
@@ -1557,22 +1826,44 @@ function BaselineCorrectionPanel({
                     {latest.selected_item_ids.length} 个冻结样本 · {latest.updated_at}
                   </p>
                 </div>
-                {latest.status === "failed" && (
+                {latest.status === "failed" && latest.error?.retryable && (
                   <Button
                     variant="secondary"
                     size="sm"
                     disabled={retryCorrection.isPending}
                     onClick={() => retryCorrection.mutate(latest.id)}
                   >
-                    <ArrowClockwise />{retryCorrection.isPending ? "正在重试" : "重试分析"}
+                    <ArrowClockwise />{retryCorrection.isPending ? "正在重新执行" : "重新执行"}
                   </Button>
                 )}
+              </div>
+
+              <div className="mt-4 grid grid-cols-2 border-y border-[var(--line)] bg-[#fafbf8] 2xl:grid-cols-5">
+                {correctionStages.map((stage, index) => {
+                  const state = correctionStageState(latest, stage.key)
+                  return (
+                    <div
+                      key={stage.key}
+                      className="min-w-0 border-r border-[var(--line)] px-3 py-3 last:border-r-0"
+                    >
+                      <div className="flex items-center gap-2">
+                        <span className={`flex size-6 shrink-0 items-center justify-center rounded-full border text-[0.68rem] font-bold ${correctionStageClassName(state)}`}>
+                          {state === "completed" ? <Check weight="bold" /> : index + 1}
+                        </span>
+                        <p className="text-xs font-bold leading-4">{stage.label}</p>
+                      </div>
+                      <p className="mt-1 pl-8 text-[0.68rem] leading-4 text-[var(--muted)]">
+                        {correctionStageStateName(state)}
+                      </p>
+                    </div>
+                  )
+                })}
               </div>
 
               {latest.status === "processing" && (
                 <div className="mt-4 border border-[#d6dfb1] bg-[#f7fadf] px-4 py-3">
                   <div className="flex justify-between gap-4 text-xs font-bold">
-                    <span>正在分析偏差方向、准确率与维度信号</span>
+                    <span>{correctionStageRunningMessage(latest.stage)}</span>
                     <span className="font-data">{latest.progress}%</span>
                   </div>
                   <div className="mt-2 h-1.5 overflow-hidden bg-white">
@@ -1583,33 +1874,38 @@ function BaselineCorrectionPanel({
 
               {latest.status === "failed" && (
                 <div className="mt-4 border border-[#e2b4af] bg-[#fff5f3] px-4 py-3 text-xs leading-5 text-[#8d2924]">
-                  <p className="font-bold">分析失败{latest.error?.code ? ` · ${latest.error.code}` : ""}</p>
-                  <p className="mt-1">{latest.error?.message || "未返回具体失败原因，可重试本次冻结样本。"}</p>
+                  <p className="font-bold">{correctionStageLabel(latest.stage)}失败{latest.error?.code ? ` · ${latest.error.code}` : ""}</p>
+                  <p className="mt-1">{latest.error?.message || "未返回具体失败原因，可重新执行本次冻结样本。"}</p>
+                  <p className="mt-1 text-[#6f3935]">重新执行会沿用本次冻结样本，不需要补充任何配置。</p>
                 </div>
               )}
 
               {(blockers.length > 0) && (
                 <div className="mt-4 border border-[#e2c188] bg-[#fff9ea] px-4 py-3 text-xs leading-5 text-[#7d4308]">
-                  <p className="font-bold">当前阻塞</p>
+                  <p className="font-bold">自动处理提示</p>
                   {blockers.map((blocker, index) => <p key={`${blocker}-${index}`} className="mt-1">{blocker}</p>)}
                 </div>
               )}
 
-              {latest.status === "awaiting_confirmation" && (
+              {(latest.status === "awaiting_decision"
+                || latest.status === "approved"
+                || latest.status === "rejected") && (
                 <>
                   <div className="mt-5 grid gap-px border-y border-[var(--line)] bg-[var(--line)] sm:grid-cols-2 xl:grid-cols-4">
-                    <Metric label="原回归准确率" value={percent(numberValue(reportMetrics.exact_accuracy) ?? run.metrics.exact_accuracy)} />
-                    <Metric label="相邻准确率" value={percent(numberValue(reportMetrics.adjacent_accuracy) ?? run.metrics.adjacent_accuracy)} />
-                    <Metric label="分析偏差样本" value={String(numberValue(accuracyReport.selected_deviation_count) ?? latest.selected_item_ids.length)} />
-                    <Metric label="平均等级距离" value={formatDecimal(numberValue(accuracyReport.average_level_distance))} />
+                    <Metric label="基准准确率" value={percent(numberValue(baselineMetrics.exact_accuracy) ?? run.metrics.exact_accuracy)} />
+                    <Metric label="候选准确率" value={formatPercent(numberValue(candidateMetrics.exact_accuracy))} />
+                    <Metric label="准确率变化" value={formatSignedPercent(numberValue(candidateRegression.exact_accuracy_delta))} />
+                    <Metric label="相邻准确率变化" value={formatSignedPercent(numberValue(candidateRegression.adjacent_accuracy_delta))} />
                   </div>
-                  <div className="mt-5 grid gap-4 sm:grid-cols-2">
-                    <ReportFact label="高估样本" value={`${numberValue(directionCounts.over_rated) ?? 0} 张`} />
-                    <ReportFact label="低估样本" value={`${numberValue(directionCounts.under_rated) ?? 0} 张`} />
+                  <div className="mt-5 grid grid-cols-4 gap-px border-y border-[var(--line)] bg-[var(--line)]">
+                    <ReportFact label="机制候选" value={latest.candidate_revision_id ? `Revision #${latest.candidate_revision_id}` : "—"} />
+                    <ReportFact label="候选提示词" value={latest.orchestration.candidate_prompt?.version ?? "—"} />
+                    <ReportFact label="候选回归" value={latest.regression_run_id ? `Run #${latest.regression_run_id}` : "—"} />
+                    <ReportFact label="回归建议" value={recommendation === "approve" ? "建议启用" : "建议拒绝"} />
                   </div>
                   <div className="mt-6">
-                    <h5 className="font-editorial text-xl font-bold">改进建议</h5>
-                    <p className="mt-1 text-xs text-[var(--muted)]">以下内容是待人工确认的分析建议，不是已生效配置。</p>
+                    <h5 className="font-editorial text-xl font-bold">AI 分析与候选变更摘要</h5>
+                    <p className="mt-1 text-xs text-[var(--muted)]">系统已把以下分析自动落入统一机制候选，并使用同一基准集完成验证。</p>
                     <div className="mt-3 divide-y divide-[var(--line)] border-y border-[var(--line)]">
                       {[...promptSuggestions, ...dimensionSuggestions].map((suggestion, index) => (
                         <div key={`${stringValue(suggestion.code) || stringValue(suggestion.dimension_key) || "suggestion"}-${index}`} className="grid gap-2 py-3 text-xs sm:grid-cols-[120px_minmax(0,1fr)]">
@@ -1631,9 +1927,64 @@ function BaselineCorrectionPanel({
                       {risks.map((risk) => <p key={risk} className="mt-1">{risk}</p>)}
                     </div>
                   )}
-                  <div className="mt-5 border-l-2 border-primary bg-[#f8faed] px-4 py-3 text-xs leading-5">
-                    <strong>状态：等待人工确认。</strong> 当前页面不会自动修改或发布提示词、维度版本；如要落地建议，需另建候选并通过配对回归与人工发布门。
-                  </div>
+                  {regressions.length > 0 && (
+                    <div className="mt-5 border border-[#e2b4af] bg-[#fff5f3] px-4 py-3 text-xs leading-5 text-[#8d2924]">
+                      <p className="font-bold">候选回归未通过</p>
+                      {regressions.map((regression, index) => (
+                        <p key={`${stringValue(regression.code)}-${index}`} className="mt-1">
+                          {stringValue(regression.message) || readableRecord(regression)}
+                        </p>
+                      ))}
+                    </div>
+                  )}
+                  {latest.status === "awaiting_decision" && canDecide && (
+                    <div className="mt-5 border-l-2 border-primary bg-[#f8faed] px-4 py-4">
+                      <div className="flex items-center justify-between gap-5">
+                        <div>
+                          <p className="text-sm font-bold">等待人工决策</p>
+                          <p className="mt-1 text-xs leading-5 text-[var(--muted)]">
+                            中间步骤已全部完成。启用只切换机制发布轴；标签事实仍需通过独立发布流程。
+                          </p>
+                        </div>
+                        <div className="flex shrink-0 gap-2">
+                          <Button
+                            variant="danger"
+                            disabled={decideCorrection.isPending}
+                            onClick={() => requestDecision("rejected")}
+                          >
+                            拒绝候选
+                          </Button>
+                          <Button
+                            disabled={!approvalAllowed || decideCorrection.isPending}
+                            title={approvalAllowed ? undefined : "候选回归未通过，不能启用"}
+                            onClick={() => requestDecision("approved")}
+                          >
+                            <Check weight="bold" />启用候选
+                          </Button>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                  {latest.status === "awaiting_decision" && !canDecide && (
+                    <div className="mt-5 border-l-2 border-[var(--line-strong)] bg-[#fafbf8] px-4 py-4">
+                      <p className="text-sm font-bold">等待系统管理员决策</p>
+                      <p className="mt-1 text-xs leading-5 text-[var(--muted)]">
+                        候选与回归证据已就绪。只有系统管理员可以启用或拒绝机制候选。
+                      </p>
+                    </div>
+                  )}
+                  {(latest.status === "approved" || latest.status === "rejected") && (
+                    <div className={`mt-5 border-l-2 px-4 py-4 ${latest.status === "approved" ? "border-primary bg-[#f8faed]" : "border-[#b7362e] bg-[#fff5f3]"}`}>
+                      <p className="text-sm font-bold">
+                        人工结论：{latest.status === "approved" ? "已启用候选" : "已拒绝候选"}
+                      </p>
+                      <p className="mt-1 text-xs leading-5 text-[var(--muted)]">
+                        {latest.decided_by || "管理员"} · {latest.decided_at || latest.updated_at}
+                        {latest.decision_note ? ` · ${latest.decision_note}` : ""}
+                      </p>
+                      <p className="mt-1 text-xs text-[var(--muted)]">该人工结论不可修改，候选、回归与决策证据均已保留。</p>
+                    </div>
+                  )}
                 </>
               )}
             </>
@@ -1642,6 +1993,58 @@ function BaselineCorrectionPanel({
       </div>
     </section>
   )
+}
+
+const correctionStages: Array<{
+  key: BaselineCorrectionRun["stage"]
+  label: string
+}> = [
+  { key: "analysis", label: "自动分析纠偏样本" },
+  { key: "candidate_generation", label: "生成统一机制候选" },
+  { key: "candidate_validation", label: "校验并冻结候选" },
+  { key: "regression", label: "执行候选回归" },
+  { key: "decision", label: "等待人工决策" },
+]
+
+type CorrectionStageState = "pending" | "active" | "completed" | "failed"
+
+function correctionStageState(
+  run: BaselineCorrectionRun,
+  stage: BaselineCorrectionRun["stage"],
+): CorrectionStageState {
+  const currentIndex = correctionStages.findIndex((item) => item.key === run.stage)
+  const stageIndex = correctionStages.findIndex((item) => item.key === stage)
+  if (run.status === "approved" || run.status === "rejected") return "completed"
+  if (stageIndex < currentIndex) return "completed"
+  if (stageIndex > currentIndex) return "pending"
+  if (run.status === "failed") return "failed"
+  return "active"
+}
+
+function correctionStageClassName(state: CorrectionStageState) {
+  if (state === "completed") return "border-[#9dbb1c] bg-primary text-[#263000]"
+  if (state === "active") return "border-[#9dbb1c] bg-[#f0f8c8] text-[#263000]"
+  if (state === "failed") return "border-[#b7362e] bg-[#fff0ee] text-[#8d2924]"
+  return "border-[var(--line-strong)] bg-white text-[var(--muted)]"
+}
+
+function correctionStageStateName(state: CorrectionStageState) {
+  if (state === "completed") return "已完成"
+  if (state === "active") return "进行中"
+  if (state === "failed") return "执行失败"
+  return "等待自动执行"
+}
+
+function correctionStageLabel(stage: BaselineCorrectionRun["stage"]) {
+  return correctionStages.find((item) => item.key === stage)?.label ?? "自动纠偏"
+}
+
+function correctionStageRunningMessage(stage: BaselineCorrectionRun["stage"]) {
+  if (stage === "analysis") return "AI 正在分析纠偏样本与偏差方向"
+  if (stage === "candidate_generation") return "AI 正在生成统一机制候选"
+  if (stage === "candidate_validation") return "系统正在校验并冻结候选版本"
+  if (stage === "regression") return "系统正在执行候选回归"
+  return "系统正在整理最终决策证据"
 }
 
 function recordValue(value: unknown): Record<string, unknown> {
@@ -1671,8 +2074,14 @@ function readableRecord(value: unknown): string {
   return stringValue(record.message) || stringValue(record.title) || stringValue(record.code)
 }
 
-function formatDecimal(value: number | null) {
-  return value === null ? "—" : value.toFixed(2)
+function formatSignedPercent(value: number | null) {
+  if (value === null) return "—"
+  const sign = value > 0 ? "+" : ""
+  return `${sign}${(value * 100).toFixed(1)}%`
+}
+
+function formatPercent(value: number | null) {
+  return value === null ? "—" : percent(value)
 }
 
 function priorityName(priority: string) {
@@ -1701,14 +2110,16 @@ function dimensionSelectionName(selection: BaselineRegressionRun["selection"]["d
 }
 
 function correctionStatusName(run: BaselineCorrectionRun) {
-  if (run.status === "processing") return "分析中"
-  if (run.status === "awaiting_confirmation") return "等待人工确认"
-  return "分析失败"
+  if (run.status === "processing") return correctionStageLabel(run.stage)
+  if (run.status === "awaiting_decision") return "等待人工决策"
+  if (run.status === "approved") return "已启用候选"
+  if (run.status === "rejected") return "已拒绝候选"
+  return "执行失败"
 }
 
 function correctionStatusTone(run: BaselineCorrectionRun): "active" | "success" | "danger" {
   if (run.status === "processing") return "active"
-  if (run.status === "awaiting_confirmation") return "success"
+  if (run.status === "awaiting_decision" || run.status === "approved") return "success"
   return "danger"
 }
 
@@ -1940,6 +2351,127 @@ function LevelSelect({
       </select>
     </label>
   )
+}
+
+function FieldMetricsEvidence({
+  data,
+  loading,
+  error,
+  levelMetrics,
+}: {
+  data?: BaselineFieldMetrics
+  loading: boolean
+  error: Error | null
+  levelMetrics: BaselineRegressionRun["metrics"]
+}) {
+  if (loading) {
+    return <div className="h-52 animate-pulse bg-[#f7f9ef]" />
+  }
+  if (error) {
+    return (
+      <div className="border border-[#d7a09d] bg-[#fff5f4] px-4 py-4 text-sm text-[#8d2924]">
+        字段质量证据加载失败：{error.message}
+      </div>
+    )
+  }
+  if (!data) {
+    return <p className="text-sm text-[var(--muted)]">当前轮次尚未形成字段证据。</p>
+  }
+
+  return (
+    <div className="space-y-6">
+      <section className="grid gap-px border-y border-[var(--line)] bg-[var(--line)] grid-cols-2 xl:grid-cols-4">
+        <Metric label="宏平均准确率" value={percent(data.aggregates.macro.accuracy)} />
+        <Metric label="宏平均召回率" value={percent(data.aggregates.macro.recall)} />
+        <Metric label="微平均准确率" value={percent(data.aggregates.micro.accuracy)} />
+        <Metric label="失败样本" value={String(data.failure_sample_ids.length)} />
+      </section>
+
+      <section className="border-y border-[var(--line-strong)] bg-white">
+        <div className="grid grid-cols-[minmax(210px,1fr)_90px_110px_110px_100px] gap-3 border-b border-[var(--line)] bg-[#fafbf8] px-4 py-3 text-xs font-semibold text-[var(--muted)]">
+          <span>字段</span><span>支持数</span><span>准确率</span><span>召回率</span><span>失败数</span>
+        </div>
+        {data.field_metrics.map((item) => (
+          <details key={item.field_key} className="border-b border-[var(--line)] last:border-0">
+            <summary className="grid cursor-pointer grid-cols-[minmax(210px,1fr)_90px_110px_110px_100px] gap-3 px-4 py-3 text-sm hover:bg-[#fbfcf5]">
+              <span className="font-data break-all font-semibold">{fieldMetricLabel(item.field_key)}</span>
+              <span className="font-data">{item.support}</span>
+              <span className="font-data">{percent(item.accuracy)}</span>
+              <span className="font-data">{percent(item.recall)}</span>
+              <span className="font-data">{item.failure_sample_ids.length}</span>
+            </summary>
+            <div className="space-y-4 border-t border-[var(--line)] bg-[#fcfdf8] px-4 py-4">
+              <div className="grid gap-3 grid-cols-3">
+                <EvidenceMetric label="TP" value={item.tp} />
+                <EvidenceMetric label="FP" value={item.fp} />
+                <EvidenceMetric label="FN" value={item.fn} />
+              </div>
+              <div className="overflow-x-auto border border-[var(--line)] bg-white">
+                <table className="w-full min-w-[520px] border-collapse text-left text-xs">
+                  <thead><tr className="border-b border-[var(--line)] bg-[#fafbf8]"><th className="px-3 py-2">人工真值</th><th className="px-3 py-2">模型输出</th><th className="px-3 py-2">样本数</th></tr></thead>
+                  <tbody>
+                    {Object.entries(item.confusion_matrix).flatMap(([expected, predictions]) => (
+                      Object.entries(predictions).map(([predicted, count]) => (
+                        <tr key={`${expected}:${predicted}`} className="border-b border-[var(--line)] last:border-0">
+                          <td className="font-data px-3 py-2">{fieldMetricValue(expected)}</td>
+                          <td className="font-data px-3 py-2">{fieldMetricValue(predicted)}</td>
+                          <td className="font-data px-3 py-2">{count}</td>
+                        </tr>
+                      ))
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <p className="text-xs leading-5 text-[var(--muted)]">
+                失败样本：{item.failure_sample_ids.length ? item.failure_sample_ids.map((id) => `#${id}`).join("、") : "无"}
+              </p>
+            </div>
+          </details>
+        ))}
+      </section>
+
+      <section className="grid gap-4 border-y border-[var(--line)] bg-[#f7f9ef] px-4 py-4 text-xs leading-5 grid-cols-2">
+        <div>
+          <p className="font-semibold">本轮版本</p>
+          <p className="mt-1 text-[var(--muted)]">模型 {data.versions.model.join(" / ") || "未记录"}</p>
+          <p className="text-[var(--muted)]">Prompt A {data.versions.prompt.a.join(" / ") || "未记录"}</p>
+          <p className="text-[var(--muted)]">Prompt B {data.versions.prompt.b.join(" / ") || "未使用"}</p>
+          <p className="text-[var(--muted)]">机制 {data.versions.mechanism.spec_version || "历史版本未记录"}</p>
+        </div>
+        <div>
+          <p className="font-semibold">证据覆盖</p>
+          <p className="mt-1 text-[var(--muted)]">素材 {data.versions.asset.count} 条 · 黄金真值匹配 {data.versions.truth.matched_asset_count} 条</p>
+          <p className="text-[var(--muted)]">真值修订 V{data.versions.truth.revision_min}–V{data.versions.truth.revision_max}</p>
+          <p className="text-[var(--muted)]">等级准确率 {percent(levelMetrics.exact_accuracy)} · 等级矩阵继续作为字段 level 的详细证据</p>
+        </div>
+      </section>
+
+      <div className="border-l-2 border-primary bg-[#f7fadf] px-4 py-3 text-xs leading-5">
+        指标仅作为人工决策证据，不会自动采纳或启用候选评测机制。人工需结合失败样本、黄金集门禁和回归结果另行决定。
+      </div>
+    </div>
+  )
+}
+
+function EvidenceMetric({ label, value }: { label: string; value: number }) {
+  return <div className="border border-[var(--line)] bg-white px-3 py-3"><p className="text-[var(--muted)]">{label}</p><p className="font-data mt-1 text-lg font-bold">{value}</p></div>
+}
+
+function fieldMetricLabel(fieldKey: string) {
+  const labels: Record<string, string> = {
+    level: "正式等级",
+    scope_status: "范围判定",
+    primary_category: "主类目",
+    quality_severity: "画质严重度",
+  }
+  if (fieldKey.startsWith("dimensions.")) return `维度 · ${fieldKey.slice("dimensions.".length)}`
+  return labels[fieldKey] ?? fieldKey
+}
+
+function fieldMetricValue(value: string) {
+  if (value === "__missing__") return "缺失"
+  if (value === "__empty__") return "空值"
+  return value
 }
 
 function PromptSelect({

@@ -15,6 +15,7 @@ from .dimension_deduction_bridge import (
     compose_rule_deductions,
     empty_deduction_output,
     has_deduction_rules,
+    rule_scoring_mode,
 )
 from .redline_policy import evaluate_redlines
 from .subcategory_resolver import resolve_subcategory
@@ -76,6 +77,12 @@ def recompute_qualified_v3(
         )
 
     if has_deduction_rules(config):
+        active_rule_mode = rule_scoring_mode(config)
+        public_scoring_mode = (
+            "bonus_cap_v2"
+            if active_rule_mode == "bonus_cap_v2"
+            else "rule_deduction"
+        )
         rule_output = dimension_output
         expected_keys = set(empty_deduction_output(config)["dimensions"])
         raw_dimensions = (
@@ -101,7 +108,7 @@ def recompute_qualified_v3(
         result = aggregate_category_evaluation(
             contract, precheck, composed, track_key=resolved_track
         )
-        result["dimension_scoring_mode"] = "rule_deduction"
+        result["dimension_scoring_mode"] = public_scoring_mode
         result["dimension_deduction_output"] = rule_output
         return result
 

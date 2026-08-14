@@ -7,11 +7,13 @@ import type {
   EvaluationProductionRun,
   EvaluationProductionRunStatus,
   MaterialPackage,
+  WorkflowKind,
 } from "@/lib/types"
 
 export type CreateEvaluationProductionRunInput = {
   material_package_id: number
   category_key: string
+  workflow_kind?: WorkflowKind
   idempotency_key: string
 }
 
@@ -55,7 +57,11 @@ function unwrapPackage(value: PackageWire): EvaluationPackageDetail {
 }
 
 export const evaluationProductionApi = {
-  list: () => api<EvaluationProductionRunList>("/api/evaluation-production-runs"),
+  list: (workflowKind?: WorkflowKind) => api<EvaluationProductionRunList>(
+    workflowKind
+      ? `/api/evaluation-production-runs?workflow_kind=${encodeURIComponent(workflowKind)}`
+      : "/api/evaluation-production-runs",
+  ),
   create: async (payload: CreateEvaluationProductionRunInput) => unwrapRun(
     await api<RunWire>("/api/evaluation-production-runs", {
       method: "POST",

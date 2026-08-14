@@ -1,140 +1,65 @@
-import { useEffect, useState, type ReactNode } from "react"
-import {
-  ArrowClockwise,
-  Check,
-  CheckCircle,
-  FloppyDisk,
-  Plus,
-  Trash,
-  WarningCircle,
-} from "@phosphor-icons/react"
+import { Suspense, useEffect, useMemo, useState } from "react"
+import { ArrowClockwise, Plus, WarningCircle } from "@phosphor-icons/react"
 import { useQuery } from "@tanstack/react-query"
+import { useSearchParams } from "react-router-dom"
 
 import { PageHeader } from "@/components/app-shell"
 import { EvaluationBoundaryNote } from "@/components/evaluation-boundary-note"
+import { RouteErrorState } from "@/components/route-error-state"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
+import { MechanismEditorBoundary } from "@/features/mechanism-config/mechanism-editor-boundary"
+import { ProfileCapabilitySummary } from "@/features/mechanism-config/profile-capability-summary"
+import { getMechanismEditorPlugin } from "@/features/mechanism-config/registry"
+import {
+  cloneEditable,
+  revisionToEditable,
+  type ConfigDetail,
+  type ConfigRevision,
+  type ConfigSummary,
+  type Editable,
+  type JsonObject,
+  type MechanismProfileCatalogItem,
+  type ValidationErrorItem,
+} from "@/features/mechanism-config/types"
+import { UnknownMechanismSummary } from "@/features/mechanism-config/unknown-mechanism-summary"
 import { api, ApiError } from "@/lib/api"
-
-/**
- * ADR-0033 v3 合同配置编辑器（存 → 读 → 改 → 校验）。
- *
- * 本页编辑的是隔离持久化的 v3 合同配置（红线规则 / 子类目赛道 / 每子类目共性+特有
- * 维度组 / 分类映射）。「校验」调用后端复用的确定性校验器（不落库），「保存」走
- * POST/PUT 落库并算 contract_hash、递增 revision。全程只做 CRUD + 校验，不入队、
- * 不发布、不调用模型、不接线上算分路径（当前 worker 尚未接入 v3）。
- */
 
 const BASE = "/api/category-evaluation/v3-config"
 
-// 与后端 redline_policy / track_classification / common_modifiers / composition
-// 的 format_version 保持一致（新建空白配置时写入）。
-const REDLINE_POLICY_FORMAT_VERSION = "redline-policy-v1"
-const TRACK_CLASSIFICATION_FORMAT_VERSION = "track-classification-v1"
-const COMMON_MODIFIERS_FORMAT_VERSION = "common-modifiers-v1"
-const CONTRACT_SCHEMA_VERSION = "evaluation-category-profile-v3"
-const CLASSIFICATION_MAP_FORMAT_VERSION = "subcategory-classification-map-v1"
-const SUBCATEGORY_DIMENSIONS_FORMAT_VERSION = "subcategory-dimensions-v1"
-
-type Json = Record<string, any>
-
-type LevelScaleEntry = {
-  level: "L1" | "L2" | "L3" | "L4" | "L5"
-  enabled: boolean
-  min_score?: number
-  display_name: string
+type RevisionListResponse = {
+  projected_revision_id: number
+  candidate_count: number
+  items: ConfigRevision[]
 }
 
-type ConfigSummary = {
-  id: number
-  category_key: string
-  display_name: string
-  status: string
-  revision: number
-  contract_hash: string
-  media_penalty_enabled: boolean
-  updated_at: string
-}
-
-type ConfigDetail = ConfigSummary & {
-  contract: Json
-  classification_map: Json
-  subcategory_dimensions: Record<string, Json>
-  dimension_deduction_rules: Record<string, Json>
-  created_by: string
-  created_at: string
-}
-
-type ValidationErrorItem = { target: string; code: string; message: string }
 type ValidateResponse = { ok: boolean; errors: ValidationErrorItem[] }
 
-type Editable = {
-  category_key: string
-  display_name: string
-  contract: Json
-  classification_map: Json
-  subcategory_dimensions: Record<string, Json>
-  revision?: number
-  contract_hash?: string
-}
-
-const LEVELS: LevelScaleEntry["level"][] = ["L1", "L2", "L3", "L4", "L5"]
-
-function levelScaleForEditor(contract: Json): LevelScaleEntry[] {
-  const configured = contract?.level_scale?.levels
-  if (Array.isArray(configured)) {
-    return LEVELS.map((level) => {
-      const entry = configured.find((item: any) => item?.level === level)
-      return {
-        level,
-        enabled: entry?.enabled !== false,
-        min_score: typeof entry?.min_score === "number" ? entry.min_score : undefined,
-        display_name: typeof entry?.display_name === "string" ? entry.display_name : level,
-      }
-    })
-  }
-  const thresholds = Array.isArray(contract?.level_thresholds) ? contract.level_thresholds : []
-  return LEVELS.map((level) => {
-    const threshold = thresholds.find((item: any) => item?.level === level)
-    return {
-      level,
-      enabled: Boolean(threshold),
-      min_score: typeof threshold?.min_score === "number" ? threshold.min_score : undefined,
-      display_name: level,
-    }
-  })
-}
-
-function editableScalePayload(contract: Json) {
-  return { version: "category-level-scale-v1", levels: levelScaleForEditor(contract) }
-}
-
-const STATUS_TONE: Record<string, "success" | "active" | "neutral"> = {
+const STATUS_TONE: Record<string, "success" | "active" | "neutral" | "warning"> = {
   active: "success",
   draft: "active",
+  candidate: "warning",
   retired: "neutral",
 }
 
 const STATUS_LABEL: Record<string, string> = {
-  active: "已启用",
-  draft: "草稿",
+  active: "现役",
+  draft: "草稿投影",
+  candidate: "候选 · 未发布",
   retired: "已退役",
 }
 
-function clone<T>(value: T): T {
-  return JSON.parse(JSON.stringify(value)) as T
-}
+const LEVELS = ["L1", "L2", "L3", "L4", "L5"] as const
 
-// 一份最小的、能通过后端校验器的空白 v3 配置：一条兜底赛道 + 一条红线 +
-// 一个把兜底类目映射到该赛道的分类映射 + 该赛道的维度组（prompt-only，两组皆空）。
-function blankEditable(): Editable {
+function blankImageEditable(): Editable {
   const trackKey = "class_default"
   return {
     category_key: "",
     display_name: "",
     contract: {
-      schema_version: CONTRACT_SCHEMA_VERSION,
+      schema_version: "evaluation-category-profile-v3",
       category_key: "",
+      profile_type: "image-rule-deduction-v1",
       level_semantics_version: "doc-l5-worst-v1",
       level_scale: {
         version: "category-level-scale-v1",
@@ -146,28 +71,26 @@ function blankEditable(): Editable {
         })),
       },
       redline_policy: {
-        format_version: REDLINE_POLICY_FORMAT_VERSION,
+        format_version: "redline-policy-v1",
         enabled: true,
         hit_level: "L5",
         hit_score_cap: 49,
         rules: [],
       },
       track_classification: {
-        format_version: TRACK_CLASSIFICATION_FORMAT_VERSION,
+        format_version: "track-classification-v1",
         default_track: trackKey,
-        tracks: [
-          {
-            key: trackKey,
-            label: "兜底赛道",
-            base_score: 40,
-            dimension_max: 30,
-            track_cap: 70,
-            dimension_schema_ref: { schema_key: "space_v13", version: "v13" },
-          },
-        ],
+        tracks: [{
+          key: trackKey,
+          label: "兜底赛道",
+          base_score: 40,
+          dimension_max: 30,
+          track_cap: 70,
+          dimension_schema_ref: { schema_key: "space_v13", version: "v13" },
+        }],
       },
       common_modifiers: {
-        format_version: COMMON_MODIFIERS_FORMAT_VERSION,
+        format_version: "common-modifiers-v1",
         media_type_penalty: {
           enabled: true,
           baseline: "real_photo",
@@ -177,14 +100,14 @@ function blankEditable(): Editable {
       },
     },
     classification_map: {
-      format_version: CLASSIFICATION_MAP_FORMAT_VERSION,
+      format_version: "subcategory-classification-map-v1",
       min_confidence: 0.6,
       category_to_subcategory: { 其它: trackKey },
       out_of_scope_subcategory: trackKey,
     },
     subcategory_dimensions: {
       [trackKey]: {
-        format_version: SUBCATEGORY_DIMENSIONS_FORMAT_VERSION,
+        format_version: "subcategory-dimensions-v1",
         sub_category_key: trackKey,
         dimension_max: 30,
         common_group: null,
@@ -194,98 +117,139 @@ function blankEditable(): Editable {
   }
 }
 
-function toEditable(detail: ConfigDetail): Editable {
+function requestBody(source: Editable) {
   return {
-    category_key: detail.category_key,
-    display_name: detail.display_name,
-    contract: clone(detail.contract),
-    classification_map: clone(detail.classification_map),
-    subcategory_dimensions: clone(detail.subcategory_dimensions),
-    revision: detail.revision,
-    contract_hash: detail.contract_hash,
+    category_key: source.category_key,
+    display_name: source.display_name,
+    contract: source.contract,
+    classification_map: source.classification_map,
+    subcategory_dimensions: source.subcategory_dimensions,
   }
 }
 
+function errMessage(err: unknown): string {
+  if (err instanceof ApiError) {
+    const detail = err.detail
+    return detail?.code
+      ? `${detail.code}: ${String(detail.message ?? err.message)}`
+      : err.message
+  }
+  return String(err)
+}
+
 export function CategoryEvaluationV3ConfigPage() {
+  const [searchParams] = useSearchParams()
+  const workflowKind = searchParams.get("workflow_kind") === "incremental" ? "incremental" : "stock"
   const listQuery = useQuery({
     queryKey: ["category-evaluation-v3-config", "list"],
     queryFn: () => api<{ items: ConfigSummary[] }>(`${BASE}/`),
   })
-
+  const profileCatalog = useQuery({
+    queryKey: ["category-evaluation-v3-config", "profiles"],
+    queryFn: () => api<{ items: MechanismProfileCatalogItem[] }>(`${BASE}/profiles`),
+  })
   const [selectedKey, setSelectedKey] = useState<string | null>(null)
+  const [selectedRevisionId, setSelectedRevisionId] = useState<number | null>(null)
   const [isNew, setIsNew] = useState(false)
   const [draft, setDraft] = useState<Editable | null>(null)
   const [busy, setBusy] = useState(false)
   const [errors, setErrors] = useState<ValidationErrorItem[]>([])
   const [banner, setBanner] = useState<string | null>(null)
 
-  // Load a config into the editor when a key is picked (and not editing a新建).
   useEffect(() => {
-    if (isNew || selectedKey === null) return
-    let cancelled = false
-    setBusy(true)
-    setErrors([])
-    setBanner(null)
-    api<ConfigDetail>(`${BASE}/${encodeURIComponent(selectedKey)}`)
-      .then((detail) => {
-        if (!cancelled) setDraft(toEditable(detail))
-      })
-      .catch((err) => {
-        if (!cancelled) setBanner(errMessage(err))
-      })
-      .finally(() => {
-        if (!cancelled) setBusy(false)
-      })
-    return () => {
-      cancelled = true
+    const first = listQuery.data?.items[0]
+    if (!isNew && selectedKey === null && first) setSelectedKey(first.category_key)
+  }, [isNew, listQuery.data, selectedKey])
+
+  const detailQuery = useQuery({
+    queryKey: ["category-evaluation-v3-config", "detail", selectedKey],
+    queryFn: () => api<ConfigDetail>(`${BASE}/${encodeURIComponent(selectedKey ?? "")}`),
+    enabled: !isNew && selectedKey !== null,
+  })
+  const revisionsQuery = useQuery({
+    queryKey: ["category-evaluation-v3-config", "revisions", selectedKey],
+    queryFn: () => api<RevisionListResponse>(
+      `${BASE}/${encodeURIComponent(selectedKey ?? "")}/revisions`,
+    ),
+    enabled: !isNew && selectedKey !== null,
+  })
+
+  const runtimeRevision = useMemo(() => {
+    const data = revisionsQuery.data
+    return data?.items.find((item) => item.id === data.projected_revision_id) ?? null
+  }, [revisionsQuery.data])
+  const selectedRevision = useMemo(() => {
+    const items = revisionsQuery.data?.items ?? []
+    return items.find((item) => item.id === selectedRevisionId) ?? runtimeRevision
+  }, [revisionsQuery.data, runtimeRevision, selectedRevisionId])
+
+  useEffect(() => {
+    if (isNew) return
+    if (runtimeRevision && selectedRevisionId === null) {
+      setSelectedRevisionId(runtimeRevision.id)
     }
-  }, [selectedKey, isNew])
+  }, [isNew, runtimeRevision, selectedRevisionId])
+
+  useEffect(() => {
+    if (!isNew && selectedRevision) setDraft(revisionToEditable(selectedRevision))
+  }, [isNew, selectedRevision])
+
+  const profileType = isNew
+    ? "image-rule-deduction-v1"
+    : selectedRevision?.mechanism_profile.profile_type ?? null
+  const plugin = getMechanismEditorPlugin(profileType)
+  const profileDescription = isNew
+    ? profileCatalog.data?.items.find((item) => item.profile_type === profileType)
+      ? {
+          ...profileCatalog.data.items.find((item) => item.profile_type === profileType)!,
+          source: "explicit" as const,
+          supported: true,
+          reason: null,
+        }
+      : null
+    : selectedRevision?.mechanism_profile ?? null
 
   const startNew = () => {
     setIsNew(true)
     setSelectedKey(null)
-    setDraft(blankEditable())
+    setSelectedRevisionId(null)
+    setDraft(blankImageEditable())
+    setErrors([])
+    setBanner(null)
+  }
+
+  const selectCategory = (categoryKey: string) => {
+    setIsNew(false)
+    setSelectedKey(categoryKey)
+    setSelectedRevisionId(null)
+    setDraft(null)
     setErrors([])
     setBanner(null)
   }
 
   const patchDraft = (mutator: (next: Editable) => void) => {
-    setDraft((prev) => {
-      if (!prev) return prev
-      const next = clone(prev)
+    setDraft((current) => {
+      if (!current) return current
+      const next = cloneEditable(current)
       mutator(next)
+      if (isNew) next.contract.category_key = next.category_key
       return next
     })
   }
 
-  // Keep contract.category_key mirrored to the top-level key for new configs.
-  const syncKey = (value: string) => {
-    patchDraft((next) => {
-      next.category_key = value
-      next.contract.category_key = value
-    })
-  }
-
-  const requestBody = (source: Editable) => ({
-    category_key: source.category_key,
-    display_name: source.display_name,
-    contract: source.contract,
-    classification_map: source.classification_map,
-    subcategory_dimensions: source.subcategory_dimensions,
-  })
-
   const runValidate = async () => {
     if (!draft) return
+    const outgoingDraft = plugin?.prepareForSave?.(draft) ?? draft
     setBusy(true)
     setBanner(null)
     try {
       const key = draft.category_key.trim() || "candidate"
       const result = await api<ValidateResponse>(
         `${BASE}/${encodeURIComponent(key)}/validate`,
-        { method: "POST", body: JSON.stringify(requestBody(draft)) },
+        { method: "POST", body: JSON.stringify(requestBody(outgoingDraft)) },
       )
       setErrors(result.errors)
-      setBanner(result.ok ? "校验通过：可以保存。" : `校验发现 ${result.errors.length} 处问题。`)
+      setBanner(result.ok ? "校验通过，可以创建候选版本。" : `校验发现 ${result.errors.length} 处问题。`)
     } catch (err) {
       setBanner(errMessage(err))
     } finally {
@@ -293,8 +257,9 @@ export function CategoryEvaluationV3ConfigPage() {
     }
   }
 
-  const save = async () => {
+  const createCandidate = async () => {
     if (!draft) return
+    const outgoingDraft = plugin?.prepareForSave?.(draft) ?? draft
     if (!draft.category_key.trim()) {
       setBanner("请先填写 category_key。")
       return
@@ -303,23 +268,44 @@ export function CategoryEvaluationV3ConfigPage() {
     setBanner(null)
     setErrors([])
     try {
-      const detail = isNew
-        ? await api<ConfigDetail>(`${BASE}/`, {
+      if (isNew) {
+        const created = await api<ConfigDetail>(`${BASE}/`, {
+          method: "POST",
+          body: JSON.stringify(requestBody(outgoingDraft)),
+        })
+        setIsNew(false)
+        setSelectedKey(created.category_key)
+        setSelectedRevisionId(created.projected_revision_id)
+        setBanner(`初始草稿已创建：revision ${created.revision}。`)
+      } else {
+        if (!runtimeRevision || !selectedRevision || !detailQuery.data) {
+          setBanner("运行时投影或所选版本尚未加载，请刷新后重试。")
+          return
+        }
+        const created = await api<ConfigRevision>(
+          `${BASE}/${encodeURIComponent(draft.category_key)}/revisions`,
+          {
             method: "POST",
-            body: JSON.stringify(requestBody(draft)),
-          })
-        : await api<ConfigDetail>(`${BASE}/${encodeURIComponent(draft.category_key)}`, {
-            method: "PUT",
-            body: JSON.stringify(requestBody(draft)),
-          })
-      setIsNew(false)
-      setSelectedKey(detail.category_key)
-      setDraft(toEditable(detail))
-      setBanner(`已保存：${detail.category_key}（revision ${detail.revision}，hash ${detail.contract_hash.slice(0, 12)}…）`)
-      await listQuery.refetch()
+            body: JSON.stringify({
+              ...requestBody(outgoingDraft),
+              parent_revision_id: selectedRevision.id,
+              expected_projected_revision: detailQuery.data.revision,
+              expected_projected_contract_hash: detailQuery.data.contract_hash,
+            }),
+          },
+        )
+        setSelectedRevisionId(created.id)
+        setDraft(revisionToEditable(created))
+        setBanner(`候选 revision ${created.revision} 已创建，未发布且未改变现役合同。`)
+      }
+      await Promise.all([
+        listQuery.refetch(),
+        detailQuery.refetch(),
+        revisionsQuery.refetch(),
+      ])
     } catch (err) {
       if (err instanceof ApiError && Array.isArray(err.detail?.errors)) {
-        setErrors(err.detail?.errors as ValidationErrorItem[])
+        setErrors(err.detail.errors as ValidationErrorItem[])
       }
       setBanner(errMessage(err))
     } finally {
@@ -327,62 +313,25 @@ export function CategoryEvaluationV3ConfigPage() {
     }
   }
 
-  const saveLevelScale = async () => {
-    if (!draft || isNew) {
-      setBanner("新建配置的等级档位会随整份合同一起保存。")
-      return
-    }
-    setBusy(true)
+  const refreshSelected = () => {
     setBanner(null)
-    setErrors([])
-    try {
-      const result = await api<{
-        revision: number
-        contract_hash: string
-        level_scale: Json
-      }>(`${BASE}/${encodeURIComponent(draft.category_key)}/level-scale`, {
-        method: "PUT",
-        body: JSON.stringify({
-          expected_revision: draft.revision,
-          expected_contract_hash: draft.contract_hash,
-          level_scale: editableScalePayload(draft.contract),
-          redline_hit_level: draft.contract?.redline_policy?.hit_level,
-        }),
-      })
-      patchDraft((next) => {
-        next.contract.level_scale = clone(result.level_scale)
-        delete next.contract.level_thresholds
-        next.revision = result.revision
-        next.contract_hash = result.contract_hash
-      })
-      setBanner(`等级档位已保存（revision ${result.revision}，hash ${result.contract_hash.slice(0, 12)}…）`)
-      await listQuery.refetch()
-    } catch (err) {
-      setBanner(errMessage(err))
-    } finally {
-      setBusy(false)
-    }
+    void Promise.all([listQuery.refetch(), detailQuery.refetch(), revisionsQuery.refetch()])
   }
 
-  const changeStatus = async (status: string) => {
-    if (!draft || isNew) return
-    setBusy(true)
-    setBanner(null)
-    try {
-      const detail = await api<ConfigDetail>(
-        `${BASE}/${encodeURIComponent(draft.category_key)}/status`,
-        { method: "PUT", body: JSON.stringify({ status }) },
-      )
-      setDraft(toEditable(detail))
-      setBanner(`状态已改为 ${STATUS_LABEL[detail.status] ?? detail.status}。`)
-      await listQuery.refetch()
-    } catch (err) {
-      setBanner(errMessage(err))
-    } finally {
-      setBusy(false)
-    }
+  if (listQuery.isError) {
+    return (
+      <RouteErrorState
+        title="类目评测合同列表加载失败"
+        message={errMessage(listQuery.error)}
+        onRetry={() => void listQuery.refetch()}
+        backTo="/workflow/system"
+      />
+    )
   }
 
+  const selectedLoadError = detailQuery.error ?? revisionsQuery.error
+  const selectedLoading = !isNew && selectedKey !== null
+    && (detailQuery.isLoading || revisionsQuery.isLoading)
   const items = listQuery.data?.items ?? []
 
   return (
@@ -390,852 +339,136 @@ export function CategoryEvaluationV3ConfigPage() {
       <PageHeader
         index="A.7"
         title="类目评测 v3 合同配置"
-        description="编辑并持久化类目评测 v3 合同：红线、赛道、维度扣分规则、媒介降权和分类映射。已启用配置会进入新评测流水线；保存前请先校验。"
+        description="运行时投影只读；结构化编辑始终追加候选 revision，候选不会自动发布、重跑或写入正式标签事实。"
         actions={
-          <Button variant="secondary" onClick={() => listQuery.refetch()} disabled={busy}>
-            <ArrowClockwise />刷新列表
+          <Button variant="secondary" onClick={refreshSelected} disabled={busy}>
+            <ArrowClockwise />刷新
           </Button>
         }
       />
       <div className="mx-auto max-w-[1540px] px-5 py-6 md:px-8 lg:px-10">
         <div className="mb-4"><EvaluationBoundaryNote slot="dimension" /></div>
-
         <div className="mb-4 flex items-start gap-3 border-y border-[var(--line)] bg-[#fff6e9] px-4 py-3 text-xs leading-6 text-[#7d4308]">
           <WarningCircle className="mt-0.5 shrink-0" size={16} weight="fill" />
-          <p>
-            本页编辑的是 <b>v3 规则扣分合同</b>。状态为「已启用」的新评测会按调用A事实预检
-            → 调用B逐条判定扣分规则 → 确定性聚合执行；草稿配置不会接管旧流水线。
-          </p>
+          <p>机制发布轴与标签事实发布轴保持独立。这里创建的版本仅为候选，人工发布门禁尚未在本批绑定。</p>
         </div>
 
         <div className="grid gap-6 lg:grid-cols-[320px_minmax(0,1fr)]">
-          {/* 左：配置列表 */}
           <aside className="border border-[var(--line)] bg-white">
             <div className="flex items-center justify-between border-b border-[var(--line)] px-4 py-3">
               <h2 className="text-sm font-bold">v3 配置</h2>
-              <Button size="sm" onClick={startNew} disabled={busy}>
-                <Plus />新建
-              </Button>
+              <Button size="sm" onClick={startNew} disabled={busy}><Plus />新建</Button>
             </div>
             {listQuery.isLoading ? (
               <p className="px-4 py-8 text-center text-xs text-[var(--muted)]">加载中…</p>
             ) : items.length === 0 ? (
-              <p className="px-4 py-8 text-center text-xs text-[var(--muted)]">
-                暂无配置，点「新建」创建一份 v3 合同。
-              </p>
+              <p className="px-4 py-8 text-center text-xs text-[var(--muted)]">暂无配置。</p>
             ) : (
               <ul className="divide-y divide-[var(--line)]">
-                {items.map((item) => {
-                  const active = !isNew && item.category_key === selectedKey
-                  return (
-                    <li key={item.id}>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setIsNew(false)
-                          setSelectedKey(item.category_key)
-                        }}
-                        className={`flex w-full flex-col gap-1 px-4 py-3 text-left text-xs ${
-                          active ? "bg-[#f0f8c8]" : "hover:bg-[#f8f9f6]"
-                        }`}
-                      >
-                        <span className="flex items-center gap-2">
-                          <span className="font-data font-semibold">{item.category_key}</span>
-                          <Badge tone={STATUS_TONE[item.status] ?? "neutral"}>
-                            {STATUS_LABEL[item.status] ?? item.status}
-                          </Badge>
-                        </span>
-                        <span className="text-[var(--muted)]">{item.display_name}</span>
-                        <span className="text-[0.68rem] text-[var(--muted)]">
-                          rev {item.revision} · {item.contract_hash.slice(0, 12)}…
-                        </span>
-                      </button>
-                    </li>
-                  )
-                })}
+                {items.map((item) => (
+                  <li key={item.id}>
+                    <button
+                      type="button"
+                      onClick={() => selectCategory(item.category_key)}
+                      className={`flex w-full flex-col gap-1 px-4 py-3 text-left text-xs ${
+                        !isNew && item.category_key === selectedKey ? "bg-[#f0f8c8]" : "hover:bg-[#f8f9f6]"
+                      }`}
+                    >
+                      <span className="flex flex-wrap items-center gap-2">
+                        <span className="font-data font-semibold">{item.category_key}</span>
+                        <Badge tone={STATUS_TONE[item.status] ?? "neutral"}>{STATUS_LABEL[item.status] ?? item.status}</Badge>
+                        {item.candidate_count > 0 && <Badge tone="warning">候选 {item.candidate_count}</Badge>}
+                      </span>
+                      <span className="text-[var(--muted)]">{item.display_name}</span>
+                      <span className="text-[0.68rem] text-[var(--muted)]">rev {item.revision} · {item.contract_hash.slice(0, 12)}…</span>
+                    </button>
+                  </li>
+                ))}
               </ul>
             )}
           </aside>
 
-          {/* 右：编辑器 */}
-          <section className="min-w-0">
-            {!draft ? (
-              <div className="flex h-full min-h-[240px] items-center justify-center border border-dashed border-[var(--line-strong)] bg-white text-xs text-[var(--muted)]">
-                从左侧选择一份配置，或点「新建」。
-              </div>
-            ) : (
-              <V3ConfigEditor
-                draft={draft}
-                isNew={isNew}
-                busy={busy}
-                banner={banner}
-                errors={errors}
-                onDisplayName={(value) => patchDraft((next) => { next.display_name = value })}
-                onKey={syncKey}
-                onPatch={patchDraft}
-                onValidate={runValidate}
-                onSave={save}
-                onSaveLevelScale={saveLevelScale}
-                onStatus={changeStatus}
+          <main className="min-w-0">
+            {selectedLoadError ? (
+              <RouteErrorState
+                title="合同版本加载失败"
+                message={errMessage(selectedLoadError)}
+                onRetry={refreshSelected}
               />
+            ) : selectedLoading ? (
+              <div className="border-y border-[var(--line)] bg-white px-5 py-12 text-center text-sm text-[var(--muted)]">加载合同与 revision 历史…</div>
+            ) : !draft ? (
+              <div className="border border-dashed border-[var(--line-strong)] bg-white px-5 py-12 text-center text-sm text-[var(--muted)]">选择一份配置，或创建新的图像机制配置。</div>
+            ) : (
+              <div className="space-y-4">
+                {!isNew && selectedRevision && (
+                  <section className="flex flex-wrap items-center justify-between gap-3 border-y border-[var(--line)] bg-white px-4 py-3 text-xs">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Badge tone={STATUS_TONE[selectedRevision.status] ?? "neutral"}>{STATUS_LABEL[selectedRevision.status] ?? selectedRevision.status}</Badge>
+                      <span className="font-data">revision {selectedRevision.revision}</span>
+                      <span className="font-data text-[var(--muted)]">{selectedRevision.contract_hash.slice(0, 12)}…</span>
+                      {selectedRevision.id === runtimeRevision?.id && <span className="font-semibold">运行时投影</span>}
+                    </div>
+                    <label className="flex items-center gap-2 font-semibold">
+                      查看版本
+                      <select
+                        className="h-9 border border-[var(--line-strong)] bg-white px-2 font-data text-xs"
+                        value={selectedRevision.id}
+                        onChange={(event) => {
+                          setSelectedRevisionId(Number(event.target.value))
+                          setErrors([])
+                          setBanner(null)
+                        }}
+                      >
+                        {(revisionsQuery.data?.items ?? []).map((revision) => (
+                          <option key={revision.id} value={revision.id}>
+                            rev {revision.revision} · {STATUS_LABEL[revision.status] ?? revision.status}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  </section>
+                )}
+                <ProfileCapabilitySummary
+                  profile={profileDescription}
+                  catalog={profileCatalog.data?.items ?? []}
+                  workflowKind={workflowKind}
+                />
+                <MechanismEditorBoundary
+                  detail={selectedRevision}
+                  workflowKind={workflowKind}
+                  canExecute={profileDescription?.can_execute === true && plugin?.canEdit === true}
+                  readOnlyFallback={profileDescription?.read_only_fallback !== false}
+                  onRetry={refreshSelected}
+                >
+                  <Suspense fallback={<div className="border-y border-[var(--line)] bg-white px-5 py-10 text-sm text-[var(--muted)]">加载机制编辑器…</div>}>
+                    {plugin ? (
+                      <plugin.Editor
+                        workflowKind={workflowKind}
+                        draft={draft}
+                        runtimeRevision={runtimeRevision}
+                        selectedRevision={selectedRevision}
+                        busy={busy}
+                        banner={banner}
+                        errors={errors}
+                        onPatch={patchDraft}
+                        onValidate={runValidate}
+                        onCreateCandidate={createCandidate}
+                      />
+                    ) : (
+                      <UnknownMechanismSummary detail={selectedRevision} />
+                    )}
+                  </Suspense>
+                </MechanismEditorBoundary>
+              </div>
             )}
-          </section>
+          </main>
         </div>
       </div>
     </>
   )
 }
 
-function errMessage(err: unknown): string {
-  if (err instanceof ApiError) {
-    const detail: any = err.detail
-    return detail?.code ? `${detail.code}: ${detail.message ?? err.message}` : err.message
-  }
-  return String(err)
-}
-
-const inputClass = "h-9 w-full rounded-[4px] border border-[var(--line-strong)] px-2 text-xs"
-const numberClass = "h-9 w-24 rounded-[4px] border border-[var(--line-strong)] px-2 text-xs font-data"
-
-function V3ConfigEditor({
-  draft,
-  isNew,
-  busy,
-  banner,
-  errors,
-  onDisplayName,
-  onKey,
-  onPatch,
-  onValidate,
-  onSave,
-  onSaveLevelScale,
-  onStatus,
-}: {
-  draft: Editable
-  isNew: boolean
-  busy: boolean
-  banner: string | null
-  errors: ValidationErrorItem[]
-  onDisplayName: (value: string) => void
-  onKey: (value: string) => void
-  onPatch: (mutator: (next: Editable) => void) => void
-  onValidate: () => void
-  onSave: () => void
-  onSaveLevelScale: () => void
-  onStatus: (status: string) => void
-}) {
-  const tracks: any[] = draft.contract?.track_classification?.tracks ?? []
-  const trackKeys = tracks.map((t) => t.key).filter(Boolean)
-  const bannerIsError = banner != null && !banner.startsWith("已保存") && !banner.startsWith("等级档位已保存") && !banner.startsWith("新建配置") && !banner.startsWith("校验通过") && !banner.startsWith("状态已改")
-
-  return (
-    <div className="space-y-5">
-      {/* 工具条 */}
-      <div className="flex flex-wrap items-center justify-between gap-3 border border-[var(--line)] bg-white px-4 py-3">
-        <div className="flex flex-wrap items-center gap-3 text-xs">
-          <span className="font-bold">{isNew ? "新建 v3 配置" : `编辑 ${draft.category_key}`}</span>
-          {!isNew && (
-            <select
-              className="h-8 rounded-[4px] border border-[var(--line-strong)] px-2 text-xs"
-              value=""
-              onChange={(e) => { if (e.target.value) onStatus(e.target.value) }}
-              disabled={busy}
-              title="改变生命周期状态（不递增 revision）"
-            >
-              <option value="">改状态…</option>
-              <option value="draft">草稿</option>
-              <option value="active">启用</option>
-              <option value="retired">退役</option>
-            </select>
-          )}
-        </div>
-        <div className="flex items-center gap-2">
-          <Button variant="secondary" size="sm" onClick={onValidate} disabled={busy}>
-            <Check />校验
-          </Button>
-          <Button size="sm" onClick={onSave} disabled={busy}>
-            <FloppyDisk />保存
-          </Button>
-        </div>
-      </div>
-
-      {banner && (
-        <div
-          className={`flex items-start gap-2 border px-3 py-2 text-xs ${
-            bannerIsError
-              ? "border-[#e4b9b6] bg-[#fdf3f2] text-[#8d2924]"
-              : "border-[#bdd8c7] bg-[#edf7f0] text-[#245b3b]"
-          }`}
-        >
-          {bannerIsError ? <WarningCircle size={15} weight="fill" className="mt-0.5" /> : <CheckCircle size={15} weight="fill" className="mt-0.5" />}
-          <span>{banner}</span>
-        </div>
-      )}
-
-      {errors.length > 0 && (
-        <div className="border border-[#e4b9b6] bg-[#fdf3f2] px-3 py-2 text-xs text-[#8d2924]">
-          <p className="font-semibold">校验错误（{errors.length}）</p>
-          <ul className="mt-1 space-y-1">
-            {errors.map((err, i) => (
-              <li key={i}>
-                <span className="font-data font-semibold">{err.target}</span>
-                {" · "}<span className="font-data">{err.code}</span>：{err.message}
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
-
-      {/* 基本信息 */}
-      <FieldCard title="基本信息">
-        <div className="grid gap-3 sm:grid-cols-2">
-          <label className="grid gap-1 text-xs">
-            <span className="font-semibold">类目标识</span>
-            <input
-              className={inputClass}
-              value={draft.category_key}
-              disabled={!isNew}
-              placeholder="如 inspiration_image"
-              onChange={(e) => onKey(e.target.value)}
-            />
-            {!isNew && <span className="text-[0.68rem] text-[var(--muted)]">key 保存后不可改</span>}
-          </label>
-          <label className="grid gap-1 text-xs">
-            <span className="font-semibold">中文名称</span>
-            <input
-              className={inputClass}
-              value={draft.display_name}
-              onChange={(e) => onDisplayName(e.target.value)}
-            />
-          </label>
-        </div>
-      </FieldCard>
-
-      <RedlineEditor draft={draft} onPatch={onPatch} />
-      <LevelScaleEditor
-        draft={draft}
-        busy={busy}
-        onPatch={onPatch}
-        onSave={onSaveLevelScale}
-      />
-      <TrackEditor draft={draft} onPatch={onPatch} />
-      <MediaPenaltyEditor draft={draft} onPatch={onPatch} />
-      <DimensionGroupsEditor draft={draft} trackKeys={trackKeys} onPatch={onPatch} />
-      <ClassificationMapEditor draft={draft} trackKeys={trackKeys} onPatch={onPatch} />
-    </div>
-  )
-}
-
-function FieldCard({ title, children }: { title: string; children: ReactNode }) {
-  return (
-    <section className="border border-[var(--line)] bg-white">
-      <div className="border-b border-[var(--line)] px-4 py-3">
-        <h3 className="text-sm font-bold">{title}</h3>
-      </div>
-      <div className="px-4 py-4">{children}</div>
-    </section>
-  )
-}
-
-function IconButton({ onClick, title, danger }: { onClick: () => void; title: string; danger?: boolean }) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      title={title}
-      className={`inline-flex h-8 w-8 items-center justify-center rounded-[4px] border border-[var(--line-strong)] bg-white [&_svg]:size-4 ${
-        danger ? "text-[#8d2924] hover:bg-[#fdf3f2]" : "hover:bg-[#f8f9f6]"
-      }`}
-    >
-      {danger ? <Trash /> : <Plus />}
-    </button>
-  )
-}
-
-function LevelScaleEditor({
-  draft,
-  busy,
-  onPatch,
-  onSave,
-}: {
-  draft: Editable
-  busy: boolean
-  onPatch: (mutator: (next: Editable) => void) => void
-  onSave: () => void
-}) {
-  const levels = levelScaleForEditor(draft.contract)
-  const enabled = levels.filter((entry) => entry.enabled)
-  const validationErrors: string[] = []
-  if (enabled.length === 0) validationErrors.push("至少保留一个启用档位")
-  if (enabled.some((entry) => !Number.isInteger(entry.min_score) || (entry.min_score ?? -1) < 0 || (entry.min_score ?? 101) > 100)) {
-    validationErrors.push("启用档位切点必须是 0-100 的整数")
-  }
-  for (let index = 0; index < enabled.length - 1; index += 1) {
-    if ((enabled[index].min_score ?? -1) <= (enabled[index + 1].min_score ?? -1)) {
-      validationErrors.push("切点必须随 L 序号增大而严格下降")
-      break
-    }
-  }
-  if (enabled.length > 0 && enabled[enabled.length - 1].min_score !== 0) {
-    validationErrors.push(`${enabled[enabled.length - 1].level} 是当前最差档，切点必须为 0`)
-  }
-  const redlineLevel = draft.contract?.redline_policy?.hit_level
-  if (typeof redlineLevel === "string" && !enabled.some((entry) => entry.level === redlineLevel)) {
-    validationErrors.push(`红线命中档 ${redlineLevel} 已关闭`)
-  }
-
-  const commit = (mutator: (next: LevelScaleEntry[]) => void) => {
-    onPatch((next) => {
-      const entries = levelScaleForEditor(next.contract)
-      mutator(entries)
-      next.contract.level_scale = {
-        version: "category-level-scale-v1",
-        levels: entries.map((entry) => entry.enabled
-          ? entry
-          : { level: entry.level, enabled: false, display_name: entry.display_name }),
-      }
-      delete next.contract.level_thresholds
-    })
-  }
-
-  return (
-    <FieldCard title="等级档位（L1 最优，L 序号越大质量越差）">
-      <div className="overflow-x-auto border-y border-[var(--line)]">
-        <div className="grid min-w-[620px] grid-cols-[80px_90px_140px_minmax(180px,1fr)] bg-[#f6f8f3] px-3 py-2 text-[0.68rem] font-semibold text-[var(--muted)]">
-          <span>档位</span><span>启用</span><span>最低美感分</span><span>展示名称</span>
-        </div>
-        {levels.map((entry, index) => (
-          <div key={entry.level} className="grid min-w-[620px] grid-cols-[80px_90px_140px_minmax(180px,1fr)] items-center border-t border-[var(--line)] px-3 py-2 text-xs">
-            <strong className="font-data">{entry.level}</strong>
-            <input
-              type="checkbox"
-              checked={entry.enabled}
-              aria-label={`${entry.level} 启用`}
-              onChange={(event) => commit((next) => {
-                next[index].enabled = event.target.checked
-                next[index].min_score = event.target.checked ? (next[index].min_score ?? 0) : undefined
-              })}
-            />
-            <input
-              type="number"
-              min={0}
-              max={100}
-              className={numberClass}
-              disabled={!entry.enabled}
-              value={entry.min_score ?? ""}
-              onChange={(event) => commit((next) => { next[index].min_score = Number(event.target.value) })}
-            />
-            <input
-              className={inputClass}
-              maxLength={40}
-              value={entry.display_name}
-              onChange={(event) => commit((next) => { next[index].display_name = event.target.value })}
-            />
-          </div>
-        ))}
-      </div>
-      <div className="mt-3 flex flex-wrap items-start justify-between gap-3">
-        <div className="min-h-8 text-xs text-[#8d2924]">
-          {validationErrors.map((message) => <p key={message}>{message}</p>)}
-        </div>
-        <Button
-          size="sm"
-          variant="secondary"
-          onClick={onSave}
-          disabled={busy || validationErrors.length > 0}
-        >
-          <FloppyDisk />仅保存等级档位
-        </Button>
-      </div>
-    </FieldCard>
-  )
-}
-
-function RedlineEditor({
-  draft,
-  onPatch,
-}: {
-  draft: Editable
-  onPatch: (mutator: (next: Editable) => void) => void
-}) {
-  const policy = draft.contract.redline_policy ?? {}
-  const rules: any[] = policy.rules ?? []
-  return (
-    <FieldCard title="红线规则（命中直筛 L5，可增删 / 开关 / 改 match 词）">
-      <div className="mb-3 flex flex-wrap items-center gap-3 text-xs">
-        <label className="flex items-center gap-2">
-          <input
-            type="checkbox"
-            checked={policy.enabled !== false}
-            onChange={(e) => onPatch((n) => { n.contract.redline_policy.enabled = e.target.checked })}
-          />
-          <span className="font-semibold">启用红线阶段</span>
-        </label>
-        <label className="flex items-center gap-2">
-          <span className="font-semibold">命中等级</span>
-          <select
-            className="h-8 rounded-[4px] border border-[var(--line-strong)] px-2"
-            value={policy.hit_level ?? "L5"}
-            onChange={(e) => onPatch((n) => { n.contract.redline_policy.hit_level = e.target.value })}
-          >
-            {["L1", "L2", "L3", "L4", "L5"].map((lv) => <option key={lv}>{lv}</option>)}
-          </select>
-        </label>
-        <label className="flex items-center gap-2">
-          <span className="font-semibold">命中后分数上限</span>
-          <input
-            type="number"
-            className={numberClass}
-            value={policy.hit_score_cap ?? 49}
-            onChange={(e) => onPatch((n) => { n.contract.redline_policy.hit_score_cap = Number(e.target.value) })}
-          />
-        </label>
-      </div>
-      <div className="space-y-2">
-        {rules.map((rule, idx) => (
-          <div key={idx} className="grid gap-2 border border-[var(--line)] px-3 py-2 sm:grid-cols-[110px_1fr_1fr_auto] sm:items-center">
-            <input
-              className={inputClass}
-              placeholder="规则标识"
-              value={rule.key ?? ""}
-              onChange={(e) => onPatch((n) => { n.contract.redline_policy.rules[idx].key = e.target.value })}
-            />
-            <input
-              className={inputClass}
-              placeholder="规则中文名"
-              value={rule.label ?? ""}
-              onChange={(e) => onPatch((n) => { n.contract.redline_policy.rules[idx].label = e.target.value })}
-            />
-            <input
-              className={inputClass}
-              placeholder="match_any（逗号分隔，如 是截图）"
-              value={(rule.match_any ?? []).join(",")}
-              onChange={(e) => onPatch((n) => {
-                n.contract.redline_policy.rules[idx].match_any = e.target.value.split(",").map((s) => s.trim()).filter(Boolean)
-              })}
-            />
-            <div className="flex items-center gap-2">
-              <label className="flex items-center gap-1 text-[0.68rem]">
-                <input
-                  type="checkbox"
-                  checked={rule.enabled !== false}
-                  onChange={(e) => onPatch((n) => { n.contract.redline_policy.rules[idx].enabled = e.target.checked })}
-                />
-                启用
-              </label>
-              <IconButton danger title="删除规则" onClick={() => onPatch((n) => { n.contract.redline_policy.rules.splice(idx, 1) })} />
-            </div>
-          </div>
-        ))}
-      </div>
-      <Button
-        variant="secondary"
-        size="sm"
-        className="mt-3"
-        onClick={() => onPatch((n) => {
-          n.contract.redline_policy.rules.push({
-            key: "", label: "", signal: "production_fields.reason",
-            match_any: [], exemptions: [], enabled: true,
-          })
-        })}
-      >
-        <Plus />新增红线规则
-      </Button>
-      <p className="mt-2 text-[0.68rem] text-[var(--muted)]">
-        信号源固定为 production_fields.reason（调用A 事实字段）；match_any 必须是允许的 reason 枚举，否则校验会拦下。
-      </p>
-    </FieldCard>
-  )
-}
-
-function TrackEditor({
-  draft,
-  onPatch,
-}: {
-  draft: Editable
-  onPatch: (mutator: (next: Editable) => void) => void
-}) {
-  const tc = draft.contract.track_classification ?? {}
-  const tracks: any[] = tc.tracks ?? []
-  return (
-    <FieldCard title="子类目赛道（分数基底 / 维度满分 / 赛道上限 / 默认兜底）">
-      <div className="mb-3 flex items-center gap-2 text-xs">
-        <span className="font-semibold">默认赛道</span>
-        <select
-          className="h-8 rounded-[4px] border border-[var(--line-strong)] px-2"
-          value={tc.default_track ?? ""}
-          onChange={(e) => onPatch((n) => { n.contract.track_classification.default_track = e.target.value })}
-        >
-          {tracks.map((t) => <option key={t.key} value={t.key}>{t.key}</option>)}
-        </select>
-      </div>
-      <div className="space-y-2">
-        {tracks.map((track, idx) => (
-          <div key={idx} className="grid gap-2 border border-[var(--line)] px-3 py-2 sm:grid-cols-[1fr_1fr_auto] sm:items-start">
-            <div className="grid gap-2">
-              <input className={inputClass} placeholder="赛道标识" value={track.key ?? ""} onChange={(e) => onPatch((n) => { n.contract.track_classification.tracks[idx].key = e.target.value })} />
-              <input className={inputClass} placeholder="赛道中文名" value={track.label ?? ""} onChange={(e) => onPatch((n) => { n.contract.track_classification.tracks[idx].label = e.target.value })} />
-            </div>
-            <div className="flex flex-wrap gap-2">
-              <label className="grid gap-0.5 text-[0.68rem]"><span>基础分</span>
-                <input type="number" className={numberClass} value={track.base_score ?? 0} onChange={(e) => onPatch((n) => { n.contract.track_classification.tracks[idx].base_score = Number(e.target.value) })} />
-              </label>
-              <label className="grid gap-0.5 text-[0.68rem]"><span>维度满分</span>
-                <input type="number" className={numberClass} value={track.dimension_max ?? 0} onChange={(e) => onPatch((n) => { n.contract.track_classification.tracks[idx].dimension_max = Number(e.target.value) })} />
-              </label>
-              <label className="grid gap-0.5 text-[0.68rem]"><span>赛道分数上限</span>
-                <input type="number" className={numberClass} value={track.track_cap ?? 0} onChange={(e) => onPatch((n) => { n.contract.track_classification.tracks[idx].track_cap = Number(e.target.value) })} />
-              </label>
-            </div>
-            <IconButton danger title="删除赛道" onClick={() => onPatch((n) => { n.contract.track_classification.tracks.splice(idx, 1) })} />
-          </div>
-        ))}
-      </div>
-      <Button
-        variant="secondary"
-        size="sm"
-        className="mt-3"
-        onClick={() => onPatch((n) => {
-          n.contract.track_classification.tracks.push({
-            key: "", label: "", base_score: 40, dimension_max: 30, track_cap: 70,
-            dimension_schema_ref: { schema_key: "space_v13", version: "v13" },
-          })
-        })}
-      >
-        <Plus />新增赛道
-      </Button>
-      <p className="mt-2 text-[0.68rem] text-[var(--muted)]">
-        约束：base_score + dimension_max ≤ track_cap ≤ 100；default_track 必须是已定义的 key。
-      </p>
-    </FieldCard>
-  )
-}
-
-const MEDIA_LABELS: Record<string, string> = {
-  real_photo: "实拍照片",
-  render_3d: "3D 效果图",
-  ai_image: "AI 图片",
-  other: "其他媒介",
-}
-
-function MediaPenaltyEditor({
-  draft,
-  onPatch,
-}: {
-  draft: Editable
-  onPatch: (mutator: (next: Editable) => void) => void
-}) {
-  const config = draft.contract?.common_modifiers?.media_type_penalty ?? {}
-  const enabled = config.enabled !== false
-  const penalties = config.penalties ?? {}
-  return (
-    <FieldCard title="媒介降权（可独立关闭）">
-      <label className="mb-3 flex items-center gap-2 text-xs font-semibold">
-        <input
-          type="checkbox"
-          checked={enabled}
-          onChange={(event) => onPatch((next) => {
-            next.contract.common_modifiers.media_type_penalty.enabled = event.target.checked
-          })}
-        />
-        启用媒介降权
-      </label>
-      <div className={`grid gap-2 sm:grid-cols-2 lg:grid-cols-4 ${enabled ? "" : "opacity-45"}`}>
-        {Object.entries(MEDIA_LABELS).map(([key, label]) => (
-          <label key={key} className="grid gap-1 text-xs">
-            <span className="font-semibold">{label}扣分值</span>
-            <input
-              type="number"
-              className={numberClass}
-              disabled={!enabled}
-              value={penalties[key] ?? 0}
-              onChange={(event) => onPatch((next) => {
-                next.contract.common_modifiers.media_type_penalty.penalties[key] = Number(event.target.value)
-              })}
-            />
-          </label>
-        ))}
-      </div>
-      {!enabled && <p className="mt-2 text-[0.68rem] text-[var(--muted)]">关闭后聚合器跳过此节点，媒介扣分固定为 0。</p>}
-    </FieldCard>
-  )
-}
-
-function emptyGroup(): Json {
-  return {
-    group_weight: 0.5,
-    schema_definition: {
-      format_version: "dimension-schema-definition-v1",
-      schema_key: "inspiration_specific",
-      version: "v1",
-      dimensions: [],
-    },
-  }
-}
-
-function DimensionGroupsEditor({
-  draft,
-  trackKeys,
-  onPatch,
-}: {
-  draft: Editable
-  trackKeys: string[]
-  onPatch: (mutator: (next: Editable) => void) => void
-}) {
-  const dims = draft.subcategory_dimensions ?? {}
-  const configuredKeys = Object.keys(dims)
-  return (
-    <FieldCard title="每子类目维度组（共性 + 特有，均可增删维度 / 调权重 / 置空）">
-      <div className="space-y-4">
-        {configuredKeys.length === 0 && (
-          <p className="text-xs text-[var(--muted)]">尚无维度配置。为下方赛道补充配置后可编辑。</p>
-        )}
-        {configuredKeys.map((trackKey) => {
-          const cfg = dims[trackKey] ?? {}
-          return (
-            <div key={trackKey} className="border border-[var(--line)] px-3 py-3">
-              <div className="mb-2 flex items-center justify-between">
-                <span className="font-data text-xs font-semibold">{trackKey}</span>
-                <label className="flex items-center gap-1 text-[0.68rem]">
-                  维度满分
-                  <input
-                    type="number"
-                    className={numberClass}
-                    value={cfg.dimension_max ?? 0}
-                    onChange={(e) => onPatch((n) => { n.subcategory_dimensions[trackKey].dimension_max = Number(e.target.value) })}
-                  />
-                </label>
-              </div>
-              {(["common_group", "specific_group"] as const).map((groupKey) => (
-                <GroupEditor
-                  key={groupKey}
-                  trackKey={trackKey}
-                  groupKey={groupKey}
-                  group={cfg[groupKey]}
-                  onPatch={onPatch}
-                />
-              ))}
-            </div>
-          )
-        })}
-      </div>
-      {trackKeys.some((k) => !configuredKeys.includes(k)) && (
-        <div className="mt-3 flex flex-wrap gap-2">
-          {trackKeys.filter((k) => !configuredKeys.includes(k)).map((k) => (
-            <Button
-              key={k}
-              variant="secondary"
-              size="sm"
-              onClick={() => onPatch((n) => {
-                n.subcategory_dimensions[k] = {
-                  format_version: SUBCATEGORY_DIMENSIONS_FORMAT_VERSION,
-                  sub_category_key: k,
-                  dimension_max: 30,
-                  common_group: null,
-                  specific_group: null,
-                }
-              })}
-            >
-              <Plus />为 {k} 补维度配置
-            </Button>
-          ))}
-        </div>
-      )}
-    </FieldCard>
-  )
-}
-
-function placeholderRules(label: string): Json[] {
-  return [
-    { rule_id: "minor_defect", description: `${label}存在局部轻微缺陷`, deduction: 10, tags: ["占位"] },
-    { rule_id: "obvious_defect", description: `${label}存在明显缺陷`, deduction: 25, tags: ["占位"] },
-    { rule_id: "severe_defect", description: `${label}存在严重缺陷`, deduction: 50, tags: ["占位"] },
-  ]
-}
-
-function GroupEditor({
-  trackKey,
-  groupKey,
-  group,
-  onPatch,
-}: {
-  trackKey: string
-  groupKey: "common_group" | "specific_group"
-  group: Json | null | undefined
-  onPatch: (mutator: (next: Editable) => void) => void
-}) {
-  const label = groupKey === "common_group" ? "共性维度组" : "特有维度组"
-  const dimensions: any[] = group?.schema_definition?.dimensions ?? []
-  const enabled = group != null
-  return (
-    <div className="mt-2 rounded-[4px] bg-[#f8fbef] px-3 py-2">
-      <div className="flex items-center justify-between text-xs">
-        <label className="flex items-center gap-2 font-semibold">
-          <input
-            type="checkbox"
-            checked={enabled}
-            onChange={(e) => onPatch((n) => {
-              n.subcategory_dimensions[trackKey][groupKey] = e.target.checked ? emptyGroup() : null
-            })}
-          />
-          {label}{!enabled && "（已置空）"}
-        </label>
-        {enabled && (
-          <label className="flex items-center gap-1 text-[0.68rem]">
-            组权重
-            <input
-              type="number"
-              step={0.05}
-              className="h-8 w-20 rounded-[4px] border border-[var(--line-strong)] px-2 font-data"
-              value={group?.group_weight ?? 0}
-              onChange={(e) => onPatch((n) => { n.subcategory_dimensions[trackKey][groupKey].group_weight = Number(e.target.value) })}
-            />
-          </label>
-        )}
-      </div>
-      {enabled && (
-        <>
-          <div className="mt-2 space-y-2">
-            {dimensions.map((dim, idx) => (
-              <div key={idx} className="border border-[var(--line)] bg-white px-3 py-3">
-                <div className="grid gap-2 sm:grid-cols-[1fr_1fr_110px_auto] sm:items-end">
-                  <label className="grid gap-1 text-[0.68rem]"><span className="font-semibold">维度标识</span>
-                    <input className={inputClass} placeholder="如 color_aesthetics" value={dim.key ?? ""} onChange={(e) => onPatch((n) => { n.subcategory_dimensions[trackKey][groupKey].schema_definition.dimensions[idx].key = e.target.value })} />
-                  </label>
-                  <label className="grid gap-1 text-[0.68rem]"><span className="font-semibold">维度中文名</span>
-                    <input className={inputClass} placeholder="如 色彩美感" value={dim.label ?? ""} onChange={(e) => onPatch((n) => { n.subcategory_dimensions[trackKey][groupKey].schema_definition.dimensions[idx].label = e.target.value })} />
-                  </label>
-                  <label className="grid gap-1 text-[0.68rem]"><span className="font-semibold">维度权重</span>
-                    <input type="number" step={0.05} className="h-9 w-full rounded-[4px] border border-[var(--line-strong)] px-2 text-xs font-data" value={dim.weight ?? 0} onChange={(e) => onPatch((n) => { n.subcategory_dimensions[trackKey][groupKey].schema_definition.dimensions[idx].weight = Number(e.target.value) })} />
-                  </label>
-                  <IconButton danger title="删除维度" onClick={() => onPatch((n) => { n.subcategory_dimensions[trackKey][groupKey].schema_definition.dimensions.splice(idx, 1) })} />
-                </div>
-                <div className="mt-3 border-t border-dashed border-[var(--line)] pt-2">
-                  <div className="mb-2 flex items-center justify-between">
-                    <span className="text-[0.68rem] font-semibold">
-                      扣分规则（调用B逐条判定） · 总扣分上限 {Math.min(100, (dim.deduction_rules ?? []).reduce((sum: number, rule: Json) => sum + Number(rule.deduction || 0), 0))}
-                    </span>
-                    <Button variant="ghost" size="sm" onClick={() => onPatch((n) => {
-                      const rules = n.subcategory_dimensions[trackKey][groupKey].schema_definition.dimensions[idx].deduction_rules ??= []
-                      rules.push({ rule_id: "", description: "", deduction: 10, tags: [] })
-                    })}><Plus />新增规则</Button>
-                  </div>
-                  <div className="space-y-1">
-                    {(dim.deduction_rules ?? []).map((rule: Json, ruleIdx: number) => (
-                      <div key={ruleIdx} className="grid gap-2 sm:grid-cols-[160px_1fr_110px_1fr_auto] sm:items-end">
-                        <label className="grid gap-1 text-[0.68rem]"><span>规则标识</span><input className={inputClass} value={rule.rule_id ?? ""} onChange={(e) => onPatch((n) => { n.subcategory_dimensions[trackKey][groupKey].schema_definition.dimensions[idx].deduction_rules[ruleIdx].rule_id = e.target.value })} /></label>
-                        <label className="grid gap-1 text-[0.68rem]"><span>中文规则描述</span><input className={inputClass} value={rule.description ?? ""} onChange={(e) => onPatch((n) => { n.subcategory_dimensions[trackKey][groupKey].schema_definition.dimensions[idx].deduction_rules[ruleIdx].description = e.target.value })} /></label>
-                        <label className="grid gap-1 text-[0.68rem]"><span>扣分值</span><input type="number" min={0.1} max={100} className={numberClass} value={rule.deduction ?? 0} onChange={(e) => onPatch((n) => { n.subcategory_dimensions[trackKey][groupKey].schema_definition.dimensions[idx].deduction_rules[ruleIdx].deduction = Number(e.target.value) })} /></label>
-                        <label className="grid gap-1 text-[0.68rem]"><span>标签（逗号分隔）</span><input className={inputClass} value={(rule.tags ?? []).join(",")} onChange={(e) => onPatch((n) => { n.subcategory_dimensions[trackKey][groupKey].schema_definition.dimensions[idx].deduction_rules[ruleIdx].tags = e.target.value.split(",").map((s) => s.trim()).filter(Boolean) })} /></label>
-                        <IconButton danger title="删除扣分规则" onClick={() => onPatch((n) => { n.subcategory_dimensions[trackKey][groupKey].schema_definition.dimensions[idx].deduction_rules.splice(ruleIdx, 1) })} />
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              </div>
-            ))}
-          </div>
-          <Button
-            variant="ghost"
-            size="sm"
-            className="mt-2"
-            onClick={() => onPatch((n) => {
-              n.subcategory_dimensions[trackKey][groupKey].schema_definition.dimensions.push({
-                key: "", label: "新维度", weight: 1,
-                deduction_rules: placeholderRules("新维度"),
-                grade_points: { "1": 20, "2": 45, "3": 65, "4": 82, "5": 95 },
-              })
-            })}
-          >
-            <Plus />新增维度
-          </Button>
-        </>
-      )}
-    </div>
-  )
-}
-
-function ClassificationMapEditor({
-  draft,
-  trackKeys,
-  onPatch,
-}: {
-  draft: Editable
-  trackKeys: string[]
-  onPatch: (mutator: (next: Editable) => void) => void
-}) {
-  const map = draft.classification_map ?? {}
-  const entries = Object.entries<string>(map.category_to_subcategory ?? {})
-  return (
-    <FieldCard title="分类映射（一级类目 → 子类目赛道）">
-      <div className="mb-3 flex flex-wrap items-center gap-3 text-xs">
-        <label className="flex items-center gap-2">
-          <span className="font-semibold">最低分类置信度</span>
-          <input
-            type="number"
-            step={0.05}
-            min={0}
-            max={1}
-            className={numberClass}
-            value={map.min_confidence ?? 0.6}
-            onChange={(e) => onPatch((n) => { n.classification_map.min_confidence = Number(e.target.value) })}
-          />
-        </label>
-        <label className="flex items-center gap-2">
-          <span className="font-semibold">范围外兜底赛道 → </span>
-          <select
-            className="h-8 rounded-[4px] border border-[var(--line-strong)] px-2"
-            value={map.out_of_scope_subcategory ?? ""}
-            onChange={(e) => onPatch((n) => { n.classification_map.out_of_scope_subcategory = e.target.value })}
-          >
-            <option value="">选择赛道…</option>
-            {trackKeys.map((k) => <option key={k} value={k}>{k}</option>)}
-          </select>
-        </label>
-      </div>
-      <div className="space-y-2">
-        {entries.map(([category, target], idx) => (
-          <div key={idx} className="grid gap-2 sm:grid-cols-[1fr_1fr_auto] sm:items-center">
-            <input
-              className={inputClass}
-              placeholder="一级类目（如 建筑设计）"
-              value={category}
-              onChange={(e) => onPatch((n) => {
-                const current = n.classification_map.category_to_subcategory ?? {}
-                const next: Record<string, string> = {}
-                Object.entries<string>(current).forEach(([c, t], i) => {
-                  next[i === idx ? e.target.value : c] = t
-                })
-                n.classification_map.category_to_subcategory = next
-              })}
-            />
-            <select
-              className="h-9 rounded-[4px] border border-[var(--line-strong)] px-2 text-xs"
-              value={target}
-              onChange={(e) => onPatch((n) => { n.classification_map.category_to_subcategory[category] = e.target.value })}
-            >
-              <option value="">选择赛道…</option>
-              {trackKeys.map((k) => <option key={k} value={k}>{k}</option>)}
-            </select>
-            <IconButton danger title="删除映射" onClick={() => onPatch((n) => { delete n.classification_map.category_to_subcategory[category] })} />
-          </div>
-        ))}
-      </div>
-      <Button
-        variant="secondary"
-        size="sm"
-        className="mt-3"
-        onClick={() => onPatch((n) => {
-          const map = n.classification_map.category_to_subcategory ?? {}
-          if (!("" in map)) map[""] = trackKeys[0] ?? ""
-          n.classification_map.category_to_subcategory = map
-        })}
-      >
-        <Plus />新增映射
-      </Button>
-      <p className="mt-2 text-[0.68rem] text-[var(--muted)]">
-        每个映射目标与 out_of_scope 都必须是上方已定义的赛道 key，否则校验会拦下。
-      </p>
-    </FieldCard>
-  )
+export function safeJson(value: JsonObject): string {
+  return JSON.stringify(value, null, 2)
 }

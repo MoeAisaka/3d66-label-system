@@ -368,6 +368,68 @@ export type BaselineLevelMetrics = {
   confusion_matrix: Record<BaselineLevel, Record<BaselineLevel, number>>
 }
 
+export type BaselineFieldMetric = {
+  field_key: string
+  support: number
+  tp: number
+  fp: number
+  fn: number
+  accuracy: number
+  recall: number
+  confusion_matrix: Record<string, Record<string, number>>
+  failure_sample_ids: number[]
+}
+
+export type BaselineFieldMetrics = {
+  schema_version: "baseline-field-metrics-v1"
+  run_id: number
+  category_key: string
+  field_metrics: BaselineFieldMetric[]
+  aggregates: {
+    macro: {
+      field_count: number
+      accuracy: number
+      recall: number
+    }
+    micro: {
+      support: number
+      tp: number
+      fp: number
+      fn: number
+      accuracy: number
+      recall: number
+    }
+  }
+  failure_sample_ids: number[]
+  golden_failure_sample_ids: number[]
+  versions: {
+    model: string[]
+    prompt: { a: string[]; b: string[] }
+    mechanism: {
+      spec_version: string | null
+      rubric: string[]
+      engine: string[]
+      strategy_bundle_id: number
+      strategy_canonical_id: string
+    }
+    asset: {
+      baseline_set_fingerprint: string
+      count: number
+      payload_hash: string
+    }
+    truth: {
+      locked_sample_set_ids: number[]
+      revision_min: number
+      revision_max: number
+      matched_asset_count: number
+    }
+  }
+  decision_policy: {
+    evidence_only: true
+    auto_activate_candidate: false
+  }
+}
+
 export type BaselinePromptSelection = {
   id: number | null
   stage: "A" | "B"
@@ -578,12 +640,46 @@ export type BaselineRegressionDetail = {
 
 export type BaselineCorrectionStatus =
   | "processing"
-  | "awaiting_confirmation"
+  | "awaiting_decision"
+  | "approved"
+  | "rejected"
   | "failed"
+
+export type BaselineCorrectionStage =
+  | "analysis"
+  | "candidate_generation"
+  | "candidate_validation"
+  | "regression"
+  | "decision"
+
+export type BaselineCorrectionRegressionReport = {
+  schema_version: "baseline-correction-regression-v1"
+  run_id: number
+  status: BaselineRegressionRun["status"]
+  comparable: boolean
+  baseline_metrics: BaselineLevelMetrics
+  candidate_metrics: BaselineLevelMetrics
+  exact_accuracy_delta: number | null
+  adjacent_accuracy_delta: number | null
+  regressions: Array<{
+    code: string
+    message: string
+    delta?: number
+  }>
+  recommendation: "approve" | "reject"
+  approval_allowed: boolean
+}
 
 export type BaselineCorrectionReport = {
   schema_version: "baseline-correction-report-v1"
-  status: "optimization_suggestion_pending_confirmation"
+  status: "automatic_candidate_pipeline"
+  category_key: string
+  baseline_run_id: number
+  selection: {
+    policy: "explicit_completed_deviations"
+    count: number
+    item_ids: number[]
+  }
   accuracy_report: {
     run_metrics: BaselineLevelMetrics
     selected_deviation_count: number
@@ -612,8 +708,38 @@ export type BaselineCorrectionReport = {
   risks: string[]
   publication: {
     allowed: false
-    next_state: "awaiting_confirmation"
+    next_state: "automatic_candidate_regression"
     message: string
+  }
+  candidate_regression?: BaselineCorrectionRegressionReport
+}
+
+export type BaselineCorrectionOrchestration = {
+  base_projection?: {
+    config_id: number
+    revision_id: number
+    revision: number
+    contract_hash: string
+  }
+  generated_candidate?: Record<string, unknown>
+  candidate_prompt?: {
+    id: number
+    stage: "A" | "B"
+    base_prompt_id: number
+    version: string
+  }
+  candidate_revision?: {
+    id: number
+    revision: number
+    contract_hash: string
+  }
+  candidate_summary?: Record<string, unknown>
+  tuning_model?: Record<string, unknown>
+  regression?: {
+    run_id: number
+    job_ids: number[]
+    source_run_id: number
+    baseline_set_fingerprint: string
   }
 }
 
@@ -623,15 +749,23 @@ export type BaselineCorrectionRun = {
   category_key: string
   selected_item_ids: number[]
   status: BaselineCorrectionStatus
+  stage: BaselineCorrectionStage
   progress: number
   attempt_count: number
   report: BaselineCorrectionReport | Record<string, never>
   blockers: Array<{ code: string; message: string; retryable: boolean }>
+  candidate_revision_id: number | null
+  regression_run_id: number | null
+  orchestration: BaselineCorrectionOrchestration
   error: {
     code: string
     message: string
     retryable: boolean
   } | null
+  decision: "approved" | "rejected" | null
+  decided_by: string | null
+  decided_at: string | null
+  decision_note: string
   created_by: string
   created_at: string
   updated_at: string
@@ -728,6 +862,8 @@ export type EvaluationProductionRunStatus =
   | "failed"
   | "archived"
 
+export type WorkflowKind = "incremental" | "stock"
+
 export type EvaluationProductionProgress = {
   percent: number
   current_step: string
@@ -770,6 +906,7 @@ export type EvaluationProductionRun = {
     active_asset_count: number
   }
   category_key: string
+  workflow_kind: WorkflowKind
   category: { key: string; name: string; configuration_hash: string }
   job_ids: number[]
   job_counts: {
@@ -1013,6 +1150,7 @@ export type Job = {
   id: number
   asset_id: number
   asset_name: string
+  category_key: string
   prompt_a_version: string | null
   prompt_b_version: string | null
   prompt_version: string | null
@@ -1020,6 +1158,13 @@ export type Job = {
   stage: string
   progress: number
   attempts: number
+  queue_class: "validation" | "interactive" | "production_batch" | "canary" | "recovery"
+  origin_queue_class: "validation" | "interactive" | "production_batch" | "canary" | "recovery"
+  parent_job_id: number | null
+  technical_attempt: number
+  technical_error_type: string | null
+  retry_after_at: string | null
+  batch_key: string | null
   error_message: string
   created_at: string
   updated_at: string
@@ -1033,6 +1178,46 @@ export type JobControl = {
   processing_count: number
   paused_count: number
   active_count: number
+  updated_at: string
+}
+
+export type QueueStatusItem = {
+  queue_class: Job["queue_class"]
+  pending: number
+  pending_total: number
+  running: number
+  reserved: number
+  borrowed: number
+  effective_limit: number
+  weight: number
+  effective_weight: number
+  blocked_by_breaker: number
+  blocked_by_credentials: number
+  blocked_by_control: number
+  delayed_by_retry_after: number
+  dispatchable_pending: number
+}
+
+export type QueueStatus = {
+  version: string
+  global_limit: number
+  shares: Record<string, number>
+  weights: Record<string, number>
+  validation_boost: number
+  queues: QueueStatusItem[]
+  credentials_configured: boolean
+  control_paused: boolean
+}
+
+export type CircuitBreaker = {
+  id: number
+  scope_type: "strategy" | "batch"
+  scope_key: string
+  state: "closed" | "open" | "half_open"
+  failure_count: number
+  cooldown_until: string | null
+  cooldown_elapsed: boolean
+  reason: string | null
   updated_at: string
 }
 
@@ -1512,8 +1697,70 @@ export type SampleSetSummary = {
   status: "draft" | "locked"
   item_count: number
   truth_complete_count: number
+  latest_truth_revision: number
   created_by: string
   created_at: string
+}
+
+export type QualityAssetsSummary = {
+  sample_set_count: number
+  item_count: number
+  truth_complete_count: number
+  by_kind: Record<string, QualityAssetsSummaryBucket>
+  by_category: Record<string, QualityAssetsSummaryBucket>
+  by_status: Record<string, QualityAssetsSummaryBucket>
+  by_truth_complete: Record<"true" | "false", number>
+}
+
+export type QualityAssetsSummaryBucket = {
+  sample_sets: number
+  items: number
+  truth_complete: number
+}
+
+export type ProjectionReconciliation = {
+  id: number
+  contract_id: number
+  manifest_id: number
+  target_table: string
+  status: "matched" | "drift" | "failed"
+  reason: string
+  row_count: number
+  missing_count: number
+  unexpected_count: number
+  expected_payload_hash: string
+  payload_hash: string
+  version_match: boolean
+  checkpoint: Record<string, unknown>
+  compensation: {
+    retryable?: boolean
+    strategy?: string
+    canonical_rows_mutated?: boolean
+  }
+  created_at: string
+}
+
+export type ProjectionContract = {
+  id: number
+  contract_key: string
+  version: number
+  target_role: "unified_dimension" | "search_labels" | "quality_governance"
+  table_name: string
+  environment: "local" | "test"
+  primary_key: string[]
+  field_mappings: Record<string, string>
+  input_versions: Record<string, unknown>
+  mode: "snapshot" | "incremental_outbox"
+  idempotency_key_template: string
+  checkpoint: Record<string, unknown>
+  reconciliation: Record<string, unknown>
+  rollback: Record<string, unknown>
+  owner: string
+  status: "draft" | "active" | "retired"
+  contract_hash: string
+  created_by: string
+  created_at: string
+  latest_reconciliation: ProjectionReconciliation | null
 }
 
 export type SampleSetItem = {

@@ -9,8 +9,10 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .audit import append_audit_event, canonical_json
+from .mechanism_profiles import MechanismProfileError, validate_mechanism_artifacts
 from .models import (
     Asset,
+    CategoryEvaluationV3Config,
     ContentIngressEvent,
     ContentRecord,
     EvaluationCategoryProfile,
@@ -18,6 +20,8 @@ from .models import (
     HumanReview,
     LabelOutboxEvent,
     LabelRelease,
+    MaterialPackage,
+    MaterialPackageItem,
     PublishedLabel,
     ReviewPanel,
 )
@@ -167,6 +171,129 @@ def ingest_content_event(
         event_key=f"content-ingress:{event_id}",
     )
     return event, record, False
+
+
+def route_content_event_to_incremental_package(
+    db: Session,
+    *,
+    event: ContentIngressEvent,
+    record: ContentRecord,
+    duplicate: bool,
+    actor: str,
+) -> tuple[MaterialPackage | None, bool, str]:
+    """Build or reuse one local incremental package without queueing a job."""
+    if event.event_type == "content.deleted" or event.status == "stale":
+        return None, False, "ignored"
+    if record.status != "ready" or record.asset_id is None:
+        return None, False, "awaiting_material"
+
+    mechanism = db.scalar(
+        select(CategoryEvaluationV3Config).where(
+            CategoryEvaluationV3Config.category_key == record.category_key,
+            CategoryEvaluationV3Config.status == "active",
+        )
+    )
+    try:
+        if mechanism is None:
+            raise MechanismProfileError(
+                "active_profile_missing",
+                "类目缺少现役评测机制",
+            )
+        validate_mechanism_artifacts(
+            json.loads(mechanism.contract_json or "{}"),
+            json.loads(mechanism.classification_map_json or "{}"),
+            json.loads(mechanism.subcategory_dimensions_json or "{}"),
+        )
+    except (MechanismProfileError, TypeError, json.JSONDecodeError, ValueError):
+        append_audit_event(
+            db,
+            category="content_ingress",
+            action="blocked_profile",
+            subject_type="content_ingress_event",
+            subject_id=event.event_id,
+            actor=actor,
+            payload={
+                "content_record_id": record.id,
+                "category_key": record.category_key,
+                "workflow_kind": "incremental",
+            },
+            event_key=f"content-ingress:{event.event_id}:blocked-profile",
+        )
+        return None, False, "blocked_profile"
+
+    package_key = "ingress:" + hashlib.sha256(
+        event.event_id.encode("utf-8")
+    ).hexdigest()
+    package = db.scalar(
+        select(MaterialPackage).where(MaterialPackage.package_key == package_key)
+    )
+    if package is not None:
+        item = db.scalar(
+            select(MaterialPackageItem).where(
+                MaterialPackageItem.package_id == package.id,
+                MaterialPackageItem.asset_id == record.asset_id,
+            )
+        )
+        if item is None:
+            raise RuntimeError("内容接入素材包缺少冻结素材项")
+        if duplicate:
+            append_audit_event(
+                db,
+                category="content_ingress",
+                action="duplicate_reused",
+                subject_type="material_package",
+                subject_id=package.id,
+                actor=actor,
+                payload={
+                    "event_id": event.event_id,
+                    "category_key": record.category_key,
+                    "workflow_kind": "incremental",
+                },
+                event_key=f"content-ingress:{event.event_id}:duplicate-reused",
+            )
+        return package, False, "packaged"
+
+    asset = db.get(Asset, record.asset_id)
+    if asset is None or asset.status == "deleted":
+        return None, False, "awaiting_material"
+    if asset.category_key != record.category_key:
+        raise ValueError("内容投影绑定素材与类目不一致")
+
+    package = MaterialPackage(
+        package_key=package_key,
+        name=f"增量接入 · {record.category_key} · {event.event_id}",
+        source="production_import",
+        category_key=record.category_key,
+        created_by=actor,
+    )
+    db.add(package)
+    db.flush()
+    db.add(
+        MaterialPackageItem(
+            package_id=package.id,
+            asset_id=asset.id,
+            original_name=asset.original_name,
+            duplicate=duplicate,
+            position=1,
+        )
+    )
+    append_audit_event(
+        db,
+        category="content_ingress",
+        action="incremental_package_created",
+        subject_type="material_package",
+        subject_id=package.id,
+        actor=actor,
+        payload={
+            "event_id": event.event_id,
+            "content_record_id": record.id,
+            "asset_id": asset.id,
+            "category_key": record.category_key,
+            "workflow_kind": "incremental",
+        },
+        event_key=f"content-ingress:{event.event_id}:incremental-package",
+    )
+    return package, True, "packaged"
 
 
 def _content_key(db: Session, evaluation: EvaluationResult, requested: str | None) -> str:

@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import socket
+import sqlite3
 import threading
 import time
 import traceback
@@ -17,7 +18,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from sqlalchemy import func, or_, select, text, update
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, OperationalError
 
 from .config import get_settings
 from .category_pipeline import (
@@ -130,6 +131,20 @@ from .strategy_bundle import (
     get_or_create_bundle,
     resolve_frozen_dimension_entry,
 )
+
+
+def is_sqlite_lock_error(exc: BaseException) -> bool:
+    """Return true only for transient SQLite busy/locked errors."""
+    current: BaseException | None = exc
+    while current is not None:
+        if isinstance(current, sqlite3.OperationalError) and any(
+            marker in str(current).lower() for marker in ("database is locked", "database is busy")
+        ):
+            return True
+        if isinstance(current, OperationalError):
+            return is_sqlite_lock_error(current.orig)
+        current = current.__cause__ or current.__context__
+    return False
 from .baseline_regression import complete_baseline_item, fail_baseline_item
 from .proposal_text_contract import (
     validate_proposal_call_a_output,
@@ -2712,7 +2727,18 @@ def _handle_technical_failure(
 
 
 async def process_one() -> bool:
-    job_id = claim_next_job()
+    job_id: int | None = None
+    for attempt in range(4):
+        try:
+            job_id = claim_next_job()
+            break
+        except Exception as exc:
+            if not is_sqlite_lock_error(exc):
+                raise
+            if attempt >= 3:
+                logger.warning("SQLite 锁冲突，放弃本轮抢占并继续保持 Worker：%s", exc)
+                return False
+            time.sleep(0.15 * (attempt + 1))
     if job_id is None:
         return False
     logger.info("开始评测任务 %s", job_id)
