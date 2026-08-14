@@ -204,7 +204,7 @@ export const baselineRegressionApi = {
     return api<{ items: PromptVersion[] }>(`/api/prompts${query}`)
   },
   listV3Revisions: (categoryKey: string) => api<BaselineV3RevisionList>(
-    `/api/category-evaluation-v3-config/${encodeURIComponent(categoryKey)}/revisions`,
+    `/api/category-evaluation/v3-config/${encodeURIComponent(categoryKey)}/revisions`,
   ),
   createRun: (setId: number, payload: {
     prompt_id?: number
