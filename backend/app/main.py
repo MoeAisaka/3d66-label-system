@@ -284,6 +284,7 @@ from .production_feedback import (
 )
 from .label_governance import (
     LabelIntegrationConflict,
+    approve_semantic_facts,
     create_release,
     ingest_content_event,
     publish_release,
@@ -7593,6 +7594,36 @@ def list_label_releases(
         ).all()
     } if releases else {}
     return {"items": [release_payload(item, published_by_release.get(item.id)) for item in releases]}
+
+
+@app.post("/api/semantic-tag-facts/{evaluation_id}/approve")
+def approve_semantic_tag_facts(
+    evaluation_id: int,
+    user: User = Depends(admin_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    try:
+        facts = approve_semantic_facts(db, evaluation_id=evaluation_id, actor=user.username)
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail=str(exc)) from None
+    db.commit()
+    return {
+        "evaluation_id": evaluation_id,
+        "approved_count": len(facts),
+        "facts": [
+            {
+                "id": fact.id,
+                "asset_version_id": fact.asset_version_id,
+                "field_key": fact.field_key,
+                "fact_version": fact.fact_version,
+                "field_status": fact.field_status,
+                "status": fact.status,
+                "payload_hash": fact.payload_hash,
+            }
+            for fact in facts
+        ],
+    }
 
 
 @app.post("/api/label-releases")
