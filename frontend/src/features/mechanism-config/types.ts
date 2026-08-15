@@ -46,6 +46,13 @@ export type ConfigDetail = ConfigSummary & {
   dimension_deduction_rules: Record<string, JsonObject>
   created_by: string
   created_at: string
+  semantic_tag_applicability?: {
+    contract_id: number
+    contract_version: number
+    contract_hash: string
+    field_counts: Record<"required" | "optional" | "not_applicable", number>
+    fields: Record<string, "required" | "optional" | "not_applicable">
+  } | null
 }
 
 export type ConfigRevision = {

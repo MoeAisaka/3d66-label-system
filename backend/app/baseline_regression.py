@@ -858,6 +858,7 @@ def complete_baseline_item(
             job.error_message = item.error_message[:500]
             job.finished_at = item.finished_at
         refresh_baseline_run(item.run)
+        _persist_semantic_quality_if_terminal(db, item.run)
         return
     frozen_selection = run_execution.get("dimension_selection")
     if frozen_selection is not None:
@@ -875,6 +876,7 @@ def complete_baseline_item(
     item.error_message = ""
     item.finished_at = datetime.now(timezone.utc)
     refresh_baseline_run(item.run)
+    _persist_semantic_quality_if_terminal(db, item.run)
 
 
 def fail_baseline_item(
@@ -893,6 +895,18 @@ def fail_baseline_item(
     item.error_message = error_code[:200]
     item.finished_at = datetime.now(timezone.utc)
     refresh_baseline_run(item.run)
+    _persist_semantic_quality_if_terminal(db, item.run)
+
+
+def _persist_semantic_quality_if_terminal(
+    db: Session,
+    run: BaselineRegressionRun,
+) -> None:
+    if run.status not in TERMINAL_RUN_STATUSES:
+        return
+    from .semantic_tag_quality import persist_run_semantic_quality_snapshot
+
+    persist_run_semantic_quality_snapshot(db, run=run)
 
 
 def run_comparison(

@@ -31,8 +31,13 @@ from .dimension_composition import (
 )
 from .dimension_deduction_bridge import extract_dimension_deduction_rules
 from .dimension_schema_registry import canonical_json
-from .models import CategoryEvaluationV3Config, EvaluationCategoryProfile, ModelConfig, PromptVersion
+from .models import CategoryEvaluationV3Config, EvaluationCategoryProfile, ModelConfig, PromptVersion, TagDemandContract
 from .redline_policy import REDLINE_POLICY_FORMAT_VERSION
+from .semantic_tag_contracts import (
+    PLATFORM_SEMANTIC_FIELD_KEYS,
+    canonical_contract_hash as semantic_contract_hash,
+    validate_tag_demand_contract,
+)
 from .subcategory_resolver import CLASSIFICATION_MAP_FORMAT_VERSION, validate_classification_map
 
 
@@ -44,12 +49,88 @@ MODEL_3D_SU_CALL_B_VERSION = "model-3d-su-b-v1-20260814"
 MODEL_3D_SU_CREATED_BY = "system:model-3d-su-v1"
 MODEL_3D_SU_SCHEMA_KEY = "model_3d_su_aesthetic"
 MODEL_3D_SU_SCHEMA_VERSION = "v1"
+MODEL_3D_SU_SEMANTIC_CONTRACT_KEY = "semantic-platform"
 
 TRACK_SPACE_BUILDING = "space_building"
 TRACK_SOFT_FURNISHING = "soft_furnishing"
 TRACK_FUNCTIONAL_MODEL = "functional_model"
 
 _ASSET_DIR = Path(__file__).with_name("model_3d_su_assets")
+
+
+def build_model_3d_su_semantic_contract() -> dict[str, Any]:
+    fields = {
+        key: {
+            "field_key": key,
+            "cardinality": "multi" if key not in {"title", "space"} else "single",
+            "localized": True,
+            "vocabulary_owner": "tpeng-semantic-platform",
+            "max_values": 10 if key not in {"title", "space"} else 1,
+            "default_value": [],
+        }
+        for key in (*PLATFORM_SEMANTIC_FIELD_KEYS, "title")
+    }
+    applicability = {
+        key: "required" if key in {"space", "object", "style"} else "optional"
+        for key in fields
+    }
+    quality_gates = {
+        key: {
+            "min_precision": 0.8,
+            "min_recall": 0.7,
+            "min_mapping_coverage": 0.9,
+            "max_conflict_rate": 0.1,
+        }
+        for key in fields
+    }
+    payload = {
+        "schema_version": "tag-demand-contract-v1",
+        "semantic_schema": {
+            "schema_version": "semantic-tag-schema-v1",
+            "fields": fields,
+        },
+        "category_applicability": {MODEL_3D_SU_CATEGORY_KEY: applicability},
+        "execution_variants": [
+            {
+                "site_scope": "domestic",
+                "asset_scope": asset_scope,
+                "locale": "zh",
+                "category_key": MODEL_3D_SU_CATEGORY_KEY,
+                "prompt_variant": asset_scope,
+                "prompt_version": f"model-3d-su-semantic-{asset_scope}-v1",
+                "model_version": "fixture-model-v1",
+            }
+            for asset_scope in ("whole", "single")
+        ],
+        "quality_gates": quality_gates,
+        "projection_targets": [
+            {"target_key": "domestic_material_tags", "mode": "dry_run", "locale": "zh"}
+        ],
+    }
+    return validate_tag_demand_contract(payload).model_dump(mode="json")
+
+
+def _seed_model_3d_su_semantic_contract(db: Session) -> TagDemandContract:
+    existing = db.scalar(
+        select(TagDemandContract)
+        .where(TagDemandContract.contract_key == MODEL_3D_SU_SEMANTIC_CONTRACT_KEY)
+        .order_by(TagDemandContract.version.desc())
+        .limit(1)
+    )
+    if existing is not None:
+        return existing
+    definition = validate_tag_demand_contract(build_model_3d_su_semantic_contract())
+    row = TagDemandContract(
+        contract_key=MODEL_3D_SU_SEMANTIC_CONTRACT_KEY,
+        version=1,
+        status="draft",
+        definition_json=canonical_json(definition.model_dump(mode="json")),
+        contract_hash=semantic_contract_hash(definition),
+        created_by=MODEL_3D_SU_CREATED_BY,
+    )
+    db.add(row)
+    db.flush()
+    return row
 
 
 def _rule(rule_id: str, description: str, deduction: int) -> dict[str, Any]:
@@ -395,6 +476,8 @@ def seed_model_3d_su(db: Session, settings: Any) -> None:
     )
     if primary is None:
         raise RuntimeError("缺少 active 评测模型，无法启用 3D/SU 模型类目")
+
+    _seed_model_3d_su_semantic_contract(db)
 
     prompt_a = _seed_prompt(
         db,

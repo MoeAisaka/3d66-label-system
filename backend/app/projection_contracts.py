@@ -35,16 +35,27 @@ _ALLOWED_ROOTS = {
     "production_fields",
     "image_quality",
     "media_form",
+    "semantic",
+    "quality",
+    "governance",
 }
 _ALLOWED_PROVENANCE = {
+    "asset_version_id",
     "asset_id",
     "asset_sha256",
+    "asset_scope",
+    "is_single",
+    "evaluation_id",
+    "final_review_id",
     "strategy_bundle_id",
     "model_id",
     "prompt_a_version",
     "prompt_b_version",
     "rubric_version",
     "engine_version",
+    "tag_contract_version",
+    "normalization_version",
+    "mapping_version",
 }
 _ALLOWED_LABEL_META = {
     "$label.id",
@@ -96,17 +107,17 @@ def validate_projection_contract(
     for target_field, source_path in field_mappings.items():
         if not target_field.strip() or not source_path.strip():
             raise ProjectionContractError("字段映射不能为空")
+        if source_path in _ALLOWED_LABEL_META:
+            continue
+        root, _, suffix = source_path.partition(".")
+        if root == "provenance" and suffix in _ALLOWED_PROVENANCE:
+            continue
         normalized = f"{target_field}.{source_path}".lower()
         if any(token in normalized for token in _FORBIDDEN_TOKENS):
             raise ProjectionContractError(
                 f"禁止将候选、凭据、模型原始响应或人工过程字段投影：{source_path}"
             )
-        if source_path in _ALLOWED_LABEL_META:
-            continue
-        root, _, suffix = source_path.partition(".")
         if root in _ALLOWED_ROOTS:
-            continue
-        if root == "provenance" and suffix in _ALLOWED_PROVENANCE:
             continue
         raise ProjectionContractError(
             f"禁止将候选、凭据、模型原始响应或人工过程字段投影：{source_path}"
@@ -212,6 +223,35 @@ def create_contract_version(
 
 
 def _lookup(payload: Mapping[str, Any], path: str) -> Any:
+    parts = path.split(".")
+    if len(parts) == 4 and parts[0] == "semantic" and parts[2] in {"primary_name", "weighted_names"}:
+        field = payload.get("semantic")
+        field_payload = field.get(parts[1]) if isinstance(field, Mapping) else None
+        values = field_payload.get("values") if isinstance(field_payload, Mapping) else None
+        if not isinstance(values, list):
+            return "" if parts[2] == "primary_name" else ""
+        locale = parts[3]
+        rendered: list[tuple[str, float | None]] = []
+        for item in values:
+            if not isinstance(item, Mapping):
+                continue
+            names = item.get("localized_names") or item.get("names") or {}
+            name = names.get(locale) if isinstance(names, Mapping) else None
+            name = str(name or item.get("value") or "").strip()
+            if name:
+                weight = item.get("weight")
+                rendered.append((name, float(weight) if isinstance(weight, (int, float)) and not isinstance(weight, bool) else None))
+        if parts[2] == "primary_name":
+            return rendered[0][0] if rendered else ""
+        return ",".join(
+            f"{name}_{weight:g}" if weight is not None else name
+            for name, weight in rendered
+        )
+    if path == "provenance.is_single":
+        provenance = payload.get("provenance")
+        if isinstance(provenance, Mapping) and provenance.get("is_single") is not None:
+            return int(bool(provenance["is_single"]))
+        return 1 if isinstance(provenance, Mapping) and provenance.get("asset_scope") == "single" else 0
     value: Any = payload
     for part in path.split("."):
         if not isinstance(value, Mapping):
@@ -266,13 +306,19 @@ def _manifest_payload(
         "label_schema_versions": sorted({label.label_schema_version for label in labels}),
         "label_release_versions": sorted({label.version for label in labels}),
         "asset_versions": sorted(
-            {str(item.get("asset_sha256") or item.get("asset_id")) for item in provenance if item.get("asset_sha256") or item.get("asset_id")}
+            {str(item.get("asset_version_id") or item.get("asset_sha256") or item.get("asset_id")) for item in provenance if item.get("asset_version_id") or item.get("asset_sha256") or item.get("asset_id")}
         ),
         "mechanism_versions": sorted(
             {f"strategy-bundle:{item['strategy_bundle_id']}" for item in provenance if item.get("strategy_bundle_id") is not None}
         ),
         "model_versions": sorted(
             {str(item["model_id"]) for item in provenance if item.get("model_id")}
+        ),
+        "tag_contract_versions": sorted(
+            {str(item["tag_contract_version"]) for item in provenance if item.get("tag_contract_version")}
+        ),
+        "mapping_versions": sorted(
+            {str(item["mapping_version"]) for item in provenance if item.get("mapping_version")}
         ),
     }
     base = {

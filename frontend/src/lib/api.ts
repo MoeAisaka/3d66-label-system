@@ -5,11 +5,13 @@ import type {
   BaselineLevel,
   BaselineRegressionDetail,
   BaselineRegressionRun,
+  BaselineSemanticQualityMetrics,
   BaselineSetDetail,
   BaselineSetSummary,
   BaselineV3RevisionList,
   MaterialPackage,
   PromptVersion,
+  TagDemandContract,
 } from "@/lib/types"
 
 export type ApiErrorDetail = {
@@ -228,6 +230,9 @@ export const baselineRegressionApi = {
   getMetrics: (runId: number) => api<BaselineFieldMetrics>(
     `/api/baseline-regressions/${runId}/metrics`,
   ),
+  getSemanticMetrics: (runId: number) => api<BaselineSemanticQualityMetrics>(
+    `/api/baseline-regressions/${runId}/semantic-metrics`,
+  ),
   enqueueDeviations: (runId: number, itemIds: number[]) => api<{
     run_id: number
     case_ids: number[]
@@ -301,4 +306,11 @@ export const promptApi = {
     { method: "POST", ...jsonBody(pipelineScope ? { pipeline_scope: pipelineScope } : {}) },
   ),
   archive: (promptId: number) => api<{ ok: boolean }>(`/api/prompts/${promptId}`, { method: "DELETE" }),
+}
+
+export const tagDemandContractApi = {
+  list: () => api<{ items: TagDemandContract[]; active_versions: Record<string, number> }>("/api/tag-demand-contracts"),
+  get: (id: number) => api<TagDemandContract>(`/api/tag-demand-contracts/${id}`),
+  create: (payload: { contract_key: string; definition: TagDemandContract["definition"]; status: "draft" | "candidate" }) => api<TagDemandContract>("/api/tag-demand-contracts", { method: "POST", ...jsonBody(payload) }),
+  activate: (id: number) => api<TagDemandContract>(`/api/tag-demand-contracts/${id}/activate`, { method: "POST" }),
 }

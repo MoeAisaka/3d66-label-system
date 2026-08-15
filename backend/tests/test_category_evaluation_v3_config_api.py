@@ -36,12 +36,14 @@ from app.category_evaluation_v3_config_api import (
     build_category_evaluation_v3_config_router,
 )
 from app.database import Base, get_db
+from app.dimension_schema_registry import canonical_json
 from app.inspiration_category_seed import (
     build_inspiration_classification_map,
     build_inspiration_subcategory_dimensions,
     build_inspiration_v3_contract,
 )
 from app.migrations import run_migrations
+from app.models import TagDemandContract
 
 
 _BASE = "/api/category-evaluation/v3-config"
@@ -174,6 +176,92 @@ def test_create_get_round_trip_has_matching_projected_revision(
     }
     assert fetched.json()["projected_revision_id"] == body["projected_revision_id"]
     assert fetched.json()["contract_hash"] == original_hash
+
+
+def test_detail_exposes_platform_semantic_tag_applicability_summary(
+    client: TestClient,
+    sessions: sessionmaker[Session],
+) -> None:
+    created = client.post(f"{_BASE}/", json=_valid_body()).json()
+    field_keys = (
+        "space", "object", "style", "material", "structural_features",
+        "architectural_element", "soft_decoration", "hard_decoration", "color", "title",
+    )
+    definition = {
+        "schema_version": "tag-demand-contract-v1",
+        "semantic_schema": {
+            "schema_version": "semantic-tag-schema-v1",
+            "fields": {
+                key: {
+                    "field_key": key,
+                    "cardinality": "multi" if key == "object" else "single",
+                    "localized": True,
+                    "vocabulary_owner": "semantic-owner",
+                    "max_values": 10 if key == "object" else 1,
+                    "default_value": [],
+                }
+                for key in field_keys
+            },
+        },
+        "category_applicability": {
+            "inspiration_image": {
+                key: "required" if key == "style" else "optional"
+                for key in field_keys
+            }
+        },
+        "execution_variants": [{
+            "site_scope": "domestic",
+            "asset_scope": "whole",
+            "locale": "zh",
+            "category_key": "inspiration_image",
+            "prompt_variant": "whole",
+            "prompt_version": "prompt-v1",
+            "model_version": "model-v1",
+        }],
+        "quality_gates": {
+            "style": {
+                "min_precision": 0.8,
+                "min_recall": 0.7,
+                "min_mapping_coverage": 0.9,
+                "max_conflict_rate": 0.1,
+            }
+        },
+        "projection_targets": [{
+            "target_key": "domestic_material_tags",
+            "mode": "dry_run",
+            "locale": "zh",
+        }],
+    }
+    with sessions() as db:
+        unrelated = json.loads(json.dumps(definition))
+        unrelated["category_applicability"]["inspiration_image"]["style"] = "optional"
+        db.add_all([
+            TagDemandContract(
+                contract_key="semantic-platform",
+                version=1,
+                status="active",
+                definition_json=canonical_json(definition),
+                contract_hash="f" * 64,
+                approved_by="test-owner",
+                created_by="test-owner",
+            ),
+            TagDemandContract(
+                contract_key="unrelated-semantic-contract",
+                version=999,
+                status="active",
+                definition_json=canonical_json(unrelated),
+                contract_hash="e" * 64,
+                approved_by="other-owner",
+                created_by="other-owner",
+            ),
+        ])
+        db.commit()
+    detail = client.get(f"{_BASE}/inspiration_image")
+    assert detail.status_code == 200, detail.text
+    summary = detail.json()["semantic_tag_applicability"]
+    assert summary["contract_version"] == 1
+    assert summary["field_counts"]["required"] == 1
+    assert summary["fields"]["style"] == "required"
 
 
 def test_proposal_profile_reads_and_validates_without_image_fields(client: TestClient) -> None:

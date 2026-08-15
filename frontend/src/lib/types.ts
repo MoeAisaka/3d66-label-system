@@ -430,6 +430,54 @@ export type BaselineFieldMetrics = {
   }
 }
 
+export type BaselineSemanticFieldMetric = {
+  field_key: string
+  truth_count: number
+  predicted_count: number
+  true_positive_count: number
+  precision: number | null
+  recall: number | null
+  mapping_coverage: number | null
+  unmapped_rate: number | null
+  conflict_rate: number | null
+  null_semantics_accuracy: number | null
+  correction_rate: number | null
+  review_coverage: number | null
+  bilingual_consistency: number | null
+  reconciliation_rate: number | null
+}
+
+export type BaselineSemanticQualityMetrics = {
+  schema_version: "semantic-quality-metrics-v1"
+  run_id: number
+  category_key: string
+  fields: Record<string, BaselineSemanticFieldMetric>
+  aggregates: {
+    macro_precision: number | null
+    macro_recall: number | null
+    micro_precision: number | null
+    micro_recall: number | null
+  }
+  reconciliation_rate: number | null
+  evidence?: {
+    status: "ready" | "unavailable_historical"
+    truth_source: "frozen_run_snapshot" | "unavailable"
+    truth_asset_count: number
+    truth_revision_min: number | null
+    truth_revision_max: number | null
+    review_evidence_item_count: number
+    reconciliation_evidence_item_count: number
+  }
+  contract?: {
+    contract_id: number
+    contract_key: string
+    contract_version: number
+    contract_hash: string
+    site_scope: "domestic" | "overseas"
+    asset_scope: "whole" | "single" | "other" | "unknown"
+  } | null
+}
+
 export type BaselinePromptSelection = {
   id: number | null
   stage: "A" | "B"
@@ -1790,6 +1838,55 @@ export type ProjectionContract = {
   created_by: string
   created_at: string
   latest_reconciliation: ProjectionReconciliation | null
+}
+
+export type SemanticApplicability = "required" | "optional" | "not_applicable"
+
+export type TagDemandContractField = {
+  field_key: string
+  cardinality: "single" | "multi"
+  localized: boolean
+  vocabulary_owner: string
+  max_values: number
+  default_value: Array<Record<string, unknown>>
+}
+
+export type TagDemandContractDefinition = {
+  schema_version: "tag-demand-contract-v1"
+  semantic_schema: {
+    schema_version: "semantic-tag-schema-v1"
+    fields: Record<string, TagDemandContractField>
+  }
+  category_applicability: Record<string, Record<string, SemanticApplicability>>
+  execution_variants: Array<{
+    site_scope: "domestic" | "overseas"
+    asset_scope: "whole" | "single" | "other" | "unknown"
+    locale: "zh" | "en"
+    category_key: string
+    prompt_variant: "whole" | "single"
+    prompt_version: string
+    model_version: string
+  }>
+  quality_gates: Record<string, {
+    min_precision: number
+    min_recall: number
+    min_mapping_coverage: number
+    max_conflict_rate: number
+  }>
+  projection_targets: Array<{ target_key: string; mode: "dry_run"; locale: "zh" | "en" }>
+}
+
+export type TagDemandContract = {
+  id: number
+  contract_key: string
+  version: number
+  status: "draft" | "candidate" | "active" | "retired"
+  definition: TagDemandContractDefinition
+  contract_hash: string
+  approved_by: string | null
+  approved_at: string | null
+  created_by: string
+  created_at: string
 }
 
 export type SampleSetItem = {

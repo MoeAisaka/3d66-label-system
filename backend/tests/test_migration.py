@@ -82,7 +82,47 @@ MIGRATION_NAMES = [
     "clear_legacy_correction_confirmation_blockers",
     "add_evaluation_production_workflow_kind",
     "add_projection_contract_registry",
+    "add_semantic_tag_contract_registry",
+    "harden_semantic_tag_fact_provenance",
 ]
+
+
+def test_semantic_provenance_foreign_keys_and_active_contract_guards(tmp_path) -> None:
+    engine = _engine(tmp_path, "semantic-provenance-v69.db")
+    try:
+        _create_latest_and_run_migrations(engine)
+        with engine.connect() as connection:
+            fact_targets = {
+                row[2]
+                for row in connection.exec_driver_sql(
+                    "PRAGMA foreign_key_list(semantic_tag_facts)"
+                )
+            }
+            quality_targets = {
+                row[2]
+                for row in connection.exec_driver_sql(
+                    "PRAGMA foreign_key_list(semantic_quality_metric_snapshots)"
+                )
+            }
+            assert {"evaluation_results", "human_reviews"} <= fact_targets
+            assert "baseline_regression_runs" in quality_targets
+
+            active_indexes = {
+                row[1]: row[2]
+                for row in connection.exec_driver_sql(
+                    "PRAGMA index_list(tag_demand_contracts)"
+                )
+            }
+            approval_indexes = {
+                row[1]: row[2]
+                for row in connection.exec_driver_sql(
+                    "PRAGMA index_list(semantic_tag_facts)"
+                )
+            }
+            assert active_indexes["uq_tag_demand_contracts_active_key"] == 1
+            assert approval_indexes["uq_semantic_tag_fact_review_approval"] == 1
+    finally:
+        engine.dispose()
 
 
 def result(level: str, category: str, confidence: float = 0.9) -> dict:

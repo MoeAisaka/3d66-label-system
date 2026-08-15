@@ -128,9 +128,20 @@ from .models import (
     ProjectionContract,
     ProjectionManifest,
     ProjectionReconciliation,
+    TagDemandContract,
     User,
 )
 from .audit import append_audit_event, canonical_json
+from .semantic_tag_contracts import (
+    PLATFORM_SEMANTIC_CONTRACT_KEY,
+    SemanticTagContractError,
+    canonical_contract_hash,
+    validate_tag_demand_contract,
+)
+from .semantic_tag_quality import (
+    build_run_semantic_quality,
+    freeze_semantic_truth_snapshot,
+)
 from .projection_contracts import (
     LocalProjectionAdapter,
     ProjectionContractError,
@@ -278,6 +289,7 @@ from .production_feedback import (
 )
 from .label_governance import (
     LabelIntegrationConflict,
+    approve_semantic_facts,
     create_release,
     ingest_content_event,
     publish_release,
@@ -626,6 +638,12 @@ class ProjectionContractCreateRequest(BaseModel):
     rollback: dict[str, Any] = Field(default_factory=dict)
     owner: str = Field(min_length=1, max_length=120)
     status: Literal["draft", "active", "retired"] = "draft"
+
+
+class TagDemandContractCreateRequest(BaseModel):
+    contract_key: str = Field(min_length=1, max_length=120, pattern=r"^[a-z][a-z0-9_-]*$")
+    definition: dict[str, Any]
+    status: Literal["draft", "candidate"] = "draft"
 
 
 class BenchmarkVariantRequest(BaseModel):
@@ -7583,6 +7601,36 @@ def list_label_releases(
     return {"items": [release_payload(item, published_by_release.get(item.id)) for item in releases]}
 
 
+@app.post("/api/semantic-tag-facts/{evaluation_id}/approve")
+def approve_semantic_tag_facts(
+    evaluation_id: int,
+    user: User = Depends(admin_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    try:
+        facts = approve_semantic_facts(db, evaluation_id=evaluation_id, actor=user.username)
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail=str(exc)) from None
+    db.commit()
+    return {
+        "evaluation_id": evaluation_id,
+        "approved_count": len(facts),
+        "facts": [
+            {
+                "id": fact.id,
+                "asset_version_id": fact.asset_version_id,
+                "field_key": fact.field_key,
+                "fact_version": fact.fact_version,
+                "field_status": fact.field_status,
+                "status": fact.status,
+                "payload_hash": fact.payload_hash,
+            }
+            for fact in facts
+        ],
+    }
+
+
 @app.post("/api/label-releases")
 def request_label_release(
     payload: LabelReleaseRequest,
@@ -7742,6 +7790,143 @@ def integration_status(_user: User = Depends(require_permission("releases:read")
         },
         "external_writes_enabled": False,
     }
+
+
+def _tag_demand_contract_payload(contract: TagDemandContract) -> dict[str, Any]:
+    return {
+        "id": contract.id,
+        "contract_key": contract.contract_key,
+        "version": contract.version,
+        "status": contract.status,
+        "definition": json.loads(contract.definition_json),
+        "contract_hash": contract.contract_hash,
+        "approved_by": contract.approved_by,
+        "approved_at": contract.approved_at,
+        "created_by": contract.created_by,
+        "created_at": contract.created_at,
+    }
+
+
+@app.get("/api/tag-demand-contracts")
+def list_tag_demand_contracts(
+    _user: User = Depends(require_permission("releases:read")),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    contracts = db.scalars(
+        select(TagDemandContract).order_by(
+            TagDemandContract.contract_key.asc(),
+            TagDemandContract.version.desc(),
+        )
+    ).all()
+    active_versions = {
+        contract.contract_key: contract.version
+        for contract in contracts
+        if contract.status == "active"
+    }
+    return {
+        "items": [_tag_demand_contract_payload(contract) for contract in contracts],
+        "active_versions": active_versions,
+    }
+
+
+@app.get("/api/tag-demand-contracts/{contract_id}")
+def get_tag_demand_contract(
+    contract_id: int,
+    _user: User = Depends(require_permission("releases:read")),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    contract = db.get(TagDemandContract, contract_id)
+    if contract is None:
+        raise HTTPException(status_code=404, detail="标签需求合同不存在")
+    return _tag_demand_contract_payload(contract)
+
+
+@app.post("/api/tag-demand-contracts", status_code=201)
+def create_tag_demand_contract(
+    payload: TagDemandContractCreateRequest,
+    user: User = Depends(admin_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    try:
+        definition = validate_tag_demand_contract(payload.definition)
+    except SemanticTagContractError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from None
+    latest = db.scalar(
+        select(TagDemandContract)
+        .where(TagDemandContract.contract_key == payload.contract_key)
+        .order_by(TagDemandContract.version.desc())
+        .limit(1)
+    )
+    version = (latest.version + 1) if latest else 1
+    canonical_definition = definition.model_dump(mode="json")
+    contract = TagDemandContract(
+        contract_key=payload.contract_key,
+        version=version,
+        status=payload.status,
+        definition_json=canonical_json(canonical_definition),
+        contract_hash=canonical_contract_hash(definition),
+        created_by=user.username,
+    )
+    db.add(contract)
+    db.flush()
+    db.commit()
+    db.refresh(contract)
+    return _tag_demand_contract_payload(contract)
+
+
+@app.post("/api/tag-demand-contracts/{contract_id}/activate")
+def activate_tag_demand_contract(
+    contract_id: int,
+    user: User = Depends(admin_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    contract = db.get(TagDemandContract, contract_id)
+    if contract is None:
+        raise HTTPException(status_code=404, detail="标签需求合同不存在")
+    if contract.status != "candidate":
+        raise HTTPException(status_code=409, detail="只有 candidate 合同可以显式激活")
+    try:
+        definition = validate_tag_demand_contract(json.loads(contract.definition_json))
+    except (SemanticTagContractError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=409, detail=f"合同签名或内容无效：{exc}") from None
+    if not definition.category_applicability or not definition.projection_targets:
+        raise HTTPException(status_code=409, detail="合同缺少字段适用性或投影目标，不能激活")
+    current = db.scalars(
+        select(TagDemandContract).where(
+            TagDemandContract.contract_key == contract.contract_key,
+            TagDemandContract.status == "active",
+        )
+    ).all()
+    now = datetime.now(timezone.utc)
+    for previous in current:
+        previous.status = "retired"
+    contract.status = "active"
+    contract.approved_by = user.username
+    contract.approved_at = now
+    append_audit_event(
+        db,
+        category="tag_demand_contract",
+        action="activated",
+        subject_type="tag_demand_contract",
+        subject_id=str(contract.id),
+        actor=user.username,
+        payload={
+            "contract_key": contract.contract_key,
+            "version": contract.version,
+            "contract_hash": contract.contract_hash,
+            "side_effects": {
+                "evaluation_jobs": False,
+                "label_releases": False,
+                "stock_reruns": False,
+                "projection_manifests": False,
+                "outbox_events": False,
+            },
+        },
+        event_key=f"tag-demand-contract:activated:{contract.id}",
+    )
+    db.commit()
+    db.refresh(contract)
+    return _tag_demand_contract_payload(contract)
 
 
 @app.get("/api/projection-contracts")
@@ -9736,6 +9921,42 @@ def create_baseline_run(
     execution_payload["execution_mode"] = request.execution_mode
     execution_payload["selection_explicit"] = request.baseline_item_ids is not None
     execution_payload["category_context"] = category_context
+    execution_payload["semantic_truth_snapshot"] = freeze_semantic_truth_snapshot(
+        db,
+        category_key=baseline_set.category_key,
+        asset_ids=[item.asset_id for item in frozen_items],
+    )
+    active_semantic_contract = db.scalar(
+        select(TagDemandContract)
+        .where(
+            TagDemandContract.contract_key == PLATFORM_SEMANTIC_CONTRACT_KEY,
+            TagDemandContract.status == "active",
+        )
+        .order_by(TagDemandContract.version.desc(), TagDemandContract.id.desc())
+        .limit(1)
+    )
+    if active_semantic_contract is not None:
+        try:
+            semantic_definition = validate_tag_demand_contract(
+                json.loads(active_semantic_contract.definition_json)
+            )
+        except (SemanticTagContractError, json.JSONDecodeError):
+            semantic_definition = None
+        if semantic_definition is not None:
+            site_scopes = {
+                variant.site_scope
+                for variant in semantic_definition.execution_variants
+                if variant.category_key == baseline_set.category_key
+            }
+            if len(site_scopes) == 1:
+                execution_payload["semantic_quality_context"] = {
+                    "contract_id": active_semantic_contract.id,
+                    "contract_key": active_semantic_contract.contract_key,
+                    "contract_version": active_semantic_contract.version,
+                    "contract_hash": active_semantic_contract.contract_hash,
+                    "site_scope": next(iter(site_scopes)),
+                    "asset_scope": "unknown",
+                }
     execution_snapshot = baseline_canonical_json(execution_payload)
     previous = db.scalar(
         select(BaselineRegressionRun)
@@ -10033,6 +10254,41 @@ def baseline_run_metrics(
     if run is None:
         raise HTTPException(status_code=404, detail="基准回归 run 不存在")
     return build_baseline_field_metrics(db, run)
+
+
+def _semantic_entity_values(value: Any) -> set[str]:
+    if isinstance(value, Mapping):
+        value = value.get("values")
+    if not isinstance(value, list):
+        return set()
+    result: set[str] = set()
+    for item in value:
+        if isinstance(item, Mapping):
+            entity_id = item.get("entity_id") or item.get("value")
+            if entity_id:
+                result.add(str(entity_id))
+        elif isinstance(item, str) and item.strip():
+            result.add(item.strip())
+    return result
+
+
+@app.get("/api/baseline-regressions/{run_id}/semantic-metrics")
+def baseline_run_semantic_metrics(
+    run_id: int,
+    _user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    run = db.get(BaselineRegressionRun, run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="基准回归 run 不存在")
+    report, evidence, context = build_run_semantic_quality(run)
+    return {
+        "run_id": run.id,
+        "category_key": run.category_key,
+        **report.to_dict(),
+        "evidence": evidence,
+        "contract": context or None,
+    }
 
 
 def _baseline_correction_payload(row: BaselineCorrectionRun) -> dict[str, Any]:

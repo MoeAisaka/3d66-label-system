@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any
+from types import MappingProxyType
+from typing import Any, Mapping
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -12,6 +14,7 @@ from .audit import append_audit_event, canonical_json
 from .mechanism_profiles import MechanismProfileError, validate_mechanism_artifacts
 from .models import (
     Asset,
+    AssetVersion,
     CategoryEvaluationV3Config,
     ContentIngressEvent,
     ContentRecord,
@@ -24,16 +27,122 @@ from .models import (
     MaterialPackageItem,
     PublishedLabel,
     ReviewPanel,
+    SemanticTagFact,
+    TagDemandContract,
+)
+from .semantic_tag_contracts import (
+    PLATFORM_SEMANTIC_CONTRACT_KEY,
+    SemanticTagContractError,
+    validate_semantic_field_result,
+    validate_tag_demand_contract,
 )
 
 
 SCHEMA_VERSION = "content-ingress-v1"
 LABEL_SCHEMA_VERSION = "published-label-v1"
+SEMANTIC_LABEL_SCHEMA_VERSION = "published-label-v2"
 INGRESS_TYPES = {"content.created", "content.updated", "content.deleted"}
 
 
 class LabelIntegrationConflict(ValueError):
     pass
+
+
+class SemanticTagRoutingError(ValueError):
+    pass
+
+
+@dataclass(frozen=True)
+class SemanticExecutionRoute:
+    contract_id: int
+    contract_version: int
+    contract_hash: str
+    site_scope: str
+    asset_scope: str
+    locale: str
+    category_key: str
+    prompt_variant: str
+    prompt_version: str
+    model_version: str
+    fields: Mapping[str, str]
+    asset_version_id: int
+
+
+def _active_platform_contract(db: Session) -> TagDemandContract | None:
+    return db.scalar(
+        select(TagDemandContract)
+        .where(
+            TagDemandContract.contract_key == PLATFORM_SEMANTIC_CONTRACT_KEY,
+            TagDemandContract.status == "active",
+        )
+        .order_by(TagDemandContract.version.desc(), TagDemandContract.id.desc())
+        .limit(1)
+    )
+
+
+def resolve_semantic_execution_route(
+    db: Session,
+    *,
+    content_record: ContentRecord,
+    asset_version: AssetVersion | None,
+    site_scope: str,
+    asset_scope: str,
+    locale: str,
+    prompt_variant: str,
+    prompt_version: str,
+    model_version: str,
+) -> SemanticExecutionRoute:
+    if asset_version is None:
+        raise SemanticTagRoutingError("素材版本缺失，不能创建语义标注路由")
+    if content_record.asset_id is None or asset_version.asset_id != content_record.asset_id:
+        raise SemanticTagRoutingError("素材版本与内容记录不一致")
+    profile = db.scalar(
+        select(EvaluationCategoryProfile).where(
+            EvaluationCategoryProfile.category_key == content_record.category_key,
+            EvaluationCategoryProfile.status == "active",
+        )
+    )
+    if profile is None:
+        raise SemanticTagRoutingError("类目 profile 未启用")
+    contract = _active_platform_contract(db)
+    if contract is None:
+        raise SemanticTagRoutingError("平台语义标签需求合同未启用")
+    try:
+        definition = validate_tag_demand_contract(json.loads(contract.definition_json))
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise SemanticTagRoutingError(f"平台语义标签需求合同无效：{exc}") from None
+    matrix = definition.category_applicability.get(content_record.category_key)
+    if matrix is None:
+        raise SemanticTagRoutingError("类目缺少语义字段适用性矩阵")
+    variants = [
+        variant
+        for variant in definition.execution_variants
+        if (
+            variant.site_scope == site_scope
+            and variant.asset_scope == asset_scope
+            and variant.locale == locale
+            and variant.category_key == content_record.category_key
+            and variant.prompt_variant == prompt_variant
+            and variant.prompt_version == prompt_version
+            and variant.model_version == model_version
+        )
+    ]
+    if not variants:
+        raise SemanticTagRoutingError("请求执行变体未在当前语义合同中声明")
+    return SemanticExecutionRoute(
+        contract_id=contract.id,
+        contract_version=contract.version,
+        contract_hash=contract.contract_hash,
+        site_scope=site_scope,
+        asset_scope=asset_scope,
+        locale=locale,
+        category_key=content_record.category_key,
+        prompt_variant=prompt_variant,
+        prompt_version=prompt_version,
+        model_version=model_version,
+        fields=MappingProxyType(dict(matrix)),
+        asset_version_id=asset_version.id,
+    )
 
 
 def _aware(value: datetime) -> datetime:
@@ -42,6 +151,206 @@ def _aware(value: datetime) -> datetime:
 
 def _payload_hash(value: Any) -> str:
     return hashlib.sha256(canonical_json(value).encode("utf-8")).hexdigest()
+
+
+def approve_semantic_facts(
+    db: Session,
+    *,
+    evaluation_id: int,
+    actor: str,
+) -> list[SemanticTagFact]:
+    """Promote evidence candidates after completed human truth, append-only."""
+    evaluation = db.get(EvaluationResult, evaluation_id)
+    if evaluation is None:
+        raise ValueError("评测结果不存在")
+    panel = db.scalar(select(ReviewPanel).where(ReviewPanel.evaluation_id == evaluation_id))
+    if panel is None or panel.status != "completed" or panel.final_review_id is None:
+        raise ValueError("人工真值未完成，不能批准语义事实")
+    final_review = db.get(HumanReview, panel.final_review_id)
+    if final_review is None or final_review.decision not in {"approved", "corrected"}:
+        raise ValueError("人工真值不是可批准状态")
+    contract = _active_platform_contract(db)
+    if contract is None:
+        raise ValueError("平台语义标签需求合同未启用")
+    try:
+        definition = validate_tag_demand_contract(json.loads(contract.definition_json))
+    except (json.JSONDecodeError, SemanticTagContractError) as exc:
+        raise ValueError(f"平台语义标签需求合同无效：{exc}") from None
+    precheck = json.loads(evaluation.precheck_json or "{}")
+    route = precheck.get("semantic_route")
+    if not isinstance(route, Mapping):
+        raise ValueError("语义执行路由未冻结，不能批准语义事实")
+    if (
+        route.get("contract_id") != contract.id
+        or route.get("contract_version") != contract.version
+        or route.get("contract_hash") != contract.contract_hash
+    ):
+        raise ValueError("语义标签合同已漂移，不能将旧候选归属到当前合同")
+    if route.get("category_key") != evaluation.job.category_key:
+        raise ValueError("语义执行路由类目与评测类目不一致")
+    route_asset_version_id = route.get("asset_version_id")
+    if not isinstance(route_asset_version_id, int):
+        raise ValueError("语义执行路由缺少冻结素材版本")
+    asset_version = db.get(AssetVersion, route_asset_version_id)
+    if asset_version is None or asset_version.asset_id != evaluation.asset_id:
+        raise ValueError("冻结素材版本与评测素材不一致")
+    matrix = definition.category_applicability.get(evaluation.job.category_key)
+    if matrix is None:
+        raise ValueError("当前类目缺少语义字段适用性矩阵")
+    final_truth = json.loads(panel.final_truth_json or "{}")
+    semantic_truth = final_truth.get("semantic")
+    semantic_truth = semantic_truth if isinstance(semantic_truth, Mapping) else {}
+    candidates = db.scalars(
+        select(SemanticTagFact)
+        .where(
+            SemanticTagFact.source_evaluation_id == evaluation_id,
+            SemanticTagFact.status == "candidate",
+        )
+        .order_by(SemanticTagFact.field_key.asc(), SemanticTagFact.fact_version.asc(), SemanticTagFact.id.asc())
+    ).all()
+    if not candidates:
+        return []
+    approved: list[SemanticTagFact] = []
+    for candidate in candidates:
+        if candidate.contract_id != contract.id:
+            raise ValueError("候选语义事实合同与冻结执行合同不一致")
+        if candidate.asset_version_id != asset_version.id:
+            raise ValueError("候选语义事实素材版本与冻结执行版本不一致")
+        field_definition = definition.semantic_schema.fields.get(candidate.field_key)
+        field_status = matrix.get(candidate.field_key)
+        if field_definition is None or field_status is None:
+            raise ValueError(f"字段 {candidate.field_key} 未在当前合同中声明")
+        existing_for_review = db.scalar(
+            select(SemanticTagFact).where(
+                SemanticTagFact.source_evaluation_id == evaluation_id,
+                SemanticTagFact.source_review_id == final_review.id,
+                SemanticTagFact.asset_version_id == candidate.asset_version_id,
+                SemanticTagFact.field_key == candidate.field_key,
+                SemanticTagFact.contract_id == contract.id,
+                SemanticTagFact.status == "approved",
+            )
+        )
+        if existing_for_review is not None:
+            approved.append(existing_for_review)
+            continue
+        existing_approved = db.scalar(
+            select(SemanticTagFact)
+            .where(
+                SemanticTagFact.asset_version_id == candidate.asset_version_id,
+                SemanticTagFact.field_key == candidate.field_key,
+                SemanticTagFact.status == "approved",
+            )
+            .order_by(SemanticTagFact.fact_version.desc(), SemanticTagFact.id.desc())
+        )
+        fact_version = (existing_approved.fact_version + 1) if existing_approved else candidate.fact_version + 1
+        values = json.loads(candidate.values_json)
+        evidence = json.loads(candidate.evidence_json)
+        human_field = semantic_truth.get(candidate.field_key)
+        if isinstance(human_field, Mapping):
+            field_status = str(human_field.get("status") or field_status)
+            if "values" in human_field:
+                values = human_field.get("values")
+        if not isinstance(values, list):
+            raise ValueError(f"字段 {candidate.field_key} 的 values 必须是数组")
+        canonical_values: list[dict[str, Any]] = []
+        validation_values: list[dict[str, Any]] = []
+        for index, raw_value in enumerate(values):
+            if not isinstance(raw_value, Mapping):
+                raise ValueError(f"字段 {candidate.field_key} 的值必须是对象")
+            item = dict(raw_value)
+            item.setdefault("value", str(item.get("entity_id") or "").strip())
+            item.setdefault("locale", str(route.get("locale") or "zh"))
+            item.setdefault("rank", index + 1)
+            item.setdefault("source", "mixed")
+            item.setdefault(
+                "evidence_ref",
+                str(evidence[index] if index < len(evidence) else f"evaluation:{evaluation_id}#semantic.{candidate.field_key}.{index}"),
+            )
+            item.setdefault("model_version", str(route.get("model_version") or "") or None)
+            item.setdefault("prompt_version", str(route.get("prompt_version") or "") or None)
+            item["normalization_version"] = candidate.normalization_version
+            item["mapping_version"] = candidate.mapping_version
+            item["review_status"] = "approved"
+            canonical_values.append(item)
+            validation_values.append(
+                {
+                    key: item.get(key)
+                    for key in (
+                        "value",
+                        "entity_id",
+                        "locale",
+                        "rank",
+                        "weight",
+                        "source",
+                        "evidence_ref",
+                        "model_version",
+                        "prompt_version",
+                        "normalization_version",
+                        "mapping_version",
+                        "review_status",
+                    )
+                    if key in item
+                }
+            )
+        try:
+            validate_semantic_field_result(
+                {"status": field_status, "values": validation_values}
+            )
+        except SemanticTagContractError as exc:
+            raise ValueError(
+                f"字段 {candidate.field_key} 不符合语义合同：{exc}"
+            ) from None
+        if field_definition.cardinality == "single" and len(canonical_values) > 1:
+            raise ValueError(f"字段 {candidate.field_key} 为 single，最多只能有一个值")
+        if len(canonical_values) > field_definition.max_values:
+            raise ValueError(
+                f"字段 {candidate.field_key} 的值数量超过合同 max_values"
+            )
+        values = canonical_values
+        payload = {
+            "asset_version_id": candidate.asset_version_id,
+            "field_key": candidate.field_key,
+            "fact_version": fact_version,
+            "field_status": field_status,
+            "values": values,
+            "evidence": evidence,
+            "source_evaluation_id": evaluation_id,
+            "source_review_id": final_review.id,
+            "contract_id": contract.id,
+            "normalization_version": candidate.normalization_version,
+            "mapping_version": candidate.mapping_version,
+            "status": "approved",
+        }
+        row = SemanticTagFact(
+            asset_version_id=candidate.asset_version_id,
+            field_key=candidate.field_key,
+            fact_version=fact_version,
+            field_status=field_status,
+            supersedes_fact_id=existing_approved.id if existing_approved else candidate.id,
+            values_json=canonical_json(values),
+            evidence_json=canonical_json(evidence),
+            source_evaluation_id=evaluation_id,
+            source_review_id=final_review.id,
+            contract_id=contract.id,
+            normalization_version=candidate.normalization_version,
+            mapping_version=candidate.mapping_version,
+            status="approved",
+            payload_hash=_payload_hash(payload),
+        )
+        db.add(row)
+        approved.append(row)
+    append_audit_event(
+        db,
+        category="semantic_tag_fact",
+        action="approved",
+        subject_type="evaluation_result",
+        subject_id=str(evaluation_id),
+        actor=actor,
+        payload={"fact_count": len(approved), "contract_id": contract.id, "review_id": final_review.id},
+        event_key=f"semantic-tag-fact:approved:{evaluation_id}:{final_review.id}",
+    )
+    db.flush()
+    return approved
 
 
 def ingest_content_event(
@@ -325,6 +634,49 @@ def _content_key(db: Session, evaluation: EvaluationResult, requested: str | Non
     )
 
 
+def _approved_semantic_payload(
+    db: Session,
+    *,
+    evaluation: EvaluationResult,
+) -> tuple[AssetVersion, dict[str, Any]] | None:
+    asset_version = db.scalar(
+        select(AssetVersion)
+        .where(AssetVersion.asset_id == evaluation.asset_id)
+        .order_by(AssetVersion.version.desc(), AssetVersion.id.desc())
+        .limit(1)
+    )
+    if asset_version is None:
+        return None
+    facts = db.scalars(
+        select(SemanticTagFact)
+        .where(
+            SemanticTagFact.asset_version_id == asset_version.id,
+            SemanticTagFact.source_evaluation_id == evaluation.id,
+            SemanticTagFact.status == "approved",
+        )
+        .order_by(SemanticTagFact.field_key.asc(), SemanticTagFact.fact_version.desc(), SemanticTagFact.id.desc())
+    ).all()
+    latest_by_field: dict[str, SemanticTagFact] = {}
+    for fact in facts:
+        latest_by_field.setdefault(fact.field_key, fact)
+    if not latest_by_field:
+        return None
+    semantic = {
+        field_key: {
+            "status": fact.field_status,
+            "values": json.loads(fact.values_json),
+            "evidence": json.loads(fact.evidence_json),
+        }
+        for field_key, fact in latest_by_field.items()
+    }
+    return asset_version, {
+        "semantic": semantic,
+        "semantic_contract_id": next(iter(latest_by_field.values())).contract_id,
+        "normalization_version": next(iter(latest_by_field.values())).normalization_version,
+        "mapping_version": next(iter(latest_by_field.values())).mapping_version,
+    }
+
+
 def build_label_snapshot(
     db: Session,
     *,
@@ -363,8 +715,10 @@ def build_label_snapshot(
         elif field_key.startswith("production_fields."):
             production_fields[field_key.split(".", 1)[1]] = value
     media_form = key_fields.get("media_form", precheck.get("media_form", {}))
+    semantic_result = _approved_semantic_payload(db, evaluation=evaluation)
+    schema_version = SEMANTIC_LABEL_SCHEMA_VERSION if semantic_result else LABEL_SCHEMA_VERSION
     payload = {
-        "schema_version": LABEL_SCHEMA_VERSION,
+        "schema_version": schema_version,
         "content_key": _content_key(db, evaluation, content_key),
         "category_key": evaluation.job.category_key,
         "level": final_level,
@@ -387,6 +741,33 @@ def build_label_snapshot(
             "engine_version": evaluation.engine_version,
         },
     }
+    if semantic_result is not None:
+        asset_version, semantic_meta = semantic_result
+        semantic_route = precheck.get("semantic_route") if isinstance(precheck.get("semantic_route"), Mapping) else {}
+        payload["semantic"] = semantic_meta["semantic"]
+        payload["quality"] = {
+            "level": final_level,
+            "score": final_score,
+            "dimensions": truth.get("dimensions") or aesthetic.get("dimensions", {}),
+        }
+        payload["governance"] = {
+            "review_status": "approved",
+            "contract_id": semantic_meta["semantic_contract_id"],
+        }
+        payload["provenance"].update({
+            "asset_version_id": asset_version.id,
+            "asset_id": evaluation.asset_id,
+            "final_review_id": final_review.id,
+            "normalization_version": semantic_meta["normalization_version"],
+            "mapping_version": semantic_meta["mapping_version"],
+            "site_scope": semantic_route.get("site_scope"),
+            "asset_scope": semantic_route.get("asset_scope"),
+            "tag_contract_version": (
+                f"{semantic_route.get('contract_id')}:{semantic_route.get('contract_version')}"
+                if semantic_route.get("contract_id") is not None and semantic_route.get("contract_version") is not None
+                else str(semantic_meta["semantic_contract_id"])
+            ),
+        })
     return payload["content_key"], evaluation.id, final_review.id, payload
 
 
@@ -416,7 +797,7 @@ def create_release(
         category_key=str(payload["category_key"]),
         evaluation_id=eval_id,
         final_review_id=review_id,
-        label_schema_version=LABEL_SCHEMA_VERSION,
+        label_schema_version=str(payload["schema_version"]),
         label_payload_json=raw,
         payload_hash=_payload_hash(payload),
         status="pending_review",

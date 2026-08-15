@@ -378,6 +378,39 @@ class Asset(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
+class AssetVersion(Base):
+    """Immutable source snapshot for one asset revision."""
+
+    __tablename__ = "asset_versions"
+    __table_args__ = (
+        UniqueConstraint("asset_id", "version", name="uq_asset_versions_asset_version"),
+        CheckConstraint(
+            "length(asset_sha256) = 64",
+            name="ck_asset_versions_sha256",
+        ),
+        CheckConstraint(
+            "snapshot_kind IN ('materialized','deleted')",
+            name="ck_asset_versions_snapshot_kind",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    asset_id: Mapped[int] = mapped_column(
+        ForeignKey("assets.id", ondelete="RESTRICT"), index=True
+    )
+    version: Mapped[int] = mapped_column(Integer)
+    asset_sha256: Mapped[str] = mapped_column(String(64), index=True)
+    source_version: Mapped[str] = mapped_column(String(120))
+    supersedes_id: Mapped[int | None] = mapped_column(
+        ForeignKey("asset_versions.id", ondelete="RESTRICT"), nullable=True, index=True
+    )
+    snapshot_kind: Mapped[str] = mapped_column(String(20), default="materialized")
+    created_by: Mapped[str] = mapped_column(String(80), default="system")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, index=True
+    )
+
+
 class EvaluationCategoryProfile(Base):
     """Per-category pipeline contract; configuration never leaks across categories."""
 
@@ -3037,6 +3070,170 @@ class ConsumerSyncCheckpoint(Base):
     cursor: Mapped[int] = mapped_column(Integer, default=0)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+
+class TagDemandContract(Base):
+    """Versioned platform semantic field demand contract."""
+
+    __tablename__ = "tag_demand_contracts"
+    __table_args__ = (
+        UniqueConstraint(
+            "contract_key", "version", name="uq_tag_demand_contracts_key_version"
+        ),
+        CheckConstraint(
+            "status IN ('draft','candidate','active','retired')",
+            name="ck_tag_demand_contracts_status",
+        ),
+        CheckConstraint(
+            "json_valid(definition_json) AND json_type(definition_json, '$') = 'object'",
+            name="ck_tag_demand_contracts_definition_json",
+        ),
+        CheckConstraint(
+            "length(contract_hash) = 64",
+            name="ck_tag_demand_contracts_hash",
+        ),
+        Index(
+            "uq_tag_demand_contracts_active_key",
+            "contract_key",
+            unique=True,
+            sqlite_where=sql_text("status = 'active'"),
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    contract_key: Mapped[str] = mapped_column(String(120), index=True)
+    version: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(20), default="draft", index=True)
+    definition_json: Mapped[str] = mapped_column(Text)
+    contract_hash: Mapped[str] = mapped_column(String(64), index=True)
+    approved_by: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_by: Mapped[str] = mapped_column(String(80), default="system")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, index=True
+    )
+
+
+class SemanticTagFact(Base):
+    """Append-only field-level Canonical semantic fact."""
+
+    __tablename__ = "semantic_tag_facts"
+    __table_args__ = (
+        UniqueConstraint(
+            "asset_version_id",
+            "field_key",
+            "fact_version",
+            name="uq_semantic_tag_facts_asset_field_version",
+        ),
+        CheckConstraint(
+            "field_status IN ('required','optional','not_applicable','not_detected','needs_review')",
+            name="ck_semantic_tag_facts_field_status",
+        ),
+        CheckConstraint(
+            "status IN ('candidate','approved','rejected')",
+            name="ck_semantic_tag_facts_status",
+        ),
+        CheckConstraint(
+            "json_valid(values_json) AND json_type(values_json, '$') = 'array'",
+            name="ck_semantic_tag_facts_values_json",
+        ),
+        CheckConstraint(
+            "json_valid(evidence_json) AND json_type(evidence_json, '$') = 'array'",
+            name="ck_semantic_tag_facts_evidence_json",
+        ),
+        Index(
+            "uq_semantic_tag_fact_review_approval",
+            "source_evaluation_id",
+            "source_review_id",
+            "asset_version_id",
+            "field_key",
+            unique=True,
+            sqlite_where=sql_text("status = 'approved'"),
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    asset_version_id: Mapped[int] = mapped_column(
+        ForeignKey("asset_versions.id", ondelete="RESTRICT"), index=True
+    )
+    field_key: Mapped[str] = mapped_column(String(80), index=True)
+    fact_version: Mapped[int] = mapped_column(Integer)
+    field_status: Mapped[str] = mapped_column(String(20), index=True)
+    supersedes_fact_id: Mapped[int | None] = mapped_column(
+        ForeignKey("semantic_tag_facts.id", ondelete="RESTRICT"), nullable=True, index=True
+    )
+    values_json: Mapped[str] = mapped_column(Text)
+    evidence_json: Mapped[str] = mapped_column(Text)
+    source_evaluation_id: Mapped[int | None] = mapped_column(
+        ForeignKey("evaluation_results.id", ondelete="RESTRICT"), nullable=True, index=True
+    )
+    source_review_id: Mapped[int | None] = mapped_column(
+        ForeignKey("human_reviews.id", ondelete="RESTRICT"), nullable=True, index=True
+    )
+    contract_id: Mapped[int] = mapped_column(
+        ForeignKey("tag_demand_contracts.id", ondelete="RESTRICT"), index=True
+    )
+    normalization_version: Mapped[str] = mapped_column(String(80))
+    mapping_version: Mapped[str] = mapped_column(String(80))
+    status: Mapped[str] = mapped_column(String(20), index=True)
+    payload_hash: Mapped[str] = mapped_column(String(64), index=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, index=True
+    )
+
+
+class SemanticQualityMetricSnapshot(Base):
+    """Append-only field quality evidence for one frozen regression run."""
+
+    __tablename__ = "semantic_quality_metric_snapshots"
+    __table_args__ = (
+        UniqueConstraint(
+            "baseline_run_id",
+            "contract_id",
+            "category_key",
+            "site_scope",
+            "asset_scope",
+            "field_key",
+            name="uq_semantic_quality_snapshot_scope",
+        ),
+        CheckConstraint(
+            "site_scope IN ('domestic','overseas')",
+            name="ck_semantic_quality_site_scope",
+        ),
+        CheckConstraint(
+            "asset_scope IN ('whole','single','other','unknown')",
+            name="ck_semantic_quality_asset_scope",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    baseline_run_id: Mapped[int] = mapped_column(
+        ForeignKey("baseline_regression_runs.id", ondelete="RESTRICT"), index=True
+    )
+    contract_id: Mapped[int] = mapped_column(
+        ForeignKey("tag_demand_contracts.id", ondelete="RESTRICT"), index=True
+    )
+    category_key: Mapped[str] = mapped_column(String(40), index=True)
+    site_scope: Mapped[str] = mapped_column(String(20), index=True)
+    asset_scope: Mapped[str] = mapped_column(String(20), index=True)
+    field_key: Mapped[str] = mapped_column(String(80), index=True)
+    truth_count: Mapped[int] = mapped_column(Integer, default=0)
+    predicted_count: Mapped[int] = mapped_column(Integer, default=0)
+    true_positive_count: Mapped[int] = mapped_column(Integer, default=0)
+    precision: Mapped[float | None] = mapped_column(Float, nullable=True)
+    recall: Mapped[float | None] = mapped_column(Float, nullable=True)
+    mapping_coverage: Mapped[float | None] = mapped_column(Float, nullable=True)
+    unmapped_rate: Mapped[float | None] = mapped_column(Float, nullable=True)
+    conflict_rate: Mapped[float | None] = mapped_column(Float, nullable=True)
+    null_semantics_accuracy: Mapped[float | None] = mapped_column(Float, nullable=True)
+    correction_rate: Mapped[float | None] = mapped_column(Float, nullable=True)
+    review_coverage: Mapped[float | None] = mapped_column(Float, nullable=True)
+    bilingual_consistency: Mapped[float | None] = mapped_column(Float, nullable=True)
+    reconciliation_rate: Mapped[float | None] = mapped_column(Float, nullable=True)
+    metrics_hash: Mapped[str] = mapped_column(String(64), index=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, index=True
     )
 
 
