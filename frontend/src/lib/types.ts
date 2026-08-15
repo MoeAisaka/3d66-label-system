@@ -1792,6 +1792,55 @@ export type ProjectionContract = {
   latest_reconciliation: ProjectionReconciliation | null
 }
 
+export type SemanticApplicability = "required" | "optional" | "not_applicable"
+
+export type TagDemandContractField = {
+  field_key: string
+  cardinality: "single" | "multi"
+  localized: boolean
+  vocabulary_owner: string
+  max_values: number
+  default_value: Array<Record<string, unknown>>
+}
+
+export type TagDemandContractDefinition = {
+  schema_version: "tag-demand-contract-v1"
+  semantic_schema: {
+    schema_version: "semantic-tag-schema-v1"
+    fields: Record<string, TagDemandContractField>
+  }
+  category_applicability: Record<string, Record<string, SemanticApplicability>>
+  execution_variants: Array<{
+    site_scope: "domestic" | "overseas"
+    asset_scope: "whole" | "single" | "other" | "unknown"
+    locale: "zh" | "en"
+    category_key: string
+    prompt_variant: "whole" | "single"
+    prompt_version: string
+    model_version: string
+  }>
+  quality_gates: Record<string, {
+    min_precision: number
+    min_recall: number
+    min_mapping_coverage: number
+    max_conflict_rate: number
+  }>
+  projection_targets: Array<{ target_key: string; mode: "dry_run"; locale: "zh" | "en" }>
+}
+
+export type TagDemandContract = {
+  id: number
+  contract_key: string
+  version: number
+  status: "draft" | "candidate" | "active" | "retired"
+  definition: TagDemandContractDefinition
+  contract_hash: string
+  approved_by: string | null
+  approved_at: string | null
+  created_by: string
+  created_at: string
+}
+
 export type SampleSetItem = {
   id: number
   asset_id: number
