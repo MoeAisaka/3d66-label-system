@@ -55,6 +55,8 @@ from .mechanism_profiles import (
     validate_mechanism_artifacts,
 )
 from .models import CategoryEvaluationV3Config, CategoryEvaluationV3Revision
+from .models import TagDemandContract
+from .semantic_tag_contracts import SemanticTagContractError, validate_tag_demand_contract
 
 
 # --------------------------------------------------------------------------- #
@@ -130,6 +132,7 @@ class V3ConfigDetail(BaseModel):
     created_by: str
     created_at: Any
     updated_at: Any
+    semantic_tag_applicability: dict[str, Any] | None = None
 
 
 class LevelScaleWriteRequest(BaseModel):
@@ -310,6 +313,36 @@ def _summary(db: Session, row: CategoryEvaluationV3Config) -> V3ConfigSummary:
 def _detail(db: Session, row: CategoryEvaluationV3Config) -> V3ConfigDetail:
     projected = _projected_revision(db, row)
     contract = json.loads(row.contract_json)
+    semantic_tag_applicability: dict[str, Any] | None = None
+    active_tag_contract = db.scalar(
+        select(TagDemandContract)
+        .where(TagDemandContract.status == "active")
+        .order_by(TagDemandContract.version.desc(), TagDemandContract.id.desc())
+        .limit(1)
+    )
+    if active_tag_contract is not None:
+        try:
+            tag_definition = validate_tag_demand_contract(
+                json.loads(active_tag_contract.definition_json)
+            )
+            fields = tag_definition.category_applicability.get(row.category_key)
+            if fields is not None:
+                counts: dict[str, int] = {}
+                for status in fields.values():
+                    counts[status] = counts.get(status, 0) + 1
+                semantic_tag_applicability = {
+                    "contract_id": active_tag_contract.id,
+                    "contract_version": active_tag_contract.version,
+                    "contract_hash": active_tag_contract.contract_hash,
+                    "field_counts": counts,
+                    "fields": dict(fields),
+                }
+        except (json.JSONDecodeError, SemanticTagContractError):
+            semantic_tag_applicability = {
+                "contract_id": active_tag_contract.id,
+                "contract_version": active_tag_contract.version,
+                "error": "平台语义标签需求合同无效",
+            }
     return V3ConfigDetail(
         id=row.id,
         category_key=row.category_key,
@@ -330,6 +363,7 @@ def _detail(db: Session, row: CategoryEvaluationV3Config) -> V3ConfigDetail:
         created_by=row.created_by,
         created_at=row.created_at,
         updated_at=row.updated_at,
+        semantic_tag_applicability=semantic_tag_applicability,
     )
 
 

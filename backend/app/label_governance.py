@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any
+from types import MappingProxyType
+from typing import Any, Mapping
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -12,6 +14,7 @@ from .audit import append_audit_event, canonical_json
 from .mechanism_profiles import MechanismProfileError, validate_mechanism_artifacts
 from .models import (
     Asset,
+    AssetVersion,
     CategoryEvaluationV3Config,
     ContentIngressEvent,
     ContentRecord,
@@ -24,7 +27,9 @@ from .models import (
     MaterialPackageItem,
     PublishedLabel,
     ReviewPanel,
+    TagDemandContract,
 )
+from .semantic_tag_contracts import validate_tag_demand_contract
 
 
 SCHEMA_VERSION = "content-ingress-v1"
@@ -34,6 +39,94 @@ INGRESS_TYPES = {"content.created", "content.updated", "content.deleted"}
 
 class LabelIntegrationConflict(ValueError):
     pass
+
+
+class SemanticTagRoutingError(ValueError):
+    pass
+
+
+@dataclass(frozen=True)
+class SemanticExecutionRoute:
+    contract_id: int
+    contract_version: int
+    contract_hash: str
+    site_scope: str
+    asset_scope: str
+    locale: str
+    category_key: str
+    prompt_variant: str
+    prompt_version: str
+    model_version: str
+    fields: Mapping[str, str]
+
+
+def resolve_semantic_execution_route(
+    db: Session,
+    *,
+    content_record: ContentRecord,
+    asset_version: AssetVersion | None,
+    site_scope: str,
+    asset_scope: str,
+    locale: str,
+    prompt_variant: str,
+    prompt_version: str,
+    model_version: str,
+) -> SemanticExecutionRoute:
+    if asset_version is None:
+        raise SemanticTagRoutingError("素材版本缺失，不能创建语义标注路由")
+    if content_record.asset_id is None or asset_version.asset_id != content_record.asset_id:
+        raise SemanticTagRoutingError("素材版本与内容记录不一致")
+    profile = db.scalar(
+        select(EvaluationCategoryProfile).where(
+            EvaluationCategoryProfile.category_key == content_record.category_key,
+            EvaluationCategoryProfile.status == "active",
+        )
+    )
+    if profile is None:
+        raise SemanticTagRoutingError("类目 profile 未启用")
+    contract = db.scalar(
+        select(TagDemandContract)
+        .where(TagDemandContract.status == "active")
+        .order_by(TagDemandContract.version.desc(), TagDemandContract.id.desc())
+        .limit(1)
+    )
+    if contract is None:
+        raise SemanticTagRoutingError("平台语义标签需求合同未启用")
+    try:
+        definition = validate_tag_demand_contract(json.loads(contract.definition_json))
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise SemanticTagRoutingError(f"平台语义标签需求合同无效：{exc}") from None
+    matrix = definition.category_applicability.get(content_record.category_key)
+    if matrix is None:
+        raise SemanticTagRoutingError("类目缺少语义字段适用性矩阵")
+    variants = [
+        variant
+        for variant in definition.execution_variants
+        if (
+            variant.site_scope == site_scope
+            and variant.asset_scope == asset_scope
+            and variant.locale == locale
+            and variant.category_key == content_record.category_key
+            and variant.prompt_variant == prompt_variant
+            and variant.prompt_version == prompt_version
+            and variant.model_version == model_version
+        )
+    ]
+    if not variants:
+        raise SemanticTagRoutingError("请求执行变体未在当前语义合同中声明")
+    return SemanticExecutionRoute(
+        contract_id=contract.id,
+        contract_version=contract.version,
+        contract_hash=contract.contract_hash,
+        site_scope=site_scope,
+        asset_scope=asset_scope,
+        locale=locale,
+        category_key=content_record.category_key,
+        prompt_variant=prompt_variant,
+        prompt_version=prompt_version,
+        model_version=model_version,
+        fields=MappingProxyType(dict(matrix)),
+    )
 
 
 def _aware(value: datetime) -> datetime:
