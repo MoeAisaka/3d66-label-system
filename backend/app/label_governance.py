@@ -637,6 +637,7 @@ def build_label_snapshot(
     }
     if semantic_result is not None:
         asset_version, semantic_meta = semantic_result
+        semantic_route = precheck.get("semantic_route") if isinstance(precheck.get("semantic_route"), Mapping) else {}
         payload["semantic"] = semantic_meta["semantic"]
         payload["quality"] = {
             "level": final_level,
@@ -653,6 +654,13 @@ def build_label_snapshot(
             "final_review_id": final_review.id,
             "normalization_version": semantic_meta["normalization_version"],
             "mapping_version": semantic_meta["mapping_version"],
+            "site_scope": semantic_route.get("site_scope"),
+            "asset_scope": semantic_route.get("asset_scope"),
+            "tag_contract_version": (
+                f"{semantic_route.get('contract_id')}:{semantic_route.get('contract_version')}"
+                if semantic_route.get("contract_id") is not None and semantic_route.get("contract_version") is not None
+                else str(semantic_meta["semantic_contract_id"])
+            ),
         })
     return payload["content_key"], evaluation.id, final_review.id, payload
 

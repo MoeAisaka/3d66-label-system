@@ -424,6 +424,18 @@ def attach_semantic_candidates(
         field_key: [candidate_payload(item) for item in bundle.values]
         for field_key, bundle in bundles.items()
     }
+    normalized["semantic_route"] = {
+        "contract_id": route.contract_id,
+        "contract_version": route.contract_version,
+        "contract_hash": route.contract_hash,
+        "site_scope": route.site_scope,
+        "asset_scope": route.asset_scope,
+        "locale": route.locale,
+        "category_key": route.category_key,
+        "prompt_variant": route.prompt_variant,
+        "prompt_version": route.prompt_version,
+        "model_version": route.model_version,
+    }
     return normalized
 
 

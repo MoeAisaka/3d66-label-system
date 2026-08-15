@@ -20,6 +20,7 @@ from app.models import (
     EvaluationCategoryProfile,
     ModelConfig,
     PromptVersion,
+    TagDemandContract,
 )
 from app.main import CATEGORY_KEYS
 from app.model_3d_su_category_seed import (
@@ -30,6 +31,7 @@ from app.model_3d_su_category_seed import (
     build_model_3d_su_classification_map,
     build_model_3d_su_contract,
     build_model_3d_su_subcategory_dimensions,
+    build_model_3d_su_semantic_contract,
     seed_model_3d_su,
 )
 from app.subcategory_resolver import validate_classification_map
@@ -284,3 +286,24 @@ def test_model_3d_su_prompts_keep_common_fields_and_forbid_final_level() -> None
         assert "predicted_level" not in prompt_a.system_prompt
         assert "不得输出 final_level" in prompt_b.system_prompt
         assert "任何最终等级" in prompt_b.system_prompt
+
+
+def test_model_3d_su_semantic_contract_seed_is_draft_and_platform_wide() -> None:
+    contract = build_model_3d_su_semantic_contract()
+    assert set(contract["semantic_schema"]["fields"]) >= {
+        "space", "object", "style", "material", "structural_features",
+        "architectural_element", "soft_decoration", "hard_decoration", "color", "title",
+    }
+    assert contract["category_applicability"]["model_3d_su"]["space"] == "required"
+    assert {item["asset_scope"] for item in contract["execution_variants"]} == {"whole", "single"}
+
+    engine = _engine()
+    with Session(engine) as db:
+        db.add(ModelConfig(active=True))
+        db.commit()
+        seed_model_3d_su(db, SimpleNamespace(project_root=PROJECT_ROOT))
+        db.commit()
+        rows = db.scalars(select(TagDemandContract).where(TagDemandContract.contract_key == "semantic-platform")).all()
+        assert len(rows) == 1
+        assert rows[0].status == "draft"
+    engine.dispose()

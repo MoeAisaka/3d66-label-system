@@ -1,0 +1,47 @@
+{
+  "schema_version": "model-3d-su-semantic-fixture-v1",
+  "samples": [
+    {
+      "key": "whole-space",
+      "asset_scope": "whole",
+      "asset_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+      "semantic": {
+        "space": [{"value": "客厅", "rank": 1, "weight": 1.0}],
+        "object": [{"value": "沙发", "rank": 1, "weight": 0.7}, {"value": "茶几", "rank": 2, "weight": 0.3}],
+        "style": [{"value": "现代简约", "rank": 1, "weight": 1.0}]
+      }
+    },
+    {
+      "key": "single-object",
+      "asset_scope": "single",
+      "asset_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+      "semantic": {
+        "space": [{"value": "家具单体", "rank": 1, "weight": 1.0}],
+        "object": [{"value": "沙发", "rank": 1, "weight": 1.0}],
+        "style": [{"value": "现代简约", "rank": 1, "weight": 1.0}]
+      }
+    }
+  ],
+  "mapping_registry": {
+    "space": {
+      "field_key": "space",
+      "values": {
+        "客厅": {"entity_id": "space.living_room", "names": {"zh": "客厅", "en": "Living room"}, "aliases": []},
+        "家具单体": {"entity_id": "space.single_object", "names": {"zh": "家具单体", "en": "Single object"}, "aliases": []}
+      }
+    },
+    "object": {
+      "field_key": "object",
+      "values": {
+        "沙发": {"entity_id": "object.sofa", "names": {"zh": "沙发", "en": "Sofa"}, "aliases": []},
+        "茶几": {"entity_id": "object.coffee_table", "names": {"zh": "茶几", "en": "Coffee table"}, "aliases": []}
+      }
+    },
+    "style": {
+      "field_key": "style",
+      "values": {
+        "现代简约": {"entity_id": "style.modern_minimal", "names": {"zh": "现代简约", "en": "Modern Minimal"}, "aliases": []}
+      }
+    }
+  }
+}
