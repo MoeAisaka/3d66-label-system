@@ -8,8 +8,8 @@ import { TagDemandContractDrawer } from "@/components/tag-demand-contract-drawer
 import { ConfirmDialog } from "@/components/workspace-page"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
-import { tagDemandContractApi } from "@/lib/api"
-import type { TagDemandContract } from "@/lib/types"
+import { api, tagDemandContractApi } from "@/lib/api"
+import type { TagDemandContract, User } from "@/lib/types"
 
 const statusLabels: Record<TagDemandContract["status"], string> = {
   draft: "草稿",
@@ -22,6 +22,7 @@ export function TagDemandContractsPage() {
   const queryClient = useQueryClient()
   const [selectedId, setSelectedId] = useState<number | null>(null)
   const [activateId, setActivateId] = useState<number | null>(null)
+  const me = useQuery({ queryKey: ["me"], queryFn: () => api<User>("/api/auth/me") })
   const contracts = useQuery({ queryKey: ["tag-demand-contracts"], queryFn: tagDemandContractApi.list })
   const selected = useMemo(() => contracts.data?.items.find((item) => item.id === selectedId) ?? null, [contracts.data?.items, selectedId])
   const activateTarget = contracts.data?.items.find((item) => item.id === activateId) ?? null
@@ -39,6 +40,7 @@ export function TagDemandContractsPage() {
   const activeCount = items.filter((item) => item.status === "active").length
   const candidateCount = items.filter((item) => item.status === "candidate").length
   const categoryCount = new Set(items.flatMap((item) => Object.keys(item.definition.category_applicability))).size
+  const canManage = Boolean(me.data?.is_admin || me.data?.role === "admin")
 
   return <>
     <PageHeader index="A.7" title="字段需求合同" description="平台通用语义字段的版本、适用类目和质量门槛。一级页只做版本管理，详细字段矩阵进入二级抽屉。" actions={<Button variant="secondary" onClick={() => contracts.refetch()} disabled={contracts.isFetching}><ArrowsClockwise />刷新</Button>} />
@@ -47,17 +49,17 @@ export function TagDemandContractsPage() {
       {contracts.isError && <div className="border-y border-[#d7a64d] bg-[#fff9e9] px-5 py-4 text-sm text-[#6f5513]">字段需求合同暂时无法读取，请稍后刷新。</div>}
       <section className="border-y border-[var(--line-strong)] bg-white">
         <div className="grid grid-cols-[minmax(0,1.3fr)_90px_100px_150px_170px_190px_auto] gap-4 border-b border-[var(--line)] px-5 py-3 text-xs font-semibold text-[var(--muted)]"><span>合同版本</span><span>版本</span><span>状态</span><span>适用类目</span><span>执行变体</span><span>质量门槛</span><span>操作</span></div>
-        {items.map((item) => <ContractRow key={item.id} contract={item} onView={() => setSelectedId(item.id)} onClone={() => clone.mutate(item)} onActivate={() => setActivateId(item.id)} cloning={clone.isPending} />)}
+        {items.map((item) => <ContractRow key={item.id} contract={item} onView={() => setSelectedId(item.id)} onClone={() => clone.mutate(item)} onActivate={() => setActivateId(item.id)} cloning={clone.isPending} canManage={canManage} />)}
         {!items.length && !contracts.isFetching && <div className="px-5 py-12 text-center text-sm text-[var(--muted)]">暂无字段需求合同版本。</div>}
       </section>
       <section className="flex items-start gap-3 border border-[var(--line)] bg-[#f7f9ef] p-4 text-xs leading-6"><ShieldCheck className="mt-0.5 shrink-0" /><p>合同激活只切换字段需求事实，不会启动评测、发布标签、存量回归或下游投影。知识图谱、搜索和数据库表继续只消费正式发布事实。</p></section>
     </div>
     <TagDemandContractDrawer contract={selected} open={selected != null} onOpenChange={(open) => !open && setSelectedId(null)} />
-    <ConfirmDialog open={activateTarget != null} onOpenChange={(open) => !open && setActivateId(null)} title="激活字段需求合同" description={activateTarget ? `确认将 ${activateTarget.contract_key} v${activateTarget.version} 设为现役？上一现役版本会退役，且不会自动发布标签事实。` : undefined} confirmLabel="确认激活" onConfirm={() => activateTarget && activate.mutate(activateTarget.id)} />
+    <ConfirmDialog open={canManage && activateTarget != null} onOpenChange={(open) => !open && setActivateId(null)} title="激活字段需求合同" description={activateTarget ? `确认将 ${activateTarget.contract_key} v${activateTarget.version} 设为现役？上一现役版本会退役，且不会自动发布标签事实。` : undefined} confirmLabel="确认激活" onConfirm={() => activateTarget && activate.mutate(activateTarget.id)} />
   </>
 }
 
-function ContractRow({ contract, onView, onClone, onActivate, cloning }: { contract: TagDemandContract; onView: () => void; onClone: () => void; onActivate: () => void; cloning: boolean }) {
+function ContractRow({ contract, onView, onClone, onActivate, cloning, canManage }: { contract: TagDemandContract; onView: () => void; onClone: () => void; onActivate: () => void; cloning: boolean; canManage: boolean }) {
   const categories = Object.keys(contract.definition.category_applicability)
   const variants = contract.definition.execution_variants.length
   const gates = Object.keys(contract.definition.quality_gates).length
@@ -68,7 +70,7 @@ function ContractRow({ contract, onView, onClone, onActivate, cloning }: { contr
     <span className="text-xs text-[var(--muted)]">{categories.length} 个类目</span>
     <span className="text-xs text-[var(--muted)]">{variants} 个变体</span>
     <span className="text-xs text-[var(--muted)]">{gates} 个字段门槛</span>
-    <div className="flex flex-wrap justify-end gap-2"><Button size="sm" variant="secondary" onClick={onView}><Eye />查看</Button>{contract.status !== "active" && <Button size="sm" variant="secondary" onClick={onClone} disabled={cloning}><Copy />复制候选</Button>}{contract.status === "candidate" && <Button size="sm" onClick={onActivate}>激活</Button>}</div>
+    <div className="flex flex-wrap justify-end gap-2"><Button size="sm" variant="secondary" onClick={onView}><Eye />查看</Button>{canManage && contract.status !== "active" && <Button size="sm" variant="secondary" onClick={onClone} disabled={cloning}><Copy />复制候选</Button>}{canManage && contract.status === "candidate" && <Button size="sm" onClick={onActivate}>激活</Button>}{!canManage && <span className="self-center text-[11px] text-[var(--muted)]">管理员可配置</span>}</div>
   </div>
 }
 

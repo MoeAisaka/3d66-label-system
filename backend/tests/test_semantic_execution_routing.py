@@ -108,6 +108,21 @@ def _fixture(category_key: str = "model_3d_su") -> tuple[Session, AssetVersion, 
 def test_four_batches_share_one_active_contract_and_return_field_statuses() -> None:
     db, version, record = _fixture()
     try:
+        platform = db.query(TagDemandContract).filter_by(
+            contract_key="semantic-platform"
+        ).one()
+        db.add(
+            TagDemandContract(
+                contract_key="unrelated-semantic-contract",
+                version=999,
+                status="active",
+                definition_json=canonical_json(_definition(category_key=record.category_key)),
+                contract_hash="c" * 64,
+                approved_by="other-owner",
+                created_by="other-owner",
+            )
+        )
+        db.commit()
         route = resolve_semantic_execution_route(
             db,
             content_record=record,
@@ -119,7 +134,7 @@ def test_four_batches_share_one_active_contract_and_return_field_statuses() -> N
             prompt_version="prompt-v1",
             model_version="model-v1",
         )
-        assert route.contract_id > 0
+        assert route.contract_id == platform.id
         assert route.category_key == "model_3d_su"
         assert route.fields["space"] == "required"
         assert route.fields["material"] == "optional"

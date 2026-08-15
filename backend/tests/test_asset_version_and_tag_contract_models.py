@@ -12,10 +12,13 @@ from app.migrations import run_migrations
 from app.models import (
     Asset,
     AssetVersion,
+    BaselineRegressionRun,
+    BaselineSet,
     LabelRelease,
     PublishedLabel,
     SemanticQualityMetricSnapshot,
     SemanticTagFact,
+    StrategyBundle,
     TagDemandContract,
 )
 
@@ -67,7 +70,39 @@ def test_asset_version_and_semantic_rows_persist_after_migration(tmp_path) -> No
             created_by="test-owner",
         )
         contract = _contract()
-        db.add_all([version, contract])
+        baseline_set = BaselineSet(
+            name="semantic-model-fixture",
+            category_key="model_3d_su",
+            default_expected_level="L1",
+            fingerprint="e" * 64,
+            created_by="test-owner",
+        )
+        bundle = StrategyBundle(
+            canonical_hash="f" * 64,
+            strategy_schema_version="strategy-bundle-v1",
+            model_id="fixture-model",
+            model_config_snapshot="{}",
+            prompt_a_version="prompt-a",
+            prompt_b_version="prompt-b",
+            rubric_version="rubric-v1",
+            engine_version="engine-v1",
+        )
+        db.add_all([version, contract, baseline_set, bundle])
+        db.flush()
+        run = BaselineRegressionRun(
+            baseline_set_id=baseline_set.id,
+            sequence_no=1,
+            strategy_bundle_id=bundle.id,
+            category_key="model_3d_su",
+            strategy_snapshot_json="{}",
+            execution_snapshot_json="{}",
+            baseline_set_fingerprint=baseline_set.fingerprint,
+            status="completed",
+            total=0,
+            metrics_json="{}",
+            created_by="test-owner",
+        )
+        db.add(run)
         db.flush()
         fact = SemanticTagFact(
             asset_version_id=version.id,
@@ -77,8 +112,8 @@ def test_asset_version_and_semantic_rows_persist_after_migration(tmp_path) -> No
             supersedes_fact_id=None,
             values_json='[{"entity_id":"style.modern"}]',
             evidence_json='[{"ref":"evaluation:1"}]',
-            source_evaluation_id=1,
-            source_review_id=1,
+            source_evaluation_id=None,
+            source_review_id=None,
             contract_id=contract.id,
             normalization_version="semantic-normalization-v1",
             mapping_version="style-map-v1",
@@ -86,7 +121,7 @@ def test_asset_version_and_semantic_rows_persist_after_migration(tmp_path) -> No
             payload_hash="c" * 64,
         )
         metrics = SemanticQualityMetricSnapshot(
-            baseline_run_id=1,
+            baseline_run_id=run.id,
             contract_id=contract.id,
             category_key="model_3d_su",
             site_scope="domestic",

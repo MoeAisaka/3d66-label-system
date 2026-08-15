@@ -233,15 +233,28 @@ def test_detail_exposes_platform_semantic_tag_applicability_summary(
         }],
     }
     with sessions() as db:
-        db.add(TagDemandContract(
-            contract_key="semantic-platform",
-            version=1,
-            status="active",
-            definition_json=canonical_json(definition),
-            contract_hash="f" * 64,
-            approved_by="test-owner",
-            created_by="test-owner",
-        ))
+        unrelated = json.loads(json.dumps(definition))
+        unrelated["category_applicability"]["inspiration_image"]["style"] = "optional"
+        db.add_all([
+            TagDemandContract(
+                contract_key="semantic-platform",
+                version=1,
+                status="active",
+                definition_json=canonical_json(definition),
+                contract_hash="f" * 64,
+                approved_by="test-owner",
+                created_by="test-owner",
+            ),
+            TagDemandContract(
+                contract_key="unrelated-semantic-contract",
+                version=999,
+                status="active",
+                definition_json=canonical_json(unrelated),
+                contract_hash="e" * 64,
+                approved_by="other-owner",
+                created_by="other-owner",
+            ),
+        ])
         db.commit()
     detail = client.get(f"{_BASE}/inspiration_image")
     assert detail.status_code == 200, detail.text

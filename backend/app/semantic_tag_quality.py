@@ -7,18 +7,252 @@ review evidence. They never decide publication or mutate persistence.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+import json
 from typing import Any, Mapping
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .audit import canonical_json
-from .models import SemanticQualityMetricSnapshot
+from .models import (
+    BaselineRegressionRun,
+    SampleSet,
+    SampleSetItem,
+    SemanticQualityMetricSnapshot,
+    TagDemandContract,
+)
 import hashlib
 
 
 def _ratio(numerator: int, denominator: int) -> float | None:
     return numerator / denominator if denominator else None
+
+
+def _json_object(value: str | None) -> dict[str, Any]:
+    try:
+        payload = json.loads(value or "{}")
+    except json.JSONDecodeError:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _semantic_entity_values(value: Any) -> set[str]:
+    if isinstance(value, Mapping):
+        value = value.get("values")
+    if not isinstance(value, list):
+        return set()
+    result: set[str] = set()
+    for item in value:
+        if isinstance(item, Mapping):
+            entity_id = item.get("entity_id") or item.get("value")
+            if entity_id:
+                result.add(str(entity_id))
+        elif isinstance(item, str) and item.strip():
+            result.add(item.strip())
+    return result
+
+
+def freeze_semantic_truth_snapshot(
+    db: Session,
+    *,
+    category_key: str,
+    asset_ids: list[int],
+) -> dict[str, Any]:
+    """Freeze the exact locked Gold truth revisions used by a new run."""
+    rows = (
+        db.scalars(
+            select(SampleSetItem)
+            .join(SampleSet, SampleSet.id == SampleSetItem.sample_set_id)
+            .where(
+                SampleSet.category_key == category_key,
+                SampleSet.kind == "golden",
+                SampleSet.status == "locked",
+                SampleSetItem.asset_id.in_(asset_ids),
+            )
+            .order_by(
+                SampleSetItem.asset_id.asc(),
+                SampleSetItem.truth_revision.desc(),
+                SampleSetItem.id.desc(),
+            )
+        ).all()
+        if asset_ids
+        else []
+    )
+    latest: dict[int, SampleSetItem] = {}
+    for row in rows:
+        latest.setdefault(row.asset_id, row)
+    return {
+        "schema_version": "semantic-truth-snapshot-v1",
+        "assets": {
+            str(asset_id): {
+                "sample_set_id": row.sample_set_id,
+                "sample_item_id": row.id,
+                "truth_revision": row.truth_revision,
+                "truth": _json_object(row.truth_json),
+            }
+            for asset_id, row in sorted(latest.items())
+        },
+    }
+
+
+def _add_stats(
+    target: dict[str, dict[str, int]],
+    source: Mapping[str, Any],
+    *,
+    defaults: Mapping[str, int],
+) -> None:
+    for field_key, raw in source.items():
+        if not isinstance(field_key, str) or not isinstance(raw, Mapping):
+            continue
+        row = target.setdefault(field_key, dict(defaults))
+        for key in defaults:
+            value = raw.get(key, 0)
+            if isinstance(value, int) and not isinstance(value, bool):
+                row[key] += value
+
+
+def build_run_semantic_quality(
+    run: BaselineRegressionRun | Any,
+) -> tuple[SemanticQualityReport, dict[str, Any], dict[str, Any]]:
+    """Build evidence only from snapshots frozen into one regression run."""
+    execution = _json_object(run.execution_snapshot_json)
+    truth_snapshot = execution.get("semantic_truth_snapshot")
+    truth_snapshot = truth_snapshot if isinstance(truth_snapshot, Mapping) else {}
+    frozen_assets = truth_snapshot.get("assets")
+    frozen_assets = frozen_assets if isinstance(frozen_assets, Mapping) else {}
+    truth_by_asset: dict[str, dict[str, set[str]]] = {}
+    predicted_by_asset: dict[str, dict[str, set[str]]] = {}
+    mapping_stats: dict[str, dict[str, int]] = {}
+    review_stats: dict[str, dict[str, int]] = {}
+    reconciliation_stats = {"expected": 0, "matched": 0}
+    truth_revisions: list[int] = []
+    reviewed_evidence_count = 0
+    reconciled_evidence_count = 0
+    for item in run.items:
+        asset_key = str(item.asset_id)
+        frozen = frozen_assets.get(asset_key)
+        frozen = frozen if isinstance(frozen, Mapping) else {}
+        truth_payload = frozen.get("truth")
+        truth_payload = truth_payload if isinstance(truth_payload, Mapping) else {}
+        semantic_truth = truth_payload.get("semantic")
+        semantic_truth = semantic_truth if isinstance(semantic_truth, Mapping) else {}
+        revision = frozen.get("truth_revision")
+        if isinstance(revision, int):
+            truth_revisions.append(revision)
+        truth_by_asset[asset_key] = {
+            str(field): _semantic_entity_values(value)
+            for field, value in semantic_truth.items()
+            if isinstance(field, str)
+        }
+
+        snapshot = _json_object(item.result_snapshot_json)
+        stage_a = snapshot.get("stage_a")
+        stage_a = stage_a if isinstance(stage_a, Mapping) else {}
+        semantic_pred = stage_a.get("semantic") or stage_a.get("semantic_candidates") or {}
+        semantic_pred = semantic_pred if isinstance(semantic_pred, Mapping) else {}
+        predicted_by_asset[asset_key] = {
+            str(field): _semantic_entity_values(value)
+            for field, value in semantic_pred.items()
+            if isinstance(field, str)
+        }
+        raw_mapping = stage_a.get("semantic_mapping_stats")
+        raw_mapping = raw_mapping if isinstance(raw_mapping, Mapping) else {}
+        for field_key, value in semantic_pred.items():
+            if not isinstance(field_key, str):
+                continue
+            candidates = value.get("values") if isinstance(value, Mapping) else value
+            candidate_count = len(candidates) if isinstance(candidates, list) else 0
+            raw = raw_mapping.get(field_key)
+            raw = raw if isinstance(raw, Mapping) else {}
+            row = mapping_stats.setdefault(
+                field_key,
+                {"candidate": 0, "mapped": 0, "unmapped": 0, "conflicted": 0, "evaluated": 0},
+            )
+            row["candidate"] += int(raw.get("candidate", candidate_count))
+            row["mapped"] += int(raw.get("mapped", candidate_count))
+            row["unmapped"] += int(raw.get("unmapped", 0))
+            row["conflicted"] += int(raw.get("conflicted", 0))
+            row["evaluated"] += 1
+
+        raw_review = stage_a.get("semantic_review_stats")
+        if isinstance(raw_review, Mapping):
+            _add_stats(
+                review_stats,
+                raw_review,
+                defaults={
+                    "corrected": 0,
+                    "reviewed": 0,
+                    "required": 0,
+                    "null_truth": 0,
+                    "null_correct": 0,
+                    "bilingual": 0,
+                    "bilingual_consistent": 0,
+                },
+            )
+            reviewed_evidence_count += 1
+        raw_reconciliation = stage_a.get("semantic_reconciliation_stats")
+        if isinstance(raw_reconciliation, Mapping):
+            for key in ("expected", "matched"):
+                value = raw_reconciliation.get(key, 0)
+                if isinstance(value, int) and not isinstance(value, bool):
+                    reconciliation_stats[key] += value
+            reconciled_evidence_count += 1
+
+    report = compute_semantic_quality_metrics(
+        truth_by_asset=truth_by_asset,
+        predicted_by_asset=predicted_by_asset,
+        mapping_stats=mapping_stats,
+        review_stats=review_stats,
+        reconciliation_stats=reconciliation_stats,
+    )
+    evidence = {
+        "status": "ready" if frozen_assets else "unavailable_historical",
+        "truth_source": "frozen_run_snapshot" if frozen_assets else "unavailable",
+        "truth_asset_count": len(frozen_assets),
+        "truth_revision_min": min(truth_revisions) if truth_revisions else None,
+        "truth_revision_max": max(truth_revisions) if truth_revisions else None,
+        "review_evidence_item_count": reviewed_evidence_count,
+        "reconciliation_evidence_item_count": reconciled_evidence_count,
+    }
+    context = execution.get("semantic_quality_context")
+    context = dict(context) if isinstance(context, Mapping) else {}
+    return report, evidence, context
+
+
+def persist_run_semantic_quality_snapshot(
+    db: Session,
+    *,
+    run: BaselineRegressionRun,
+) -> list[SemanticQualityMetricSnapshot]:
+    if run.status not in {"completed", "partial_failed", "failed"}:
+        return []
+    report, evidence, context = build_run_semantic_quality(run)
+    if evidence["status"] != "ready" or not report.fields:
+        return []
+    contract_id = context.get("contract_id")
+    contract = db.get(TagDemandContract, contract_id) if isinstance(contract_id, int) else None
+    if (
+        contract is None
+        or contract.contract_key != context.get("contract_key")
+        or contract.version != context.get("contract_version")
+        or contract.contract_hash != context.get("contract_hash")
+    ):
+        raise ValueError("回归冻结的语义质量合同上下文无效")
+    site_scope = context.get("site_scope")
+    asset_scope = context.get("asset_scope")
+    if site_scope not in {"domestic", "overseas"}:
+        raise ValueError("回归冻结的语义质量 site_scope 无效")
+    if asset_scope not in {"whole", "single", "other", "unknown"}:
+        raise ValueError("回归冻结的语义质量 asset_scope 无效")
+    return persist_semantic_quality_snapshot(
+        db,
+        baseline_run_id=run.id,
+        contract_id=contract.id,
+        category_key=run.category_key,
+        site_scope=site_scope,
+        asset_scope=asset_scope,
+        report=report,
+    )
 
 
 @dataclass(frozen=True)

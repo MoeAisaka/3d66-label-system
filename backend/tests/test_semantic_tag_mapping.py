@@ -96,6 +96,7 @@ def test_normalization_rejects_string_when_field_requires_array() -> None:
         prompt_version="prompt-v1",
         model_version="model-v1",
         fields={"style": "optional"},
+        asset_version_id=1,
     )
     with pytest.raises(ValueError, match="style 必须是数组或对象"):
         normalize_semantic_candidates(
@@ -118,6 +119,7 @@ def test_schema_adapter_only_attaches_candidates_without_creating_release() -> N
         prompt_version="prompt-v1",
         model_version="model-v1",
         fields={"style": "optional"},
+        asset_version_id=1,
     )
     precheck: dict[str, object] = {"classification": {"scope_status": "in_scope"}}
     normalized = attach_semantic_candidates(

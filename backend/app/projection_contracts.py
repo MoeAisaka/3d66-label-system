@@ -107,17 +107,17 @@ def validate_projection_contract(
     for target_field, source_path in field_mappings.items():
         if not target_field.strip() or not source_path.strip():
             raise ProjectionContractError("字段映射不能为空")
+        if source_path in _ALLOWED_LABEL_META:
+            continue
+        root, _, suffix = source_path.partition(".")
+        if root == "provenance" and suffix in _ALLOWED_PROVENANCE:
+            continue
         normalized = f"{target_field}.{source_path}".lower()
         if any(token in normalized for token in _FORBIDDEN_TOKENS):
             raise ProjectionContractError(
                 f"禁止将候选、凭据、模型原始响应或人工过程字段投影：{source_path}"
             )
-        if source_path in _ALLOWED_LABEL_META:
-            continue
-        root, _, suffix = source_path.partition(".")
         if root in _ALLOWED_ROOTS:
-            continue
-        if root == "provenance" and suffix in _ALLOWED_PROVENANCE:
             continue
         raise ProjectionContractError(
             f"禁止将候选、凭据、模型原始响应或人工过程字段投影：{source_path}"

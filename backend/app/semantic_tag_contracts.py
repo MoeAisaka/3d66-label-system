@@ -28,6 +28,7 @@ PLATFORM_SEMANTIC_FIELD_KEYS = (
     "hard_decoration",
     "color",
 )
+PLATFORM_SEMANTIC_CONTRACT_KEY = "semantic-platform"
 
 _CATEGORY_KEY_PATTERN = re.compile(r"^[a-z][a-z0-9_]{1,39}$")
 

@@ -7658,8 +7658,8 @@ def _migration_068_add_semantic_tag_contract_registry(connection: Connection) ->
                 CHECK(json_valid(values_json) AND json_type(values_json, '$') = 'array'),
             evidence_json TEXT NOT NULL
                 CHECK(json_valid(evidence_json) AND json_type(evidence_json, '$') = 'array'),
-            source_evaluation_id INTEGER,
-            source_review_id INTEGER,
+            source_evaluation_id INTEGER REFERENCES evaluation_results(id) ON DELETE RESTRICT,
+            source_review_id INTEGER REFERENCES human_reviews(id) ON DELETE RESTRICT,
             contract_id INTEGER NOT NULL REFERENCES tag_demand_contracts(id) ON DELETE RESTRICT,
             normalization_version VARCHAR(80) NOT NULL,
             mapping_version VARCHAR(80) NOT NULL,
@@ -7673,7 +7673,7 @@ def _migration_068_add_semantic_tag_contract_registry(connection: Connection) ->
     connection.exec_driver_sql("""
         CREATE TABLE IF NOT EXISTS semantic_quality_metric_snapshots (
             id INTEGER PRIMARY KEY,
-            baseline_run_id INTEGER NOT NULL,
+            baseline_run_id INTEGER NOT NULL REFERENCES baseline_regression_runs(id) ON DELETE RESTRICT,
             contract_id INTEGER NOT NULL REFERENCES tag_demand_contracts(id) ON DELETE RESTRICT,
             category_key VARCHAR(40) NOT NULL,
             site_scope VARCHAR(20) NOT NULL CHECK(site_scope IN ('domestic','overseas')),
@@ -7704,6 +7704,8 @@ def _migration_068_add_semantic_tag_contract_registry(connection: Connection) ->
         "CREATE INDEX IF NOT EXISTS ix_semantic_tag_facts_asset ON semantic_tag_facts(asset_version_id, field_key, fact_version)",
         "CREATE INDEX IF NOT EXISTS ix_semantic_tag_facts_contract ON semantic_tag_facts(contract_id, status)",
         "CREATE INDEX IF NOT EXISTS ix_semantic_quality_snapshot_run ON semantic_quality_metric_snapshots(baseline_run_id, contract_id)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_tag_demand_contracts_active_key ON tag_demand_contracts(contract_key) WHERE status = 'active'",
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_semantic_tag_fact_review_approval ON semantic_tag_facts(source_evaluation_id, source_review_id, asset_version_id, field_key) WHERE status = 'approved'",
     ):
         connection.exec_driver_sql(statement)
     for statement in (
@@ -7742,6 +7744,159 @@ def _migration_068_add_semantic_tag_contract_registry(connection: Connection) ->
     violations = connection.exec_driver_sql("PRAGMA foreign_key_check").fetchall()
     if violations:
         raise RuntimeError(f"v68 语义标签合同迁移外键校验失败：{violations[:3]}")
+
+
+def _migration_069_harden_semantic_tag_fact_provenance(connection: Connection) -> None:
+    """Add provenance FKs and database-level approval/activation guards."""
+
+    duplicate_active = connection.exec_driver_sql(
+        "SELECT contract_key, COUNT(*) FROM tag_demand_contracts "
+        "WHERE status='active' GROUP BY contract_key HAVING COUNT(*) > 1"
+    ).fetchall()
+    if duplicate_active:
+        raise RuntimeError(f"v69 存在多个现役语义合同：{duplicate_active[:3]}")
+    duplicate_approvals = connection.exec_driver_sql(
+        "SELECT source_evaluation_id, source_review_id, asset_version_id, field_key, COUNT(*) "
+        "FROM semantic_tag_facts WHERE status='approved' "
+        "GROUP BY source_evaluation_id, source_review_id, asset_version_id, field_key "
+        "HAVING COUNT(*) > 1"
+    ).fetchall()
+    if duplicate_approvals:
+        raise RuntimeError(f"v69 存在重复语义批准事实：{duplicate_approvals[:3]}")
+
+    fact_targets = {
+        row[2]
+        for row in connection.exec_driver_sql(
+            "PRAGMA foreign_key_list(semantic_tag_facts)"
+        )
+    }
+    if not {"evaluation_results", "human_reviews"} <= fact_targets:
+        orphan_evaluations = connection.exec_driver_sql(
+            "SELECT id FROM semantic_tag_facts f WHERE source_evaluation_id IS NOT NULL "
+            "AND NOT EXISTS (SELECT 1 FROM evaluation_results e WHERE e.id=f.source_evaluation_id) LIMIT 3"
+        ).fetchall()
+        orphan_reviews = connection.exec_driver_sql(
+            "SELECT id FROM semantic_tag_facts f WHERE source_review_id IS NOT NULL "
+            "AND NOT EXISTS (SELECT 1 FROM human_reviews r WHERE r.id=f.source_review_id) LIMIT 3"
+        ).fetchall()
+        if orphan_evaluations or orphan_reviews:
+            raise RuntimeError(
+                "v69 语义事实 provenance 存在孤儿引用："
+                f"evaluation={orphan_evaluations}, review={orphan_reviews}"
+            )
+        connection.exec_driver_sql("PRAGMA defer_foreign_keys = ON")
+        connection.exec_driver_sql("DROP TRIGGER IF EXISTS trg_semantic_tag_facts_append_only")
+        connection.exec_driver_sql("DROP TRIGGER IF EXISTS trg_semantic_tag_facts_no_delete")
+        connection.exec_driver_sql("ALTER TABLE semantic_tag_facts RENAME TO semantic_tag_facts_v68")
+        connection.exec_driver_sql("""
+            CREATE TABLE semantic_tag_facts (
+                id INTEGER PRIMARY KEY,
+                asset_version_id INTEGER NOT NULL REFERENCES asset_versions(id) ON DELETE RESTRICT,
+                field_key VARCHAR(80) NOT NULL,
+                fact_version INTEGER NOT NULL,
+                field_status VARCHAR(20) NOT NULL
+                    CHECK(field_status IN ('required','optional','not_applicable','not_detected','needs_review')),
+                supersedes_fact_id INTEGER REFERENCES semantic_tag_facts(id) ON DELETE RESTRICT,
+                values_json TEXT NOT NULL
+                    CHECK(json_valid(values_json) AND json_type(values_json, '$') = 'array'),
+                evidence_json TEXT NOT NULL
+                    CHECK(json_valid(evidence_json) AND json_type(evidence_json, '$') = 'array'),
+                source_evaluation_id INTEGER REFERENCES evaluation_results(id) ON DELETE RESTRICT,
+                source_review_id INTEGER REFERENCES human_reviews(id) ON DELETE RESTRICT,
+                contract_id INTEGER NOT NULL REFERENCES tag_demand_contracts(id) ON DELETE RESTRICT,
+                normalization_version VARCHAR(80) NOT NULL,
+                mapping_version VARCHAR(80) NOT NULL,
+                status VARCHAR(20) NOT NULL
+                    CHECK(status IN ('candidate','approved','rejected')),
+                payload_hash VARCHAR(64) NOT NULL,
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(asset_version_id, field_key, fact_version)
+            )
+        """)
+        connection.exec_driver_sql("""
+            INSERT INTO semantic_tag_facts (
+                id, asset_version_id, field_key, fact_version, field_status,
+                supersedes_fact_id, values_json, evidence_json,
+                source_evaluation_id, source_review_id, contract_id,
+                normalization_version, mapping_version, status, payload_hash, created_at
+            )
+            SELECT id, asset_version_id, field_key, fact_version, field_status,
+                supersedes_fact_id, values_json, evidence_json,
+                source_evaluation_id, source_review_id, contract_id,
+                normalization_version, mapping_version, status, payload_hash, created_at
+            FROM semantic_tag_facts_v68 ORDER BY id
+        """)
+        connection.exec_driver_sql("DROP TABLE semantic_tag_facts_v68")
+
+    quality_targets = {
+        row[2]
+        for row in connection.exec_driver_sql(
+            "PRAGMA foreign_key_list(semantic_quality_metric_snapshots)"
+        )
+    }
+    if "baseline_regression_runs" not in quality_targets:
+        orphan_runs = connection.exec_driver_sql(
+            "SELECT id FROM semantic_quality_metric_snapshots q "
+            "WHERE NOT EXISTS (SELECT 1 FROM baseline_regression_runs r WHERE r.id=q.baseline_run_id) LIMIT 3"
+        ).fetchall()
+        if orphan_runs:
+            raise RuntimeError(f"v69 语义质量快照存在孤儿回归引用：{orphan_runs}")
+        connection.exec_driver_sql("DROP TRIGGER IF EXISTS trg_semantic_quality_snapshots_append_only")
+        connection.exec_driver_sql("DROP TRIGGER IF EXISTS trg_semantic_quality_snapshots_no_delete")
+        connection.exec_driver_sql(
+            "ALTER TABLE semantic_quality_metric_snapshots RENAME TO semantic_quality_metric_snapshots_v68"
+        )
+        connection.exec_driver_sql("""
+            CREATE TABLE semantic_quality_metric_snapshots (
+                id INTEGER PRIMARY KEY,
+                baseline_run_id INTEGER NOT NULL REFERENCES baseline_regression_runs(id) ON DELETE RESTRICT,
+                contract_id INTEGER NOT NULL REFERENCES tag_demand_contracts(id) ON DELETE RESTRICT,
+                category_key VARCHAR(40) NOT NULL,
+                site_scope VARCHAR(20) NOT NULL CHECK(site_scope IN ('domestic','overseas')),
+                asset_scope VARCHAR(20) NOT NULL CHECK(asset_scope IN ('whole','single','other','unknown')),
+                field_key VARCHAR(80) NOT NULL,
+                truth_count INTEGER NOT NULL DEFAULT 0,
+                predicted_count INTEGER NOT NULL DEFAULT 0,
+                true_positive_count INTEGER NOT NULL DEFAULT 0,
+                precision FLOAT, recall FLOAT, mapping_coverage FLOAT,
+                unmapped_rate FLOAT, conflict_rate FLOAT,
+                null_semantics_accuracy FLOAT, correction_rate FLOAT,
+                review_coverage FLOAT, bilingual_consistency FLOAT,
+                reconciliation_rate FLOAT,
+                metrics_hash VARCHAR(64) NOT NULL,
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(baseline_run_id, contract_id, category_key, site_scope, asset_scope, field_key)
+            )
+        """)
+        connection.exec_driver_sql("""
+            INSERT INTO semantic_quality_metric_snapshots
+            SELECT * FROM semantic_quality_metric_snapshots_v68 ORDER BY id
+        """)
+        connection.exec_driver_sql("DROP TABLE semantic_quality_metric_snapshots_v68")
+
+    for statement in (
+        "CREATE INDEX IF NOT EXISTS ix_semantic_tag_facts_asset ON semantic_tag_facts(asset_version_id, field_key, fact_version)",
+        "CREATE INDEX IF NOT EXISTS ix_semantic_tag_facts_contract ON semantic_tag_facts(contract_id, status)",
+        "CREATE INDEX IF NOT EXISTS ix_semantic_quality_snapshot_run ON semantic_quality_metric_snapshots(baseline_run_id, contract_id)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_tag_demand_contracts_active_key ON tag_demand_contracts(contract_key) WHERE status = 'active'",
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_semantic_tag_fact_review_approval ON semantic_tag_facts(source_evaluation_id, source_review_id, asset_version_id, field_key) WHERE status = 'approved'",
+        """CREATE TRIGGER IF NOT EXISTS trg_semantic_tag_facts_append_only
+            BEFORE UPDATE ON semantic_tag_facts
+            BEGIN SELECT RAISE(ABORT, 'SemanticTagFact is append-only'); END""",
+        """CREATE TRIGGER IF NOT EXISTS trg_semantic_tag_facts_no_delete
+            BEFORE DELETE ON semantic_tag_facts
+            BEGIN SELECT RAISE(ABORT, 'SemanticTagFact cannot be deleted'); END""",
+        """CREATE TRIGGER IF NOT EXISTS trg_semantic_quality_snapshots_append_only
+            BEFORE UPDATE ON semantic_quality_metric_snapshots
+            BEGIN SELECT RAISE(ABORT, 'SemanticQualityMetricSnapshot is append-only'); END""",
+        """CREATE TRIGGER IF NOT EXISTS trg_semantic_quality_snapshots_no_delete
+            BEFORE DELETE ON semantic_quality_metric_snapshots
+            BEGIN SELECT RAISE(ABORT, 'SemanticQualityMetricSnapshot cannot be deleted'); END""",
+    ):
+        connection.exec_driver_sql(statement)
+    violations = connection.exec_driver_sql("PRAGMA foreign_key_check").fetchall()
+    if violations:
+        raise RuntimeError(f"v69 语义事实 provenance 外键校验失败：{violations[:3]}")
 
 
 MIGRATIONS = [
@@ -8040,6 +8195,11 @@ MIGRATIONS = [
         68,
         "add_semantic_tag_contract_registry",
         _migration_068_add_semantic_tag_contract_registry,
+    ),
+    Migration(
+        69,
+        "harden_semantic_tag_fact_provenance",
+        _migration_069_harden_semantic_tag_fact_provenance,
     ),
 ]
 

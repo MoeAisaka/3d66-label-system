@@ -1,7 +1,24 @@
 # 3d66 标签系统｜当前项目状态
 
-> 最后更新：2026-08-14
+> 最后更新：2026-08-15
 > 本文件只记录“现在做到哪里”；长期原则见 `PRODUCT.md` 和 `AGENTS.md`，历史背景见 `CODEX_HANDOFF.md`。
+
+## 最新实施：平台语义事实发布门禁加固（2026-08-15）
+
+- 发布前审查发现并修复 Canonical 语义事实的审批幂等、冻结合同/素材版本校验、平台合同 key 隔离、正式标签 Schema 元数据、质量真值漂移和 provenance 外键缺口。
+- 语义事实批准现在严格校验冻结 `contract_id/version/hash`、`asset_version_id`、类目适用性、字段声明、cardinality、max values、rank/weight、required/not-applicable/null semantics；旧合同候选和素材版本漂移候选 fail-closed。
+- 同一 `evaluation + final review + asset version + field` 的批准为业务幂等，并由数据库部分唯一索引提供并发保护；正式 `published-label-v2` payload、LabelRelease、PublishedLabel、Outbox 和 Projection Manifest 使用一致 Schema 版本。
+- 平台运行时只读取 `contract_key=semantic-platform` 的现役合同；其他合同 key 可独立管理，但不会误驱动类目路由、人工批准或 V3 适用性摘要。每个 contract key 仅允许一个 active 版本。
+- migration 69 为 `SemanticTagFact.source_evaluation_id/source_review_id` 和 `SemanticQualityMetricSnapshot.baseline_run_id` 增加真实外键，并保留事实、质量快照的追加式不可变触发器。
+- 新回归任务会把当时锁定黄金集的语义真值 revision 冻结到运行快照；语义 Precision/Recall、映射、人工审核和对账只读取冻结真值及冻结结果证据，终态幂等写入不可变质量快照。缺少冻结真值的历史轮次明确显示不可用，不拿当前黄金集回算。
+- 字段需求合同页按当前用户权限展示配置动作；非管理员只读查看，不再展示必然返回 403 的复制候选/激活按钮。合法 `provenance.final_review_id` 可进入受控本地投影。
+
+当前验证：
+
+- 后端全量：`1402 passed, 1 skipped, 6 warnings`；warning 仅为既有 FastAPI/httpx 与 PDF SWIG 弃用提示。
+- 前端全部合同脚本、Lightbox、回归等级指标、TypeScript lint 和 Vite production build 通过；仅保留既有主 chunk 大于 500 kB warning。
+- Codeup 功能分支已先行更新到审查前 `48360c0`；审查修复尚待提交并重新推送。`main` 和测试服仍保持 `db516c2`，尚未部署 migration 68/69。
+- 发布边界不变：只允许 Codeup main 和公司内网测试服；不连接真实上游、业务数据库、知识图谱、真实模型或生产环境，不自动激活候选、发布标签或覆盖存量。
 
 ## 最新实施：基准回归运行配置与 V3 多版本等级证据（2026-08-14）
 

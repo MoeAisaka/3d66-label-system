@@ -3093,6 +3093,12 @@ class TagDemandContract(Base):
             "length(contract_hash) = 64",
             name="ck_tag_demand_contracts_hash",
         ),
+        Index(
+            "uq_tag_demand_contracts_active_key",
+            "contract_key",
+            unique=True,
+            sqlite_where=sql_text("status = 'active'"),
+        ),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -3136,6 +3142,15 @@ class SemanticTagFact(Base):
             "json_valid(evidence_json) AND json_type(evidence_json, '$') = 'array'",
             name="ck_semantic_tag_facts_evidence_json",
         ),
+        Index(
+            "uq_semantic_tag_fact_review_approval",
+            "source_evaluation_id",
+            "source_review_id",
+            "asset_version_id",
+            "field_key",
+            unique=True,
+            sqlite_where=sql_text("status = 'approved'"),
+        ),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -3150,8 +3165,12 @@ class SemanticTagFact(Base):
     )
     values_json: Mapped[str] = mapped_column(Text)
     evidence_json: Mapped[str] = mapped_column(Text)
-    source_evaluation_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
-    source_review_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    source_evaluation_id: Mapped[int | None] = mapped_column(
+        ForeignKey("evaluation_results.id", ondelete="RESTRICT"), nullable=True, index=True
+    )
+    source_review_id: Mapped[int | None] = mapped_column(
+        ForeignKey("human_reviews.id", ondelete="RESTRICT"), nullable=True, index=True
+    )
     contract_id: Mapped[int] = mapped_column(
         ForeignKey("tag_demand_contracts.id", ondelete="RESTRICT"), index=True
     )
@@ -3189,7 +3208,9 @@ class SemanticQualityMetricSnapshot(Base):
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    baseline_run_id: Mapped[int] = mapped_column(Integer, index=True)
+    baseline_run_id: Mapped[int] = mapped_column(
+        ForeignKey("baseline_regression_runs.id", ondelete="RESTRICT"), index=True
+    )
     contract_id: Mapped[int] = mapped_column(
         ForeignKey("tag_demand_contracts.id", ondelete="RESTRICT"), index=True
     )

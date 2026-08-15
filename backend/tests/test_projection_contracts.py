@@ -351,3 +351,14 @@ def test_semantic_projection_reads_structured_v2_facts_and_versions() -> None:
         assert row["is_single"] == 0
         assert manifest.json()["input_versions"]["tag_contract_versions"] == ["semantic-platform:3"]
         assert manifest.json()["input_versions"]["mapping_versions"] == ["kg-entity-map-v1"]
+
+
+def test_projection_contract_allows_final_review_provenance() -> None:
+    with _projection_context() as fixture:
+        payload = _contract_payload(contract_key="review-provenance")
+        payload["field_mappings"] = {
+            "content_key": "content_key",
+            "final_review_id": "provenance.final_review_id",
+        }
+        response = fixture["client"].post("/api/projection-contracts", json=payload)
+        assert response.status_code == 200, response.text

@@ -16,6 +16,7 @@ export function SemanticQualityDrawer({
 }) {
   return <SecondaryDrawer open={open} onOpenChange={onOpenChange} size="wide" title="语义字段质量" description="按实体 ID 统计 Precision、Recall、映射覆盖、冲突和人工纠偏证据；不替代原有 L1–L5 等级矩阵。">
     {loading ? <div className="h-52 animate-pulse bg-[#f7f9ef]" /> : error ? <div className="border border-[#d7a09d] bg-[#fff5f4] px-4 py-4 text-sm text-[#8d2924]">语义字段质量加载失败：{error.message}</div> : !data ? <p className="text-sm text-[var(--muted)]">当前轮次尚未形成语义字段质量证据。</p> : <div className="space-y-6">
+      {data.evidence?.status === "unavailable_historical" && <div className="border-y border-[#d7a64d] bg-[#fff9e9] px-4 py-3 text-xs leading-5 text-[#6f5513]">该历史轮次未冻结语义黄金真值，不使用当前黄金集回算，避免历史指标漂移。请用新版回归任务生成可追溯指标。</div>}
       <section className="grid grid-cols-2 gap-px border-y border-[var(--line)] bg-[var(--line)] sm:grid-cols-4"><Metric label="宏 Precision" value={formatRate(data.aggregates.macro_precision)} /><Metric label="宏 Recall" value={formatRate(data.aggregates.macro_recall)} /><Metric label="微 Precision" value={formatRate(data.aggregates.micro_precision)} /><Metric label="微 Recall" value={formatRate(data.aggregates.micro_recall)} /></section>
       <section className="overflow-x-auto border-y border-[var(--line-strong)] bg-white">
         <table className="w-full min-w-[1120px] border-collapse text-left text-xs">

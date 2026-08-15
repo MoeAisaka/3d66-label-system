@@ -56,7 +56,11 @@ from .mechanism_profiles import (
 )
 from .models import CategoryEvaluationV3Config, CategoryEvaluationV3Revision
 from .models import TagDemandContract
-from .semantic_tag_contracts import SemanticTagContractError, validate_tag_demand_contract
+from .semantic_tag_contracts import (
+    PLATFORM_SEMANTIC_CONTRACT_KEY,
+    SemanticTagContractError,
+    validate_tag_demand_contract,
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -316,7 +320,10 @@ def _detail(db: Session, row: CategoryEvaluationV3Config) -> V3ConfigDetail:
     semantic_tag_applicability: dict[str, Any] | None = None
     active_tag_contract = db.scalar(
         select(TagDemandContract)
-        .where(TagDemandContract.status == "active")
+        .where(
+            TagDemandContract.contract_key == PLATFORM_SEMANTIC_CONTRACT_KEY,
+            TagDemandContract.status == "active",
+        )
         .order_by(TagDemandContract.version.desc(), TagDemandContract.id.desc())
         .limit(1)
     )

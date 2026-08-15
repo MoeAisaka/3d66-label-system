@@ -428,6 +428,7 @@ def attach_semantic_candidates(
         "contract_id": route.contract_id,
         "contract_version": route.contract_version,
         "contract_hash": route.contract_hash,
+        "asset_version_id": route.asset_version_id,
         "site_scope": route.site_scope,
         "asset_scope": route.asset_scope,
         "locale": route.locale,

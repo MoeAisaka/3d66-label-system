@@ -133,11 +133,15 @@ from .models import (
 )
 from .audit import append_audit_event, canonical_json
 from .semantic_tag_contracts import (
+    PLATFORM_SEMANTIC_CONTRACT_KEY,
     SemanticTagContractError,
     canonical_contract_hash,
     validate_tag_demand_contract,
 )
-from .semantic_tag_quality import compute_semantic_quality_metrics
+from .semantic_tag_quality import (
+    build_run_semantic_quality,
+    freeze_semantic_truth_snapshot,
+)
 from .projection_contracts import (
     LocalProjectionAdapter,
     ProjectionContractError,
@@ -9917,6 +9921,42 @@ def create_baseline_run(
     execution_payload["execution_mode"] = request.execution_mode
     execution_payload["selection_explicit"] = request.baseline_item_ids is not None
     execution_payload["category_context"] = category_context
+    execution_payload["semantic_truth_snapshot"] = freeze_semantic_truth_snapshot(
+        db,
+        category_key=baseline_set.category_key,
+        asset_ids=[item.asset_id for item in frozen_items],
+    )
+    active_semantic_contract = db.scalar(
+        select(TagDemandContract)
+        .where(
+            TagDemandContract.contract_key == PLATFORM_SEMANTIC_CONTRACT_KEY,
+            TagDemandContract.status == "active",
+        )
+        .order_by(TagDemandContract.version.desc(), TagDemandContract.id.desc())
+        .limit(1)
+    )
+    if active_semantic_contract is not None:
+        try:
+            semantic_definition = validate_tag_demand_contract(
+                json.loads(active_semantic_contract.definition_json)
+            )
+        except (SemanticTagContractError, json.JSONDecodeError):
+            semantic_definition = None
+        if semantic_definition is not None:
+            site_scopes = {
+                variant.site_scope
+                for variant in semantic_definition.execution_variants
+                if variant.category_key == baseline_set.category_key
+            }
+            if len(site_scopes) == 1:
+                execution_payload["semantic_quality_context"] = {
+                    "contract_id": active_semantic_contract.id,
+                    "contract_key": active_semantic_contract.contract_key,
+                    "contract_version": active_semantic_contract.version,
+                    "contract_hash": active_semantic_contract.contract_hash,
+                    "site_scope": next(iter(site_scopes)),
+                    "asset_scope": "unknown",
+                }
     execution_snapshot = baseline_canonical_json(execution_payload)
     previous = db.scalar(
         select(BaselineRegressionRun)
@@ -10241,68 +10281,14 @@ def baseline_run_semantic_metrics(
     run = db.get(BaselineRegressionRun, run_id)
     if run is None:
         raise HTTPException(status_code=404, detail="基准回归 run 不存在")
-    truth_by_asset: dict[str, dict[str, set[str]]] = {}
-    predicted_by_asset: dict[str, dict[str, set[str]]] = {}
-    mapping_stats: dict[str, dict[str, int]] = {}
-    review_stats: dict[str, dict[str, int]] = {}
-    reconciliation_stats = {"expected": 0, "matched": 0}
-    for item in run.items:
-        snapshot = _json_object(item.result_snapshot_json)
-        golden = db.scalar(
-            select(SampleSetItem)
-            .join(SampleSet, SampleSet.id == SampleSetItem.sample_set_id)
-            .where(
-                SampleSet.category_key == run.category_key,
-                SampleSet.kind == "golden",
-                SampleSet.status == "locked",
-                SampleSetItem.asset_id == item.asset_id,
-            )
-            .order_by(SampleSetItem.truth_revision.desc(), SampleSetItem.id.desc())
-        )
-        truth_payload = _json_object(golden.truth_json) if golden else {}
-        semantic_truth = truth_payload.get("semantic") or {}
-        semantic_pred = snapshot.get("semantic") or snapshot.get("semantic_candidates") or {}
-        asset_key = str(item.asset_id)
-        truth_by_asset[asset_key] = {
-            str(field): _semantic_entity_values(value)
-            for field, value in semantic_truth.items()
-            if isinstance(field, str)
-        }
-        predicted_by_asset[asset_key] = {
-            str(field): _semantic_entity_values(value)
-            for field, value in semantic_pred.items()
-            if isinstance(field, str)
-        }
-        for field_key, value in semantic_pred.items():
-            if not isinstance(field_key, str):
-                continue
-            candidates = value.get("values") if isinstance(value, Mapping) else value
-            candidate_count = len(candidates) if isinstance(candidates, list) else 0
-            stats = snapshot.get("semantic_mapping_stats", {}).get(field_key, {}) if isinstance(snapshot.get("semantic_mapping_stats"), Mapping) else {}
-            mapping_stats[field_key] = {
-                "candidate": mapping_stats.get(field_key, {}).get("candidate", 0) + int(stats.get("candidate", candidate_count)),
-                "mapped": mapping_stats.get(field_key, {}).get("mapped", 0) + int(stats.get("mapped", candidate_count)),
-                "unmapped": mapping_stats.get(field_key, {}).get("unmapped", 0) + int(stats.get("unmapped", 0)),
-                "conflicted": mapping_stats.get(field_key, {}).get("conflicted", 0) + int(stats.get("conflicted", 0)),
-                "evaluated": mapping_stats.get(field_key, {}).get("evaluated", 0) + 1,
-            }
-            review_stats.setdefault(field_key, {
-                "corrected": 0,
-                "reviewed": 0,
-                "required": 0,
-                "null_truth": 0,
-                "null_correct": 0,
-                "bilingual": 0,
-                "bilingual_consistent": 0,
-            })
-    report = compute_semantic_quality_metrics(
-        truth_by_asset=truth_by_asset,
-        predicted_by_asset=predicted_by_asset,
-        mapping_stats=mapping_stats,
-        review_stats=review_stats,
-        reconciliation_stats=reconciliation_stats,
-    )
-    return {"run_id": run.id, "category_key": run.category_key, **report.to_dict()}
+    report, evidence, context = build_run_semantic_quality(run)
+    return {
+        "run_id": run.id,
+        "category_key": run.category_key,
+        **report.to_dict(),
+        "evidence": evidence,
+        "contract": context or None,
+    }
 
 
 def _baseline_correction_payload(row: BaselineCorrectionRun) -> dict[str, Any]:

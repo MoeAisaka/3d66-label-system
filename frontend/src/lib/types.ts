@@ -459,6 +459,23 @@ export type BaselineSemanticQualityMetrics = {
     micro_recall: number | null
   }
   reconciliation_rate: number | null
+  evidence?: {
+    status: "ready" | "unavailable_historical"
+    truth_source: "frozen_run_snapshot" | "unavailable"
+    truth_asset_count: number
+    truth_revision_min: number | null
+    truth_revision_max: number | null
+    review_evidence_item_count: number
+    reconciliation_evidence_item_count: number
+  }
+  contract?: {
+    contract_id: number
+    contract_key: string
+    contract_version: number
+    contract_hash: string
+    site_scope: "domestic" | "overseas"
+    asset_scope: "whole" | "single" | "other" | "unknown"
+  } | null
 }
 
 export type BaselinePromptSelection = {
