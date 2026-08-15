@@ -54,6 +54,37 @@ def _request(*, status: str = "draft") -> dict[str, object]:
     return {"contract_key": "semantic-platform", "definition": _definition(), "status": status}
 
 
+def _definition_v2() -> dict[str, object]:
+    from tests.test_semantic_tag_contracts import valid_contract_v2
+
+    return valid_contract_v2()
+
+
+def _create_and_approve_identity_verification(
+    client: TestClient,
+) -> dict[str, object]:
+    created = client.post(
+        "/api/source-identity-verifications",
+        json={
+            "contract_key": "semantic-platform",
+            "source_system": "aliyun_3d66_dw",
+            "key_fields": ["res_type", "ll_id"],
+            "result": "verified",
+            "probe_hash": "a" * 64,
+            "data_window": "2026-08-01/2026-08-15",
+            "scoped_row_count": 100,
+            "duplicate_key_count": 0,
+            "res_id_conflict_count": 0,
+        },
+    )
+    assert created.status_code == 201, created.text
+    approved = client.post(
+        f"/api/source-identity-verifications/{created.json()['id']}/approve"
+    )
+    assert approved.status_code == 200, approved.text
+    return approved.json()
+
+
 @contextmanager
 def _context() -> Iterator[dict[str, object]]:
     engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
@@ -147,3 +178,49 @@ def test_contract_detail_never_returns_secrets_or_raw_payloads() -> None:
         serialized = json.dumps(detail.json(), ensure_ascii=False)
         assert "api_key" not in serialized
         assert "raw_response" not in serialized
+
+
+def test_binding_identity_verification_appends_candidate_without_mutating_source() -> None:
+    with _context() as fixture:
+        client = fixture["client"]
+        app.dependency_overrides[current_user] = _as_user(fixture["admin"])
+        draft = client.post(
+            "/api/tag-demand-contracts",
+            json={
+                "contract_key": "semantic-platform",
+                "definition": _definition_v2(),
+                "status": "draft",
+            },
+        ).json()
+        verification = _create_and_approve_identity_verification(client)
+        bound = client.post(
+            f"/api/tag-demand-contracts/{draft['id']}/bind-source-identity-verification",
+            json={"verification_id": verification["id"]},
+        )
+        assert bound.status_code == 200, bound.text
+        assert bound.json()["version"] == draft["version"] + 1
+        assert bound.json()["status"] == "candidate"
+        source_identity = bound.json()["definition"]["source_identity"]
+        assert source_identity["uniqueness_status"] == "verified"
+        assert source_identity["verification_evidence_hash"] == verification["probe_hash"]
+        original = client.get(f"/api/tag-demand-contracts/{draft['id']}").json()
+        assert original["definition"]["source_identity"]["uniqueness_status"] == (
+            "unverified"
+        )
+
+
+def test_v2_contract_activation_requires_bound_approved_identity() -> None:
+    with _context() as fixture:
+        client = fixture["client"]
+        app.dependency_overrides[current_user] = _as_user(fixture["admin"])
+        draft = client.post(
+            "/api/tag-demand-contracts",
+            json={
+                "contract_key": "semantic-platform",
+                "definition": _definition_v2(),
+                "status": "candidate",
+            },
+        ).json()
+        blocked = client.post(f"/api/tag-demand-contracts/{draft['id']}/activate")
+        assert blocked.status_code == 409
+        assert "尚未签认" in blocked.json()["detail"]

@@ -118,6 +118,7 @@ def test_content_created_builds_incremental_package(monkeypatch) -> None:
         body = response.json()
         assert body["workflow_kind"] == "incremental"
         assert body["routing_status"] == "packaged"
+        assert body["content"]["content_key"] == "upstream-sim:asset-1"
         assert body["package_created"] is True
         assert body["writes_evaluation_job"] is False
         package = db.get(MaterialPackage, body["material_package_id"])
