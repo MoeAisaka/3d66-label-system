@@ -17,7 +17,7 @@
 
 - 后端全量：`1402 passed, 1 skipped, 6 warnings`；warning 仅为既有 FastAPI/httpx 与 PDF SWIG 弃用提示。
 - 前端全部合同脚本、Lightbox、回归等级指标、TypeScript lint 和 Vite production build 通过；仅保留既有主 chunk 大于 500 kB warning。
-- Codeup 功能分支已先行更新到审查前 `48360c0`；审查修复尚待提交并重新推送。`main` 和测试服仍保持 `db516c2`，尚未部署 migration 68/69。
+- 审查修复已提交为 `6a3496b` 并推送到 Codeup 功能分支；当前等待 MR 合并和测试服部署。`main` 和测试服仍保持 `db516c2`，尚未部署 migration 68/69。
 - 发布边界不变：只允许 Codeup main 和公司内网测试服；不连接真实上游、业务数据库、知识图谱、真实模型或生产环境，不自动激活候选、发布标签或覆盖存量。
 
 ## 最新实施：基准回归运行配置与 V3 多版本等级证据（2026-08-14）
