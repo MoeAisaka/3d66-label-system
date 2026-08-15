@@ -93,6 +93,10 @@ from .optimization_automation import (
     optimization_worker_tick,
     touch_automation_worker_status,
 )
+from .workflow_fixture_executor import (
+    process_runtime_step_once as process_workflow_runtime_step_once,
+    recover_runtime_once,
+)
 from .production_dimension_contract import (
     ProductionDimensionContractError,
     resolve_frozen_dimension_contract,
@@ -2806,6 +2810,15 @@ def _handle_technical_failure(
 
 
 async def process_one() -> bool:
+    try:
+        recover_runtime_once()
+        if process_workflow_runtime_step_once(WORKER_ID):
+            return True
+    except Exception as exc:
+        if is_sqlite_lock_error(exc):
+            logger.warning("工作流运行时 SQLite 锁冲突，本轮继续旧评测队列：%s", exc)
+        else:
+            logger.exception("工作流运行时 tick 失败，旧评测队列继续运行：%s", exc)
     job_id: int | None = None
     for attempt in range(4):
         try:

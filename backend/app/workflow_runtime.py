@@ -686,6 +686,98 @@ def recover_expired_runtime_steps(
     return recovered
 
 
+def fail_runtime_step(
+    db: Session,
+    attempt_id: int,
+    lease_token: str,
+    error_code: str,
+    error_message: str,
+    *,
+    retryable: bool = True,
+    now: datetime | None = None,
+) -> ProductionStepAttempt:
+    attempt = db.get(ProductionStepAttempt, attempt_id)
+    if (
+        attempt is None
+        or attempt.status not in {"leased", "running"}
+        or attempt.lease_token != lease_token
+    ):
+        raise WorkflowRuntimeError(
+            "step_lease_stale",
+            "步骤租约已失效",
+            status_code=409,
+        )
+    current = _now(now)
+    dispatch = db.scalar(
+        select(RuntimeDispatchItem).where(
+            RuntimeDispatchItem.step_attempt_id == attempt.id
+        )
+    )
+    if dispatch is not None:
+        dispatch.status = "completed"
+    attempt.status = "failed"
+    attempt.last_error_code = error_code
+    attempt.last_error_message = error_message
+    attempt.finished_at = current
+    run = db.get(ProductionRun, attempt.run_id)
+    script = db.get(ScriptVersion, attempt.script_version_id)
+    if run is None or script is None:
+        raise WorkflowRuntimeError(
+            "runtime_evidence_missing",
+            "步骤关联的运行或脚本版本不存在",
+            status_code=409,
+        )
+    if retryable and attempt.attempt_no < script.max_attempts:
+        next_number = attempt.attempt_no + 1
+        next_attempt = ProductionStepAttempt(
+            run_id=attempt.run_id,
+            step_key=attempt.step_key,
+            step_type=attempt.step_type,
+            sequence=attempt.sequence,
+            script_version_id=attempt.script_version_id,
+            status="retryable",
+            attempt_no=next_number,
+            idempotency_key=(
+                f"{run.run_key}:{attempt.step_key}:{attempt.input_hash}:"
+                f"attempt:{next_number}"
+            ),
+            input_manifest_json=attempt.input_manifest_json,
+            input_hash=attempt.input_hash,
+            output_manifest_json="{}",
+            checkpoint_json=attempt.checkpoint_json,
+            checkpoint_hash=attempt.checkpoint_hash,
+            last_error_code="",
+            last_error_message="",
+        )
+        db.add(next_attempt)
+        db.flush()
+        db.add(
+            RuntimeDispatchItem(
+                step_attempt_id=next_attempt.id,
+                queue_class="recovery",
+                priority=100,
+                status="queued",
+                available_at=current,
+            )
+        )
+        run.status = "retryable"
+        run.current_step_key = attempt.step_key
+        run.error_code = error_code
+        run.error_message = error_message
+        run.lease_owner = None
+        run.lease_token = None
+        run.lease_expires_at = None
+        db.flush()
+        return next_attempt
+    run.status = "failed"
+    run.failed_steps += 1
+    run.error_code = error_code
+    run.error_message = error_message
+    run.finished_at = current
+    db.flush()
+    return attempt
+
+
 def resume_from_checkpoint(
     db: Session,
     run_id: int,
