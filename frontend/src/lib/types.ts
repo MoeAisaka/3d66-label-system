@@ -430,6 +430,37 @@ export type BaselineFieldMetrics = {
   }
 }
 
+export type BaselineSemanticFieldMetric = {
+  field_key: string
+  truth_count: number
+  predicted_count: number
+  true_positive_count: number
+  precision: number | null
+  recall: number | null
+  mapping_coverage: number | null
+  unmapped_rate: number | null
+  conflict_rate: number | null
+  null_semantics_accuracy: number | null
+  correction_rate: number | null
+  review_coverage: number | null
+  bilingual_consistency: number | null
+  reconciliation_rate: number | null
+}
+
+export type BaselineSemanticQualityMetrics = {
+  schema_version: "semantic-quality-metrics-v1"
+  run_id: number
+  category_key: string
+  fields: Record<string, BaselineSemanticFieldMetric>
+  aggregates: {
+    macro_precision: number | null
+    macro_recall: number | null
+    micro_precision: number | null
+    micro_recall: number | null
+  }
+  reconciliation_rate: number | null
+}
+
 export type BaselinePromptSelection = {
   id: number | null
   stage: "A" | "B"

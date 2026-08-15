@@ -1,7 +1,7 @@
 import { Suspense, useEffect, useMemo, useState } from "react"
 import { ArrowClockwise, Plus, WarningCircle } from "@phosphor-icons/react"
 import { useQuery } from "@tanstack/react-query"
-import { useSearchParams } from "react-router-dom"
+import { Link, useSearchParams } from "react-router-dom"
 
 import { PageHeader } from "@/components/app-shell"
 import { EvaluationBoundaryNote } from "@/components/evaluation-boundary-note"
@@ -434,6 +434,13 @@ export function CategoryEvaluationV3ConfigPage() {
                   catalog={profileCatalog.data?.items ?? []}
                   workflowKind={workflowKind}
                 />
+                {!isNew && detailQuery.data?.semantic_tag_applicability && (() => {
+                  const semantic_tag_applicability = detailQuery.data.semantic_tag_applicability
+                  return <section className="flex flex-wrap items-center justify-between gap-3 border-y border-[var(--line)] bg-white px-4 py-4 text-xs">
+                    <div><p className="font-semibold">平台语义字段适用性</p><p className="mt-1 text-[var(--muted)]">合同 v{semantic_tag_applicability.contract_version} · {semantic_tag_applicability.contract_hash.slice(0, 12)}…</p></div>
+                    <div className="flex flex-wrap items-center gap-2"><Badge tone="success">必填 {semantic_tag_applicability.field_counts.required ?? 0}</Badge><Badge>可选 {semantic_tag_applicability.field_counts.optional ?? 0}</Badge><Badge tone="neutral">不适用 {semantic_tag_applicability.field_counts.not_applicable ?? 0}</Badge><Button asChild size="sm" variant="secondary"><Link to="/workflow/governance/tag-demand-contracts">查看字段合同</Link></Button></div>
+                  </section>
+                })()}
                 <MechanismEditorBoundary
                   detail={selectedRevision}
                   workflowKind={workflowKind}

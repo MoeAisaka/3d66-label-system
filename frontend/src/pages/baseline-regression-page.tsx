@@ -15,6 +15,7 @@ import { toast } from "sonner"
 
 import { PageHeader } from "@/components/app-shell"
 import { StatusSummaryStrip } from "@/components/workspace-page"
+import { SemanticQualityDrawer } from "@/components/semantic-quality-drawer"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -32,6 +33,7 @@ import type {
   BaselineFieldMetrics,
   BaselineRegressionItem,
   BaselineRegressionRun,
+  BaselineSemanticQualityMetrics,
   BaselineV3Revision,
   EvaluationCategoryProfile,
   MaterialPackage,
@@ -95,6 +97,7 @@ export function BaselineRegressionPage() {
   const [baselineSetDialogOpen, setBaselineSetDialogOpen] = useState(false)
   const [runConfigDrawerOpen, setRunConfigDrawerOpen] = useState(false)
   const [metricsDrawerOpen, setMetricsDrawerOpen] = useState(false)
+  const [semanticQualityDrawerOpen, setSemanticQualityDrawerOpen] = useState(false)
   const [runHistoryDrawerOpen, setRunHistoryDrawerOpen] = useState(false)
 
   const categories = useQuery({
@@ -153,6 +156,12 @@ export function BaselineRegressionPage() {
   const fieldMetrics = useQuery({
     queryKey: ["baseline-field-metrics", selectedRunId],
     queryFn: () => baselineRegressionApi.getMetrics(selectedRunId),
+    enabled: selectedRunId > 0,
+    refetchInterval: runDetail.data?.summary.status === "running" ? 3000 : false,
+  })
+  const semanticMetrics = useQuery<BaselineSemanticQualityMetrics>({
+    queryKey: ["baseline-semantic-metrics", selectedRunId],
+    queryFn: () => baselineRegressionApi.getSemanticMetrics(selectedRunId),
     enabled: selectedRunId > 0,
     refetchInterval: runDetail.data?.summary.status === "running" ? 3000 : false,
   })
@@ -612,6 +621,13 @@ export function BaselineRegressionPage() {
               disabled={!selectedRunId}
             >
               查看字段证据
+            </Button>
+            <Button
+              variant="secondary"
+              onClick={() => setSemanticQualityDrawerOpen(true)}
+              disabled={!selectedRunId}
+            >
+              语义字段质量
             </Button>
             <Button
               variant="secondary"
@@ -1249,6 +1265,13 @@ export function BaselineRegressionPage() {
           />
         </MetricsDrawer>
       )}
+      <SemanticQualityDrawer
+        open={semanticQualityDrawerOpen}
+        onOpenChange={setSemanticQualityDrawerOpen}
+        data={semanticMetrics.data}
+        loading={semanticMetrics.isLoading}
+        error={semanticMetrics.error}
+      />
     </>
   )
 }

@@ -5,6 +5,7 @@ import type {
   BaselineLevel,
   BaselineRegressionDetail,
   BaselineRegressionRun,
+  BaselineSemanticQualityMetrics,
   BaselineSetDetail,
   BaselineSetSummary,
   BaselineV3RevisionList,
@@ -228,6 +229,9 @@ export const baselineRegressionApi = {
   },
   getMetrics: (runId: number) => api<BaselineFieldMetrics>(
     `/api/baseline-regressions/${runId}/metrics`,
+  ),
+  getSemanticMetrics: (runId: number) => api<BaselineSemanticQualityMetrics>(
+    `/api/baseline-regressions/${runId}/semantic-metrics`,
   ),
   enqueueDeviations: (runId: number, itemIds: number[]) => api<{
     run_id: number
