@@ -85,6 +85,81 @@ def valid_contract() -> dict:
     }
 
 
+def valid_contract_v2() -> dict:
+    contract = valid_contract()
+    contract["schema_version"] = "tag-demand-contract-v2"
+    contract["source_identity"] = {
+        "source_system": "aliyun_3d66_dw",
+        "object_grain": "asset",
+        "identity_fields": ["res_type", "ll_id"],
+        "optional_disambiguator": "res_id",
+        "version_field": "dt",
+        "deletion_field": "is_delete",
+        "uniqueness_status": "unverified",
+        "verification_evidence_hash": None,
+    }
+    contract["field_supply"] = {
+        key: {
+            "field_key": key,
+            "fact_namespace": "semantic",
+            "object_grain": "asset",
+            "production_method": "model" if key != "title" else "source_direct",
+            "source_authority": "tpeng-label-platform",
+            "owner": "tpeng-semantic-platform",
+            "freshness_sla_hours": 24,
+            "null_semantics": ["not_applicable", "not_detected", "unknown"],
+            "rollback_strategy": "previous_release",
+        }
+        for key in contract["semantic_schema"]["fields"]
+    }
+    contract["execution_variants"].append(
+        {
+            "site_scope": "domestic",
+            "asset_scope": "single",
+            "locale": "zh",
+            "category_key": "model_3d_su",
+            "prompt_variant": "single",
+            "prompt_version": "prompt-single-v1",
+            "model_version": "model-v1",
+            "field_applicability_overrides": {"space": "not_applicable"},
+        }
+    )
+    return contract
+
+
+def test_v2_contract_freezes_source_identity_and_field_supply() -> None:
+    parsed = validate_tag_demand_contract(valid_contract_v2())
+    assert parsed.schema_version == "tag-demand-contract-v2"
+    assert parsed.source_identity is not None
+    assert parsed.source_identity.identity_fields == ("res_type", "ll_id")
+    assert parsed.field_supply["style"].production_method == "model"
+    assert parsed.execution_variants[1].field_applicability_overrides["space"] == (
+        "not_applicable"
+    )
+
+
+def test_v2_contract_requires_supply_metadata_for_every_field() -> None:
+    contract = valid_contract_v2()
+    del contract["field_supply"]["material"]
+    with pytest.raises(SemanticTagContractError, match="material.*供给路径"):
+        validate_tag_demand_contract(contract)
+
+
+def test_v2_verified_identity_requires_evidence_hash() -> None:
+    contract = valid_contract_v2()
+    contract["source_identity"]["uniqueness_status"] = "verified"
+    with pytest.raises(SemanticTagContractError, match="verification_evidence_hash"):
+        validate_tag_demand_contract(contract)
+
+
+def test_v1_contract_remains_valid_without_v2_fields() -> None:
+    parsed = validate_tag_demand_contract(valid_contract())
+    assert parsed.schema_version == "tag-demand-contract-v1"
+    assert canonical_contract_hash(parsed) == (
+        "2c0b0b9b08f910651c073012fd4b26e9d0bae42ee66ff4601cf0a7db333b4d1c"
+    )
+
+
 def test_platform_contract_accepts_shared_semantic_fields_and_structured_values() -> None:
     contract = valid_contract()
     parsed = validate_tag_demand_contract(contract)
