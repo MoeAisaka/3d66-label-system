@@ -1991,3 +1991,19 @@ npm.cmd run build
 - MacBook 隔离服务 `127.0.0.1:18148` 已切换到新镜像，health 200、restart 0；
   PDF v2 contract/profile 均为 revision 2。旧容器保留为 `pre-pdfv2` 回退点。
 - 架构决策见 ADR-0038；ADR-0035 已被取代，历史 v1 结果继续只读保留。
+
+## 最新完成：平台语义标签需求合同与 3D/SU 本地纵向切片（2026-08-15）
+
+- 产品口径继续保持为 **TPENG 标签实验台（LabelLab）是标签体系重构的统一产品载体和标签/内容中台通用底座**；本批未创建第二套标签平台，也未把实验台收缩为单纯评测工具。
+- 新增平台级字段需求合同：`space`、`object`、`style`、`material`、`structural_features`、`architectural_element`、`soft_decoration`、`hard_decoration`、`color`，以及按 locale/类目声明的 `title`。多值事实结构化保存值、实体、locale、rank、weight 和 provenance，空值语义区分 `not_applicable`、`not_detected`、`needs_review`。
+- 新增不可变 `AssetVersion`、版本化 `TagDemandContract`、追加式 `SemanticTagFact` 和 `SemanticQualityMetricSnapshot`，数据库迁移为 `add_semantic_tag_contract_registry`（migration 68）。合同激活只切换字段需求版本，不触发评测、标签发布、存量重跑、投影或 outbox。
+- 语义执行按 `site_scope`、`asset_scope`、`locale`、`category_key`、`prompt_variant`、`prompt_version`、`model_version` 统一路由；业务类目只提供适用性和执行变体，不复制模型、纠偏、发布、重跑或投影能力。
+- 模型输出先进入证据候选，经精确值/声明别名实体映射、冲突与未映射标记、人工真值批准后，才追加为 approved Canonical 事实。存在 approved 语义事实的新发布使用 `published-label-v2`；既有 `published-label-v1` 历史继续可读。
+- 字段级质量新增 Precision、Recall、映射覆盖率、未映射率、冲突率、空值语义准确率、纠偏率、审核覆盖率、双语一致率和投影对账率；原有精确等级准确率、相邻等级准确率、推荐档 L1/L2、常规档 L3/L4、过滤档 L5 及完整 5×5 矩阵全部保留。
+- 下游投影继续只消费正式 `PublishedLabel`，支持 semantic/quality/governance 和版本 provenance 的本地/test dry-run 变换、manifest 与对账；候选、模型原始响应、人工过程、凭据字段继续禁止投影。
+- 前端新增“字段需求合同”常规入口、列表型版本管理和宽抽屉详情；类目 v3 页只展示适用性摘要并链接合同页；基准回归新增独立“语义字段质量”抽屉，不平铺完整矩阵。
+- 国内 3D/SU 是首个本地验证切片，不是平台字段专属实现。whole/single 两个确定性 fixture 已跑通路由、标准化、实体映射、人工批准、`published-label-v2`、dry-run 投影和对账；种子合同默认 `draft`，不会自动激活。
+- 验证：聚焦后端 60 passed；完整后端 1395 passed、1 skipped、6 warnings；前端字段合同、信息架构、等级指标合同、TypeScript lint 和 Vite build 全部通过（仅既有主 chunk 警告）；复制 SQLite 的 integrity=`ok`、foreign-key errors=0、migration 68 仅一次。
+- 浏览器：`1440×900` 的字段合同列表/详情抽屉、`1280×720` 的 3D/SU 适用性摘要、基准回归指标入口和本地投影对账均无文档级横向溢出、无白屏、控制台 0 error；主导航没有重复字段合同入口。
+- 当前分支本地实现，**未推送、未合并、未部署**；未连接真实上游、真实业务数据库、真实知识图谱、真实模型或生产环境。下一阶段仍需 Owner 冻结真实词表、字段签认、上下游表合同、权限、金丝雀和回退门禁。
+- 架构决策见 ADR-0047：`docs/decisions/0047-platform-semantic-tag-demand-contract.md`。
