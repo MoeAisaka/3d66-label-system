@@ -306,3 +306,48 @@ def test_projection_drift_detection_never_mutates_canonical_labels() -> None:
         assert result.status == "drift"
         assert result.reason == "payload_hash_mismatch"
         assert canonical_after == canonical_before
+
+
+def test_semantic_projection_reads_structured_v2_facts_and_versions() -> None:
+    with _projection_context() as fixture:
+        with fixture["sessions"]() as db:
+            label = db.scalar(select(PublishedLabel).where(PublishedLabel.content_key == "content:formal-1"))
+            assert label is not None
+            payload = {
+                "schema_version": "published-label-v2",
+                "content_key": label.content_key,
+                "category_key": label.category_key,
+                "semantic": {
+                    "space": {"status": "required", "values": [{"value": "客厅", "entity_id": "space.living", "localized_names": {"zh": "客厅", "en": "Living room"}, "weight": 1.0}]},
+                    "object": {"status": "optional", "values": [{"value": "沙发", "entity_id": "object.sofa", "localized_names": {"zh": "沙发", "en": "Sofa"}, "weight": 0.7}, {"value": "茶几", "entity_id": "object.table", "localized_names": {"zh": "茶几", "en": "Coffee table"}, "weight": 0.3}]},
+                },
+                "provenance": {
+                    "asset_version_id": 11,
+                    "asset_sha256": "c" * 64,
+                    "strategy_bundle_id": 7,
+                    "model_id": "quality-model-v2",
+                    "tag_contract_version": "semantic-platform:3",
+                    "mapping_version": "kg-entity-map-v1",
+                    "asset_scope": "whole",
+                },
+            }
+            label.label_schema_version = "published-label-v2"
+            label.label_payload_json = json.dumps(payload, ensure_ascii=False)
+            db.commit()
+        payload = _contract_payload(contract_key="semantic-v2")
+        payload["field_mappings"] = {
+            "content_key": "content_key",
+            "space": "semantic.space.primary_name.zh",
+            "object": "semantic.object.weighted_names.zh",
+            "is_single": "provenance.is_single",
+        }
+        contract = fixture["client"].post("/api/projection-contracts", json=payload)
+        assert contract.status_code == 200, contract.text
+        manifest = fixture["client"].post(f"/api/projection-contracts/{contract.json()['id']}/manifest")
+        assert manifest.status_code == 200, manifest.text
+        row = manifest.json()["rows"][0]
+        assert row["space"] == "客厅"
+        assert row["object"] == "沙发_0.7,茶几_0.3"
+        assert row["is_single"] == 0
+        assert manifest.json()["input_versions"]["tag_contract_versions"] == ["semantic-platform:3"]
+        assert manifest.json()["input_versions"]["mapping_versions"] == ["kg-entity-map-v1"]
