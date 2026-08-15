@@ -28,6 +28,7 @@ from app.model_3d_su_category_seed import (
     MODEL_3D_SU_CALL_B_VERSION,
     MODEL_3D_SU_CATEGORY_KEY,
     MODEL_3D_SU_RUBRIC_VERSION,
+    MODEL_3D_SU_SEMANTIC_CONTRACT_KEY,
     build_model_3d_su_classification_map,
     build_model_3d_su_contract,
     build_model_3d_su_subcategory_dimensions,
@@ -306,4 +307,87 @@ def test_model_3d_su_semantic_contract_seed_is_draft_and_platform_wide() -> None
         rows = db.scalars(select(TagDemandContract).where(TagDemandContract.contract_key == "semantic-platform")).all()
         assert len(rows) == 1
         assert rows[0].status == "draft"
+    engine.dispose()
+
+
+def test_seed_appends_v2_draft_without_activating_or_overwriting_v1() -> None:
+    engine = _engine()
+    with Session(engine) as db:
+        db.add(ModelConfig(active=True))
+        db.commit()
+        settings = SimpleNamespace(project_root=PROJECT_ROOT)
+        seed_model_3d_su(db, settings)
+        db.commit()
+        first_rows = db.scalars(
+            select(TagDemandContract)
+            .where(
+                TagDemandContract.contract_key == MODEL_3D_SU_SEMANTIC_CONTRACT_KEY
+            )
+            .order_by(TagDemandContract.version)
+        ).all()
+        assert len(first_rows) == 1
+        assert first_rows[0].status == "draft"
+        assert json.loads(first_rows[0].definition_json)["schema_version"] == (
+            "tag-demand-contract-v2"
+        )
+        first_hash = first_rows[0].contract_hash
+
+        seed_model_3d_su(db, settings)
+        db.commit()
+        second_rows = db.scalars(
+            select(TagDemandContract)
+            .where(
+                TagDemandContract.contract_key == MODEL_3D_SU_SEMANTIC_CONTRACT_KEY
+            )
+            .order_by(TagDemandContract.version)
+        ).all()
+        assert len(second_rows) == 1
+        assert second_rows[0].contract_hash == first_hash
+        assert second_rows[0].approved_by is None
+    engine.dispose()
+
+
+def test_seed_appends_v2_after_existing_v1_without_retiring_operator_contract() -> None:
+    from tests.test_semantic_tag_contracts import valid_contract
+
+    engine = _engine()
+    with Session(engine) as db:
+        db.add_all(
+            [
+                ModelConfig(active=True),
+                TagDemandContract(
+                    contract_key=MODEL_3D_SU_SEMANTIC_CONTRACT_KEY,
+                    version=1,
+                    status="active",
+                    definition_json=json.dumps(
+                        valid_contract(), ensure_ascii=False, sort_keys=True
+                    ),
+                    contract_hash="f" * 64,
+                    created_by="operator:semantic-owner",
+                ),
+            ]
+        )
+        db.commit()
+
+        seed_model_3d_su(db, SimpleNamespace(project_root=PROJECT_ROOT))
+        db.commit()
+
+        rows = db.scalars(
+            select(TagDemandContract)
+            .where(
+                TagDemandContract.contract_key == MODEL_3D_SU_SEMANTIC_CONTRACT_KEY
+            )
+            .order_by(TagDemandContract.version)
+        ).all()
+        assert [(row.version, row.status) for row in rows] == [
+            (1, "active"),
+            (2, "draft"),
+        ]
+        assert rows[0].created_by == "operator:semantic-owner"
+        assert json.loads(rows[0].definition_json)["schema_version"] == (
+            "tag-demand-contract-v1"
+        )
+        assert json.loads(rows[1].definition_json)["schema_version"] == (
+            "tag-demand-contract-v2"
+        )
     engine.dispose()

@@ -83,12 +83,53 @@ def build_model_3d_su_semantic_contract() -> dict[str, Any]:
         }
         for key in fields
     }
+    field_supply = {
+        key: {
+            "field_key": key,
+            "fact_namespace": "semantic",
+            "object_grain": "asset",
+            "production_method": (
+                "source_direct"
+                if key == "title"
+                else "hybrid" if key == "space" else "model"
+            ),
+            "source_authority": (
+                "upstream-source+tpeng-label-platform"
+                if key == "title"
+                else "tpeng-label-platform"
+            ),
+            "owner": (
+                "tpeng-content-data"
+                if key == "title"
+                else "tpeng-semantic-platform"
+            ),
+            "freshness_sla_hours": 24,
+            "null_semantics": [
+                "not_applicable",
+                "not_detected",
+                "unknown",
+            ],
+            "rollback_strategy": "previous_release",
+        }
+        for key in fields
+    }
     payload = {
-        "schema_version": "tag-demand-contract-v1",
+        "schema_version": "tag-demand-contract-v2",
         "semantic_schema": {
             "schema_version": "semantic-tag-schema-v1",
             "fields": fields,
         },
+        "source_identity": {
+            "source_system": "aliyun_3d66_dw",
+            "object_grain": "asset",
+            "identity_fields": ["res_type", "ll_id"],
+            "optional_disambiguator": "res_id",
+            "version_field": "dt",
+            "deletion_field": "is_delete",
+            "uniqueness_status": "unverified",
+            "verification_evidence_hash": None,
+        },
+        "field_supply": field_supply,
         "category_applicability": {MODEL_3D_SU_CATEGORY_KEY: applicability},
         "execution_variants": [
             {
@@ -99,6 +140,11 @@ def build_model_3d_su_semantic_contract() -> dict[str, Any]:
                 "prompt_variant": asset_scope,
                 "prompt_version": f"model-3d-su-semantic-{asset_scope}-v1",
                 "model_version": "fixture-model-v1",
+                "field_applicability_overrides": (
+                    {"space": "not_applicable"}
+                    if asset_scope == "single"
+                    else {}
+                ),
             }
             for asset_scope in ("whole", "single")
         ],
@@ -107,25 +153,38 @@ def build_model_3d_su_semantic_contract() -> dict[str, Any]:
             {"target_key": "domestic_material_tags", "mode": "dry_run", "locale": "zh"}
         ],
     }
-    return validate_tag_demand_contract(payload).model_dump(mode="json")
+    definition = validate_tag_demand_contract(payload).model_dump(mode="json")
+    for variant in definition["execution_variants"]:
+        variant.setdefault("field_applicability_overrides", {})
+    return definition
 
 
 def _seed_model_3d_su_semantic_contract(db: Session) -> TagDemandContract:
+    definition = validate_tag_demand_contract(build_model_3d_su_semantic_contract())
+    contract_hash = semantic_contract_hash(definition)
     existing = db.scalar(
+        select(TagDemandContract)
+        .where(
+            TagDemandContract.contract_key == MODEL_3D_SU_SEMANTIC_CONTRACT_KEY,
+            TagDemandContract.contract_hash == contract_hash,
+        )
+        .order_by(TagDemandContract.version.asc())
+        .limit(1)
+    )
+    if existing is not None:
+        return existing
+    latest = db.scalar(
         select(TagDemandContract)
         .where(TagDemandContract.contract_key == MODEL_3D_SU_SEMANTIC_CONTRACT_KEY)
         .order_by(TagDemandContract.version.desc())
         .limit(1)
     )
-    if existing is not None:
-        return existing
-    definition = validate_tag_demand_contract(build_model_3d_su_semantic_contract())
     row = TagDemandContract(
         contract_key=MODEL_3D_SU_SEMANTIC_CONTRACT_KEY,
-        version=1,
+        version=(latest.version + 1) if latest else 1,
         status="draft",
         definition_json=canonical_json(definition.model_dump(mode="json")),
-        contract_hash=semantic_contract_hash(definition),
+        contract_hash=contract_hash,
         created_by=MODEL_3D_SU_CREATED_BY,
     )
     db.add(row)
