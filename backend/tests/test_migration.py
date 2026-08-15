@@ -85,6 +85,7 @@ MIGRATION_NAMES = [
     "add_semantic_tag_contract_registry",
     "harden_semantic_tag_fact_provenance",
     "add_source_identity_verification",
+    "add_script_workflow_runtime",
 ]
 
 
@@ -3409,5 +3410,45 @@ def test_migration_26_repairs_dangling_prompt_fk_and_allows_real_insert(
             assert connection.exec_driver_sql(
                 "PRAGMA foreign_key_check"
             ).all() == []
+    finally:
+        engine.dispose()
+
+
+def test_migration_71_creates_runtime_tables_without_rewriting_history(tmp_path) -> None:
+    engine = create_engine(f"sqlite:///{tmp_path / 'runtime-v71.db'}")
+    try:
+        with engine.begin() as connection:
+            connection.exec_driver_sql(
+                "CREATE TABLE evaluation_production_runs "
+                "(id INTEGER PRIMARY KEY, status VARCHAR(30) NOT NULL)"
+            )
+            connection.exec_driver_sql(
+                "INSERT INTO evaluation_production_runs (id, status) "
+                "VALUES (7, 'published')"
+            )
+            migration = next(item for item in MIGRATIONS if item.version == 71)
+            migration.up(connection)
+            migration.up(connection)
+
+            tables = {
+                row[0]
+                for row in connection.exec_driver_sql(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                )
+            }
+            assert {
+                "script_definitions",
+                "script_versions",
+                "workflow_definitions",
+                "workflow_versions",
+                "production_runs",
+                "production_step_attempts",
+                "runtime_dispatch_items",
+                "runtime_audit_events",
+            } <= tables
+            assert connection.exec_driver_sql(
+                "SELECT status FROM evaluation_production_runs WHERE id=7"
+            ).scalar_one() == "published"
+            assert connection.exec_driver_sql("PRAGMA foreign_key_check").all() == []
     finally:
         engine.dispose()
