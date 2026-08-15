@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from copy import deepcopy
-from typing import Any
+from typing import Any, Mapping
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -402,6 +402,29 @@ def normalize_production_fields(
         "trait": trait,
     }
     return precheck
+
+
+def attach_semantic_candidates(
+    precheck: dict[str, Any],
+    *,
+    route: Any,
+    provider_payload: Mapping[str, Any],
+    evidence_prefix: str,
+) -> dict[str, Any]:
+    """Attach normalized semantic evidence candidates without publishing facts."""
+    from .semantic_tag_mapping import candidate_payload, normalize_semantic_candidates
+
+    normalized = deepcopy(precheck)
+    bundles = normalize_semantic_candidates(
+        route=route,
+        provider_payload=provider_payload,
+        evidence_prefix=evidence_prefix,
+    )
+    normalized["semantic_candidates"] = {
+        field_key: [candidate_payload(item) for item in bundle.values]
+        for field_key, bundle in bundles.items()
+    }
+    return normalized
 
 
 def normalize_precheck_business_rules(precheck: dict[str, Any]) -> dict[str, Any]:
