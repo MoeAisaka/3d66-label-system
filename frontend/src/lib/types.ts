@@ -1286,6 +1286,76 @@ export type QueueStatus = {
   control_paused: boolean
 }
 
+export type RuntimeAction = "pause" | "resume" | "retry" | "cancel"
+
+export type ProductionRunSummary = {
+  id: number
+  run_key: string
+  idempotency_key: string
+  source_type: string | null
+  source_id: number | null
+  source_run_id: number | null
+  workflow_definition_id: number
+  workflow_version_id: number
+  workflow_version: string
+  snapshot_hash: string
+  category_key: string | null
+  queue_class: Job["queue_class"]
+  status: "planned" | "queued" | "running" | "paused" | "succeeded" | "failed" | "retryable" | "blocked" | "canceled"
+  current_step_key: string | null
+  blockers: Array<{ code?: string; message?: string; owner?: string } | string>
+  requested_by: string
+  owner: string
+  reason: string
+  environment: "dry_run"
+  total_steps: number
+  completed_steps: number
+  failed_steps: number
+  last_checkpoint_id: number | null
+  attempt_count: number
+  next_retry_at: string | null
+  error_code: string
+  error_message: string
+  created_at: string
+  updated_at: string
+  started_at: string | null
+  finished_at: string | null
+  allowed_actions: RuntimeAction[]
+  duplicate?: boolean
+}
+
+export type RuntimeTimelineItem = {
+  id: number
+  step_key: string
+  step_type: string
+  sequence: number
+  attempt_no: number
+  status: string
+  script_version_id: number
+  script_version: string
+  queue_class: Job["queue_class"] | null
+  input_hash: string
+  output_hash: string | null
+  checkpoint_hash: string | null
+  lease_owner: string | null
+  lease_expires_at: string | null
+  last_error_code: string
+  last_error_message: string
+  started_at: string | null
+  finished_at: string | null
+}
+
+export type RuntimeSnapshot = {
+  run_key: string
+  snapshot_hash: string
+  snapshot: {
+    schema_version: string
+    workflow: Record<string, unknown>
+    scripts: Array<Record<string, unknown>>
+    runtime_context: Record<string, unknown>
+  }
+}
+
 export type CircuitBreaker = {
   id: number
   scope_type: "strategy" | "batch"
