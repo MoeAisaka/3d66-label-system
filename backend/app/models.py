@@ -2908,6 +2908,58 @@ class ProductionFeedbackEvent(Base):
     )
 
 
+class SourceIdentityVerification(Base):
+    """Human-approved evidence for one upstream source identity contract."""
+
+    __tablename__ = "source_identity_verifications"
+    __table_args__ = (
+        CheckConstraint(
+            "result IN ('verified','conflict')",
+            name="ck_source_identity_verifications_result",
+        ),
+        CheckConstraint(
+            "status IN ('draft','approved','superseded','rejected')",
+            name="ck_source_identity_verifications_status",
+        ),
+        CheckConstraint(
+            "length(probe_hash) = 64",
+            name="ck_source_identity_verifications_probe_hash",
+        ),
+        CheckConstraint(
+            "scoped_row_count >= 0 AND duplicate_key_count >= 0 "
+            "AND res_id_conflict_count >= 0",
+            name="ck_source_identity_verifications_counts",
+        ),
+        Index(
+            "uq_source_identity_verifications_approved_source",
+            "contract_key",
+            "source_system",
+            unique=True,
+            sqlite_where=sql_text("status = 'approved'"),
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    contract_key: Mapped[str] = mapped_column(String(120), index=True)
+    source_system: Mapped[str] = mapped_column(String(120), index=True)
+    key_fields_json: Mapped[str] = mapped_column(Text)
+    result: Mapped[str] = mapped_column(String(20), index=True)
+    probe_hash: Mapped[str] = mapped_column(String(64), index=True)
+    data_window: Mapped[str] = mapped_column(String(120))
+    scoped_row_count: Mapped[int] = mapped_column(Integer)
+    duplicate_key_count: Mapped[int] = mapped_column(Integer)
+    res_id_conflict_count: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(20), default="draft", index=True)
+    created_by: Mapped[str] = mapped_column(String(80))
+    approved_by: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, index=True
+    )
+    approved_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+
 class ContentRecord(Base):
     """Local projection of an upstream content item, never a remote DB mirror."""
 
@@ -2920,6 +2972,21 @@ class ContentRecord(Base):
             "status IN ('awaiting_material','ready','deleted')",
             name="ck_content_records_status",
         ),
+        CheckConstraint(
+            "identity_status IN "
+            "('legacy_unverified','pending_verification','verified','conflict')",
+            name="ck_content_records_identity_status",
+        ),
+        CheckConstraint(
+            "source_res_type IS NULL OR source_res_type IN (1, 6)",
+            name="ck_content_records_source_res_type",
+        ),
+        Index(
+            "uq_content_records_verified_key",
+            "content_key",
+            unique=True,
+            sqlite_where=sql_text("content_key IS NOT NULL"),
+        ),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -2928,6 +2995,22 @@ class ContentRecord(Base):
     category_key: Mapped[str] = mapped_column(String(40), index=True)
     source_version: Mapped[str] = mapped_column(String(120))
     source_occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    content_key: Mapped[str | None] = mapped_column(String(320), nullable=True)
+    source_res_type: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    source_ll_id: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    source_res_id: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    identity_status: Mapped[str] = mapped_column(
+        String(30),
+        default="legacy_unverified",
+        server_default="legacy_unverified",
+        index=True,
+    )
+    identity_hash: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    identity_verification_id: Mapped[int | None] = mapped_column(
+        ForeignKey("source_identity_verifications.id", ondelete="RESTRICT"),
+        nullable=True,
+        index=True,
+    )
     asset_id: Mapped[int | None] = mapped_column(
         ForeignKey("assets.id", ondelete="RESTRICT"), nullable=True, index=True
     )
@@ -2938,6 +3021,7 @@ class ContentRecord(Base):
     )
 
     asset: Mapped[Asset | None] = relationship()
+    identity_verification: Mapped[SourceIdentityVerification | None] = relationship()
 
 
 class ContentIngressEvent(Base):
@@ -2962,6 +3046,13 @@ class ContentIngressEvent(Base):
     occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     payload_hash: Mapped[str] = mapped_column(String(64), index=True)
     payload_json: Mapped[str] = mapped_column(Text)
+    identity_snapshot_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    identity_hash: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    identity_verification_id: Mapped[int | None] = mapped_column(
+        ForeignKey("source_identity_verifications.id", ondelete="RESTRICT"),
+        nullable=True,
+        index=True,
+    )
     content_record_id: Mapped[int | None] = mapped_column(
         ForeignKey("content_records.id", ondelete="RESTRICT"), nullable=True, index=True
     )
@@ -2972,6 +3063,7 @@ class ContentIngressEvent(Base):
     )
 
     content_record: Mapped[ContentRecord | None] = relationship()
+    identity_verification: Mapped[SourceIdentityVerification | None] = relationship()
 
 
 class LabelRelease(Base):

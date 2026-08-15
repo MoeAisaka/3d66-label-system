@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 
 import pytest
 from sqlalchemy import create_engine, select
@@ -14,11 +15,14 @@ from app.models import (
     AssetVersion,
     BaselineRegressionRun,
     BaselineSet,
+    ContentIngressEvent,
+    ContentRecord,
     LabelRelease,
     PublishedLabel,
     SemanticQualityMetricSnapshot,
     SemanticTagFact,
     StrategyBundle,
+    SourceIdentityVerification,
     TagDemandContract,
 )
 
@@ -43,6 +47,155 @@ def _contract() -> TagDemandContract:
         contract_hash="a" * 64,
         created_by="test-owner",
     )
+
+
+def test_migration_70_preserves_legacy_content_records_as_unverified(tmp_path) -> None:
+    engine = _engine(tmp_path)
+    Base.metadata.create_all(engine)
+    with engine.begin() as connection:
+        run_migrations(connection)
+    with Session(engine) as db:
+        record = ContentRecord(
+            source_system="legacy",
+            source_content_id="1",
+            category_key="model_3d_su",
+            source_version="v1",
+            source_occurred_at=datetime.now(timezone.utc),
+            status="awaiting_material",
+        )
+        db.add(record)
+        db.commit()
+        assert record.identity_status == "legacy_unverified"
+        assert record.content_key is None
+    engine.dispose()
+
+
+def test_verified_content_key_is_unique_when_present(tmp_path) -> None:
+    engine = _engine(tmp_path)
+    Base.metadata.create_all(engine)
+    with engine.begin() as connection:
+        run_migrations(connection)
+    now = datetime.now(timezone.utc)
+    with Session(engine) as db:
+        first = ContentRecord(
+            source_system="aliyun_3d66_dw",
+            source_content_id="source-1",
+            content_key="aliyun_3d66_dw:1:12345",
+            source_res_type=1,
+            source_ll_id="12345",
+            identity_status="verified",
+            identity_hash="a" * 64,
+            category_key="model_3d_su",
+            source_version="v1",
+            source_occurred_at=now,
+            status="awaiting_material",
+        )
+        second = ContentRecord(
+            source_system="aliyun_3d66_dw",
+            source_content_id="source-2",
+            content_key="aliyun_3d66_dw:1:12345",
+            source_res_type=1,
+            source_ll_id="12345",
+            identity_status="verified",
+            identity_hash="b" * 64,
+            category_key="model_3d_su",
+            source_version="v1",
+            source_occurred_at=now,
+            status="awaiting_material",
+        )
+        db.add(first)
+        db.commit()
+        db.add(second)
+        with pytest.raises(IntegrityError, match="content_key"):
+            db.commit()
+    engine.dispose()
+
+
+def test_only_one_approved_identity_verification_exists_per_source_contract(
+    tmp_path,
+) -> None:
+    engine = _engine(tmp_path)
+    Base.metadata.create_all(engine)
+    with engine.begin() as connection:
+        run_migrations(connection)
+    with Session(engine) as db:
+        def row(probe_hash: str) -> SourceIdentityVerification:
+            return SourceIdentityVerification(
+                contract_key="semantic-platform",
+                source_system="aliyun_3d66_dw",
+                key_fields_json='["res_type","ll_id"]',
+                result="verified",
+                probe_hash=probe_hash,
+                data_window="2026-08-01/2026-08-15",
+                scoped_row_count=100,
+                duplicate_key_count=0,
+                res_id_conflict_count=0,
+                status="approved",
+                created_by="test",
+                approved_by="test",
+                approved_at=datetime.now(timezone.utc),
+            )
+
+        db.add(row("c" * 64))
+        db.commit()
+        db.add(row("d" * 64))
+        with pytest.raises(IntegrityError, match="source_identity_verifications"):
+            db.commit()
+    engine.dispose()
+
+
+def test_verified_content_identity_is_immutable(tmp_path) -> None:
+    engine = _engine(tmp_path)
+    Base.metadata.create_all(engine)
+    with engine.begin() as connection:
+        run_migrations(connection)
+    with Session(engine) as db:
+        record = ContentRecord(
+            source_system="aliyun_3d66_dw",
+            source_content_id="1:12345",
+            content_key="aliyun_3d66_dw:1:12345",
+            source_res_type=1,
+            source_ll_id="12345",
+            identity_status="verified",
+            identity_hash="a" * 64,
+            category_key="model_3d_su",
+            source_version="v1",
+            source_occurred_at=datetime.now(timezone.utc),
+            status="awaiting_material",
+        )
+        db.add(record)
+        db.commit()
+        record.identity_hash = "b" * 64
+        with pytest.raises(IntegrityError, match="ContentRecord identity is immutable"):
+            db.commit()
+    engine.dispose()
+
+
+def test_content_ingress_identity_snapshot_is_immutable(tmp_path) -> None:
+    engine = _engine(tmp_path)
+    Base.metadata.create_all(engine)
+    with engine.begin() as connection:
+        run_migrations(connection)
+    with Session(engine) as db:
+        event = ContentIngressEvent(
+            event_id="identity-event-1",
+            schema_version="content-ingress-v2",
+            event_type="content.created",
+            source_system="aliyun_3d66_dw",
+            occurred_at=datetime.now(timezone.utc),
+            payload_hash="a" * 64,
+            payload_json="{}",
+            identity_snapshot_json='{"content_key":"aliyun_3d66_dw:1:12345"}',
+            identity_hash="b" * 64,
+            status="awaiting_material",
+            received_by="test",
+        )
+        db.add(event)
+        db.commit()
+        event.identity_snapshot_json = "{}"
+        with pytest.raises(IntegrityError, match="ContentIngressEvent identity is immutable"):
+            db.commit()
+    engine.dispose()
 
 
 def test_asset_version_and_semantic_rows_persist_after_migration(tmp_path) -> None:

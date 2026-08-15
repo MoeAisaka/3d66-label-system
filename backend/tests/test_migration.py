@@ -84,7 +84,55 @@ MIGRATION_NAMES = [
     "add_projection_contract_registry",
     "add_semantic_tag_contract_registry",
     "harden_semantic_tag_fact_provenance",
+    "add_source_identity_verification",
 ]
+
+
+def test_migration_70_upgrades_legacy_content_identity_without_backfill(tmp_path) -> None:
+    engine = create_engine(f"sqlite:///{tmp_path / 'legacy-identity.db'}")
+    try:
+        with engine.begin() as connection:
+            connection.exec_driver_sql(
+                """
+                CREATE TABLE content_records (
+                    id INTEGER PRIMARY KEY,
+                    source_system VARCHAR(120) NOT NULL,
+                    source_content_id VARCHAR(160) NOT NULL,
+                    category_key VARCHAR(40) NOT NULL,
+                    source_version VARCHAR(120) NOT NULL,
+                    source_occurred_at DATETIME NOT NULL,
+                    asset_id INTEGER,
+                    status VARCHAR(30) NOT NULL,
+                    created_at DATETIME NOT NULL,
+                    updated_at DATETIME NOT NULL,
+                    UNIQUE(source_system, source_content_id)
+                )
+                """
+            )
+            connection.exec_driver_sql(
+                """
+                INSERT INTO content_records (
+                    id, source_system, source_content_id, category_key,
+                    source_version, source_occurred_at, status, created_at, updated_at
+                ) VALUES (
+                    1, 'legacy', '42', 'model_3d_su',
+                    'v1', CURRENT_TIMESTAMP, 'awaiting_material',
+                    CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                )
+                """
+            )
+        Base.metadata.create_all(engine)
+        with engine.begin() as connection:
+            run_migrations(connection)
+            row = connection.exec_driver_sql(
+                "SELECT content_key, identity_status, identity_hash "
+                "FROM content_records WHERE id = 1"
+            ).one()
+            assert row.content_key is None
+            assert row.identity_status == "legacy_unverified"
+            assert row.identity_hash is None
+    finally:
+        engine.dispose()
 
 
 def test_semantic_provenance_foreign_keys_and_active_contract_guards(tmp_path) -> None:
