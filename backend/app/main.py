@@ -249,6 +249,7 @@ from .category_evaluation_v3_config_api import (
 from .node_correction_api import build_node_correction_router
 from .script_registry_api import build_script_registry_router
 from .workflow_registry_api import build_workflow_registry_router
+from .workflow_runtime_api import build_workflow_runtime_router
 from .worker_v3_authoritative import (
     V3AuthoritativeError,
     v3_authoritative_category,
@@ -1521,6 +1522,7 @@ app.include_router(build_category_evaluation_v3_config_router(current_user))
 app.include_router(build_node_correction_router(_permission_user("reviews:write")))
 app.include_router(build_script_registry_router(current_user))
 app.include_router(build_workflow_registry_router(current_user))
+app.include_router(build_workflow_runtime_router(current_user))
 app.include_router(
     build_evaluation_package_router(
         require_permission("releases:read"),

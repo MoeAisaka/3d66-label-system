@@ -23,16 +23,18 @@ ROLE_PERMISSIONS: Final[dict[str, frozenset[str]]] = {
             "scripts:write",
             "workflows:read",
             "workflows:write",
+            "runtime:read",
+            "runtime:write",
             "releases:read",
             "releases:write",
             "reports:read",
         }
     ),
-    "reviewer": frozenset({"assets:read", "jobs:read", "reviews:write", "scripts:read", "workflows:read", "releases:read", "reports:read"}),
+    "reviewer": frozenset({"assets:read", "jobs:read", "reviews:write", "scripts:read", "workflows:read", "runtime:read", "releases:read", "reports:read"}),
     "analyst": frozenset(
-        {"assets:read", "jobs:read", "reviews:read", "scripts:read", "workflows:read", "releases:read", "prompts:read", "dimensions:read", "models:read", "reports:read"}
+        {"assets:read", "jobs:read", "reviews:read", "scripts:read", "workflows:read", "runtime:read", "releases:read", "prompts:read", "dimensions:read", "models:read", "reports:read"}
     ),
-    "viewer": frozenset({"assets:read", "jobs:read", "reviews:read", "scripts:read", "workflows:read", "releases:read", "reports:read"}),
+    "viewer": frozenset({"assets:read", "jobs:read", "reviews:read", "scripts:read", "workflows:read", "runtime:read", "releases:read", "reports:read"}),
 }
 
 ROLE_LABELS: Final[dict[str, str]] = {
