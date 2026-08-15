@@ -63,6 +63,7 @@
 | [0045](0045-dual-workspaces-and-table-projection-contract.md) | Accepted | TPENG 标签实验台双工作区与数据库表投影合同 |
 | [0046](0046-model-3d-su-evaluation-mechanism.md) | Accepted | 3D & SU 模型美感评测机制独立类目与三赛道合同 |
 | [0047](0047-platform-semantic-tag-demand-contract.md) | Accepted | 平台级语义标签需求合同与 3D/SU 首验证切片 |
+| [0048](0048-controlled-script-workflow-runtime.md) | Accepted | 受控脚本注册、工作流版本与可恢复通用运行时底座 |
 
 文件名格式：
 
