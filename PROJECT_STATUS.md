@@ -2135,3 +2135,4 @@ npm.cmd run build
 - 3D/SU 的 2026 年 9 月目标仍是首个真实闭环纵切；当前真实接入前置签认尚未完成，readiness 继续为 `pending_external_signoff`。方案未把本地 fixture、dry-run 或文档生成表述成生产上线事实。
 - 本批只有文档与本地 dry-run 工件：未连接真实上游、真实业务数据库、DataWorks/ODPS、真实模型或生产环境；未申请权限、执行 DML、推送、合并或部署。
 - Word 输出为经过 8 页渲染核验的宣讲视觉版，Markdown 为可编辑权威源；原因是当前 headless LibreOffice 无法稳定渲染 OOXML 中的中文字体，不影响 PDF 与 Markdown 的可读性和内容权威性。
+- Owner 已确认产品、平台字段、数据身份规则、算法机制、审核双人工门和平台运行边界共 10 项签认；这些项当前记为 `OWNER_CONFIRMED_PENDING_EVIDENCE`，不等同于真实证据已验收。下游统一大维表/职责小表及 Badcase 回流 2 项记为 `PENDING_DOWNSTREAM_SYNC`，等待同步下游负责人。

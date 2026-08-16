@@ -23,7 +23,7 @@
 
 - The Markdown briefing has 32 headings and one Mermaid architecture diagram. It explicitly preserves the closed loop, Canonical fact ownership, dual human gates, dual release axes, the 3D/SU September vertical slice, one wide table plus responsibility small tables, and the Precision >= 80% / Recall >= 70% default field gate.
 - The proposal explicitly excludes Query×asset relevance, ranking weights, recall fusion, online experiments and graph-internal relations from Canonical asset facts.
-- The owner signoff register has 12 rows; role groups are exactly `product_label`, `data`, `algorithm`, `review`, `platform` and `consumer`; every entry is `UNASSIGNED`.
+- The owner signoff register has 12 rows; the Owner confirmed 10 product/data/algorithm/review/platform items as `OWNER_CONFIRMED_PENDING_EVIDENCE`; the two consumer items are `PENDING_DOWNSTREAM_SYNC` pending downstream coordination.
 - Placeholder/stale-claim scan found one `生产已就绪` match only in the negated rehearsal safety statement: “不代表生产已就绪”. No `TBD`, `TODO`, “仅评测工具”, “两套独立项目”, or unsupported completed-production claim was found.
 - Nowledge claim review examined 20 claims. Three markers point to superseded 2026-07/08 historical notes, not a conflict with the current frozen unified-LabelLab positioning; no historic implementation result is used as evidence that real ingress is ready.
 
@@ -47,4 +47,4 @@
 
 ## Remaining owner action before a real 3D/SU run
 
-Assign and complete the six owner groups’ signoff for: platform/category fields, source window and identity probe, model/mechanism and quality thresholds, golden truth and review rules, queue/projection/recovery rehearsal, and downstream table mapping/reconciliation/Badcase return. Until then, retain `pending_external_signoff` and do not interpret the local package as real-ingress authorization.
+The Owner has confirmed the non-consumer scope. Remaining actions are to archive the 10 confirmation evidence packages, synchronize the two downstream consumer items, and separately freeze any real source access, model calls, target-table DML, gray release and rollback. Until those gates are complete, retain `pending_external_signoff` and do not interpret this package as real-ingress authorization.
