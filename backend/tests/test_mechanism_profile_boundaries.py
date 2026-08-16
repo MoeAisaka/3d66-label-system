@@ -8,6 +8,7 @@ from app.mechanism_profiles import (
     mechanism_profile_catalog,
 )
 from app.models import User
+from app.three_d_profile import THREE_D_PROFILE
 
 
 def test_supported_profile_exposes_version_capabilities_and_editor_route() -> None:
@@ -42,19 +43,25 @@ def test_unknown_profile_is_read_only_and_cannot_execute() -> None:
     assert summary.can_execute is False
 
 
-def test_catalog_reserves_3d_and_su_slots_without_enabling_execution() -> None:
+def test_catalog_enables_combined_3d_su_profile_and_keeps_future_su_slot_closed() -> None:
     catalog = {item["profile_type"]: item for item in mechanism_profile_catalog()}
 
     assert catalog[IMAGE_PROFILE]["can_execute"] is True
     assert catalog[PROPOSAL_PROFILE]["can_execute"] is True
-    assert catalog["future-3d-controlled-v1"] == {
-        "profile_type": "future-3d-controlled-v1",
+    assert catalog[THREE_D_PROFILE] == {
+        "profile_type": THREE_D_PROFILE,
         "version": "v1",
-        "capabilities": ["dedicated_editor_slot"],
-        "editor_route": None,
-        "read_only_fallback": True,
-        "editable": False,
-        "can_execute": False,
+        "capabilities": [
+            "structured_editor",
+            "candidate_validation",
+            "candidate_execution",
+            "workflow_incremental",
+            "workflow_stock",
+        ],
+        "editor_route": "three-d",
+        "read_only_fallback": False,
+        "editable": True,
+        "can_execute": True,
     }
     assert catalog["future-su-controlled-v1"]["can_execute"] is False
 
@@ -71,7 +78,7 @@ def test_profile_catalog_api_exposes_safe_extension_metadata() -> None:
             item["profile_type"]: item for item in response.json()["items"]
         }
         assert catalog[IMAGE_PROFILE]["editor_route"] == "image-rule"
-        assert catalog["future-3d-controlled-v1"]["read_only_fallback"] is True
+        assert catalog[THREE_D_PROFILE]["editor_route"] == "three-d"
         assert catalog["future-su-controlled-v1"]["can_execute"] is False
     finally:
         app.dependency_overrides.clear()

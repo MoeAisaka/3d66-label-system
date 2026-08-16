@@ -314,7 +314,7 @@ def test_invalid_row_rolls_back_the_entire_source_page(
             SourceRow(
                 content_id="1002",
                 source_version="v1",
-                category_key="three_d",
+                category_key="model_3d_su",
                 occurred_at=occurred_at,
                 asset_id=asset.id,
             ),

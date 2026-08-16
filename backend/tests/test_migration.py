@@ -86,6 +86,7 @@ MIGRATION_NAMES = [
     "harden_semantic_tag_fact_provenance",
     "add_source_identity_verification",
     "add_script_workflow_runtime",
+    "add_3d_shadow_dry_run_contracts",
 ]
 
 
@@ -132,6 +133,91 @@ def test_migration_70_upgrades_legacy_content_identity_without_backfill(tmp_path
             assert row.content_key is None
             assert row.identity_status == "legacy_unverified"
             assert row.identity_hash is None
+    finally:
+        engine.dispose()
+
+
+def test_migration_72_rebuilds_legacy_projection_environment_check(tmp_path) -> None:
+    engine = _engine(tmp_path, "v71-projection-shadow.db")
+    try:
+        with engine.begin() as connection:
+            connection.exec_driver_sql("""
+                CREATE TABLE projection_contracts (
+                    id INTEGER PRIMARY KEY,
+                    contract_key VARCHAR(120) NOT NULL,
+                    version INTEGER NOT NULL,
+                    target_role VARCHAR(40) NOT NULL,
+                    table_name VARCHAR(120) NOT NULL,
+                    environment VARCHAR(20) NOT NULL DEFAULT 'local'
+                        CHECK(environment IN ('local','test')),
+                    primary_key_json TEXT NOT NULL,
+                    field_mappings_json TEXT NOT NULL,
+                    input_versions_json TEXT NOT NULL DEFAULT '{}',
+                    mode VARCHAR(30) NOT NULL DEFAULT 'snapshot',
+                    idempotency_key_template VARCHAR(300) NOT NULL,
+                    checkpoint_json TEXT NOT NULL DEFAULT '{}',
+                    reconciliation_json TEXT NOT NULL DEFAULT '{}',
+                    rollback_json TEXT NOT NULL DEFAULT '{}',
+                    owner VARCHAR(120) NOT NULL,
+                    status VARCHAR(20) NOT NULL DEFAULT 'draft',
+                    contract_hash VARCHAR(64) NOT NULL UNIQUE,
+                    created_by VARCHAR(80) NOT NULL DEFAULT 'system',
+                    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(contract_key, version)
+                )
+            """)
+            connection.exec_driver_sql("""
+                INSERT INTO projection_contracts (
+                    id, contract_key, version, target_role, table_name, environment,
+                    primary_key_json, field_mappings_json, idempotency_key_template,
+                    owner, status, contract_hash
+                ) VALUES (
+                    1, 'legacy-unified', 1, 'unified_dimension',
+                    'unified_dimension_table', 'local', '["content_key"]',
+                    '{"content_key":"content_key"}', '{content_key}',
+                    'platform', 'active', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+                )
+            """)
+            connection.exec_driver_sql("""
+                CREATE TABLE schema_migrations (
+                    version INTEGER PRIMARY KEY,
+                    name VARCHAR(200) NOT NULL,
+                    applied_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            for version, name in enumerate(MIGRATION_NAMES[:71], start=1):
+                connection.exec_driver_sql(
+                    "INSERT INTO schema_migrations(version, name) VALUES (?, ?)",
+                    (version, name),
+                )
+
+            run_migrations(connection)
+            row = connection.exec_driver_sql(
+                "SELECT contract_key, adapter_key, write_policy, max_batch_size "
+                "FROM projection_contracts WHERE id=1"
+            ).one()
+            assert row == ("legacy-unified", "local-sqlite", "local_only", 500)
+            connection.exec_driver_sql("""
+                INSERT INTO projection_contracts (
+                    contract_key, version, target_role, table_name, environment,
+                    adapter_key, target_key, write_policy, category_key,
+                    primary_key_json, field_mappings_json, input_versions_json,
+                    mode, idempotency_key_template, checkpoint_json,
+                    reconciliation_json, rollback_json, owner, status,
+                    contract_hash, created_by
+                ) VALUES (
+                    '3d-shadow', 1, 'search_labels', 'shadow_target', 'shadow',
+                    'fixture', 'target-3d', 'shadow_only', 'model_3d_su',
+                    '["content_key"]', '{"content_key":"content_key"}', '{}',
+                    'snapshot', '{content_key}', '{}', '{}', '{}', 'platform',
+                    'draft', 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+                    'migration-test'
+                )
+            """)
+            assert connection.exec_driver_sql(
+                "SELECT environment FROM projection_contracts WHERE contract_key='3d-shadow'"
+            ).scalar_one() == "shadow"
+            assert connection.exec_driver_sql("PRAGMA foreign_key_check").fetchall() == []
     finally:
         engine.dispose()
 

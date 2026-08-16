@@ -43,7 +43,7 @@ def _context() -> tuple[object, Session, object, object, object]:
     field_contract = create_field_demand_contract(
         db,
         contract_key="3d-search",
-        category_key="three_d",
+        category_key="model_3d_su",
         consumer_key="search",
         owner="tpeng-3d",
         fields=[
@@ -98,11 +98,11 @@ def _context() -> tuple[object, Session, object, object, object]:
         adapter_key="fixture-shadow",
         target_key=target.target_key,
         write_policy="shadow_only",
-        category_key="three_d",
+        category_key="model_3d_su",
         field_contract_id=field_contract.id,
         max_batch_size=500,
     )
-    _published(db, content_key="3d:1001", category_key="three_d", style="modern")
+    _published(db, content_key="3d:1001", category_key="model_3d_su", style="modern")
     _published(db, content_key="space:2001", category_key="space_image", style="other")
     db.commit()
     return engine, db, field_contract, target, projection_contract
@@ -176,7 +176,7 @@ def test_shadow_manifest_contains_only_published_matching_category() -> None:
         run = enqueue_shadow_projection_run(db, projection_contract=contract, field_contract=field_contract, target=target, max_rows=10, actor="admin")
         manifest = build_shadow_manifest(db, run=run)
         assert manifest.row_count == 1
-        assert manifest.rows[0]["category_key"] == "three_d"
+        assert manifest.rows[0]["category_key"] == "model_3d_su"
         serialized = json.dumps(manifest.rows)
         assert "space:2001" not in serialized
         assert "candidate_mechanism" not in serialized
@@ -190,7 +190,7 @@ def test_shadow_manifest_rejects_non_positive_mechanism_version() -> None:
     engine, db, field_contract, target, contract = _context()
     try:
         label = db.scalar(
-            select(PublishedLabel).where(PublishedLabel.category_key == "three_d")
+            select(PublishedLabel).where(PublishedLabel.category_key == "model_3d_su")
         )
         payload = json.loads(label.label_payload_json)
         payload["provenance"]["strategy_bundle_id"] = 0
@@ -480,7 +480,7 @@ def _shadow_contract_payload(*, field_contract_id: int) -> dict[str, object]:
         "adapter_key": "sql-shadow",
         "target_key": "3d-shadow-unified",
         "write_policy": "shadow_only",
-        "category_key": "three_d",
+        "category_key": "model_3d_su",
         "field_contract_id": field_contract_id,
         "max_batch_size": 500,
         "primary_key": ["content_key"],
@@ -511,7 +511,7 @@ def test_shadow_projection_admin_apis_redact_secret_and_enqueue_run() -> None:
             field_contract = create_field_demand_contract(
                 db,
                 contract_key="3d-search",
-                category_key="three_d",
+                category_key="model_3d_su",
                 consumer_key="search",
                 owner="tpeng-3d",
                 fields=[

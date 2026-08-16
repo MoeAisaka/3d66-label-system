@@ -34,12 +34,14 @@ class CategoryEvaluationV3RevisionError(ValueError):
 
 
 def _canonical_artifacts(
+    db: Session,
     artifacts: RevisionArtifacts,
 ) -> tuple[str, str, str, str, str, bool]:
     profile_type = validate_mechanism_artifacts(
         artifacts.contract,
         artifacts.classification_map,
         artifacts.subcategory_dimensions,
+        db=db,
     )
     contract_json = canonical_json(artifacts.contract)
     classification_map_json = canonical_json(artifacts.classification_map)
@@ -261,7 +263,7 @@ def create_candidate_revision(
         rule_mirror_json,
         contract_hash,
         media_penalty_enabled,
-    ) = _canonical_artifacts(artifacts)
+    ) = _canonical_artifacts(db, artifacts)
 
     same_parent = db.scalars(
         select(CategoryEvaluationV3Revision)
@@ -427,7 +429,7 @@ def activate_candidate_revision(
         rule_mirror_json,
         contract_hash,
         media_penalty_enabled,
-    ) = _canonical_artifacts(artifacts)
+    ) = _canonical_artifacts(db, artifacts)
     if (
         candidate.contract_json != contract_json
         or candidate.classification_map_json != classification_map_json

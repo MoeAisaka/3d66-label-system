@@ -206,6 +206,7 @@ def _coded_400(exc: Exception) -> HTTPException:
 
 def _collect_validation_errors(
     payload: V3ConfigWriteRequest,
+    db: Session | None = None,
 ) -> list[ValidationErrorItem]:
     """Run every reused validator, aggregating failures with stable codes.
 
@@ -220,6 +221,7 @@ def _collect_validation_errors(
             payload.contract,
             payload.classification_map,
             payload.subcategory_dimensions,
+            db=db,
         )
     except MechanismProfileError as exc:
         return [
@@ -232,7 +234,7 @@ def _collect_validation_errors(
     return []
 
 
-def _guard_valid(payload: V3ConfigWriteRequest) -> str:
+def _guard_valid(payload: V3ConfigWriteRequest, db: Session | None = None) -> str:
     """Raise a coded HTTP 400 (aggregating every failure) if any artifact fails.
 
     The detail carries the first failure's ``code``/``message`` plus the full
@@ -244,6 +246,7 @@ def _guard_valid(payload: V3ConfigWriteRequest) -> str:
             payload.contract,
             payload.classification_map,
             payload.subcategory_dimensions,
+            db=db,
         )
     except MechanismProfileError as exc:
         raise HTTPException(
@@ -523,7 +526,7 @@ def build_category_evaluation_v3_config_router(
         anything lands; a failure becomes a coded 400 and nothing is written.
         A duplicate ``category_key`` is a coded 409.
         """
-        profile_type = _guard_valid(payload)
+        profile_type = _guard_valid(payload, db)
         existing = db.scalar(
             select(CategoryEvaluationV3Config).where(
                 CategoryEvaluationV3Config.category_key == payload.category_key
@@ -704,28 +707,30 @@ def build_category_evaluation_v3_config_router(
         category_key: str,
         payload: V3ConfigWriteRequest,
         _user: Any = Depends(require_user),
+        db: Session = Depends(get_db),
     ) -> ValidateResponse:
-        """Dry-run validate a candidate config — no write, no DB access.
+        """Dry-run validate a candidate config — no write.
 
         Reuses the exact same validation as create/update but never persists;
         returns ``ok`` plus the aggregated coded error list.  The path
         ``category_key`` scopes the call; validation itself is over the body's
         artifacts only.
         """
-        errors = _collect_validation_errors(payload)
+        errors = _collect_validation_errors(payload, db)
         return ValidateResponse(ok=not errors, errors=errors)
 
     @router.post("/validate", response_model=ValidateResponse)
     def validate_candidate(
         payload: V3ConfigWriteRequest,
         _user: Any = Depends(require_user),
+        db: Session = Depends(get_db),
     ) -> ValidateResponse:
         """Dry-run validate a candidate config before it has a key — no write.
 
         Same reused validators as create/update; never persists.  Used by the
         editor before first save (no existing ``category_key`` yet).
         """
-        errors = _collect_validation_errors(payload)
+        errors = _collect_validation_errors(payload, db)
         return ValidateResponse(ok=not errors, errors=errors)
 
     return router

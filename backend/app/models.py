@@ -384,6 +384,12 @@ class AssetVersion(Base):
     __tablename__ = "asset_versions"
     __table_args__ = (
         UniqueConstraint("asset_id", "version", name="uq_asset_versions_asset_version"),
+        UniqueConstraint(
+            "source_system",
+            "source_content_id",
+            "source_version",
+            name="uq_asset_versions_source_identity",
+        ),
         CheckConstraint(
             "length(asset_sha256) = 64",
             name="ck_asset_versions_sha256",
@@ -401,6 +407,20 @@ class AssetVersion(Base):
     version: Mapped[int] = mapped_column(Integer)
     asset_sha256: Mapped[str] = mapped_column(String(64), index=True)
     source_version: Mapped[str] = mapped_column(String(120))
+    source_system: Mapped[str | None] = mapped_column(
+        String(120), nullable=True, index=True
+    )
+    source_content_id: Mapped[str | None] = mapped_column(
+        String(160), nullable=True, index=True
+    )
+    mime_type: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    size_bytes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    occurred_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
+    payload_hash: Mapped[str | None] = mapped_column(
+        String(64), nullable=True, index=True
+    )
     supersedes_id: Mapped[int | None] = mapped_column(
         ForeignKey("asset_versions.id", ondelete="RESTRICT"), nullable=True, index=True
     )
@@ -409,6 +429,8 @@ class AssetVersion(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, index=True
     )
+
+    asset: Mapped[Asset] = relationship()
 
 
 class EvaluationCategoryProfile(Base):
@@ -3429,6 +3451,11 @@ class ContentRecord(Base):
     asset_id: Mapped[int | None] = mapped_column(
         ForeignKey("assets.id", ondelete="RESTRICT"), nullable=True, index=True
     )
+    current_asset_version_id: Mapped[int | None] = mapped_column(
+        ForeignKey("asset_versions.id", ondelete="RESTRICT"),
+        nullable=True,
+        index=True,
+    )
     status: Mapped[str] = mapped_column(String(30), default="awaiting_material", index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(
@@ -3436,6 +3463,7 @@ class ContentRecord(Base):
     )
 
     asset: Mapped[Asset | None] = relationship()
+    current_asset_version: Mapped[AssetVersion | None] = relationship()
     identity_verification: Mapped[SourceIdentityVerification | None] = relationship()
 
 
@@ -3744,6 +3772,124 @@ class SemanticQualityMetricSnapshot(Base):
     )
 
 
+class FieldDemandContract(Base):
+    __tablename__ = "field_demand_contracts"
+    __table_args__ = (
+        UniqueConstraint(
+            "contract_key", "version", name="uq_field_demand_contract_version"
+        ),
+        UniqueConstraint(
+            "contract_key", "contract_hash", name="uq_field_demand_contract_hash"
+        ),
+        CheckConstraint(
+            "status IN ('draft','active','retired')",
+            name="ck_field_demand_contract_status",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    contract_key: Mapped[str] = mapped_column(String(120), index=True)
+    version: Mapped[int] = mapped_column(Integer)
+    category_key: Mapped[str] = mapped_column(String(40), index=True)
+    consumer_key: Mapped[str] = mapped_column(String(120), index=True)
+    owner: Mapped[str] = mapped_column(String(120))
+    fields_json: Mapped[str] = mapped_column(Text)
+    thresholds_json: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(20), default="draft", index=True)
+    contract_hash: Mapped[str] = mapped_column(String(64), index=True)
+    created_by: Mapped[str] = mapped_column(String(80), default="system")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, index=True
+    )
+
+
+class UpstreamSourceContract(Base):
+    __tablename__ = "upstream_source_contracts"
+    __table_args__ = (
+        UniqueConstraint(
+            "contract_key", "version", name="uq_upstream_source_contract_version"
+        ),
+        UniqueConstraint(
+            "contract_key", "contract_hash", name="uq_upstream_source_contract_hash"
+        ),
+        CheckConstraint(
+            "status IN ('draft','active','retired')",
+            name="ck_upstream_source_contract_status",
+        ),
+        CheckConstraint(
+            "page_size BETWEEN 1 AND 500",
+            name="ck_upstream_source_contract_page_size",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    contract_key: Mapped[str] = mapped_column(String(120), index=True)
+    version: Mapped[int] = mapped_column(Integer)
+    adapter_key: Mapped[str] = mapped_column(String(80), index=True)
+    source_system: Mapped[str] = mapped_column(String(120), index=True)
+    category_key: Mapped[str] = mapped_column(String(40), index=True)
+    connection_locator: Mapped[str] = mapped_column(String(200))
+    secret_reference: Mapped[str] = mapped_column(String(200))
+    field_mappings_json: Mapped[str] = mapped_column(Text)
+    cursor_definition_json: Mapped[str] = mapped_column(Text)
+    page_size: Mapped[int] = mapped_column(Integer, default=100)
+    read_only: Mapped[bool] = mapped_column(Boolean, default=True)
+    schema_fingerprint: Mapped[str] = mapped_column(String(64), index=True)
+    owner: Mapped[str] = mapped_column(String(120))
+    status: Mapped[str] = mapped_column(String(20), default="draft", index=True)
+    contract_hash: Mapped[str] = mapped_column(String(64), index=True)
+    created_by: Mapped[str] = mapped_column(String(80), default="system")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, index=True
+    )
+
+
+class UpstreamReadRun(Base):
+    __tablename__ = "upstream_read_runs"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('queued','running','succeeded','failed','blocked','cancelled')",
+            name="ck_upstream_read_run_status",
+        ),
+        CheckConstraint(
+            "requested_limit BETWEEN 1 AND 500",
+            name="ck_upstream_read_run_limit",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    source_contract_id: Mapped[int] = mapped_column(
+        ForeignKey("upstream_source_contracts.id", ondelete="RESTRICT"), index=True
+    )
+    source_contract_hash: Mapped[str] = mapped_column(String(64), index=True)
+    category_key: Mapped[str] = mapped_column(String(40), index=True)
+    requested_cursor_json: Mapped[str] = mapped_column(Text, default="{}")
+    next_cursor_json: Mapped[str] = mapped_column(Text, default="{}")
+    requested_limit: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(20), default="queued", index=True)
+    schema_fingerprint: Mapped[str] = mapped_column(String(64), default="")
+    page_hash: Mapped[str] = mapped_column(String(64), default="")
+    row_count: Mapped[int] = mapped_column(Integer, default=0)
+    package_count: Mapped[int] = mapped_column(Integer, default=0)
+    duplicate_count: Mapped[int] = mapped_column(Integer, default=0)
+    awaiting_material_count: Mapped[int] = mapped_column(Integer, default=0)
+    error_code: Mapped[str] = mapped_column(String(80), default="")
+    error_message: Mapped[str] = mapped_column(Text, default="")
+    attempt_count: Mapped[int] = mapped_column(Integer, default=1)
+    retry_after: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    actor: Mapped[str] = mapped_column(String(80), default="system")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, index=True
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+    source_contract: Mapped[UpstreamSourceContract] = relationship()
+
+
 class ProjectionContract(Base):
     __tablename__ = "projection_contracts"
     __table_args__ = (
@@ -3755,8 +3901,12 @@ class ProjectionContract(Base):
             name="ck_projection_contract_target_role",
         ),
         CheckConstraint(
-            "environment IN ('local','test')",
+            "environment IN ('local','test','shadow')",
             name="ck_projection_contract_environment",
+        ),
+        CheckConstraint(
+            "write_policy IN ('local_only','shadow_only')",
+            name="ck_projection_contract_write_policy",
         ),
         CheckConstraint(
             "mode IN ('snapshot','incremental_outbox')",
@@ -3774,6 +3924,26 @@ class ProjectionContract(Base):
     target_role: Mapped[str] = mapped_column(String(40), index=True)
     table_name: Mapped[str] = mapped_column(String(120), index=True)
     environment: Mapped[str] = mapped_column(String(20), default="local", index=True)
+    adapter_key: Mapped[str] = mapped_column(
+        String(80), default="local-sqlite", server_default="local-sqlite"
+    )
+    target_key: Mapped[str | None] = mapped_column(
+        String(120), nullable=True, index=True
+    )
+    write_policy: Mapped[str] = mapped_column(
+        String(20), default="local_only", server_default="local_only"
+    )
+    category_key: Mapped[str | None] = mapped_column(
+        String(40), nullable=True, index=True
+    )
+    field_contract_id: Mapped[int | None] = mapped_column(
+        ForeignKey("field_demand_contracts.id", ondelete="RESTRICT"),
+        nullable=True,
+        index=True,
+    )
+    max_batch_size: Mapped[int] = mapped_column(
+        Integer, default=500, server_default="500"
+    )
     primary_key_json: Mapped[str] = mapped_column(Text)
     field_mappings_json: Mapped[str] = mapped_column(Text)
     input_versions_json: Mapped[str] = mapped_column(Text, default="{}")
@@ -3867,6 +4037,135 @@ class ProjectionReconciliation(Base):
     compensation_json: Mapped[str] = mapped_column(Text, default="{}")
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, index=True
+    )
+
+
+class ShadowProjectionTarget(Base):
+    __tablename__ = "shadow_projection_targets"
+    __table_args__ = (
+        UniqueConstraint(
+            "target_key", "version", name="uq_shadow_projection_target_version"
+        ),
+        UniqueConstraint(
+            "target_key", "target_hash", name="uq_shadow_projection_target_hash"
+        ),
+        CheckConstraint(
+            "environment = 'shadow'", name="ck_shadow_projection_target_environment"
+        ),
+        CheckConstraint(
+            "shadow_only = 1", name="ck_shadow_projection_target_shadow_only"
+        ),
+        CheckConstraint(
+            "status IN ('draft','active','retired')",
+            name="ck_shadow_projection_target_status",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    target_key: Mapped[str] = mapped_column(String(120), index=True)
+    version: Mapped[int] = mapped_column(Integer)
+    adapter_key: Mapped[str] = mapped_column(String(80), index=True)
+    connection_locator: Mapped[str] = mapped_column(String(200))
+    secret_reference: Mapped[str] = mapped_column(String(200))
+    schema_name: Mapped[str] = mapped_column(String(120))
+    table_name: Mapped[str] = mapped_column(String(120))
+    environment: Mapped[str] = mapped_column(String(20), default="shadow")
+    shadow_only: Mapped[bool] = mapped_column(Boolean, default=True)
+    owner: Mapped[str] = mapped_column(String(120))
+    schema_fingerprint: Mapped[str] = mapped_column(String(64), index=True)
+    status: Mapped[str] = mapped_column(String(20), default="draft", index=True)
+    target_hash: Mapped[str] = mapped_column(String(64), index=True)
+    consecutive_failures: Mapped[int] = mapped_column(Integer, default=0)
+    circuit_opened_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_by: Mapped[str] = mapped_column(String(80), default="system")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, index=True
+    )
+
+
+class ShadowProjectionRun(Base):
+    __tablename__ = "shadow_projection_runs"
+    __table_args__ = (
+        UniqueConstraint("batch_id", name="uq_shadow_projection_run_batch"),
+        CheckConstraint(
+            "status IN ('queued','running','succeeded','failed','blocked','rolled_back')",
+            name="ck_shadow_projection_run_status",
+        ),
+        CheckConstraint(
+            "max_rows BETWEEN 1 AND 500", name="ck_shadow_projection_run_max_rows"
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    projection_contract_id: Mapped[int] = mapped_column(
+        ForeignKey("projection_contracts.id", ondelete="RESTRICT"), index=True
+    )
+    field_contract_id: Mapped[int] = mapped_column(
+        ForeignKey("field_demand_contracts.id", ondelete="RESTRICT"), index=True
+    )
+    target_id: Mapped[int] = mapped_column(
+        ForeignKey("shadow_projection_targets.id", ondelete="RESTRICT"), index=True
+    )
+    manifest_id: Mapped[int | None] = mapped_column(
+        ForeignKey("projection_manifests.id", ondelete="RESTRICT"),
+        nullable=True,
+        index=True,
+    )
+    batch_id: Mapped[str] = mapped_column(String(80), unique=True, index=True)
+    status: Mapped[str] = mapped_column(String(20), default="queued", index=True)
+    worker_id: Mapped[str] = mapped_column(String(120), default="")
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0)
+    max_rows: Mapped[int] = mapped_column(Integer, default=500)
+    checkpoint_json: Mapped[str] = mapped_column(Text, default="{}")
+    expected_row_count: Mapped[int] = mapped_column(Integer, default=0)
+    actual_row_count: Mapped[int] = mapped_column(Integer, default=0)
+    expected_payload_hash: Mapped[str] = mapped_column(String(64), default="")
+    actual_payload_hash: Mapped[str] = mapped_column(String(64), default="")
+    error_code: Mapped[str] = mapped_column(String(80), default="")
+    error_message: Mapped[str] = mapped_column(Text, default="")
+    retry_after: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    actor: Mapped[str] = mapped_column(String(80), default="system")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, index=True
+    )
+    started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    projection_contract: Mapped[ProjectionContract] = relationship()
+    field_contract: Mapped[FieldDemandContract] = relationship()
+    target: Mapped[ShadowProjectionTarget] = relationship()
+    manifest: Mapped[ProjectionManifest | None] = relationship()
+
+
+class ShadowProjectionLease(Base):
+    __tablename__ = "shadow_projection_leases"
+    __table_args__ = (
+        UniqueConstraint("target_id", name="uq_shadow_projection_lease_target"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    target_id: Mapped[int] = mapped_column(
+        ForeignKey("shadow_projection_targets.id", ondelete="CASCADE"),
+        unique=True,
+        index=True,
+    )
+    worker_id: Mapped[str] = mapped_column(String(120), index=True)
+    acquired_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow
+    )
+    heartbeat_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow
+    )
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), index=True
     )
 
 

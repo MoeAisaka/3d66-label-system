@@ -54,6 +54,28 @@ def ingest_production_feedback(
     prompt_version = str(payload["prompt_version"]).strip()
     if not prompt_version or len(prompt_version) > 40:
         raise ValueError("生产反馈 prompt_version 非法")
+    projected_label_version = payload.get("projected_label_version")
+    if projected_label_version is not None and (
+        isinstance(projected_label_version, bool)
+        or not isinstance(projected_label_version, int)
+        or projected_label_version < 1
+    ):
+        raise ValueError("生产反馈 projected_label_version 必须为正整数")
+    shadow_batches = payload.get("shadow_batches")
+    normalized_shadow_batches: list[str] | None = None
+    if shadow_batches is not None:
+        if not isinstance(shadow_batches, list) or len(shadow_batches) > 20:
+            raise ValueError("生产反馈 shadow_batches 必须是不超过 20 项的数组")
+        normalized_shadow_batches = []
+        for batch_id in shadow_batches:
+            if not isinstance(batch_id, str):
+                raise ValueError("生产反馈 shadow_batches 只能包含字符串")
+            normalized_batch_id = batch_id.strip()
+            if not normalized_batch_id or len(normalized_batch_id) > 160:
+                raise ValueError("生产反馈 shadow_batches 包含非法批次标识")
+            if normalized_batch_id in normalized_shadow_batches:
+                raise ValueError("生产反馈 shadow_batches 不能包含重复批次")
+            normalized_shadow_batches.append(normalized_batch_id)
     category_key = str(payload["category_key"]).strip()
     profile = db.scalar(
         select(EvaluationCategoryProfile).where(
@@ -108,6 +130,21 @@ def ingest_production_feedback(
     )
     db.add(event)
     db.flush()
+    case_payload = {
+        "schema_version": "optimization-case-v1",
+        "source": "production_feedback",
+        "source_event_id": event_id,
+        "production_case_id": payload["production_case_id"],
+        "model_output": payload["model_output"],
+        "human_truth": payload["human_truth"],
+        "reason_codes": payload.get("reason_codes", []),
+        "production_applied": bool(payload.get("production_applied", False)),
+        "writes_production_database": False,
+    }
+    if projected_label_version is not None:
+        case_payload["projected_label_version"] = projected_label_version
+    if normalized_shadow_batches is not None:
+        case_payload["shadow_batches"] = normalized_shadow_batches
     case = OptimizationCaseQueue(
         category_key=category_key,
         idempotency_key=f"production:{event_id}",
@@ -117,21 +154,7 @@ def ingest_production_feedback(
         source_event_id=event.id,
         prompt_version=prompt_version,
         severity=str(payload["severity"]),
-        case_json=canonical_json(
-            {
-                "schema_version": "optimization-case-v1",
-                "source": "production_feedback",
-                "source_event_id": event_id,
-                "production_case_id": payload["production_case_id"],
-                "model_output": payload["model_output"],
-                "human_truth": payload["human_truth"],
-                "reason_codes": payload.get("reason_codes", []),
-                "production_applied": bool(
-                    payload.get("production_applied", False)
-                ),
-                "writes_production_database": False,
-            }
-        ),
+        case_json=canonical_json(case_payload),
         status="pending",
     )
     db.add(case)

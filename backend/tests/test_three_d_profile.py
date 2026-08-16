@@ -20,7 +20,7 @@ from app.mechanism_profiles import (
 )
 
 
-def _field_contract(db: Session, *, status: str = "active", category: str = "three_d"):
+def _field_contract(db: Session, *, status: str = "active", category: str = "model_3d_su"):
     row = create_field_demand_contract(
         db,
         contract_key="3d-search",
@@ -67,7 +67,7 @@ def _artifacts(db: Session, **contract_overrides: object):
     contract.update(
         {
             "profile_type": "3d-asset-quality-v1",
-            "category_key": "three_d",
+            "category_key": "model_3d_su",
             "field_demand_contract_id": field_contract.id,
             "source_schema_fingerprint": "f" * 64,
             "stage_fields": {

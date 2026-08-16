@@ -35,7 +35,7 @@ def _fields(*, source_path: str = "semantic.style") -> list[dict[str, object]]:
 def _contract_args(**overrides: object) -> dict[str, object]:
     args: dict[str, object] = {
         "contract_key": "3d-search",
-        "category_key": "three_d",
+        "category_key": "model_3d_su",
         "consumer_key": "search",
         "owner": "tpeng-search",
         "fields": _fields(),
@@ -78,7 +78,7 @@ def asset(db: Session) -> Asset:
         width=32,
         height=32,
         sha256="a" * 64,
-        category_key="three_d",
+        category_key="model_3d_su",
     )
     db.add(row)
     db.commit()
@@ -243,7 +243,7 @@ def test_asset_version_api_lists_newest_first(
             mime_type="image/png",
             size_bytes=256,
             sha256="b" * 64,
-            category_key="three_d",
+            category_key="model_3d_su",
         )
         db.add(asset)
         db.flush()

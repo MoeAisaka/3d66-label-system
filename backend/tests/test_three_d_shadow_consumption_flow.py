@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.category_evaluation_contract import canonical_contract_hash
 from app.database import Base
+from app.audit import canonical_json
 from app.field_demand_contracts import create_field_demand_contract
 from app.inspiration_category_seed import (
     build_inspiration_classification_map,
@@ -29,6 +30,8 @@ from app.models import (
     PromptVersion,
     ReviewPanel,
     SamplingPolicy,
+    SemanticTagFact,
+    TagDemandContract,
 )
 from app.production_feedback import ingest_production_feedback
 from app.projection_contracts import create_contract_version
@@ -57,7 +60,7 @@ def test_three_d_fixture_flows_from_readonly_source_to_shadow_and_badcase() -> N
         field_contract = create_field_demand_contract(
             db,
             contract_key="3d-search-consumption",
-            category_key="three_d",
+            category_key="model_3d_su",
             consumer_key="search",
             owner="tpeng-3d",
             fields=[
@@ -81,7 +84,7 @@ def test_three_d_fixture_flows_from_readonly_source_to_shadow_and_badcase() -> N
             created_by="admin",
         )
         profile = EvaluationCategoryProfile(
-            category_key="three_d",
+            category_key="model_3d_su",
             display_name="3D 素材",
             status="active",
             allowed_mime_types_json='["image/png"]',
@@ -93,7 +96,7 @@ def test_three_d_fixture_flows_from_readonly_source_to_shadow_and_badcase() -> N
         contract.update(
             {
                 "profile_type": "3d-asset-quality-v1",
-                "category_key": "three_d",
+                "category_key": "model_3d_su",
                 "field_demand_contract_id": field_contract.id,
                 "source_schema_fingerprint": "f" * 64,
                 "stage_fields": {
@@ -103,7 +106,7 @@ def test_three_d_fixture_flows_from_readonly_source_to_shadow_and_badcase() -> N
             }
         )
         mechanism = CategoryEvaluationV3Config(
-            category_key="three_d",
+            category_key="model_3d_su",
             display_name="3D 素材",
             status="active",
             contract_json=json.dumps(contract, ensure_ascii=False),
@@ -124,17 +127,16 @@ def test_three_d_fixture_flows_from_readonly_source_to_shadow_and_badcase() -> N
             width=64,
             height=64,
             sha256="a" * 64,
-            category_key="three_d",
+            category_key="model_3d_su",
         )
         db.add_all([profile, mechanism, asset])
         db.flush()
-
         source_contract = create_upstream_source_contract(
             db,
             contract_key="3d-readonly-source",
             adapter_key="fixture-readonly",
             source_system="fixture-3d",
-            category_key="three_d",
+            category_key="model_3d_su",
             connection_locator="source-registry:3d-readonly",
             secret_reference="secret-ref:3d-readonly",
             field_mappings={
@@ -159,7 +161,7 @@ def test_three_d_fixture_flows_from_readonly_source_to_shadow_and_badcase() -> N
                 SourceRow(
                     content_id="1001",
                     source_version="v7",
-                    category_key="three_d",
+                    category_key="model_3d_su",
                     occurred_at=datetime(2026, 8, 14, tzinfo=timezone.utc),
                     asset_id=asset.id,
                 )
@@ -200,7 +202,7 @@ def test_three_d_fixture_flows_from_readonly_source_to_shadow_and_badcase() -> N
         )
         job = EvaluationJob(
             asset_id=asset.id,
-            category_key="three_d",
+            category_key="model_3d_su",
             prompt_a_id=prompt.id,
             strategy_bundle_id=strategy.id,
             status="completed",
@@ -276,6 +278,42 @@ def test_three_d_fixture_flows_from_readonly_source_to_shadow_and_badcase() -> N
             )
         )
         db.flush()
+        tag_contract = TagDemandContract(
+            contract_key="platform-semantic",
+            version=1,
+            status="active",
+            definition_json="{}",
+            contract_hash="c" * 64,
+            created_by="admin",
+        )
+        db.add(tag_contract)
+        db.flush()
+        db.add(
+            SemanticTagFact(
+                asset_version_id=1,
+                field_key="style",
+                fact_version=1,
+                field_status="required",
+                values_json=canonical_json(
+                    [{
+                        "value": "现代",
+                        "locale": "zh",
+                        "rank": 1,
+                        "source": "human",
+                        "evidence_ref": "review:3d-1001",
+                    }]
+                ),
+                evidence_json=canonical_json(["review:3d-1001"]),
+                source_evaluation_id=result.id,
+                source_review_id=review.id,
+                contract_id=tag_contract.id,
+                normalization_version="semantic-normalization-v1",
+                mapping_version="semantic-mapping-v1",
+                status="approved",
+                payload_hash="d" * 64,
+            )
+        )
+        db.flush()
         release, _ = create_release(
             db,
             release_key="3d-release-1001",
@@ -290,7 +328,7 @@ def test_three_d_fixture_flows_from_readonly_source_to_shadow_and_badcase() -> N
         assert published_payload["provenance"]["source_system"] == "fixture-3d"
         assert published_payload["provenance"]["source_content_id"] == "1001"
         assert published_payload["provenance"]["source_version"] == "v7"
-        assert published_payload["semantic"]["style"] == "现代"
+        assert published_payload["semantic"]["style"]["values"][0]["value"] == "现代"
         assert published_payload["quality"]["score"] == 93
 
         shadow_batches: list[str] = []
@@ -322,7 +360,7 @@ def test_three_d_fixture_flows_from_readonly_source_to_shadow_and_badcase() -> N
                 adapter_key="fixture-shadow",
                 target_key=target.target_key,
                 write_policy="shadow_only",
-                category_key="three_d",
+                category_key="model_3d_su",
                 field_contract_id=field_contract.id,
                 max_batch_size=500,
                 primary_key=["content_key"],
@@ -382,7 +420,7 @@ def test_three_d_fixture_flows_from_readonly_source_to_shadow_and_badcase() -> N
             occurred_at=datetime(2026, 8, 14, tzinfo=timezone.utc),
             payload={
                 "production_case_id": "shadow-case-1001",
-                "category_key": "three_d",
+                "category_key": "model_3d_su",
                 "prompt_version": prompt.version,
                 "severity": "P2",
                 "model_output": {"style": "现代简约"},
@@ -430,7 +468,7 @@ def test_production_feedback_validates_bounded_shadow_evidence(
     try:
         db.add(
             EvaluationCategoryProfile(
-                category_key="three_d",
+                category_key="model_3d_su",
                 display_name="3D 素材",
                 status="active",
                 allowed_mime_types_json='["image/png"]',
@@ -450,7 +488,7 @@ def test_production_feedback_validates_bounded_shadow_evidence(
                 occurred_at=datetime(2026, 8, 14, tzinfo=timezone.utc),
                 payload={
                     "production_case_id": "shadow-case-invalid",
-                    "category_key": "three_d",
+                    "category_key": "model_3d_su",
                     "prompt_version": "3d-a-v1",
                     "severity": "P2",
                     "model_output": {"style": "现代简约"},

@@ -1,6 +1,21 @@
 # 3d66 标签系统｜当前项目状态
 
-> 最后更新：2026-08-15
+## 最新实施：3D/SU Shadow 与确定性标签闭环预备批次（2026-08-16，本地未发布）
+
+- 在 main@9943b8c7ae14dd70a54b7c08197be58c9b8131c2 上按能力移植只读来源合同、字段需求合同、model_3d_su Profile、Shadow 投影底座和 deterministic workflow fixture；业务类目只扩展平台能力，不复制第二套通用底座。
+- migration 72 为增量、幂等迁移：补齐素材来源/版本证据、来源合同、字段合同、Shadow 目标/运行/租约，并安全升级旧 projection_contracts 的 local/test 环境约束；不回填或改写历史评测、纠偏、机制和标签事实。
+- Shadow 只消费 PublishedLabel.status=published，manifest 携带素材版本/来源身份/SHA-256、机制、模型和 quality 溯源；候选机制、人工过程、原始响应、Query×素材策略和向量索引不进入 Canonical 事实或正式投影。
+- 3D/SU dry-run 使用既有五队列与通用运行时，7 步串行链路覆盖来源接入、评测/标注、人工纠偏门、标签事实发布门、Shadow 投影、对账和 Badcase 回流。运行会真实暂停在两个独立人工门，禁止越序审批，人工放行后才继续；首次投影失败从检查点恢复，重复幂等键不新增运行。
+- 运行中心仅增加紧凑一级摘要，详细冻结快照、投影批次、对账与回流证据仍进入二级抽屉；不考虑移动端。
+
+当前验证：
+
+- 后端全量（Python 3.12、全新临时 DATA_DIR）：1503 passed, 1 skipped, 6 warnings；warning 仅为既有依赖弃用提示。
+- 本轮双人工门专项：3 passed；前置 Shadow/来源/Profile/迁移联合专项：85 passed，受影响模块回归：92 passed。
+- 前端 test:lightbox、test:baseline-level-metrics、lint、build 全部通过；构建保留既有 Vite 配置提示和主 chunk 大于 500 kB warning。
+- 本批仅保留在隔离分支 codex/3d-shadow-dry-run-prep-20260816，未推送、未合并、未部署测试服，未连接真实上游/模型/DataWorks/业务数据库，未执行正式标签发布或存量覆盖。详见 docs/superpowers/receipts/2026-08-16-3d-shadow-dry-run-prep.md。
+
+> 最后更新：2026-08-16
 > 本文件只记录“现在做到哪里”；长期原则见 `PRODUCT.md` 和 `AGENTS.md`，历史背景见 `CODEX_HANDOFF.md`。
 
 ## 最新实施：3D/SU 五维 grade 评分回归修复（2026-08-17）

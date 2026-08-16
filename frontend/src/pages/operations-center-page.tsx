@@ -39,6 +39,14 @@ function blockerLabel(run: ProductionRunSummary) {
   return blocker?.message ?? blocker?.code ?? run.error_message ?? "无"
 }
 
+function threeDDryRunGate(run: ProductionRunSummary) {
+  if (run.current_step_key === "human_correction_gate") return "人工纠偏门"
+  if (run.current_step_key === "label_fact_gate") return "标签事实发布门"
+  if (run.status === "succeeded") return "双人工门已通过"
+  if (run.status === "blocked") return "等待人工处理"
+  return "自动链路执行中"
+}
+
 export function OperationsCenterPage() {
   const [failureOpen, setFailureOpen] = useState(false)
   const [runtimeOpen, setRuntimeOpen] = useState(false)
@@ -53,6 +61,7 @@ export function OperationsCenterPage() {
   const retryJobs = (jobs.data?.items ?? []).filter((job) => job.retry_after_at || job.technical_attempt > 0)
   const openBreakers = (breakers.data?.items ?? []).filter((item) => item.state === "open")
   const runs = runtimeRuns.data?.items ?? []
+  const threeDDryRun = runs.find((run) => run.category_key === "model_3d_su") ?? null
   const refresh = () => Promise.all([
     control.refetch(),
     jobs.refetch(),
@@ -110,6 +119,31 @@ export function OperationsCenterPage() {
             <p className="mt-3 text-sm leading-6 text-[var(--muted)]">恢复队列 {recoveryJobs.length} 个 · 延迟/重试任务 {retryJobs.length} 个 · 打开熔断 {openBreakers.length} 个。</p>
             <p className="mt-3 text-xs leading-5 text-[var(--muted)]">最后检查点：{control.data?.updated_at ? new Date(control.data.updated_at).toLocaleString("zh-CN") : "暂无"}</p>
           </aside>
+        </section>
+
+        <section data-testid="three-d-dry-run-summary" className="border-y border-[var(--line-strong)] bg-white">
+          <div className="flex flex-wrap items-end justify-between gap-3 px-5 py-5 md:px-6">
+            <div>
+              <p className="text-xs font-semibold text-[var(--muted)]">3D/SU 标签闭环 · deterministic dry-run</p>
+              <h2 className="mt-1 text-lg font-bold">双人工门与影子消费</h2>
+              <p className="mt-2 text-xs leading-5 text-[var(--muted)]">一级只显示当前关口、状态和检查点；步骤尝试、冻结快照、失败恢复与影子证据进入二级抽屉。</p>
+            </div>
+            <Badge tone={threeDDryRun ? runtimeTone(threeDDryRun.status) : "neutral"}>{threeDDryRun ? threeDDryRun.status : "尚未运行"}</Badge>
+          </div>
+          {threeDDryRun ? (
+            <div className="grid gap-px border-t border-[var(--line)] bg-[var(--line)] md:grid-cols-2 xl:grid-cols-6">
+              <RunFact label="类目" value={threeDDryRun.category_key ?? "model_3d_su"} />
+              <RunFact label="工作流版本" value={threeDDryRun.workflow_version} />
+              <RunFact label="当前关口" value={threeDDryRunGate(threeDDryRun)} />
+              <RunFact label="最后检查点" value={threeDDryRun.last_checkpoint_id ? `#${threeDDryRun.last_checkpoint_id}` : "暂无"} />
+              <RunFact label="阻塞原因" value={blockerLabel(threeDDryRun)} />
+              <div className="flex items-center justify-end bg-white px-4 py-4">
+                <Button variant="secondary" size="sm" onClick={() => { setSelectedRun(threeDDryRun); setRuntimeOpen(true) }}>查看完整证据</Button>
+              </div>
+            </div>
+          ) : (
+            <div className="border-t border-[var(--line)] px-5 py-4 text-xs leading-5 text-[var(--muted)]">本地 fixture 尚未创建运行记录。该入口不会连接真实上游、模型或下游表，也不会发布正式标签。</div>
+          )}
         </section>
 
         <section data-testid="runtime-runs" className="border-y border-[var(--line-strong)] bg-white">
@@ -196,6 +230,15 @@ function Metric({ label, value, tone = "neutral" }: { label: string; value: stri
       <p className="text-xs text-[var(--muted)]">{label}</p>
       <p className="mt-2 font-data text-2xl font-bold">{value}</p>
       <Badge className="mt-2" tone={tone}>{tone === "success" ? "正常" : tone === "warning" ? "需要处理" : "实时"}</Badge>
+    </div>
+  )
+}
+
+function RunFact({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="min-w-0 bg-white px-4 py-4">
+      <p className="text-[11px] text-[var(--muted)]">{label}</p>
+      <p className="mt-1 break-all font-data text-xs font-semibold">{value}</p>
     </div>
   )
 }
