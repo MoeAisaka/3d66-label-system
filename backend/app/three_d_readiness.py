@@ -40,6 +40,10 @@ class IdentityReadiness(FrozenModel):
     accepted_res_types: tuple[int, ...] = (1, 6)
     window_required: bool = True
     approval_state: Literal["pending", "signed"] = "pending"
+    signed_window: str | None = None
+    duplicate_key_count: int | None = None
+    multi_res_id_conflict_count: int | None = None
+    approval_evidence: str | None = None
     probe_hash: str
     duplicate_policy: Literal["fail_closed"] = "fail_closed"
 
@@ -53,6 +57,13 @@ class IdentityReadiness(FrozenModel):
             raise ValueError("res_type 只允许 1/6")
         if len(self.probe_hash) != 64:
             raise ValueError("probe_hash 必须是 SHA-256")
+        if self.approval_state == "signed":
+            if not self.signed_window or not self.approval_evidence:
+                raise ValueError("身份签认必须包含数据窗口和签认证据")
+            if self.duplicate_key_count != 0:
+                raise ValueError("身份签认要求重复键数量为 0")
+            if self.multi_res_id_conflict_count != 0:
+                raise ValueError("身份签认要求同键多 res_id 冲突数量为 0")
         return self
 
 
@@ -195,6 +206,10 @@ class ThreeDReadinessManifest(FrozenModel):
             return self
         evidence_complete = (
             self.identity.approval_state == "signed"
+            and bool(self.identity.signed_window)
+            and self.identity.duplicate_key_count == 0
+            and self.identity.multi_res_id_conflict_count == 0
+            and bool(self.identity.approval_evidence)
             and bool(self.fields.owner_signoff_evidence)
             and bool(self.golden_set.owner_signoff_evidence)
             and self.permissions.approval_state == "approved"

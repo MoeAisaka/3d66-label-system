@@ -1,5 +1,14 @@
 # 3d66 标签系统｜当前项目状态
 
+## 最新实施：3D/SU 真实闭环接入前置冻结（2026-08-16，本地未发布）
+
+- 新增机器可校验的 `3d-su-readiness-v1` manifest，固定 `model_3d_su` 首个纵切的候选源表、`res_type + ll_id` 身份键、四项只读探查哈希、平台字段与类目扩展边界、黄金集、最小权限、RACI、停止条件和全部外部效果为 false。
+- readiness 状态固定为 `pending_external_signoff`；身份、字段、黄金集、权限和六类 RACI 证据不完整时，系统拒绝 `ready_for_real_ingress`。该状态是接入前置冻结，不代表真实接入已就绪。
+- 研发接入包已冻结：来源与身份签认、逐字段 whole/single 与空值语义模板、至少 100 条黄金/挑战样本计划、仅 SELECT/DESCRIBE 的权限模板、产品/数据/算法/平台/审核/下游 RACI，以及九月真实闭环验收依赖。
+- 默认字段质量门槛保持 Precision ≥ 0.80、Recall ≥ 0.70；黄金集真值只能新增 revision，不原地覆盖锁定历史；机制候选启用与标签事实发布继续保持两个独立人工门。
+- 当前仍未签认：真实数据窗口与四项探查结果、字段 Owner/词表/回退版本、黄金集 revision、限时只读权限、六类责任人、真实投影目标与下游消费验收人。
+- 本批未连接 DataWorks/ODPS、真实上游、真实模型或业务数据库，未执行 SQL、申请权限、DML、模型调用、标签发布、存量覆盖、Codeup 推送、MR 合并或部署。合同见 `docs/contracts/3d-su-readiness-freeze-v1.md`。
+
 ## 最新实施：3D/SU Shadow 与确定性标签闭环预备批次（2026-08-16，本地未发布）
 
 - 在 main@9943b8c7ae14dd70a54b7c08197be58c9b8131c2 上按能力移植只读来源合同、字段需求合同、model_3d_su Profile、Shadow 投影底座和 deterministic workflow fixture；业务类目只扩展平台能力，不复制第二套通用底座。

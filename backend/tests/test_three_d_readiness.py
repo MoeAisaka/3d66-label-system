@@ -94,6 +94,38 @@ def test_readiness_rejects_ready_status_without_signed_evidence() -> None:
         validate_three_d_readiness_manifest(payload)
 
 
+def test_readiness_requires_zero_conflicts_and_signed_window_for_ready_status() -> None:
+    payload = build_three_d_readiness_manifest().model_dump(mode="json")
+    payload["status"] = "ready_for_real_ingress"
+    payload["identity"].update(
+        {
+            "approval_state": "signed",
+            "signed_window": "2026-09-01/2026-09-07",
+            "duplicate_key_count": 1,
+            "multi_res_id_conflict_count": 0,
+            "approval_evidence": "sha256:identity-evidence",
+        }
+    )
+    payload["fields"]["owner_signoff_evidence"] = "sha256:field-evidence"
+    payload["golden_set"]["owner_signoff_evidence"] = "sha256:golden-evidence"
+    payload["permissions"].update(
+        {
+            "approval_state": "approved",
+            "approval_evidence": "sha256:permission-evidence",
+        }
+    )
+    payload["raci"]["assignments"] = {
+        role: f"signed:{role}" for role in payload["raci"]["required_roles"]
+    }
+
+    with pytest.raises(ThreeDReadinessError, match="重复|冲突"):
+        validate_three_d_readiness_manifest(payload)
+
+    payload["identity"]["duplicate_key_count"] = 0
+    validated = validate_three_d_readiness_manifest(payload)
+    assert validated.status == "ready_for_real_ingress"
+
+
 def test_readiness_rejects_weaker_gates_or_overbroad_permissions() -> None:
     weak_gate = build_three_d_readiness_manifest().model_dump(mode="json")
     weak_gate["fields"]["min_precision"] = 0.79
