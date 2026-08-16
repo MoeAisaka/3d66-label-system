@@ -33,11 +33,11 @@ Interfaces:
 - validate_three_d_readiness_manifest(manifest) -> ThreeDReadinessManifest
 - readiness_manifest_hash(manifest) -> str
 
-- [ ] Write failing tests for pending_external_signoff, all external_effects false, exact identity table/key, Select/Describe permissions, stable probe hash, and rejection of ready status without signed evidence.
-- [ ] Run focused tests and confirm collection/import failure because app.three_d_readiness does not exist.
-- [ ] Implement immutable Pydantic types for identity, fields, golden_set, permissions, RACI, external_effects and stop_conditions. Reject unknown keys, unsafe table names, missing Owners, weak quality gates, or permissions outside the allow/deny contract.
-- [ ] Bind identity.probe_hash to build_three_d_su_identity_probe('aliyun_3d66_dw.dim_res_info_union'); store no query results, credentials or source rows.
-- [ ] Run focused tests and commit feat: add 3d su readiness manifest.
+- [x] Write failing tests for pending_external_signoff, all external_effects false, exact identity table/key, Select/Describe permissions, stable probe hash, and rejection of ready status without signed evidence.
+- [x] Run focused tests and confirm collection/import failure because app.three_d_readiness does not exist.
+- [x] Implement immutable Pydantic types for identity, fields, golden_set, permissions, RACI, external_effects and stop_conditions. Reject unknown keys, unsafe table names, missing Owners, weak quality gates, or permissions outside the allow/deny contract.
+- [x] Bind identity.probe_hash to build_three_d_su_identity_probe('aliyun_3d66_dw.dim_res_info_union'); store no query results, credentials or source rows.
+- [x] Run focused tests and commit feat: add 3d su readiness manifest.
 
 ### Task 2: Add the研发接入清单 and source/field/golden-set contracts
 
@@ -48,11 +48,11 @@ Files:
 - Create docs/contracts/3d-su-permission-raci-v1.md
 - Modify PROJECT_STATUS.md
 
-- [ ] Document the candidate source table, four SELECT probe purposes, signed data window, zero duplicate/conflict decision, probe hash binding and separate Select/Describe approval.
-- [ ] Document platform fields space, object, style, material, structural_features, architectural_element, soft_decoration, hard_decoration, color and localized title; extensions only under category.model_3d_su.*. Every row includes owner, whole/single applicability, null semantics, cardinality, vocabulary version, quality gate and rollback release.
-- [ ] Document a minimum 100 locked/challenge samples across 3D/SU, whole/single, three evaluation tracks, semantic hard cases and L1-L5 levels. Truth changes create a new revision; no UPDATE to a locked set.
-- [ ] Document source discovery permissions, target-table DML as a future separately approved dependency, and product/data/algorithm/platform/reviewer/consumer Owners with expiry and evidence fields.
-- [ ] Add project status links and unresolved signoff fields; state explicitly this is pre-freeze, not real ingress readiness.
+- [x] Document the candidate source table, four SELECT probe purposes, signed data window, zero duplicate/conflict decision, probe hash binding and separate Select/Describe approval.
+- [x] Document platform fields space, object, style, material, structural_features, architectural_element, soft_decoration, hard_decoration, color and localized title; extensions only under category.model_3d_su.*. Every row includes owner, whole/single applicability, null semantics, cardinality, vocabulary version, quality gate and rollback release.
+- [x] Document a minimum 100 locked/challenge samples across 3D/SU, whole/single, three evaluation tracks, semantic hard cases and L1-L5 levels. Truth changes create a new revision; no UPDATE to a locked set.
+- [x] Document source discovery permissions, target-table DML as a future separately approved dependency, and product/data/algorithm/platform/reviewer/consumer Owners with expiry and evidence fields.
+- [x] Add project status links and unresolved signoff fields; state explicitly this is pre-freeze, not real ingress readiness.
 
 ### Task 3: Validate docs and handoff evidence
 
@@ -61,17 +61,17 @@ Files:
 - Modify frontend/package.json
 - Create docs/superpowers/receipts/2026-08-16-3d-su-readiness-freeze.md
 
-- [ ] Add a static contract script that checks table names, Select/Describe permissions, model_3d_su, res_type 1/6, 100-sample floor, P/R gates, double human gates and no-external-effects statements.
-- [ ] Run npm run contract:three-d-readiness and git diff --check.
-- [ ] Write a receipt with branch, commit, manifest hash, exact counts, unresolved dependencies and explicit no real source/model/database contact.
+- [x] Add a static contract script that checks table names, Select/Describe permissions, model_3d_su, res_type 1/6, 100-sample floor, P/R gates, double human gates and no-external-effects statements.
+- [x] Run npm run contract:three-d-readiness and git diff --check.
+- [x] Write a receipt with branch, commit, manifest hash, exact counts, unresolved dependencies and explicit no real source/model/database contact.
 
 ### Task 4: Final local verification and handoff
 
-- [ ] Run new backend focused tests with fresh temporary DATA_DIR.
-- [ ] Run the readiness contract, source identity and semantic contract tests, frontend lint and build.
-- [ ] Run git diff --check, inspect git status --short and verify no remote write occurred.
-- [ ] Commit only this readiness package; do not push, merge or deploy.
-- [ ] Return the signed-evidence checklist to the 标签体系 reconstruction thread for Owner/Data/Algorithm signoff.
+- [x] Run new backend focused tests with fresh temporary DATA_DIR.
+- [x] Run the readiness contract, source identity and semantic contract tests, frontend lint and build.
+- [x] Run git diff --check, inspect git status --short and verify no remote write occurred.
+- [x] Commit only this readiness package; do not push, merge or deploy.
+- [x] Return the signed-evidence checklist to the 标签体系 reconstruction thread for Owner/Data/Algorithm signoff.
 
 ## Stop Conditions
 

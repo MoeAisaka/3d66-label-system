@@ -6,7 +6,7 @@
 - 分支：`codex/3d-shadow-dry-run-prep-20260816`
 - readiness 提交：`175fe9c5eb51cca6773704da2d5022e56852b440`
 - manifest：`3d-su-readiness-v1` / `model_3d_su`
-- 当前 manifest SHA-256：`f96819792fb3e79f484b8757d79cf2bb94fabe1b2092bc5828434d8c26559401`
+- 当前 manifest SHA-256：`f9d5d03c1e02a029fc95205605deda3b1f65eb689ef8407a02d3947547a9b9de`
 - 状态：`pending_external_signoff`
 
 ## 已完成
