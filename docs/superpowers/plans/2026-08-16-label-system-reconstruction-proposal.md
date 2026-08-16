@@ -20,6 +20,8 @@
 
 **Document delivery note (2026-08-16):** Markdown remains the editable authoritative source. The paired Word output is a visually verified handout assembled from the validated PDF page renders because the current headless LibreOffice renderer cannot reliably render CJK text from OOXML font runs. This is a renderer workaround, not a change to product scope or an assertion that the Word file is the editable source.
 
+**Narrative revision (2026-08-16):** The business briefing opens with `背景与现状 → 核心痛点 → 解决方案总览`, then expands the implementation details, so business readers understand the case for change before reading platform mechanics.
+
 ---
 
 ### Task 1: Build the business briefing source document
@@ -37,7 +39,7 @@
 - Produces one authoritative narrative that both business stakeholders and engineers can use.
 - Uses current-state labels: `已实现`、`本批冻结`、`待负责人签认`、`下一阶段候选`。
 
-- [x] Write the document sections: executive summary; why now; unified positioning; current pain points; target business loop; architecture layers; Canonical fact ownership; platform modules; incremental/stock workflows; dual human gates and dual release axes; model/mechanism management; 3D/SU September vertical slice; downstream big-table/small-table consumption; KPI and acceptance; RACI; roadmap; risks; decision requests; non-goals.
+- [x] Write the document sections in the approved business order: background/current state; core pain points; solution overview; target business loop; architecture layers; Canonical fact ownership; platform modules; incremental/stock workflows; dual human gates and dual release axes; model/mechanism management; 3D/SU September vertical slice; downstream big-table/small-table consumption; KPI and acceptance; RACI; roadmap; risks; decision requests; non-goals.
 - [x] Include one architecture diagram in Mermaid and one compact capability matrix.
 - [x] Explicitly state that query relevance, ranking weights and graph-internal relations remain downstream strategy and are not asset facts.
 - [x] Explicitly state the first success standard: 3D/SU closed-loop production evidence plus field Precision/Recall and downstream reconciliation; do not use platform construction volume as a substitute.
