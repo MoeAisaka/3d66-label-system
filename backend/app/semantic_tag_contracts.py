@@ -156,6 +156,48 @@ class ProjectionTargetDefinition(BaseModel):
     locale: Literal["zh", "en"]
 
 
+class SourceIdentityContract(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    source_system: str = Field(min_length=1, max_length=120)
+    object_grain: Literal["asset"]
+    identity_fields: tuple[Literal["res_type", "ll_id"], ...]
+    optional_disambiguator: Literal["res_id"] | None = None
+    version_field: str = Field(min_length=1, max_length=80)
+    deletion_field: str = Field(min_length=1, max_length=80)
+    uniqueness_status: Literal["unverified", "verified", "conflict"]
+    verification_evidence_hash: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+    )
+
+    @model_validator(mode="after")
+    def _freeze_identity_fields(self) -> "SourceIdentityContract":
+        object.__setattr__(self, "identity_fields", tuple(self.identity_fields))
+        return self
+
+
+class FieldSupplyDefinition(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    field_key: str
+    fact_namespace: Literal["semantic", "quality", "governance"]
+    object_grain: Literal["asset", "image", "text_fragment"]
+    production_method: Literal["source_direct", "rule", "model", "human", "hybrid"]
+    source_authority: str = Field(min_length=1, max_length=160)
+    owner: str = Field(min_length=1, max_length=120)
+    freshness_sla_hours: int = Field(ge=1, le=8760)
+    null_semantics: tuple[
+        Literal["not_applicable", "not_detected", "unknown", "empty_valid"], ...
+    ]
+    rollback_strategy: Literal["previous_release", "compensation_release"]
+
+    @model_validator(mode="after")
+    def _freeze_null_semantics(self) -> "FieldSupplyDefinition":
+        object.__setattr__(self, "null_semantics", tuple(self.null_semantics))
+        return self
+
+
 class ExecutionVariant(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -166,6 +208,19 @@ class ExecutionVariant(BaseModel):
     prompt_variant: Literal["whole", "single"]
     prompt_version: str
     model_version: str
+    field_applicability_overrides: dict[str, SemanticApplicability] = Field(
+        default_factory=dict,
+        exclude_if=lambda value: not value,
+    )
+
+    @model_validator(mode="after")
+    def _freeze_field_applicability_overrides(self) -> "ExecutionVariant":
+        object.__setattr__(
+            self,
+            "field_applicability_overrides",
+            _freeze_mapping(self.field_applicability_overrides),
+        )
+        return self
 
 
 class SemanticTagSchema(BaseModel):
@@ -183,12 +238,20 @@ class SemanticTagSchema(BaseModel):
 class TagDemandContractDefinition(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    schema_version: Literal["tag-demand-contract-v1"]
+    schema_version: Literal["tag-demand-contract-v1", "tag-demand-contract-v2"]
     semantic_schema: SemanticTagSchema
     category_applicability: dict[str, dict[str, SemanticApplicability]]
     execution_variants: tuple[ExecutionVariant, ...]
     quality_gates: dict[str, FieldQualityGate]
     projection_targets: tuple[ProjectionTargetDefinition, ...]
+    source_identity: SourceIdentityContract | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
+    field_supply: dict[str, FieldSupplyDefinition] = Field(
+        default_factory=dict,
+        exclude_if=lambda value: not value,
+    )
 
     @model_validator(mode="after")
     def _validate_platform_contract(self) -> "TagDemandContractDefinition":
@@ -231,6 +294,58 @@ class TagDemandContractDefinition(BaseModel):
                 raise ValueError("whole 执行变体必须满足 prompt_variant=whole")
             if variant.asset_scope == "single" and variant.prompt_variant != "single":
                 raise ValueError("single 执行变体必须满足 prompt_variant=single")
+            unknown_overrides = sorted(
+                set(variant.field_applicability_overrides) - declared_fields
+            )
+            if unknown_overrides:
+                raise ValueError(
+                    f"执行变体覆盖字段 {unknown_overrides[0]} 未在 semantic_schema.fields 中声明"
+                )
+
+        if self.schema_version == "tag-demand-contract-v1":
+            if self.source_identity is not None or self.field_supply:
+                raise ValueError("v2 身份与字段供给配置不能写入 tag-demand-contract-v1")
+            if any(variant.field_applicability_overrides for variant in self.execution_variants):
+                raise ValueError("执行变体字段覆盖需要 tag-demand-contract-v2")
+        else:
+            if self.source_identity is None:
+                raise ValueError("tag-demand-contract-v2 必须声明 source_identity")
+
+            missing_supply = sorted(declared_fields - set(self.field_supply))
+            if missing_supply:
+                raise ValueError(f"字段 {missing_supply[0]} 缺少供给路径")
+            unknown_supply = sorted(set(self.field_supply) - declared_fields)
+            if unknown_supply:
+                raise ValueError(
+                    f"供给路径字段 {unknown_supply[0]} 未在 semantic_schema.fields 中声明"
+                )
+            for field_key, supply in self.field_supply.items():
+                if supply.field_key != field_key:
+                    raise ValueError(
+                        f"字段 {field_key} 的供给路径 field_key 必须与映射键一致"
+                    )
+
+            if "model_3d_su" in declared_categories and self.source_identity.identity_fields != (
+                "res_type",
+                "ll_id",
+            ):
+                raise ValueError(
+                    "model_3d_su 身份字段必须严格为 res_type + ll_id"
+                )
+            if (
+                self.source_identity.uniqueness_status == "verified"
+                and self.source_identity.verification_evidence_hash is None
+            ):
+                raise ValueError(
+                    "verified 源身份必须提供 verification_evidence_hash"
+                )
+            if (
+                self.source_identity.uniqueness_status == "conflict"
+                and self.source_identity.verification_evidence_hash is not None
+            ):
+                raise ValueError(
+                    "conflict 源身份不能提供 verification_evidence_hash"
+                )
         object.__setattr__(
             self,
             "category_applicability",
@@ -243,6 +358,7 @@ class TagDemandContractDefinition(BaseModel):
             _freeze_mapping(self.quality_gates),
         )
         object.__setattr__(self, "projection_targets", tuple(self.projection_targets))
+        object.__setattr__(self, "field_supply", _freeze_mapping(self.field_supply))
         return self
 
 

@@ -3,6 +3,22 @@
 > 最后更新：2026-08-15
 > 本文件只记录“现在做到哪里”；长期原则见 `PRODUCT.md` 和 `AGENTS.md`，历史背景见 `CODEX_HANDOFF.md`。
 
+## 最新实施：受控脚本注册与工作流运行时 dry-run 底座（2026-08-15）
+
+- 新增 `ScriptDefinition/ScriptVersion`、`WorkflowDefinition/WorkflowVersion`、`ProductionRun/ProductionStepAttempt`、运行分发和追加式审计模型；migration 71 为增量、幂等迁移，不回填或改写历史评测事实。
+- 脚本注册中心只接受受控元数据、Schema、权限声明、重试策略和制品哈希；首批执行器仅允许 `deterministic_fixture`，API 和页面均拒绝 Python、JavaScript、SQL、Shell、源码和命令字段。
+- 工作流版本支持 DAG、受限条件路由、不可变 canonical hash 和运行时冻结快照；类目通过 Profile 引用工作流，继续复用模型中心、评测机制、纠偏、双人工门、发布和投影能力。
+- 通用运行时复用既有 `DeterministicQueueScheduler`、`QueueSchedulerState` 与 `validation / interactive / production_batch / canary / recovery` 五队列，没有新增第六队列或第二套调度状态。
+- 两步确定性链路 `identity -> fail_once` 已证明：首次失败进入 `recovery`，第二次从检查点成功恢复，已完成步骤不重跑，重复幂等请求不新增运行，且不会创建 `EvaluationJob` 或 `LabelRelease`。
+- 桌面运行中心新增通用运行列表；一级页展示五队列、当前步骤、最后检查点、责任人和阻塞原因，步骤时间线、冻结快照、脚本版本、输入/输出哈希、`checkpoint_hash` 和暂停/取消动作进入二级证据抽屉。
+
+当前验证：
+
+- 后端全量：`1460 passed, 1 skipped, 6 warnings`（Python 3.12；warning 为既有 FastAPI/httpx 与 PDF SWIG 弃用提示）。
+- 前端全部合同脚本、Lightbox、回归等级指标、TypeScript lint 和 Vite production build 通过；仅保留既有 Vite 配置提示和主 chunk `524.41 kB` warning。
+- Microsoft Edge 本地桌面验收通过：五队列、运行主线和证据抽屉正常显示，无 React 页面执行错误；本地夹具只使用内存 mock，不连接测试服或数据库。
+- 代码能力基线为 `6da0e1942e287ffc93aa289710a64c4158bfb713`。本批未推送、未创建或合并 MR、未部署，未调用真实模型、真实 DataWorks 或外部数据库 DML。
+
 ## 最新实施：平台语义事实发布门禁加固（2026-08-15）
 
 - 发布前审查发现并修复 Canonical 语义事实的审批幂等、冻结合同/素材版本校验、平台合同 key 隔离、正式标签 Schema 元数据、质量真值漂移和 provenance 外键缺口。
@@ -2024,3 +2040,51 @@ npm.cmd run build
 - 浏览器：`1440×900` 的字段合同列表/详情抽屉、`1280×720` 的 3D/SU 适用性摘要、基准回归指标入口和本地投影对账均无文档级横向溢出、无白屏、控制台 0 error；主导航没有重复字段合同入口。
 - 当前分支本地实现，**未推送、未合并、未部署**；未连接真实上游、真实业务数据库、真实知识图谱、真实模型或生产环境。下一阶段仍需 Owner 冻结真实词表、字段签认、上下游表合同、权限、金丝雀和回退门禁。
 - 架构决策见 ADR-0047：`docs/decisions/0047-platform-semantic-tag-demand-contract.md`。
+
+## 最新完成：3D/SU 字段供给合同与资产身份底座（2026-08-15）
+
+- 当前日期为 **2026-08-15（周六）**。本节记录截至当前日已完成的本地实现；
+  `2026-08-21` 的脚本注册与工作流编排、`2026-09-30` 的真实 3D/SU 标签闭环
+  均为未来检查点或目标，不属于本批已完成事项。
+- `tag-demand-contract-v2` 新增源身份合同、逐字段供给路径和执行变体级字段适用性覆盖；
+  `tag-demand-contract-v1` 继续保持无 v2 字段的原序列化与固定哈希兼容。v2 要求每个
+  semantic 字段恰好有一条供给路径，3D/SU `single` 变体显式冻结
+  `space=not_applicable`。
+- 3D/SU 候选源身份固定为
+  `source_system + res_type + ll_id`，其中 `res_type=1` 表示 3D、`res_type=6`
+  表示 SU。只有同一数据窗口的重复键和多 `res_id` 冲突均为零，且摘要证据经过人工
+  批准后，才允许生成 `aliyun_3d66_dw:<res_type>:<ll_id>`；未签认时
+  `content_key=null`，冲突时关闭失败，禁止追加随机后缀制造唯一性。
+- 新增 migration 70 `add_source_identity_verification`：保存探查哈希、数据窗口、聚合
+  计数、状态和审核人；为内容记录和接入事件增加冻结身份字段、非空 content key
+  唯一索引与不可变触发器。历史记录只迁移为 `legacy_unverified`，不回填
+  `content_key`，不推断为 verified。
+- 新增 `content-ingress-v2` 与身份签认 API。v2 事件在无批准证据时仍只追加本地事件
+  和内容记录，但返回 `routing_status=blocked_identity`，不能创建素材包；批准证据后
+  只对新事件生成确定性 content key。同 event_id 身份漂移返回 409。v1 接入、旧
+  content key 展示和既有组包行为保持不变。
+- 身份探查批准不会执行 SQL、激活合同、启动模型或发布标签事实。批准证据绑定采用
+  **追加 candidate 合同版本**，不原地修改 source 合同；v2 candidate 只有在引用仍为
+  approved 的匹配证据时才能由人工激活，继续保持机制发布轴和标签事实发布轴独立。
+- 3D/SU 系统种子现在生成不可自动激活的 v2 `draft`，逐字段供给口径记录在
+  `docs/contracts/3d-su-field-supply-v1.md`；已有运营 v1 合同保持状态和内容不变，
+  系统只在没有相同哈希版本时追加 v2。
+- 前端字段合同详情新增“源身份合同”“字段供给路径”“执行变体覆盖”；身份批准和
+  绑定进入二级“身份签认”抽屉。增量工作台一级页只显示最近五条内容的来源、类目、
+  版本、身份状态和路由结果，候选复合键、哈希及签认证据进入内容身份抽屉。正式界面
+  仍只验收桌面内网使用，不增加移动端范围。
+- 只读探查工具只生成四条 `SELECT`：范围计数、空值、重复键和多 `res_id` 冲突，
+  并输出稳定 `probe_hash`。运行时代码未引入 DataWorks/ODPS/HTTP 客户端、SQL
+  执行方法或 DML；本批只验证 JSON 输出，**没有执行生成的 SQL**。
+- 验证：聚焦后端 `128 passed`；隔离数据目录后端全量
+  `1435 passed, 1 skipped, 6 warnings`。前端
+  `contract:tag-demand`、`contract:content-identity`、
+  `contract:information-architecture`、`contract:dual-workspaces`、TypeScript lint 和
+  Vite build 全部通过；仅保留既有主 chunk 大于 500 kB 警告。
+- 当前工作分支为 `codex/tpeng-label-reconstruction-kickoff-20260815`，基于
+  `origin/main@850508a38240aa3108b2e59a3dc94fc4a1c90a09`。截至本节写入前，设计、
+  计划与 Tasks 1–7 均仅本地提交；未推送 Codeup、未创建 MR、未合并、未部署、未连接
+  DataWorks、未申请权限、未调用真实模型、未写真实数据库、未切搜索流量。
+- 下一份实施计划是未来检查点
+  `2026-08-21-script-registry-workflow-runtime.md`：脚本注册、工作流定义、冻结快照、
+  五队列和检查点恢复。该日期不是当前授权，也不表示相关能力已经完成。

@@ -9,8 +9,10 @@ import type {
   BaselineSetDetail,
   BaselineSetSummary,
   BaselineV3RevisionList,
+  ContentIdentityRecord,
   MaterialPackage,
   PromptVersion,
+  SourceIdentityVerification,
   TagDemandContract,
 } from "@/lib/types"
 
@@ -313,4 +315,20 @@ export const tagDemandContractApi = {
   get: (id: number) => api<TagDemandContract>(`/api/tag-demand-contracts/${id}`),
   create: (payload: { contract_key: string; definition: TagDemandContract["definition"]; status: "draft" | "candidate" }) => api<TagDemandContract>("/api/tag-demand-contracts", { method: "POST", ...jsonBody(payload) }),
   activate: (id: number) => api<TagDemandContract>(`/api/tag-demand-contracts/${id}/activate`, { method: "POST" }),
+}
+
+export const sourceIdentityApi = {
+  list: () => api<{ items: SourceIdentityVerification[] }>("/api/source-identity-verifications"),
+  approve: (id: number) => api<SourceIdentityVerification>(
+    `/api/source-identity-verifications/${id}/approve`,
+    { method: "POST" },
+  ),
+  bindContract: (contractId: number, verificationId: number) => api<TagDemandContract>(
+    `/api/tag-demand-contracts/${contractId}/bind-source-identity-verification`,
+    { method: "POST", ...jsonBody({ verification_id: verificationId }) },
+  ),
+}
+
+export const contentIngressApi = {
+  list: () => api<{ items: ContentIdentityRecord[] }>("/api/content-ingress/records"),
 }

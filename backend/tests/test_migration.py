@@ -84,7 +84,56 @@ MIGRATION_NAMES = [
     "add_projection_contract_registry",
     "add_semantic_tag_contract_registry",
     "harden_semantic_tag_fact_provenance",
+    "add_source_identity_verification",
+    "add_script_workflow_runtime",
 ]
+
+
+def test_migration_70_upgrades_legacy_content_identity_without_backfill(tmp_path) -> None:
+    engine = create_engine(f"sqlite:///{tmp_path / 'legacy-identity.db'}")
+    try:
+        with engine.begin() as connection:
+            connection.exec_driver_sql(
+                """
+                CREATE TABLE content_records (
+                    id INTEGER PRIMARY KEY,
+                    source_system VARCHAR(120) NOT NULL,
+                    source_content_id VARCHAR(160) NOT NULL,
+                    category_key VARCHAR(40) NOT NULL,
+                    source_version VARCHAR(120) NOT NULL,
+                    source_occurred_at DATETIME NOT NULL,
+                    asset_id INTEGER,
+                    status VARCHAR(30) NOT NULL,
+                    created_at DATETIME NOT NULL,
+                    updated_at DATETIME NOT NULL,
+                    UNIQUE(source_system, source_content_id)
+                )
+                """
+            )
+            connection.exec_driver_sql(
+                """
+                INSERT INTO content_records (
+                    id, source_system, source_content_id, category_key,
+                    source_version, source_occurred_at, status, created_at, updated_at
+                ) VALUES (
+                    1, 'legacy', '42', 'model_3d_su',
+                    'v1', CURRENT_TIMESTAMP, 'awaiting_material',
+                    CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                )
+                """
+            )
+        Base.metadata.create_all(engine)
+        with engine.begin() as connection:
+            run_migrations(connection)
+            row = connection.exec_driver_sql(
+                "SELECT content_key, identity_status, identity_hash "
+                "FROM content_records WHERE id = 1"
+            ).one()
+            assert row.content_key is None
+            assert row.identity_status == "legacy_unverified"
+            assert row.identity_hash is None
+    finally:
+        engine.dispose()
 
 
 def test_semantic_provenance_foreign_keys_and_active_contract_guards(tmp_path) -> None:
@@ -3361,5 +3410,45 @@ def test_migration_26_repairs_dangling_prompt_fk_and_allows_real_insert(
             assert connection.exec_driver_sql(
                 "PRAGMA foreign_key_check"
             ).all() == []
+    finally:
+        engine.dispose()
+
+
+def test_migration_71_creates_runtime_tables_without_rewriting_history(tmp_path) -> None:
+    engine = create_engine(f"sqlite:///{tmp_path / 'runtime-v71.db'}")
+    try:
+        with engine.begin() as connection:
+            connection.exec_driver_sql(
+                "CREATE TABLE evaluation_production_runs "
+                "(id INTEGER PRIMARY KEY, status VARCHAR(30) NOT NULL)"
+            )
+            connection.exec_driver_sql(
+                "INSERT INTO evaluation_production_runs (id, status) "
+                "VALUES (7, 'published')"
+            )
+            migration = next(item for item in MIGRATIONS if item.version == 71)
+            migration.up(connection)
+            migration.up(connection)
+
+            tables = {
+                row[0]
+                for row in connection.exec_driver_sql(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                )
+            }
+            assert {
+                "script_definitions",
+                "script_versions",
+                "workflow_definitions",
+                "workflow_versions",
+                "production_runs",
+                "production_step_attempts",
+                "runtime_dispatch_items",
+                "runtime_audit_events",
+            } <= tables
+            assert connection.exec_driver_sql(
+                "SELECT status FROM evaluation_production_runs WHERE id=7"
+            ).scalar_one() == "published"
+            assert connection.exec_driver_sql("PRAGMA foreign_key_check").all() == []
     finally:
         engine.dispose()

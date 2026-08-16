@@ -7899,6 +7899,368 @@ def _migration_069_harden_semantic_tag_fact_provenance(connection: Connection) -
         raise RuntimeError(f"v69 语义事实 provenance 外键校验失败：{violations[:3]}")
 
 
+def _migration_070_add_source_identity_verification(connection: Connection) -> None:
+    """Persist source identity evidence without verifying legacy rows."""
+
+    connection.exec_driver_sql("""
+        CREATE TABLE IF NOT EXISTS source_identity_verifications (
+            id INTEGER PRIMARY KEY,
+            contract_key VARCHAR(120) NOT NULL,
+            source_system VARCHAR(120) NOT NULL,
+            key_fields_json TEXT NOT NULL,
+            result VARCHAR(20) NOT NULL
+                CHECK(result IN ('verified','conflict')),
+            probe_hash VARCHAR(64) NOT NULL CHECK(length(probe_hash) = 64),
+            data_window VARCHAR(120) NOT NULL,
+            scoped_row_count INTEGER NOT NULL CHECK(scoped_row_count >= 0),
+            duplicate_key_count INTEGER NOT NULL CHECK(duplicate_key_count >= 0),
+            res_id_conflict_count INTEGER NOT NULL CHECK(res_id_conflict_count >= 0),
+            status VARCHAR(20) NOT NULL DEFAULT 'draft'
+                CHECK(status IN ('draft','approved','superseded','rejected')),
+            created_by VARCHAR(80) NOT NULL,
+            approved_by VARCHAR(80),
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            approved_at DATETIME
+        )
+    """)
+
+    tables = {
+        row[0]
+        for row in connection.exec_driver_sql(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )
+    }
+    if "content_records" in tables:
+        record_columns = {
+            row[1]
+            for row in connection.exec_driver_sql("PRAGMA table_info(content_records)")
+        }
+        for column_name, definition in (
+            ("content_key", "VARCHAR(320)"),
+            ("source_res_type", "INTEGER"),
+            ("source_ll_id", "VARCHAR(160)"),
+            ("source_res_id", "VARCHAR(160)"),
+            (
+                "identity_status",
+                "VARCHAR(30) NOT NULL DEFAULT 'legacy_unverified'",
+            ),
+            ("identity_hash", "VARCHAR(64)"),
+            (
+                "identity_verification_id",
+                "INTEGER REFERENCES source_identity_verifications(id) ON DELETE RESTRICT",
+            ),
+        ):
+            if column_name not in record_columns:
+                connection.exec_driver_sql(
+                    f"ALTER TABLE content_records ADD COLUMN {column_name} {definition}"
+                )
+        connection.exec_driver_sql(
+            "UPDATE content_records SET identity_status='legacy_unverified' "
+            "WHERE identity_status IS NULL OR identity_status=''"
+        )
+
+    if "content_ingress_events" in tables:
+        event_columns = {
+            row[1]
+            for row in connection.exec_driver_sql(
+                "PRAGMA table_info(content_ingress_events)"
+            )
+        }
+        for column_name, definition in (
+            ("identity_snapshot_json", "TEXT"),
+            ("identity_hash", "VARCHAR(64)"),
+            (
+                "identity_verification_id",
+                "INTEGER REFERENCES source_identity_verifications(id) ON DELETE RESTRICT",
+            ),
+        ):
+            if column_name not in event_columns:
+                connection.exec_driver_sql(
+                    f"ALTER TABLE content_ingress_events ADD COLUMN {column_name} {definition}"
+                )
+
+    for statement in (
+        "CREATE INDEX IF NOT EXISTS ix_source_identity_verifications_contract "
+        "ON source_identity_verifications(contract_key, source_system)",
+        "CREATE INDEX IF NOT EXISTS ix_source_identity_verifications_probe_hash "
+        "ON source_identity_verifications(probe_hash)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_source_identity_verifications_approved_source "
+        "ON source_identity_verifications(contract_key, source_system) "
+        "WHERE status = 'approved'",
+    ):
+        connection.exec_driver_sql(statement)
+    if "content_records" in tables:
+        for statement in (
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_content_records_verified_key "
+            "ON content_records(content_key) WHERE content_key IS NOT NULL",
+            "CREATE INDEX IF NOT EXISTS ix_content_records_identity_status "
+            "ON content_records(identity_status)",
+            "CREATE INDEX IF NOT EXISTS ix_content_records_identity_hash "
+            "ON content_records(identity_hash)",
+            """CREATE TRIGGER IF NOT EXISTS trg_content_records_identity_immutable
+            BEFORE UPDATE ON content_records
+            WHEN (OLD.content_key IS NOT NULL AND NEW.content_key IS NOT OLD.content_key)
+              OR (OLD.identity_hash IS NOT NULL AND NEW.identity_hash IS NOT OLD.identity_hash)
+            BEGIN SELECT RAISE(ABORT, 'ContentRecord identity is immutable'); END""",
+        ):
+            connection.exec_driver_sql(statement)
+    if "content_ingress_events" in tables:
+        for statement in (
+            "CREATE INDEX IF NOT EXISTS ix_content_ingress_events_identity_hash "
+            "ON content_ingress_events(identity_hash)",
+            """CREATE TRIGGER IF NOT EXISTS trg_content_ingress_events_identity_immutable
+            BEFORE UPDATE ON content_ingress_events
+            WHEN (OLD.identity_snapshot_json IS NOT NULL
+                  AND NEW.identity_snapshot_json IS NOT OLD.identity_snapshot_json)
+              OR (OLD.identity_hash IS NOT NULL AND NEW.identity_hash IS NOT OLD.identity_hash)
+              OR (OLD.identity_verification_id IS NOT NULL
+                  AND NEW.identity_verification_id IS NOT OLD.identity_verification_id)
+            BEGIN SELECT RAISE(ABORT, 'ContentIngressEvent identity is immutable'); END""",
+        ):
+            connection.exec_driver_sql(statement)
+
+    violations = connection.exec_driver_sql("PRAGMA foreign_key_check").fetchall()
+    if violations:
+        raise RuntimeError(f"v70 源身份迁移外键校验失败：{violations[:3]}")
+
+
+def _migration_071_add_script_workflow_runtime(connection: Connection) -> None:
+    """Add the controlled dry-run workflow runtime without rewriting history."""
+
+    statements = (
+        """
+        CREATE TABLE IF NOT EXISTS script_definitions (
+            id INTEGER PRIMARY KEY,
+            script_key VARCHAR(160) NOT NULL UNIQUE,
+            name VARCHAR(160) NOT NULL,
+            description TEXT NOT NULL DEFAULT '',
+            owner VARCHAR(120) NOT NULL,
+            allowed_categories_json TEXT NOT NULL DEFAULT '[]'
+                CHECK(json_valid(allowed_categories_json)
+                    AND json_type(allowed_categories_json, '$') = 'array'),
+            step_types_json TEXT NOT NULL DEFAULT '[]'
+                CHECK(json_valid(step_types_json)
+                    AND json_type(step_types_json, '$') = 'array'),
+            status VARCHAR(20) NOT NULL DEFAULT 'active'
+                CHECK(status IN ('active','retired')),
+            created_by VARCHAR(80) NOT NULL,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS script_versions (
+            id INTEGER PRIMARY KEY,
+            script_definition_id INTEGER NOT NULL
+                REFERENCES script_definitions(id) ON DELETE RESTRICT,
+            version VARCHAR(80) NOT NULL,
+            display_name VARCHAR(160) NOT NULL,
+            executor_kind VARCHAR(40) NOT NULL DEFAULT 'deterministic_fixture'
+                CHECK(executor_kind = 'deterministic_fixture'),
+            artifact_sha256 VARCHAR(64) NOT NULL
+                CHECK(length(artifact_sha256) = 64
+                    AND artifact_sha256 = lower(artifact_sha256)
+                    AND artifact_sha256 NOT GLOB '*[^0-9a-f]*'),
+            manifest_json TEXT NOT NULL,
+            input_schema_json TEXT NOT NULL,
+            output_schema_json TEXT NOT NULL,
+            required_permissions_json TEXT NOT NULL DEFAULT '[]',
+            idempotency_template VARCHAR(320) NOT NULL,
+            timeout_seconds INTEGER NOT NULL DEFAULT 300
+                CHECK(timeout_seconds BETWEEN 1 AND 3600),
+            max_attempts INTEGER NOT NULL DEFAULT 1
+                CHECK(max_attempts BETWEEN 1 AND 5),
+            retry_policy_json TEXT NOT NULL DEFAULT '{}',
+            concurrency_limit INTEGER NOT NULL DEFAULT 1
+                CHECK(concurrency_limit >= 1),
+            rate_limit_key VARCHAR(160),
+            estimated_cost_json TEXT NOT NULL DEFAULT '{}',
+            status VARCHAR(20) NOT NULL DEFAULT 'draft'
+                CHECK(status IN ('draft','validating','active','deprecated','retired','blocked')),
+            validation_report_json TEXT NOT NULL DEFAULT '{}',
+            blocked_reason TEXT NOT NULL DEFAULT '',
+            created_by VARCHAR(80) NOT NULL,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(script_definition_id, version)
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS workflow_definitions (
+            id INTEGER PRIMARY KEY,
+            workflow_key VARCHAR(160) NOT NULL UNIQUE,
+            name VARCHAR(160) NOT NULL,
+            description TEXT NOT NULL DEFAULT '',
+            owner VARCHAR(120) NOT NULL,
+            allowed_categories_json TEXT NOT NULL DEFAULT '[]',
+            status VARCHAR(20) NOT NULL DEFAULT 'active'
+                CHECK(status IN ('active','retired')),
+            created_by VARCHAR(80) NOT NULL,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS workflow_versions (
+            id INTEGER PRIMARY KEY,
+            workflow_definition_id INTEGER NOT NULL
+                REFERENCES workflow_definitions(id) ON DELETE RESTRICT,
+            version VARCHAR(80) NOT NULL,
+            status VARCHAR(20) NOT NULL DEFAULT 'draft'
+                CHECK(status IN ('draft','validating','active','deprecated','retired','blocked')),
+            workflow_schema_version VARCHAR(40) NOT NULL DEFAULT 'workflow-v1',
+            step_manifest_json TEXT NOT NULL,
+            edge_manifest_json TEXT NOT NULL,
+            input_schema_json TEXT NOT NULL,
+            output_schema_json TEXT NOT NULL,
+            resource_policy_json TEXT NOT NULL DEFAULT '{}',
+            canonical_hash VARCHAR(64) NOT NULL
+                CHECK(length(canonical_hash) = 64
+                    AND canonical_hash = lower(canonical_hash)
+                    AND canonical_hash NOT GLOB '*[^0-9a-f]*'),
+            validation_report_json TEXT NOT NULL DEFAULT '{}',
+            created_by VARCHAR(80) NOT NULL,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(workflow_definition_id, version)
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS production_runs (
+            id INTEGER PRIMARY KEY,
+            run_key VARCHAR(160) NOT NULL UNIQUE,
+            idempotency_key VARCHAR(200) NOT NULL UNIQUE,
+            source_type VARCHAR(60),
+            source_id INTEGER,
+            source_run_id INTEGER REFERENCES production_runs(id) ON DELETE RESTRICT,
+            workflow_definition_id INTEGER NOT NULL
+                REFERENCES workflow_definitions(id) ON DELETE RESTRICT,
+            workflow_version_id INTEGER NOT NULL
+                REFERENCES workflow_versions(id) ON DELETE RESTRICT,
+            snapshot_json TEXT NOT NULL,
+            snapshot_hash VARCHAR(64) NOT NULL
+                CHECK(length(snapshot_hash) = 64
+                    AND snapshot_hash = lower(snapshot_hash)
+                    AND snapshot_hash NOT GLOB '*[^0-9a-f]*'),
+            category_key VARCHAR(40),
+            queue_class VARCHAR(30) NOT NULL DEFAULT 'validation'
+                CHECK(queue_class IN ('validation','interactive','production_batch','canary','recovery')),
+            status VARCHAR(30) NOT NULL DEFAULT 'planned'
+                CHECK(status IN ('planned','queued','running','paused','succeeded','failed','retryable','blocked','canceled')),
+            current_step_key VARCHAR(120),
+            blockers_json TEXT NOT NULL DEFAULT '[]',
+            requested_by VARCHAR(80) NOT NULL,
+            owner VARCHAR(120) NOT NULL,
+            reason TEXT NOT NULL DEFAULT '',
+            environment VARCHAR(30) NOT NULL DEFAULT 'dry_run'
+                CHECK(environment = 'dry_run'),
+            total_steps INTEGER NOT NULL DEFAULT 0,
+            completed_steps INTEGER NOT NULL DEFAULT 0,
+            failed_steps INTEGER NOT NULL DEFAULT 0,
+            last_checkpoint_id INTEGER,
+            lease_owner VARCHAR(120),
+            lease_token VARCHAR(80),
+            lease_expires_at DATETIME,
+            heartbeat_at DATETIME,
+            attempt_count INTEGER NOT NULL DEFAULT 0,
+            next_retry_at DATETIME,
+            error_code VARCHAR(80) NOT NULL DEFAULT '',
+            error_message TEXT NOT NULL DEFAULT '',
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            started_at DATETIME,
+            finished_at DATETIME,
+            CHECK(total_steps >= 0 AND completed_steps >= 0 AND failed_steps >= 0),
+            CHECK(attempt_count >= 0)
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS production_step_attempts (
+            id INTEGER PRIMARY KEY,
+            run_id INTEGER NOT NULL REFERENCES production_runs(id) ON DELETE RESTRICT,
+            step_key VARCHAR(120) NOT NULL,
+            step_type VARCHAR(40) NOT NULL
+                CHECK(step_type IN ('connector','identity','transform','model_call','rule_eval',
+                    'human_task','release_gate','projection','reconcile','feedback')),
+            sequence INTEGER NOT NULL CHECK(sequence >= 0),
+            script_version_id INTEGER NOT NULL
+                REFERENCES script_versions(id) ON DELETE RESTRICT,
+            status VARCHAR(30) NOT NULL DEFAULT 'pending'
+                CHECK(status IN ('pending','leased','running','succeeded','retryable','failed','blocked','skipped')),
+            attempt_no INTEGER NOT NULL DEFAULT 1 CHECK(attempt_no >= 1),
+            idempotency_key VARCHAR(240) NOT NULL UNIQUE,
+            input_manifest_json TEXT NOT NULL,
+            input_hash VARCHAR(64) NOT NULL,
+            output_manifest_json TEXT NOT NULL DEFAULT '{}',
+            output_hash VARCHAR(64),
+            checkpoint_json TEXT NOT NULL DEFAULT '{}',
+            checkpoint_hash VARCHAR(64),
+            lease_owner VARCHAR(120),
+            lease_token VARCHAR(80),
+            lease_expires_at DATETIME,
+            heartbeat_at DATETIME,
+            started_at DATETIME,
+            finished_at DATETIME,
+            last_error_code VARCHAR(80) NOT NULL DEFAULT '',
+            last_error_message TEXT NOT NULL DEFAULT '',
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(run_id, step_key, attempt_no)
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS runtime_dispatch_items (
+            id INTEGER PRIMARY KEY,
+            step_attempt_id INTEGER NOT NULL UNIQUE
+                REFERENCES production_step_attempts(id) ON DELETE RESTRICT,
+            queue_class VARCHAR(30) NOT NULL
+                CHECK(queue_class IN ('validation','interactive','production_batch','canary','recovery')),
+            priority INTEGER NOT NULL DEFAULT 50 CHECK(priority BETWEEN 0 AND 100),
+            status VARCHAR(20) NOT NULL DEFAULT 'queued'
+                CHECK(status IN ('queued','leased','completed','canceled')),
+            available_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS runtime_audit_events (
+            id INTEGER PRIMARY KEY,
+            event_key VARCHAR(200) NOT NULL UNIQUE,
+            entity_type VARCHAR(60) NOT NULL,
+            entity_key VARCHAR(200) NOT NULL,
+            action VARCHAR(80) NOT NULL,
+            actor VARCHAR(80) NOT NULL,
+            details_json TEXT NOT NULL DEFAULT '{}'
+                CHECK(json_valid(details_json)
+                    AND json_type(details_json, '$') = 'object'),
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        """,
+    )
+    for statement in statements:
+        connection.exec_driver_sql(statement)
+
+    for statement in (
+        "CREATE INDEX IF NOT EXISTS ix_script_definitions_owner ON script_definitions(owner)",
+        "CREATE INDEX IF NOT EXISTS ix_script_versions_status ON script_versions(status)",
+        "CREATE INDEX IF NOT EXISTS ix_script_versions_sha ON script_versions(artifact_sha256)",
+        "CREATE INDEX IF NOT EXISTS ix_workflow_definitions_owner ON workflow_definitions(owner)",
+        "CREATE INDEX IF NOT EXISTS ix_workflow_versions_status ON workflow_versions(status)",
+        "CREATE INDEX IF NOT EXISTS ix_production_runs_status_queue ON production_runs(status, queue_class)",
+        "CREATE INDEX IF NOT EXISTS ix_production_runs_source ON production_runs(source_type, source_id)",
+        "CREATE INDEX IF NOT EXISTS ix_production_step_attempts_run ON production_step_attempts(run_id, sequence)",
+        "CREATE INDEX IF NOT EXISTS ix_production_step_attempts_lease ON production_step_attempts(status, lease_expires_at)",
+        "CREATE INDEX IF NOT EXISTS ix_runtime_dispatch_ready ON runtime_dispatch_items(status, available_at, queue_class, priority)",
+        "CREATE INDEX IF NOT EXISTS ix_runtime_audit_entity ON runtime_audit_events(entity_type, entity_key, created_at)",
+    ):
+        connection.exec_driver_sql(statement)
+
+    violations = connection.exec_driver_sql("PRAGMA foreign_key_check").fetchall()
+    if violations:
+        raise RuntimeError(f"v71 工作流运行时迁移外键校验失败：{violations[:3]}")
+
+
 MIGRATIONS = [
     Migration(1, "add_sample_expected_level", _migration_001_add_sample_expected_level),
     Migration(2, "add_review_corrections", _migration_002_add_review_corrections),
@@ -8200,6 +8562,16 @@ MIGRATIONS = [
         69,
         "harden_semantic_tag_fact_provenance",
         _migration_069_harden_semantic_tag_fact_provenance,
+    ),
+    Migration(
+        70,
+        "add_source_identity_verification",
+        _migration_070_add_source_identity_verification,
+    ),
+    Migration(
+        71,
+        "add_script_workflow_runtime",
+        _migration_071_add_script_workflow_runtime,
     ),
 ]
 

@@ -1,18 +1,20 @@
 import { ArrowRight, CheckCircle, Images, Package, Play, Sparkle } from "@phosphor-icons/react"
-import { useMemo } from "react"
+import { useMemo, useState } from "react"
 import { Link } from "react-router-dom"
 import { useQuery } from "@tanstack/react-query"
 
 import { PageHeader } from "@/components/app-shell"
+import { ContentIdentityDrawer } from "@/components/content-identity-drawer"
 import { WorkflowContextBadge } from "@/components/workflow-context-badge"
 import { WorkflowStepper, type WorkflowStep } from "@/components/workflow-stepper"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
-import { api } from "@/lib/api"
+import { api, contentIngressApi, sourceIdentityApi } from "@/lib/api"
 import { evaluationProductionApi } from "@/lib/evaluation-packages"
-import type { AuditEvent, EvaluationCategoryProfile, EvaluationProductionRun, MaterialPackage } from "@/lib/types"
+import type { AuditEvent, ContentIdentityRecord, EvaluationCategoryProfile, EvaluationProductionRun, MaterialPackage } from "@/lib/types"
 
 export function IncrementalWorkspacePage() {
+  const [selectedIdentityId, setSelectedIdentityId] = useState<number | null>(null)
   const categories = useQuery({
     queryKey: ["evaluation-categories", "incremental"],
     queryFn: () => api<{ items: EvaluationCategoryProfile[] }>("/api/evaluation-categories"),
@@ -31,6 +33,15 @@ export function IncrementalWorkspacePage() {
     queryFn: () => api<{ items: AuditEvent[] }>("/api/audit-events?category=content_ingress&limit=500"),
     refetchInterval: 4000,
   })
+  const contentRecords = useQuery({
+    queryKey: ["content-ingress-records", "incremental"],
+    queryFn: contentIngressApi.list,
+    refetchInterval: 4000,
+  })
+  const identityVerifications = useQuery({
+    queryKey: ["source-identity-verifications", "incremental"],
+    queryFn: sourceIdentityApi.list,
+  })
   const activeCategoryCount = useMemo(
     () => (categories.data?.items ?? []).filter((item) => item.status === "active").length,
     [categories.data?.items],
@@ -46,7 +57,7 @@ export function IncrementalWorkspacePage() {
         counts.duplicate += 1
       } else if (event.action === "awaiting_material") {
         counts.awaiting += 1
-      } else if (event.action === "stale" || event.action === "blocked_profile") {
+      } else if (event.action === "stale" || event.action === "blocked_profile" || event.action === "blocked_identity") {
         counts.blocked += 1
       } else {
         counts.received += 1
@@ -54,6 +65,9 @@ export function IncrementalWorkspacePage() {
     }
     return counts
   }, [ingressEvents.data?.items])
+  const recentContentRecords = (contentRecords.data?.items ?? []).slice(0, 5)
+  const selectedIdentity = recentContentRecords.find((item) => item.id === selectedIdentityId) ?? null
+  const selectedVerification = (identityVerifications.data?.items ?? []).find((item) => item.id === selectedIdentity?.identity_verification_id) ?? null
   const currentStep = latestRun?.status === "published" ? 8 : latestRun?.status === "awaiting_review" ? 6 : latestRun ? 4 : 2
   const steps: WorkflowStep[] = [
     { key: "category", label: "选择类目", note: `${activeCategoryCount} 个类目可用`, state: currentStep > 1 ? "completed" : "current", required: true },
@@ -86,7 +100,7 @@ export function IncrementalWorkspacePage() {
           <aside className="bg-[#f7fadf] px-5 py-6 md:px-6"><p className="text-xs font-bold">最近一次增量运行</p>{latestRun ? <><p className="mt-3 text-lg font-semibold">{latestRun.material_package.name}</p><p className="mt-2 text-xs leading-5 text-[var(--muted)]">{latestRun.category.name} · {latestRun.current_stage_label} · {latestRun.progress.percent}%</p><Button asChild size="sm" variant="secondary" className="mt-5"><Link to={`/workflow/production-line?run=${latestRun.id}`}>查看运行详情<ArrowRight /></Link></Button></> : <p className="mt-3 text-sm leading-6 text-[var(--muted)]">还没有增量运行。先导入素材包，再进入生产线。</p>}</aside>
         </section>
         <section className="border-y border-[var(--line)] bg-white px-5 py-5">
-          <div className="flex flex-wrap items-center justify-between gap-3"><div><p className="text-xs font-bold">本地接入合同状态</p><p className="mt-1 text-xs text-[var(--muted)]">这里只统计模拟接入与本地素材包路由，不代表真实上游已连接。</p></div><Badge tone="neutral">content-ingress-v1</Badge></div>
+          <div className="flex flex-wrap items-center justify-between gap-3"><div><p className="text-xs font-bold">本地接入合同状态</p><p className="mt-1 text-xs text-[var(--muted)]">这里只统计模拟接入与本地素材包路由，不代表真实上游已连接。</p></div><Badge tone="neutral">content-ingress-v1 / v2</Badge></div>
           <div className="mt-4 grid gap-px bg-[var(--line)] sm:grid-cols-5">
             <IngressMetric label="已接收" value={ingressCounts.received} />
             <IngressMetric label="等待素材" value={ingressCounts.awaiting} />
@@ -95,10 +109,25 @@ export function IncrementalWorkspacePage() {
             <IngressMetric label="重复复用" value={ingressCounts.duplicate} />
           </div>
         </section>
+        <section className="border-y border-[var(--line-strong)] bg-white">
+          <div className="flex flex-wrap items-start justify-between gap-3 border-b border-[var(--line)] px-5 py-4"><div><h2 className="text-sm font-bold">最近接入身份</h2><p className="mt-1 text-xs text-[var(--muted)]">一级页只保留生产路由所需状态；候选复合键与证据进入二级抽屉。</p></div><Badge tone={recentContentRecords.some((item) => item.identity_status === "pending_verification") ? "warning" : "neutral"}>{recentContentRecords.filter((item) => item.identity_status === "pending_verification").length} 条身份待签认</Badge></div>
+          <div className="grid grid-cols-[minmax(0,1.1fr)_140px_140px_150px_150px_auto] gap-3 border-b border-[var(--line)] px-5 py-3 text-xs font-semibold text-[var(--muted)]"><span>来源 / 内容</span><span>类目</span><span>版本</span><span>身份状态</span><span>路由结果</span><span>操作</span></div>
+          {recentContentRecords.map((record) => <IdentityRow key={record.id} record={record} onOpen={() => setSelectedIdentityId(record.id)} />)}
+          {!recentContentRecords.length && !contentRecords.isFetching && <div className="px-5 py-10 text-center text-sm text-[var(--muted)]">暂无内容接入记录。</div>}
+        </section>
         <section className="border-y border-[var(--line)] bg-white px-5 py-5"><div className="flex items-center gap-2"><Play size={18} weight="fill" /><h2 className="text-sm font-bold">主线说明</h2></div><p className="mt-2 text-xs leading-6 text-[var(--muted)]">自动 AI 迭代只负责生成完整候选机制和样本回归证据；是否启用候选、是否将正式标签事实发布给下游，仍由具备权限的人工分别决定。</p></section>
       </div>
+      <ContentIdentityDrawer record={selectedIdentity} verification={selectedVerification} open={selectedIdentity != null} onOpenChange={(open) => !open && setSelectedIdentityId(null)} />
     </>
   )
+}
+
+function IdentityRow({ record, onOpen }: { record: ContentIdentityRecord; onOpen: () => void }) {
+  const pending = record.identity_status === "pending_verification"
+  const conflict = record.identity_status === "conflict"
+  const statusLabel = pending ? "身份待签认" : conflict ? "身份冲突" : record.identity_status === "verified" ? "已签认" : "旧链路未签认"
+  const routing = pending || conflict ? "阻断生产" : record.status === "ready" ? "可继续组包" : "等待素材"
+  return <div className="grid grid-cols-[minmax(0,1.1fr)_140px_140px_150px_150px_auto] items-center gap-3 border-b border-[var(--line)] px-5 py-4 text-xs last:border-0"><div><p className="font-bold">{record.source_system}</p><p className="mt-1 font-data text-[11px] text-[var(--muted)]">{record.content_id}</p></div><span>{record.category_key}</span><span>{record.content_version}</span><Badge tone={record.identity_status === "verified" ? "success" : pending || conflict ? "warning" : "neutral"}>{statusLabel}</Badge><span>{routing}</span><Button size="sm" variant="secondary" onClick={onOpen}>查看身份</Button></div>
 }
 
 function IngressMetric({ label, value }: { label: string; value: number }) {

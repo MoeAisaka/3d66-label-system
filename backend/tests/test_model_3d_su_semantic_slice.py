@@ -38,12 +38,27 @@ def run_fixture_slice(*, asset_scope: str) -> dict:
         seed_model_3d_su(db, SimpleNamespace(project_root=PROJECT_ROOT))
         db.flush()
         draft = db.query(TagDemandContract).filter(TagDemandContract.contract_key == "semantic-platform").one()
-        candidate = client.post("/api/tag-demand-contracts", json={
+        verification = client.post("/api/source-identity-verifications", json={
             "contract_key": "semantic-platform",
-            "definition": json.loads(draft.definition_json),
-            "status": "candidate",
+            "source_system": "aliyun_3d66_dw",
+            "key_fields": ["res_type", "ll_id"],
+            "result": "verified",
+            "probe_hash": "a" * 64,
+            "data_window": "fixture-window",
+            "scoped_row_count": 2,
+            "duplicate_key_count": 0,
+            "res_id_conflict_count": 0,
         })
-        assert candidate.status_code == 201, candidate.text
+        assert verification.status_code == 201, verification.text
+        approved = client.post(
+            f"/api/source-identity-verifications/{verification.json()['id']}/approve"
+        )
+        assert approved.status_code == 200, approved.text
+        candidate = client.post(
+            f"/api/tag-demand-contracts/{draft.id}/bind-source-identity-verification",
+            json={"verification_id": approved.json()["id"]},
+        )
+        assert candidate.status_code == 200, candidate.text
         activated = client.post(f"/api/tag-demand-contracts/{candidate.json()['id']}/activate")
         assert activated.status_code == 200, activated.text
         contract = db.get(TagDemandContract, candidate.json()["id"])
@@ -173,3 +188,27 @@ def test_3d_su_quality_extension_does_not_replace_platform_semantic_fields() -> 
     assert "semantic" in result["published_label"]
     assert "quality" in result["published_label"]
     assert result["published_label"]["quality"]["level"] in {"L1", "L2", "L3", "L4"}
+
+
+def test_model_3d_su_contract_v2_declares_source_and_supply_paths() -> None:
+    from app.model_3d_su_category_seed import build_model_3d_su_semantic_contract
+
+    contract = build_model_3d_su_semantic_contract()
+    assert contract["schema_version"] == "tag-demand-contract-v2"
+    assert contract["source_identity"]["identity_fields"] == ["res_type", "ll_id"]
+    assert contract["source_identity"]["uniqueness_status"] == "unverified"
+    assert set(contract["field_supply"]) == set(contract["semantic_schema"]["fields"])
+
+
+def test_single_variant_marks_space_not_applicable() -> None:
+    from app.model_3d_su_category_seed import build_model_3d_su_semantic_contract
+
+    contract = build_model_3d_su_semantic_contract()
+    single = next(
+        item for item in contract["execution_variants"] if item["asset_scope"] == "single"
+    )
+    whole = next(
+        item for item in contract["execution_variants"] if item["asset_scope"] == "whole"
+    )
+    assert single["field_applicability_overrides"]["space"] == "not_applicable"
+    assert whole["field_applicability_overrides"] == {}

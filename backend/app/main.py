@@ -128,6 +128,7 @@ from .models import (
     ProjectionContract,
     ProjectionManifest,
     ProjectionReconciliation,
+    SourceIdentityVerification,
     TagDemandContract,
     User,
 )
@@ -246,6 +247,9 @@ from .category_evaluation_v3_config_api import (
     build_category_evaluation_v3_config_router,
 )
 from .node_correction_api import build_node_correction_router
+from .script_registry_api import build_script_registry_router
+from .workflow_registry_api import build_workflow_registry_router
+from .workflow_runtime_api import build_workflow_runtime_router
 from .worker_v3_authoritative import (
     V3AuthoritativeError,
     v3_authoritative_category,
@@ -575,7 +579,7 @@ class ProductionFeedbackRequest(BaseModel):
 
 class ContentIngressRequest(BaseModel):
     event_id: str = Field(min_length=1, max_length=160)
-    schema_version: Literal["content-ingress-v1"]
+    schema_version: Literal["content-ingress-v1", "content-ingress-v2"]
     event_type: Literal["content.created", "content.updated", "content.deleted"]
     source_system: str = Field(min_length=1, max_length=120)
     occurred_at: datetime
@@ -644,6 +648,22 @@ class TagDemandContractCreateRequest(BaseModel):
     contract_key: str = Field(min_length=1, max_length=120, pattern=r"^[a-z][a-z0-9_-]*$")
     definition: dict[str, Any]
     status: Literal["draft", "candidate"] = "draft"
+
+
+class SourceIdentityVerificationCreateRequest(BaseModel):
+    contract_key: str = Field(min_length=1, max_length=120)
+    source_system: str = Field(min_length=1, max_length=120)
+    key_fields: tuple[Literal["res_type", "ll_id"], ...]
+    result: Literal["verified", "conflict"]
+    probe_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    data_window: str = Field(min_length=1, max_length=120)
+    scoped_row_count: int = Field(ge=0)
+    duplicate_key_count: int = Field(ge=0)
+    res_id_conflict_count: int = Field(ge=0)
+
+
+class SourceIdentityVerificationBindRequest(BaseModel):
+    verification_id: int = Field(ge=1)
 
 
 class BenchmarkVariantRequest(BaseModel):
@@ -1500,6 +1520,9 @@ app.include_router(build_canary_router(current_user))
 app.include_router(build_category_evaluation_preview_router(current_user))
 app.include_router(build_category_evaluation_v3_config_router(current_user))
 app.include_router(build_node_correction_router(_permission_user("reviews:write")))
+app.include_router(build_script_registry_router(current_user))
+app.include_router(build_workflow_registry_router(current_user))
+app.include_router(build_workflow_runtime_router(current_user))
 app.include_router(
     build_evaluation_package_router(
         require_permission("releases:read"),
@@ -7505,13 +7528,22 @@ def production_feedback_config_status(
 
 
 def _content_record_payload(record: ContentRecord) -> dict[str, Any]:
+    content_key = record.content_key
+    if content_key is None and record.identity_status == "legacy_unverified":
+        content_key = f"{record.source_system}:{record.source_content_id}"
     return {
         "id": record.id,
         "source_system": record.source_system,
         "content_id": record.source_content_id,
-        "content_key": f"{record.source_system}:{record.source_content_id}",
+        "content_key": content_key,
         "category_key": record.category_key,
         "content_version": record.source_version,
+        "source_res_type": record.source_res_type,
+        "source_ll_id": record.source_ll_id,
+        "source_res_id": record.source_res_id,
+        "identity_status": record.identity_status,
+        "identity_hash": record.identity_hash,
+        "identity_verification_id": record.identity_verification_id,
         "asset_id": record.asset_id,
         "status": record.status,
         "source_occurred_at": record.source_occurred_at,
@@ -7537,15 +7569,35 @@ def create_content_ingress_event(
             payload=payload.payload,
             received_by=_sender,
         )
-        package, package_created, routing_status = (
-            route_content_event_to_incremental_package(
+        if (
+            payload.schema_version == "content-ingress-v2"
+            and record.content_key is None
+        ):
+            package, package_created, routing_status = None, False, "blocked_identity"
+            append_audit_event(
                 db,
-                event=event,
-                record=record,
-                duplicate=duplicate,
+                category="content_ingress",
+                action="blocked_identity",
+                subject_type="content_ingress_event",
+                subject_id=event.event_id,
                 actor=_sender,
+                payload={
+                    "content_record_id": record.id,
+                    "identity_status": record.identity_status,
+                    "workflow_kind": "incremental",
+                },
+                event_key=f"content-ingress:{event.event_id}:blocked-identity",
             )
-        )
+        else:
+            package, package_created, routing_status = (
+                route_content_event_to_incremental_package(
+                    db,
+                    event=event,
+                    record=record,
+                    duplicate=duplicate,
+                    actor=_sender,
+                )
+            )
     except LabelIntegrationConflict as exc:
         db.rollback()
         raise HTTPException(status_code=409, detail={"code": "INGRESS_EVENT_CONFLICT", "message": str(exc)}) from None
@@ -7778,7 +7830,7 @@ def integration_status(_user: User = Depends(require_permission("releases:read")
     return {
         "upstream_content_ingress": {
             "configured": settings.content_ingress_token is not None,
-            "schema_version": "content-ingress-v1",
+            "schema_versions": ["content-ingress-v1", "content-ingress-v2"],
             "events": ["content.created", "content.updated", "content.deleted"],
             "material_fetch": False,
         },
@@ -7805,6 +7857,198 @@ def _tag_demand_contract_payload(contract: TagDemandContract) -> dict[str, Any]:
         "created_by": contract.created_by,
         "created_at": contract.created_at,
     }
+
+
+def _source_identity_verification_payload(
+    verification: SourceIdentityVerification,
+) -> dict[str, Any]:
+    return {
+        "id": verification.id,
+        "contract_key": verification.contract_key,
+        "source_system": verification.source_system,
+        "key_fields": json.loads(verification.key_fields_json),
+        "result": verification.result,
+        "probe_hash": verification.probe_hash,
+        "data_window": verification.data_window,
+        "scoped_row_count": verification.scoped_row_count,
+        "duplicate_key_count": verification.duplicate_key_count,
+        "res_id_conflict_count": verification.res_id_conflict_count,
+        "status": verification.status,
+        "created_by": verification.created_by,
+        "approved_by": verification.approved_by,
+        "created_at": verification.created_at,
+        "approved_at": verification.approved_at,
+    }
+
+
+@app.get("/api/source-identity-verifications")
+def list_source_identity_verifications(
+    _user: User = Depends(require_permission("releases:read")),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    rows = db.scalars(
+        select(SourceIdentityVerification).order_by(
+            SourceIdentityVerification.created_at.desc(),
+            SourceIdentityVerification.id.desc(),
+        )
+    ).all()
+    return {"items": [_source_identity_verification_payload(row) for row in rows]}
+
+
+@app.post("/api/source-identity-verifications", status_code=201)
+def create_source_identity_verification(
+    payload: SourceIdentityVerificationCreateRequest,
+    user: User = Depends(admin_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    row = SourceIdentityVerification(
+        contract_key=payload.contract_key,
+        source_system=payload.source_system,
+        key_fields_json=canonical_json(list(payload.key_fields)),
+        result=payload.result,
+        probe_hash=payload.probe_hash,
+        data_window=payload.data_window,
+        scoped_row_count=payload.scoped_row_count,
+        duplicate_key_count=payload.duplicate_key_count,
+        res_id_conflict_count=payload.res_id_conflict_count,
+        status="draft",
+        created_by=user.username,
+    )
+    db.add(row)
+    db.flush()
+    append_audit_event(
+        db,
+        category="source_identity_verification",
+        action="created",
+        subject_type="source_identity_verification",
+        subject_id=str(row.id),
+        actor=user.username,
+        payload={
+            "contract_key": row.contract_key,
+            "source_system": row.source_system,
+            "result": row.result,
+            "probe_hash": row.probe_hash,
+            "side_effects": {"sql_executed": False, "contract_activated": False},
+        },
+        event_key=f"source-identity-verification:created:{row.id}",
+    )
+    db.commit()
+    db.refresh(row)
+    return _source_identity_verification_payload(row)
+
+
+@app.post("/api/source-identity-verifications/{verification_id}/approve")
+def approve_source_identity_verification(
+    verification_id: int,
+    user: User = Depends(admin_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    row = db.get(SourceIdentityVerification, verification_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="源身份签认证据不存在")
+    if row.status != "draft":
+        raise HTTPException(status_code=409, detail="只有 draft 身份证据可以批准")
+    try:
+        key_fields = tuple(json.loads(row.key_fields_json))
+    except (TypeError, json.JSONDecodeError):
+        raise HTTPException(status_code=409, detail="身份签认 key_fields 无效") from None
+    if row.result != "verified":
+        raise HTTPException(status_code=409, detail="冲突探查结果不能批准为 verified")
+    if row.duplicate_key_count != 0 or row.res_id_conflict_count != 0:
+        raise HTTPException(status_code=409, detail="重复键或 res_id 冲突未清零")
+    if key_fields != ("res_type", "ll_id"):
+        raise HTTPException(status_code=409, detail="身份签认键必须为 res_type + ll_id")
+
+    candidates = db.scalars(
+        select(TagDemandContract).where(
+            TagDemandContract.contract_key == row.contract_key,
+            TagDemandContract.status.in_(("draft", "candidate")),
+        )
+    ).all()
+    matches_contract = False
+    for contract in candidates:
+        try:
+            definition = validate_tag_demand_contract(
+                json.loads(contract.definition_json)
+            )
+        except (SemanticTagContractError, json.JSONDecodeError):
+            continue
+        if (
+            definition.schema_version == "tag-demand-contract-v2"
+            and definition.source_identity is not None
+            and definition.source_identity.source_system == row.source_system
+            and definition.source_identity.identity_fields == key_fields
+        ):
+            matches_contract = True
+            break
+    if not matches_contract:
+        raise HTTPException(
+            status_code=409,
+            detail="没有匹配的 draft/candidate v2 字段合同",
+        )
+
+    previous = db.scalars(
+        select(SourceIdentityVerification).where(
+            SourceIdentityVerification.contract_key == row.contract_key,
+            SourceIdentityVerification.source_system == row.source_system,
+            SourceIdentityVerification.status == "approved",
+            SourceIdentityVerification.id != row.id,
+        )
+    ).all()
+    for item in previous:
+        item.status = "superseded"
+    db.flush()
+    row.status = "approved"
+    row.approved_by = user.username
+    row.approved_at = datetime.now(timezone.utc)
+    append_audit_event(
+        db,
+        category="source_identity_verification",
+        action="approved",
+        subject_type="source_identity_verification",
+        subject_id=str(row.id),
+        actor=user.username,
+        payload={
+            "contract_key": row.contract_key,
+            "source_system": row.source_system,
+            "probe_hash": row.probe_hash,
+            "superseded_ids": [item.id for item in previous],
+            "side_effects": {"sql_executed": False, "contract_activated": False},
+        },
+        event_key=f"source-identity-verification:approved:{row.id}",
+    )
+    db.commit()
+    db.refresh(row)
+    return _source_identity_verification_payload(row)
+
+
+@app.post("/api/source-identity-verifications/{verification_id}/reject")
+def reject_source_identity_verification(
+    verification_id: int,
+    user: User = Depends(admin_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    row = db.get(SourceIdentityVerification, verification_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="源身份签认证据不存在")
+    if row.status != "draft":
+        raise HTTPException(status_code=409, detail="只有 draft 身份证据可以拒绝")
+    row.status = "rejected"
+    row.approved_by = user.username
+    row.approved_at = datetime.now(timezone.utc)
+    append_audit_event(
+        db,
+        category="source_identity_verification",
+        action="rejected",
+        subject_type="source_identity_verification",
+        subject_id=str(row.id),
+        actor=user.username,
+        payload={"probe_hash": row.probe_hash},
+        event_key=f"source-identity-verification:rejected:{row.id}",
+    )
+    db.commit()
+    db.refresh(row)
+    return _source_identity_verification_payload(row)
 
 
 @app.get("/api/tag-demand-contracts")
@@ -7874,6 +8118,88 @@ def create_tag_demand_contract(
     return _tag_demand_contract_payload(contract)
 
 
+@app.post(
+    "/api/tag-demand-contracts/{contract_id}/bind-source-identity-verification"
+)
+def bind_source_identity_verification(
+    contract_id: int,
+    payload: SourceIdentityVerificationBindRequest,
+    user: User = Depends(admin_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    source = db.get(TagDemandContract, contract_id)
+    if source is None:
+        raise HTTPException(status_code=404, detail="标签需求合同不存在")
+    if source.status not in {"draft", "candidate"}:
+        raise HTTPException(status_code=409, detail="只有 draft/candidate 合同可以绑定证据")
+    try:
+        definition = validate_tag_demand_contract(json.loads(source.definition_json))
+    except (SemanticTagContractError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=409, detail=f"源合同无效：{exc}") from None
+    if definition.schema_version != "tag-demand-contract-v2":
+        raise HTTPException(status_code=409, detail="只有 v2 合同可以绑定身份签认证据")
+    verification = db.get(SourceIdentityVerification, payload.verification_id)
+    if verification is None or verification.status != "approved":
+        raise HTTPException(status_code=409, detail="身份签认证据未批准或不存在")
+    if definition.source_identity is None:
+        raise HTTPException(status_code=409, detail="v2 合同缺少 source_identity")
+    try:
+        key_fields = tuple(json.loads(verification.key_fields_json))
+    except (TypeError, json.JSONDecodeError):
+        raise HTTPException(status_code=409, detail="身份签认 key_fields 无效") from None
+    if (
+        verification.contract_key != source.contract_key
+        or verification.source_system != definition.source_identity.source_system
+        or key_fields != definition.source_identity.identity_fields
+    ):
+        raise HTTPException(status_code=409, detail="身份签认证据与字段合同不匹配")
+
+    candidate_payload = definition.model_dump(mode="json")
+    candidate_payload["source_identity"] = {
+        **candidate_payload["source_identity"],
+        "uniqueness_status": "verified",
+        "verification_evidence_hash": verification.probe_hash,
+    }
+    try:
+        candidate_definition = validate_tag_demand_contract(candidate_payload)
+    except SemanticTagContractError as exc:
+        raise HTTPException(status_code=409, detail=f"绑定后合同无效：{exc}") from None
+    latest = db.scalar(
+        select(TagDemandContract)
+        .where(TagDemandContract.contract_key == source.contract_key)
+        .order_by(TagDemandContract.version.desc())
+        .limit(1)
+    )
+    row = TagDemandContract(
+        contract_key=source.contract_key,
+        version=(latest.version + 1) if latest else 1,
+        status="candidate",
+        definition_json=canonical_json(candidate_definition.model_dump(mode="json")),
+        contract_hash=canonical_contract_hash(candidate_definition),
+        created_by=user.username,
+    )
+    db.add(row)
+    db.flush()
+    append_audit_event(
+        db,
+        category="tag_demand_contract",
+        action="source_identity_bound",
+        subject_type="tag_demand_contract",
+        subject_id=str(row.id),
+        actor=user.username,
+        payload={
+            "source_contract_id": source.id,
+            "verification_id": verification.id,
+            "probe_hash": verification.probe_hash,
+            "contract_activated": False,
+        },
+        event_key=f"tag-demand-contract:source-identity-bound:{row.id}",
+    )
+    db.commit()
+    db.refresh(row)
+    return _tag_demand_contract_payload(row)
+
+
 @app.post("/api/tag-demand-contracts/{contract_id}/activate")
 def activate_tag_demand_contract(
     contract_id: int,
@@ -7891,6 +8217,27 @@ def activate_tag_demand_contract(
         raise HTTPException(status_code=409, detail=f"合同签名或内容无效：{exc}") from None
     if not definition.category_applicability or not definition.projection_targets:
         raise HTTPException(status_code=409, detail="合同缺少字段适用性或投影目标，不能激活")
+    if definition.schema_version == "tag-demand-contract-v2":
+        if (
+            definition.source_identity is None
+            or definition.source_identity.uniqueness_status != "verified"
+        ):
+            raise HTTPException(status_code=409, detail="源身份唯一性尚未签认")
+        approved = db.scalar(
+            select(SourceIdentityVerification).where(
+                SourceIdentityVerification.contract_key == contract.contract_key,
+                SourceIdentityVerification.source_system
+                == definition.source_identity.source_system,
+                SourceIdentityVerification.status == "approved",
+                SourceIdentityVerification.probe_hash
+                == definition.source_identity.verification_evidence_hash,
+            )
+        )
+        if approved is None:
+            raise HTTPException(
+                status_code=409,
+                detail="字段合同引用的身份签认证据不存在或已失效",
+            )
     current = db.scalars(
         select(TagDemandContract).where(
             TagDemandContract.contract_key == contract.contract_key,

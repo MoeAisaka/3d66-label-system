@@ -762,6 +762,421 @@ class EvaluationProductionRun(Base):
     evaluation_package: Mapped["EvaluationPackage | None"] = relationship()
 
 
+class ScriptDefinition(Base):
+    __tablename__ = "script_definitions"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('active','retired')",
+            name="ck_script_definitions_status",
+        ),
+        CheckConstraint(
+            "json_valid(allowed_categories_json) AND "
+            "json_type(allowed_categories_json, '$') = 'array'",
+            name="ck_script_definitions_categories_json",
+        ),
+        CheckConstraint(
+            "json_valid(step_types_json) AND "
+            "json_type(step_types_json, '$') = 'array'",
+            name="ck_script_definitions_step_types_json",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    script_key: Mapped[str] = mapped_column(String(160), unique=True, index=True)
+    name: Mapped[str] = mapped_column(String(160))
+    description: Mapped[str] = mapped_column(Text, default="")
+    owner: Mapped[str] = mapped_column(String(120), index=True)
+    allowed_categories_json: Mapped[str] = mapped_column(Text, default="[]")
+    step_types_json: Mapped[str] = mapped_column(Text, default="[]")
+    status: Mapped[str] = mapped_column(String(20), default="active", index=True)
+    created_by: Mapped[str] = mapped_column(String(80))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+
+class ScriptVersion(Base):
+    __tablename__ = "script_versions"
+    __table_args__ = (
+        UniqueConstraint(
+            "script_definition_id", "version", name="uq_script_versions_key"
+        ),
+        CheckConstraint(
+            "status IN ('draft','validating','active','deprecated','retired','blocked')",
+            name="ck_script_versions_status",
+        ),
+        CheckConstraint(
+            "executor_kind = 'deterministic_fixture'",
+            name="ck_script_versions_executor",
+        ),
+        CheckConstraint(
+            "length(artifact_sha256) = 64 AND artifact_sha256 = lower(artifact_sha256) "
+            "AND artifact_sha256 NOT GLOB '*[^0-9a-f]*'",
+            name="ck_script_versions_sha256",
+        ),
+        CheckConstraint(
+            "timeout_seconds BETWEEN 1 AND 3600",
+            name="ck_script_versions_timeout",
+        ),
+        CheckConstraint(
+            "max_attempts BETWEEN 1 AND 5",
+            name="ck_script_versions_attempts",
+        ),
+        CheckConstraint(
+            "concurrency_limit >= 1",
+            name="ck_script_versions_concurrency",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    script_definition_id: Mapped[int] = mapped_column(
+        ForeignKey("script_definitions.id", ondelete="RESTRICT"), index=True
+    )
+    version: Mapped[str] = mapped_column(String(80))
+    display_name: Mapped[str] = mapped_column(String(160))
+    executor_kind: Mapped[str] = mapped_column(
+        String(40), default="deterministic_fixture"
+    )
+    artifact_sha256: Mapped[str] = mapped_column(String(64), index=True)
+    manifest_json: Mapped[str] = mapped_column(Text)
+    input_schema_json: Mapped[str] = mapped_column(Text)
+    output_schema_json: Mapped[str] = mapped_column(Text)
+    required_permissions_json: Mapped[str] = mapped_column(Text, default="[]")
+    idempotency_template: Mapped[str] = mapped_column(String(320))
+    timeout_seconds: Mapped[int] = mapped_column(Integer, default=300)
+    max_attempts: Mapped[int] = mapped_column(Integer, default=1)
+    retry_policy_json: Mapped[str] = mapped_column(Text, default="{}")
+    concurrency_limit: Mapped[int] = mapped_column(Integer, default=1)
+    rate_limit_key: Mapped[str | None] = mapped_column(
+        String(160), nullable=True, index=True
+    )
+    estimated_cost_json: Mapped[str] = mapped_column(Text, default="{}")
+    status: Mapped[str] = mapped_column(String(20), default="draft", index=True)
+    validation_report_json: Mapped[str] = mapped_column(Text, default="{}")
+    blocked_reason: Mapped[str] = mapped_column(Text, default="")
+    created_by: Mapped[str] = mapped_column(String(80))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+    definition: Mapped[ScriptDefinition] = relationship()
+
+
+class WorkflowDefinition(Base):
+    __tablename__ = "workflow_definitions"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('active','retired')",
+            name="ck_workflow_definitions_status",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    workflow_key: Mapped[str] = mapped_column(String(160), unique=True, index=True)
+    name: Mapped[str] = mapped_column(String(160))
+    description: Mapped[str] = mapped_column(Text, default="")
+    owner: Mapped[str] = mapped_column(String(120), index=True)
+    allowed_categories_json: Mapped[str] = mapped_column(Text, default="[]")
+    status: Mapped[str] = mapped_column(String(20), default="active", index=True)
+    created_by: Mapped[str] = mapped_column(String(80))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+
+class WorkflowVersion(Base):
+    __tablename__ = "workflow_versions"
+    __table_args__ = (
+        UniqueConstraint(
+            "workflow_definition_id", "version", name="uq_workflow_versions_key"
+        ),
+        CheckConstraint(
+            "status IN ('draft','validating','active','deprecated','retired','blocked')",
+            name="ck_workflow_versions_status",
+        ),
+        CheckConstraint(
+            "length(canonical_hash) = 64 AND canonical_hash = lower(canonical_hash) "
+            "AND canonical_hash NOT GLOB '*[^0-9a-f]*'",
+            name="ck_workflow_versions_hash",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    workflow_definition_id: Mapped[int] = mapped_column(
+        ForeignKey("workflow_definitions.id", ondelete="RESTRICT"), index=True
+    )
+    version: Mapped[str] = mapped_column(String(80))
+    status: Mapped[str] = mapped_column(String(20), default="draft", index=True)
+    workflow_schema_version: Mapped[str] = mapped_column(
+        String(40), default="workflow-v1"
+    )
+    step_manifest_json: Mapped[str] = mapped_column(Text)
+    edge_manifest_json: Mapped[str] = mapped_column(Text)
+    input_schema_json: Mapped[str] = mapped_column(Text)
+    output_schema_json: Mapped[str] = mapped_column(Text)
+    resource_policy_json: Mapped[str] = mapped_column(Text, default="{}")
+    canonical_hash: Mapped[str] = mapped_column(String(64), index=True)
+    validation_report_json: Mapped[str] = mapped_column(Text, default="{}")
+    created_by: Mapped[str] = mapped_column(String(80))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+    definition: Mapped[WorkflowDefinition] = relationship()
+
+
+class ProductionRun(Base):
+    __tablename__ = "production_runs"
+    __table_args__ = (
+        CheckConstraint(
+            "queue_class IN ('validation','interactive','production_batch','canary','recovery')",
+            name="ck_production_runs_queue_class",
+        ),
+        CheckConstraint(
+            "status IN ('planned','queued','running','paused','succeeded','failed','retryable','blocked','canceled')",
+            name="ck_production_runs_status",
+        ),
+        CheckConstraint(
+            "environment = 'dry_run'",
+            name="ck_production_runs_environment",
+        ),
+        CheckConstraint(
+            "length(snapshot_hash) = 64 AND snapshot_hash = lower(snapshot_hash) "
+            "AND snapshot_hash NOT GLOB '*[^0-9a-f]*'",
+            name="ck_production_runs_snapshot_hash",
+        ),
+        CheckConstraint(
+            "total_steps >= 0 AND completed_steps >= 0 AND failed_steps >= 0",
+            name="ck_production_runs_step_counts",
+        ),
+        CheckConstraint(
+            "attempt_count >= 0",
+            name="ck_production_runs_attempt_count",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    run_key: Mapped[str] = mapped_column(String(160), unique=True, index=True)
+    idempotency_key: Mapped[str] = mapped_column(
+        String(200), unique=True, index=True
+    )
+    source_type: Mapped[str | None] = mapped_column(
+        String(60), nullable=True, index=True
+    )
+    source_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    source_run_id: Mapped[int | None] = mapped_column(
+        ForeignKey("production_runs.id", ondelete="RESTRICT"), nullable=True, index=True
+    )
+    workflow_definition_id: Mapped[int] = mapped_column(
+        ForeignKey("workflow_definitions.id", ondelete="RESTRICT"), index=True
+    )
+    workflow_version_id: Mapped[int] = mapped_column(
+        ForeignKey("workflow_versions.id", ondelete="RESTRICT"), index=True
+    )
+    snapshot_json: Mapped[str] = mapped_column(Text)
+    snapshot_hash: Mapped[str] = mapped_column(String(64), index=True)
+    category_key: Mapped[str | None] = mapped_column(
+        String(40), nullable=True, index=True
+    )
+    queue_class: Mapped[str] = mapped_column(
+        String(30), default="validation", index=True
+    )
+    status: Mapped[str] = mapped_column(String(30), default="planned", index=True)
+    current_step_key: Mapped[str | None] = mapped_column(
+        String(120), nullable=True, index=True
+    )
+    blockers_json: Mapped[str] = mapped_column(Text, default="[]")
+    requested_by: Mapped[str] = mapped_column(String(80), index=True)
+    owner: Mapped[str] = mapped_column(String(120), index=True)
+    reason: Mapped[str] = mapped_column(Text, default="")
+    environment: Mapped[str] = mapped_column(String(30), default="dry_run")
+    total_steps: Mapped[int] = mapped_column(Integer, default=0)
+    completed_steps: Mapped[int] = mapped_column(Integer, default=0)
+    failed_steps: Mapped[int] = mapped_column(Integer, default=0)
+    last_checkpoint_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    lease_owner: Mapped[str | None] = mapped_column(
+        String(120), nullable=True, index=True
+    )
+    lease_token: Mapped[str | None] = mapped_column(
+        String(80), nullable=True, index=True
+    )
+    lease_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
+    heartbeat_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0)
+    next_retry_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
+    error_code: Mapped[str] = mapped_column(String(80), default="")
+    error_message: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, index=True
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+    started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    workflow_definition: Mapped[WorkflowDefinition] = relationship(
+        foreign_keys=[workflow_definition_id]
+    )
+    workflow_version: Mapped[WorkflowVersion] = relationship(
+        foreign_keys=[workflow_version_id]
+    )
+
+
+class ProductionStepAttempt(Base):
+    __tablename__ = "production_step_attempts"
+    __table_args__ = (
+        UniqueConstraint(
+            "run_id", "step_key", "attempt_no", name="uq_production_step_attempt"
+        ),
+        CheckConstraint(
+            "step_type IN ('connector','identity','transform','model_call','rule_eval',"
+            "'human_task','release_gate','projection','reconcile','feedback')",
+            name="ck_production_step_attempts_type",
+        ),
+        CheckConstraint(
+            "status IN ('pending','leased','running','succeeded','retryable','failed','blocked','skipped')",
+            name="ck_production_step_attempts_status",
+        ),
+        CheckConstraint("attempt_no >= 1", name="ck_production_step_attempts_number"),
+        CheckConstraint("sequence >= 0", name="ck_production_step_attempts_sequence"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    run_id: Mapped[int] = mapped_column(
+        ForeignKey("production_runs.id", ondelete="RESTRICT"), index=True
+    )
+    step_key: Mapped[str] = mapped_column(String(120), index=True)
+    step_type: Mapped[str] = mapped_column(String(40), index=True)
+    sequence: Mapped[int] = mapped_column(Integer)
+    script_version_id: Mapped[int] = mapped_column(
+        ForeignKey("script_versions.id", ondelete="RESTRICT"), index=True
+    )
+    status: Mapped[str] = mapped_column(String(30), default="pending", index=True)
+    attempt_no: Mapped[int] = mapped_column(Integer, default=1)
+    idempotency_key: Mapped[str] = mapped_column(
+        String(240), unique=True, index=True
+    )
+    input_manifest_json: Mapped[str] = mapped_column(Text)
+    input_hash: Mapped[str] = mapped_column(String(64), index=True)
+    output_manifest_json: Mapped[str] = mapped_column(Text, default="{}")
+    output_hash: Mapped[str | None] = mapped_column(
+        String(64), nullable=True, index=True
+    )
+    checkpoint_json: Mapped[str] = mapped_column(Text, default="{}")
+    checkpoint_hash: Mapped[str | None] = mapped_column(
+        String(64), nullable=True, index=True
+    )
+    lease_owner: Mapped[str | None] = mapped_column(
+        String(120), nullable=True, index=True
+    )
+    lease_token: Mapped[str | None] = mapped_column(
+        String(80), nullable=True, index=True
+    )
+    lease_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
+    heartbeat_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_error_code: Mapped[str] = mapped_column(String(80), default="")
+    last_error_message: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+    run: Mapped[ProductionRun] = relationship()
+    script_version: Mapped[ScriptVersion] = relationship()
+
+
+class RuntimeDispatchItem(Base):
+    __tablename__ = "runtime_dispatch_items"
+    __table_args__ = (
+        CheckConstraint(
+            "queue_class IN ('validation','interactive','production_batch','canary','recovery')",
+            name="ck_runtime_dispatch_items_queue_class",
+        ),
+        CheckConstraint(
+            "status IN ('queued','leased','completed','canceled')",
+            name="ck_runtime_dispatch_items_status",
+        ),
+        CheckConstraint("priority BETWEEN 0 AND 100", name="ck_runtime_dispatch_items_priority"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    step_attempt_id: Mapped[int] = mapped_column(
+        ForeignKey("production_step_attempts.id", ondelete="RESTRICT"),
+        unique=True,
+        index=True,
+    )
+    queue_class: Mapped[str] = mapped_column(String(30), index=True)
+    priority: Mapped[int] = mapped_column(Integer, default=50)
+    status: Mapped[str] = mapped_column(String(20), default="queued", index=True)
+    available_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+    step_attempt: Mapped[ProductionStepAttempt] = relationship()
+
+
+class RuntimeAuditEvent(Base):
+    __tablename__ = "runtime_audit_events"
+    __table_args__ = (
+        CheckConstraint(
+            "json_valid(details_json) AND json_type(details_json, '$') = 'object'",
+            name="ck_runtime_audit_events_details_json",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    event_key: Mapped[str] = mapped_column(String(200), unique=True, index=True)
+    entity_type: Mapped[str] = mapped_column(String(60), index=True)
+    entity_key: Mapped[str] = mapped_column(String(200), index=True)
+    action: Mapped[str] = mapped_column(String(80), index=True)
+    actor: Mapped[str] = mapped_column(String(80), index=True)
+    details_json: Mapped[str] = mapped_column(Text, default="{}")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, index=True
+    )
+
+
 class AgentPlanVersion(Base):
     __tablename__ = "agent_plan_versions"
     __table_args__ = (
@@ -2908,6 +3323,58 @@ class ProductionFeedbackEvent(Base):
     )
 
 
+class SourceIdentityVerification(Base):
+    """Human-approved evidence for one upstream source identity contract."""
+
+    __tablename__ = "source_identity_verifications"
+    __table_args__ = (
+        CheckConstraint(
+            "result IN ('verified','conflict')",
+            name="ck_source_identity_verifications_result",
+        ),
+        CheckConstraint(
+            "status IN ('draft','approved','superseded','rejected')",
+            name="ck_source_identity_verifications_status",
+        ),
+        CheckConstraint(
+            "length(probe_hash) = 64",
+            name="ck_source_identity_verifications_probe_hash",
+        ),
+        CheckConstraint(
+            "scoped_row_count >= 0 AND duplicate_key_count >= 0 "
+            "AND res_id_conflict_count >= 0",
+            name="ck_source_identity_verifications_counts",
+        ),
+        Index(
+            "uq_source_identity_verifications_approved_source",
+            "contract_key",
+            "source_system",
+            unique=True,
+            sqlite_where=sql_text("status = 'approved'"),
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    contract_key: Mapped[str] = mapped_column(String(120), index=True)
+    source_system: Mapped[str] = mapped_column(String(120), index=True)
+    key_fields_json: Mapped[str] = mapped_column(Text)
+    result: Mapped[str] = mapped_column(String(20), index=True)
+    probe_hash: Mapped[str] = mapped_column(String(64), index=True)
+    data_window: Mapped[str] = mapped_column(String(120))
+    scoped_row_count: Mapped[int] = mapped_column(Integer)
+    duplicate_key_count: Mapped[int] = mapped_column(Integer)
+    res_id_conflict_count: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(20), default="draft", index=True)
+    created_by: Mapped[str] = mapped_column(String(80))
+    approved_by: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, index=True
+    )
+    approved_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+
 class ContentRecord(Base):
     """Local projection of an upstream content item, never a remote DB mirror."""
 
@@ -2920,6 +3387,21 @@ class ContentRecord(Base):
             "status IN ('awaiting_material','ready','deleted')",
             name="ck_content_records_status",
         ),
+        CheckConstraint(
+            "identity_status IN "
+            "('legacy_unverified','pending_verification','verified','conflict')",
+            name="ck_content_records_identity_status",
+        ),
+        CheckConstraint(
+            "source_res_type IS NULL OR source_res_type IN (1, 6)",
+            name="ck_content_records_source_res_type",
+        ),
+        Index(
+            "uq_content_records_verified_key",
+            "content_key",
+            unique=True,
+            sqlite_where=sql_text("content_key IS NOT NULL"),
+        ),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -2928,6 +3410,22 @@ class ContentRecord(Base):
     category_key: Mapped[str] = mapped_column(String(40), index=True)
     source_version: Mapped[str] = mapped_column(String(120))
     source_occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    content_key: Mapped[str | None] = mapped_column(String(320), nullable=True)
+    source_res_type: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    source_ll_id: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    source_res_id: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    identity_status: Mapped[str] = mapped_column(
+        String(30),
+        default="legacy_unverified",
+        server_default="legacy_unverified",
+        index=True,
+    )
+    identity_hash: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    identity_verification_id: Mapped[int | None] = mapped_column(
+        ForeignKey("source_identity_verifications.id", ondelete="RESTRICT"),
+        nullable=True,
+        index=True,
+    )
     asset_id: Mapped[int | None] = mapped_column(
         ForeignKey("assets.id", ondelete="RESTRICT"), nullable=True, index=True
     )
@@ -2938,6 +3436,7 @@ class ContentRecord(Base):
     )
 
     asset: Mapped[Asset | None] = relationship()
+    identity_verification: Mapped[SourceIdentityVerification | None] = relationship()
 
 
 class ContentIngressEvent(Base):
@@ -2962,6 +3461,13 @@ class ContentIngressEvent(Base):
     occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     payload_hash: Mapped[str] = mapped_column(String(64), index=True)
     payload_json: Mapped[str] = mapped_column(Text)
+    identity_snapshot_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    identity_hash: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    identity_verification_id: Mapped[int | None] = mapped_column(
+        ForeignKey("source_identity_verifications.id", ondelete="RESTRICT"),
+        nullable=True,
+        index=True,
+    )
     content_record_id: Mapped[int | None] = mapped_column(
         ForeignKey("content_records.id", ondelete="RESTRICT"), nullable=True, index=True
     )
@@ -2972,6 +3478,7 @@ class ContentIngressEvent(Base):
     )
 
     content_record: Mapped[ContentRecord | None] = relationship()
+    identity_verification: Mapped[SourceIdentityVerification | None] = relationship()
 
 
 class LabelRelease(Base):

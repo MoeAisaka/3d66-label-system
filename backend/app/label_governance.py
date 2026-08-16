@@ -10,6 +10,11 @@ from typing import Any, Mapping
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from .asset_identity import (
+    AssetIdentityError,
+    IdentityVerificationEvidence,
+    resolve_three_d_su_identity,
+)
 from .audit import append_audit_event, canonical_json
 from .mechanism_profiles import MechanismProfileError, validate_mechanism_artifacts
 from .models import (
@@ -28,6 +33,7 @@ from .models import (
     PublishedLabel,
     ReviewPanel,
     SemanticTagFact,
+    SourceIdentityVerification,
     TagDemandContract,
 )
 from .semantic_tag_contracts import (
@@ -39,6 +45,7 @@ from .semantic_tag_contracts import (
 
 
 SCHEMA_VERSION = "content-ingress-v1"
+INGRESS_SCHEMA_VERSIONS = {SCHEMA_VERSION, "content-ingress-v2"}
 LABEL_SCHEMA_VERSION = "published-label-v1"
 SEMANTIC_LABEL_SCHEMA_VERSION = "published-label-v2"
 INGRESS_TYPES = {"content.created", "content.updated", "content.deleted"}
@@ -364,7 +371,7 @@ def ingest_content_event(
     payload: dict[str, Any],
     received_by: str,
 ) -> tuple[ContentIngressEvent, ContentRecord, bool]:
-    if schema_version != SCHEMA_VERSION:
+    if schema_version not in INGRESS_SCHEMA_VERSIONS:
         raise ValueError("不支持的内容接入 schema_version")
     if event_type not in INGRESS_TYPES:
         raise ValueError("不支持的内容接入 event_type")
@@ -396,6 +403,44 @@ def ingest_content_event(
         if asset.category_key != category_key:
             raise ValueError("payload.asset_id 与 category_key 不一致")
 
+    resolved_identity = None
+    identity_verification: SourceIdentityVerification | None = None
+    if schema_version == "content-ingress-v2":
+        if category_key != "model_3d_su":
+            raise ValueError("content-ingress-v2 当前只支持 model_3d_su 类目")
+        identity_verification = db.scalar(
+            select(SourceIdentityVerification).where(
+                SourceIdentityVerification.contract_key
+                == PLATFORM_SEMANTIC_CONTRACT_KEY,
+                SourceIdentityVerification.source_system == source_system,
+                SourceIdentityVerification.status == "approved",
+            )
+        )
+        verification_evidence = None
+        if identity_verification is not None:
+            try:
+                key_fields = tuple(json.loads(identity_verification.key_fields_json))
+                verification_evidence = IdentityVerificationEvidence(
+                    source_system=identity_verification.source_system,
+                    key_fields=key_fields,
+                    status=identity_verification.result,
+                    evidence_hash=identity_verification.probe_hash,
+                )
+            except (TypeError, ValueError) as exc:
+                raise LabelIntegrationConflict(
+                    f"已批准身份签认证据无效：{exc}"
+                ) from None
+        try:
+            resolved_identity = resolve_three_d_su_identity(
+                source_system=source_system,
+                payload=payload,
+                verification=verification_evidence,
+            )
+        except AssetIdentityError as exc:
+            if identity_verification is not None:
+                raise LabelIntegrationConflict(str(exc)) from None
+            raise ValueError(str(exc)) from None
+
     payload_hash = _payload_hash(payload)
     existing_event = db.scalar(
         select(ContentIngressEvent).where(ContentIngressEvent.event_id == event_id)
@@ -407,6 +452,10 @@ def ingest_content_event(
             or existing_event.event_type != event_type
             or existing_event.source_system != source_system
             or _aware(existing_event.occurred_at) != _aware(occurred_at)
+            or (
+                resolved_identity is not None
+                and existing_event.identity_hash != resolved_identity.identity_hash
+            )
         ):
             raise LabelIntegrationConflict("同一 event_id 的内容接入载荷不一致")
         record = db.get(ContentRecord, existing_event.content_record_id)
@@ -427,6 +476,23 @@ def ingest_content_event(
     )
     event_status = status if status == "awaiting_material" else "applied"
     if record is None:
+        identity_values = (
+            {
+                "content_key": resolved_identity.content_key,
+                "source_res_type": resolved_identity.res_type,
+                "source_ll_id": resolved_identity.ll_id,
+                "source_res_id": resolved_identity.res_id,
+                "identity_status": resolved_identity.identity_status,
+                "identity_hash": resolved_identity.identity_hash,
+                "identity_verification_id": (
+                    identity_verification.id
+                    if identity_verification is not None
+                    else None
+                ),
+            }
+            if resolved_identity is not None
+            else {}
+        )
         record = ContentRecord(
             source_system=source_system,
             source_content_id=content_id,
@@ -435,12 +501,31 @@ def ingest_content_event(
             source_occurred_at=occurred_at,
             asset_id=asset.id if asset else None,
             status=status,
+            **identity_values,
         )
         db.add(record)
         db.flush()
     elif incoming_time <= _aware(record.source_occurred_at):
         event_status = "stale"
     else:
+        if resolved_identity is not None:
+            if (
+                record.identity_hash is not None
+                and record.identity_hash != resolved_identity.identity_hash
+            ):
+                raise LabelIntegrationConflict("同一内容记录的源身份发生漂移")
+            if record.identity_status == "pending_verification":
+                record.content_key = resolved_identity.content_key
+                record.source_res_type = resolved_identity.res_type
+                record.source_ll_id = resolved_identity.ll_id
+                record.source_res_id = resolved_identity.res_id
+                record.identity_status = resolved_identity.identity_status
+                record.identity_hash = resolved_identity.identity_hash
+                record.identity_verification_id = (
+                    identity_verification.id
+                    if identity_verification is not None
+                    else None
+                )
         record.category_key = category_key
         record.source_version = source_version
         record.source_occurred_at = occurred_at
@@ -449,6 +534,23 @@ def ingest_content_event(
         record.status = status
         record.updated_at = datetime.now(timezone.utc)
 
+    identity_snapshot = (
+        {
+            **resolved_identity.model_dump(mode="json"),
+            "identity_verification_id": (
+                identity_verification.id
+                if identity_verification is not None
+                else None
+            ),
+            "verification_evidence_hash": (
+                identity_verification.probe_hash
+                if identity_verification is not None
+                else None
+            ),
+        }
+        if resolved_identity is not None
+        else None
+    )
     event = ContentIngressEvent(
         event_id=event_id,
         schema_version=schema_version,
@@ -457,6 +559,19 @@ def ingest_content_event(
         occurred_at=occurred_at,
         payload_hash=payload_hash,
         payload_json=canonical_json(payload),
+        identity_snapshot_json=(
+            canonical_json(identity_snapshot) if identity_snapshot is not None else None
+        ),
+        identity_hash=(
+            resolved_identity.identity_hash
+            if resolved_identity is not None
+            else None
+        ),
+        identity_verification_id=(
+            identity_verification.id
+            if identity_verification is not None
+            else None
+        ),
         content_record_id=record.id,
         status=event_status,
         received_by=received_by,
@@ -471,11 +586,16 @@ def ingest_content_event(
         subject_id=event_id,
         actor=received_by,
         payload={
-            "content_key": f"{source_system}:{content_id}",
+            "content_key": (
+                record.content_key
+                if schema_version == "content-ingress-v2"
+                else f"{source_system}:{content_id}"
+            ),
             "category_key": category_key,
             "event_type": event_type,
             "source_version": source_version,
             "status": event_status,
+            "identity_status": record.identity_status,
         },
         event_key=f"content-ingress:{event_id}",
     )

@@ -17,6 +17,8 @@
     "contract:mechanism-editor": "node --experimental-strip-types scripts/check-mechanism-editor-contract.ts",
     "contract:dual-workspaces": "node --experimental-strip-types scripts/check-dual-workspaces-contract.ts",
     "contract:tag-demand": "node --experimental-strip-types scripts/check-tag-demand-contract.ts",
+    "contract:content-identity": "node --experimental-strip-types scripts/check-content-identity-contract.ts",
+    "contract:runtime-center": "node --experimental-strip-types scripts/check-runtime-center-contract.ts",
     "test:lightbox": "node --experimental-strip-types scripts/check-baseline-lightbox.ts",
     "test:baseline-level-metrics": "node --experimental-strip-types scripts/check-baseline-level-metrics.ts",
     "lint": "tsc -b --pretty false",

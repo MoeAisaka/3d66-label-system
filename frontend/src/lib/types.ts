@@ -1286,6 +1286,76 @@ export type QueueStatus = {
   control_paused: boolean
 }
 
+export type RuntimeAction = "pause" | "resume" | "retry" | "cancel"
+
+export type ProductionRunSummary = {
+  id: number
+  run_key: string
+  idempotency_key: string
+  source_type: string | null
+  source_id: number | null
+  source_run_id: number | null
+  workflow_definition_id: number
+  workflow_version_id: number
+  workflow_version: string
+  snapshot_hash: string
+  category_key: string | null
+  queue_class: Job["queue_class"]
+  status: "planned" | "queued" | "running" | "paused" | "succeeded" | "failed" | "retryable" | "blocked" | "canceled"
+  current_step_key: string | null
+  blockers: Array<{ code?: string; message?: string; owner?: string } | string>
+  requested_by: string
+  owner: string
+  reason: string
+  environment: "dry_run"
+  total_steps: number
+  completed_steps: number
+  failed_steps: number
+  last_checkpoint_id: number | null
+  attempt_count: number
+  next_retry_at: string | null
+  error_code: string
+  error_message: string
+  created_at: string
+  updated_at: string
+  started_at: string | null
+  finished_at: string | null
+  allowed_actions: RuntimeAction[]
+  duplicate?: boolean
+}
+
+export type RuntimeTimelineItem = {
+  id: number
+  step_key: string
+  step_type: string
+  sequence: number
+  attempt_no: number
+  status: string
+  script_version_id: number
+  script_version: string
+  queue_class: Job["queue_class"] | null
+  input_hash: string
+  output_hash: string | null
+  checkpoint_hash: string | null
+  lease_owner: string | null
+  lease_expires_at: string | null
+  last_error_code: string
+  last_error_message: string
+  started_at: string | null
+  finished_at: string | null
+}
+
+export type RuntimeSnapshot = {
+  run_key: string
+  snapshot_hash: string
+  snapshot: {
+    schema_version: string
+    workflow: Record<string, unknown>
+    scripts: Array<Record<string, unknown>>
+    runtime_context: Record<string, unknown>
+  }
+}
+
 export type CircuitBreaker = {
   id: number
   scope_type: "strategy" | "batch"
@@ -1851,8 +1921,31 @@ export type TagDemandContractField = {
   default_value: Array<Record<string, unknown>>
 }
 
+export type SourceIdentityContract = {
+  source_system: string
+  object_grain: "asset"
+  identity_fields: ["res_type", "ll_id"]
+  optional_disambiguator: "res_id" | null
+  version_field: string
+  deletion_field: string
+  uniqueness_status: "unverified" | "verified" | "conflict"
+  verification_evidence_hash: string | null
+}
+
+export type FieldSupplyDefinition = {
+  field_key: string
+  fact_namespace: "semantic" | "quality" | "governance"
+  object_grain: "asset" | "image" | "text_fragment"
+  production_method: "source_direct" | "rule" | "model" | "human" | "hybrid"
+  source_authority: string
+  owner: string
+  freshness_sla_hours: number
+  null_semantics: Array<"not_applicable" | "not_detected" | "unknown" | "empty_valid">
+  rollback_strategy: "previous_release" | "compensation_release"
+}
+
 export type TagDemandContractDefinition = {
-  schema_version: "tag-demand-contract-v1"
+  schema_version: "tag-demand-contract-v1" | "tag-demand-contract-v2"
   semantic_schema: {
     schema_version: "semantic-tag-schema-v1"
     fields: Record<string, TagDemandContractField>
@@ -1866,6 +1959,7 @@ export type TagDemandContractDefinition = {
     prompt_variant: "whole" | "single"
     prompt_version: string
     model_version: string
+    field_applicability_overrides?: Record<string, SemanticApplicability>
   }>
   quality_gates: Record<string, {
     min_precision: number
@@ -1874,6 +1968,8 @@ export type TagDemandContractDefinition = {
     max_conflict_rate: number
   }>
   projection_targets: Array<{ target_key: string; mode: "dry_run"; locale: "zh" | "en" }>
+  source_identity?: SourceIdentityContract
+  field_supply?: Record<string, FieldSupplyDefinition>
 }
 
 export type TagDemandContract = {
@@ -1887,6 +1983,41 @@ export type TagDemandContract = {
   approved_at: string | null
   created_by: string
   created_at: string
+}
+
+export type SourceIdentityVerification = {
+  id: number
+  contract_key: string
+  source_system: string
+  key_fields: ["res_type", "ll_id"]
+  result: "verified" | "conflict"
+  probe_hash: string
+  data_window: string
+  scoped_row_count: number
+  duplicate_key_count: number
+  res_id_conflict_count: number
+  status: "draft" | "approved" | "superseded" | "rejected"
+  created_by: string
+  approved_by: string | null
+  created_at: string
+  approved_at: string | null
+}
+
+export type ContentIdentityRecord = {
+  id: number
+  source_system: string
+  content_id: string
+  content_key: string | null
+  category_key: string
+  content_version: string
+  source_res_type: 1 | 6 | null
+  source_ll_id: string | null
+  source_res_id: string | null
+  identity_status: "legacy_unverified" | "pending_verification" | "verified" | "conflict"
+  identity_hash: string | null
+  identity_verification_id: number | null
+  status: string
+  updated_at: string
 }
 
 export type SampleSetItem = {
