@@ -3076,6 +3076,25 @@ class OptimizationCaseQueue(Base):
             name="ck_optimization_case_status",
         ),
         CheckConstraint(
+            "pipeline_kind IN ('incremental','baseline')",
+            name="ck_optimization_case_pipeline_kind",
+        ),
+        CheckConstraint(
+            "automation_generation >= 1",
+            name="ck_optimization_case_automation_generation",
+        ),
+        CheckConstraint(
+            "admission_state IN ('awaiting_evidence','historical_audit','eligible','admitted','rejected')",
+            name="ck_optimization_case_admission_state",
+        ),
+        CheckConstraint(
+            "mechanism_fingerprint IS NULL OR "
+            "(length(mechanism_fingerprint) = 64 "
+            "AND lower(mechanism_fingerprint) = mechanism_fingerprint "
+            "AND mechanism_fingerprint NOT GLOB '*[^0-9a-f]*')",
+            name="ck_optimization_case_mechanism_fingerprint",
+        ),
+        CheckConstraint(
             "severity IN ('P0','P1','P2','P3')",
             name="ck_optimization_case_severity",
         ),
@@ -3108,6 +3127,24 @@ class OptimizationCaseQueue(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     category_key: Mapped[str] = mapped_column(
         String(40), default="space_image", server_default="space_image", index=True
+    )
+    pipeline_kind: Mapped[str] = mapped_column(
+        String(20), default="incremental", server_default="incremental", index=True
+    )
+    automation_generation: Mapped[int] = mapped_column(
+        Integer, default=1, server_default="1", index=True
+    )
+    mechanism_fingerprint: Mapped[str | None] = mapped_column(
+        String(64), nullable=True, index=True
+    )
+    route_key: Mapped[str | None] = mapped_column(
+        String(120), nullable=True, index=True
+    )
+    eligibility_snapshot_id: Mapped[int | None] = mapped_column(
+        Integer, nullable=True, index=True
+    )
+    admission_state: Mapped[str] = mapped_column(
+        String(30), default="eligible", server_default="eligible", index=True
     )
     idempotency_key: Mapped[str] = mapped_column(
         String(160), unique=True, index=True
@@ -3225,6 +3262,226 @@ class AutomationPolicy(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, onupdate=utcnow
     )
+
+
+class AutomationLanePolicy(Base):
+    __tablename__ = "automation_lane_policies"
+    __table_args__ = (
+        UniqueConstraint(
+            "category_key",
+            "pipeline_kind",
+            "generation",
+            name="uq_automation_lane_policy_identity",
+        ),
+        CheckConstraint(
+            "pipeline_kind IN ('incremental','baseline')",
+            name="ck_automation_lane_policy_pipeline_kind",
+        ),
+        CheckConstraint(
+            "generation >= 1",
+            name="ck_automation_lane_policy_generation",
+        ),
+        CheckConstraint(
+            "status IN ('draft','enabled','paused','retired')",
+            name="ck_automation_lane_policy_status",
+        ),
+        CheckConstraint(
+            "case_threshold >= 1 AND min_batch_size >= 1 AND max_wait_seconds >= 0",
+            name="ck_automation_lane_policy_batch_limits",
+        ),
+        CheckConstraint(
+            "daily_budget_micros >= 0 AND cooldown_seconds >= 0 "
+            "AND max_candidates >= 1 AND max_consecutive_batches >= 1",
+            name="ck_automation_lane_policy_budget_limits",
+        ),
+        CheckConstraint(
+            "json_valid(immediate_severities_json) "
+            "AND json_type(immediate_severities_json, '$') = 'array'",
+            name="ck_automation_lane_policy_immediate_severities",
+        ),
+        CheckConstraint(
+            "json_valid(mechanism_snapshot_json) "
+            "AND json_type(mechanism_snapshot_json, '$') = 'object'",
+            name="ck_automation_lane_policy_mechanism_snapshot",
+        ),
+        CheckConstraint(
+            "length(mechanism_fingerprint) = 64 "
+            "AND lower(mechanism_fingerprint) = mechanism_fingerprint "
+            "AND mechanism_fingerprint NOT GLOB '*[^0-9a-f]*'",
+            name="ck_automation_lane_policy_mechanism_fingerprint",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    category_key: Mapped[str] = mapped_column(String(40), index=True)
+    pipeline_kind: Mapped[str] = mapped_column(String(20), index=True)
+    generation: Mapped[int] = mapped_column(Integer, index=True)
+    status: Mapped[str] = mapped_column(String(20), default="draft", index=True)
+    enabled_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    case_threshold: Mapped[int] = mapped_column(Integer, default=10)
+    min_batch_size: Mapped[int] = mapped_column(Integer, default=1)
+    max_wait_seconds: Mapped[int] = mapped_column(Integer, default=3600)
+    immediate_severities_json: Mapped[str] = mapped_column(
+        Text, default='["P0","P1"]'
+    )
+    daily_budget_micros: Mapped[int] = mapped_column(Integer, default=0)
+    cooldown_seconds: Mapped[int] = mapped_column(Integer, default=21600)
+    max_candidates: Mapped[int] = mapped_column(Integer, default=1)
+    max_consecutive_batches: Mapped[int] = mapped_column(Integer, default=1)
+    target_sample_set_id: Mapped[str | None] = mapped_column(
+        String(120), nullable=True, index=True
+    )
+    stable_control_set_id: Mapped[str | None] = mapped_column(
+        String(120), nullable=True, index=True
+    )
+    blind_holdout_set_id: Mapped[str | None] = mapped_column(
+        String(120), nullable=True, index=True
+    )
+    mechanism_snapshot_json: Mapped[str] = mapped_column(Text, default="{}")
+    mechanism_fingerprint: Mapped[str] = mapped_column(String(64), index=True)
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+
+class OptimizationCaseEligibilitySnapshot(Base):
+    __tablename__ = "optimization_case_eligibility_snapshots"
+    __table_args__ = (
+        UniqueConstraint("case_id", name="uq_automation_case_eligibility_case"),
+        CheckConstraint(
+            "pipeline_kind IN ('incremental','baseline')",
+            name="ck_automation_case_eligibility_pipeline_kind",
+        ),
+        CheckConstraint(
+            "generation >= 1",
+            name="ck_automation_case_eligibility_generation",
+        ),
+        CheckConstraint(
+            "admission_state IN ('awaiting_evidence','historical_audit','eligible','admitted','rejected')",
+            name="ck_automation_case_eligibility_state",
+        ),
+        CheckConstraint(
+            "json_valid(evidence_json) "
+            "AND json_type(evidence_json, '$') = 'object'",
+            name="ck_automation_case_eligibility_evidence",
+        ),
+        CheckConstraint(
+            "length(mechanism_fingerprint) = 64 "
+            "AND lower(mechanism_fingerprint) = mechanism_fingerprint "
+            "AND mechanism_fingerprint NOT GLOB '*[^0-9a-f]*'",
+            name="ck_automation_case_eligibility_mechanism_fingerprint",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    case_id: Mapped[int] = mapped_column(
+        ForeignKey("optimization_case_queue.id", ondelete="CASCADE"), index=True
+    )
+    lane_policy_id: Mapped[int] = mapped_column(
+        ForeignKey("automation_lane_policies.id", ondelete="RESTRICT"), index=True
+    )
+    category_key: Mapped[str] = mapped_column(String(40), index=True)
+    pipeline_kind: Mapped[str] = mapped_column(String(20), index=True)
+    generation: Mapped[int] = mapped_column(Integer, index=True)
+    mechanism_fingerprint: Mapped[str] = mapped_column(String(64), index=True)
+    route_key: Mapped[str] = mapped_column(String(120), index=True)
+    correction_revision: Mapped[int] = mapped_column(Integer, default=1)
+    evidence_json: Mapped[str] = mapped_column(Text, default="{}")
+    admission_state: Mapped[str] = mapped_column(
+        String(30), default="awaiting_evidence", index=True
+    )
+    eligible_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
+    historical_source: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class AutomationBatch(Base):
+    __tablename__ = "automation_batches"
+    __table_args__ = (
+        UniqueConstraint("batch_key", name="uq_automation_batch_key"),
+        CheckConstraint(
+            "pipeline_kind IN ('incremental','baseline')",
+            name="ck_automation_batch_pipeline_kind",
+        ),
+        CheckConstraint("generation >= 1", name="ck_automation_batch_generation"),
+        CheckConstraint(
+            "status IN ('queued','leased','processing','completed','failed','cancelled','awaiting_release_review')",
+            name="ck_automation_batch_status",
+        ),
+        CheckConstraint(
+            "length(case_set_hash) = 64 "
+            "AND lower(case_set_hash) = case_set_hash "
+            "AND case_set_hash NOT GLOB '*[^0-9a-f]*'",
+            name="ck_automation_batch_case_set_hash",
+        ),
+        CheckConstraint(
+            "json_valid(frozen_policy_json) "
+            "AND json_type(frozen_policy_json, '$') = 'object'",
+            name="ck_automation_batch_frozen_policy",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    batch_key: Mapped[str] = mapped_column(String(200), unique=True, index=True)
+    lane_policy_id: Mapped[int] = mapped_column(
+        ForeignKey("automation_lane_policies.id", ondelete="RESTRICT"), index=True
+    )
+    category_key: Mapped[str] = mapped_column(String(40), index=True)
+    pipeline_kind: Mapped[str] = mapped_column(String(20), index=True)
+    generation: Mapped[int] = mapped_column(Integer, index=True)
+    mechanism_fingerprint: Mapped[str] = mapped_column(String(64), index=True)
+    route_key: Mapped[str] = mapped_column(String(120), index=True)
+    case_set_hash: Mapped[str] = mapped_column(String(64), index=True)
+    frozen_policy_json: Mapped[str] = mapped_column(Text, default="{}")
+    status: Mapped[str] = mapped_column(String(40), default="queued", index=True)
+    trigger_reason: Mapped[str] = mapped_column(String(120), default="threshold")
+    lease_owner: Mapped[str | None] = mapped_column(String(120), nullable=True, index=True)
+    lease_token: Mapped[str | None] = mapped_column(String(80), nullable=True, index=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
+    error_code: Mapped[str | None] = mapped_column(String(80), nullable=True, index=True)
+    error_message: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+
+class AutomationBatchCase(Base):
+    __tablename__ = "automation_batch_cases"
+    __table_args__ = (
+        UniqueConstraint(
+            "batch_id",
+            "case_id",
+            name="uq_automation_batch_case_pair",
+        ),
+        UniqueConstraint(
+            "eligibility_snapshot_id",
+            name="uq_automation_batch_case_snapshot",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    batch_id: Mapped[int] = mapped_column(
+        ForeignKey("automation_batches.id", ondelete="CASCADE"), index=True
+    )
+    eligibility_snapshot_id: Mapped[int] = mapped_column(
+        ForeignKey("optimization_case_eligibility_snapshots.id", ondelete="RESTRICT"),
+        index=True,
+    )
+    case_id: Mapped[int] = mapped_column(
+        ForeignKey("optimization_case_queue.id", ondelete="RESTRICT"), index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
 class AutomationOptimizationRun(Base):
