@@ -13,7 +13,7 @@ Tech Stack: Python 3.12、Pydantic 2、pytest、现有 SQLAlchemy/SQLite 只读�
 - 产品主体仍为 TPENG 标签实验台（LabelLab），3D/SU 只是第一个真实纵切，不复制平台通用能力。
 - 本批只做本地合同、脱敏清单、确定性哈希和测试；不执行 DataWorks/ODPS SQL，不申请权限，不连接真实上游、模型或数据库。
 - 不执行真实数据库写入、批量模型调用、正式标签发布、存量覆盖、Codeup 推送、MR 合并或测试服部署。
-- 身份候选键固定为 source_system + res_type + ll_id；res_type=1 为 3D，res_type=6 为 SU；重复或多 res_id 冲突时 fail-closed。
+- 本计划已完成的 readiness manifest 仅覆盖国内 `dim_res_info_union + (res_type,ll_id)`；海外 `ods_ll_relebook_res + (res_type,res_id) + su_extra.is_single` 属于后续独立 source binding，不得被当前 manifest 或运行时隐式复用。
 - 平台语义字段与 3D/SU 专有字段必须分层；not_applicable、not_detected、needs_review 不得折叠为空字符串。
 - 质量默认门槛为 Precision ≥ 0.80、Recall ≥ 0.70；最终降低门槛必须另行 Owner 批准。
 - 权限清单只允许 Select/Describe，明确排除 Download、Update、Alter、Drop 和 DML。
@@ -36,7 +36,7 @@ Interfaces:
 - [x] Write failing tests for pending_external_signoff, all external_effects false, exact identity table/key, Select/Describe permissions, stable probe hash, and rejection of ready status without signed evidence.
 - [x] Run focused tests and confirm collection/import failure because app.three_d_readiness does not exist.
 - [x] Implement immutable Pydantic types for identity, fields, golden_set, permissions, RACI, external_effects and stop_conditions. Reject unknown keys, unsafe table names, missing Owners, weak quality gates, or permissions outside the allow/deny contract.
-- [x] Bind identity.probe_hash to build_three_d_su_identity_probe('aliyun_3d66_dw.dim_res_info_union'); store no query results, credentials or source rows.
+- [x] Bind the domestic identity.probe_hash to build_three_d_su_identity_probe('aliyun_3d66_dw.dim_res_info_union'); store no query results, credentials or source rows. Overseas source/extra probes require a separate versioned contract and evidence hash.
 - [x] Run focused tests and commit feat: add 3d su readiness manifest.
 
 ### Task 2: Add the研发接入清单 and source/field/golden-set contracts

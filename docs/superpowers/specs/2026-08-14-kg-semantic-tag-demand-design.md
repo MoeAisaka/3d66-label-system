@@ -33,7 +33,16 @@
 
 平台统一使用 `asset_id` / `content_key` 作为 Canonical 业务身份，并通过不可变 `asset_version_id` 追踪具体素材版本。
 
-知识图谱需求中的 `ll_id`、`res_id` 只能作为下游表字段别名或来源系统字段，不能形成两套事实主键。
+知识图谱需求中的 `ll_id`、`res_id` 是站点来源身份：国内权威来源 ID 为 `ll_id`，海外权威来源 ID 为 `res_id`。两者必须分别映射到平台统一 `content_key`，不能直接形成两套 Canonical 事实主键。
+
+来源绑定固定为：
+
+| 站点 | 素材主表 | 来源素材 ID | 模型过滤 | `is_single` 来源 |
+|---|---|---|---|---|
+| 国内 | `aliyun_3d66_dw.dim_res_info_union` | `ll_id` | `res_type in (1,6)` | 主表同字段 |
+| 海外 | `aliyun_3d66_dw.ods_ll_relebook_res` | `res_id` | `res_type=6` | `aliyun_3d66_dw.ods_ll_relebook_res_su_extra` |
+
+海外主表与 extra 表的关联键必须由 Data Owner 签认；未签认前只记录合同和 Gap，不接真实数据。
 
 ### 3.2 执行变体
 

@@ -11,21 +11,23 @@
 
 ## 来源身份合同
 
-候选表固定为 `aliyun_3d66_dw.dim_res_info_union`，候选业务键为 `res_type + ll_id`：
+来源身份按站点分别冻结，不把国内和海外压成同一个主键合同：
 
-- `res_type=1`：3D；
-- `res_type=6`：SU；
-- `res_id` 只作为冲突证据，不自动拼入主键；
-- 重复键或同键对应多个 `res_id` 时 fail-closed，不生成随机后缀。
+- 国内：`aliyun_3d66_dw.dim_res_info_union`，素材 ID 为 `ll_id`，
+  `res_type in (1,6)`，`is_single` 同表提供，候选键为 `res_type + ll_id`；
+- 海外：`aliyun_3d66_dw.ods_ll_relebook_res`，素材 ID 为 `res_id`，
+  `res_type=6`，`is_single` 来自 `aliyun_3d66_dw.ods_ll_relebook_res_su_extra`，
+  候选键为 `res_type + res_id`；两表关联键必须另行签认。
 
-对一个经 Data Owner 签认的数据窗口，仅允许另行审批后执行以下四类只读 `SELECT`：
+对每个经 Data Owner 签认的数据窗口，仅允许另行审批后执行站点对应的只读探查：
 
-1. 3D/SU 分类型记录数；
-2. `ll_id`、`res_id` 空值或空字符串计数；
-3. `res_type + ll_id` 重复键；
-4. 同键对应多个 `res_id` 的冲突。
+1. 分类型记录数和快照分区一致性；
+2. 权威素材 ID 空值或空字符串计数；
+3. 候选键重复；
+4. `is_single` 空值、非法值和整体/单体分布；
+5. 海外主表与 `su_extra` 的匹配覆盖率、重复匹配和快照一致性。
 
-机器清单只保存这四条查询文本的 `probe_hash`，不保存查询结果、凭据或源表明细。签认包必须绑定数据窗口、表名、查询哈希、聚合计数、审阅人和证据哈希。重复键和多 `res_id` 冲突均为 0 才可签为 verified。
+国内和海外探查必须分别生成证据哈希，不得复用同一份 `probe_hash`。签认包必须绑定站点、数据窗口、表名、查询哈希、聚合计数、审阅人和证据哈希；重复、空主键、非法 `is_single` 或海外多表匹配冲突均为 0 才可签为 verified。
 
 ## 字段分层
 
@@ -47,7 +49,8 @@
 
 ## 进入真实接入前的证据
 
-- 来源表、数据窗口、四项聚合结果与 `probe_hash` 已由 Data Owner 签认；
+- 国内/海外来源表、各自数据窗口、站点专项聚合结果与独立 `probe_hash` 已由 Data Owner 签认；
+- 海外主表与 `ods_ll_relebook_res_su_extra` 的关联键已签认，匹配覆盖与重复匹配均通过；
 - 字段逐项完成 Owner、whole/single、空值语义、基数、词表、P/R 门槛和回退版本签认；
 - 至少 100 个样本的黄金集 revision 已锁定，覆盖矩阵和复审记录完整；
 - `SELECT`/`DESCRIBE` 权限经审批且有到期时间，拒绝项保持未授权；
@@ -57,3 +60,5 @@
 ## 停止条件
 
 一旦需要连接真实源、执行 SQL、索取凭据、调用模型、写外部数据库、启用候选、发布标签、覆盖存量或部署，立即停止并重新冻结执行合同。证据不完整、主键冲突、质量门槛不达标、版本漂移或无法完成对账时同样 fail-closed。
+
+当前来源身份运行时仍以单一 `source_identity` 和国内 `(res_type,ll_id)` 候选键为主；海外 `(res_type,res_id) + su_extra.is_single` 的多表绑定尚未接入，只记录为下一阶段 Gap，不因本次来源同步扩大冻结执行合同。

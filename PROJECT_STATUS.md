@@ -3,19 +3,20 @@
 ## 最新合同补充：知识图谱四批真实数据与两张目标表建表需求（2026-08-17，本地合同已更新）
 
 - 已冻结四批交付口径：国内整体/单体、海外整体/单体，共用平台语义字段合同和同一投影逻辑；海外目标表为 `relebook_kg_model_tag_recognition`，国内目标表为 `kg_model_tag_recognition_cn`。
-- 四批正式首批统一使用 T-1 快照 `2026-08-16`；海外来源固定为 `aliyun_3d66_dw.ods_ll_relebook_res(dt='20260816', res_type=6)`，通过 `(ll_id,res_type)` 关联 `aliyun_3d66_dw.dim_res_info`，过滤 `is_delete=0`，按 `is_single` 拆分整体/单体。
+- 四批正式首批统一使用 T-1 快照 `2026-08-16`；国内来源为 `aliyun_3d66_dw.dim_res_info_union`，素材 ID 为 `ll_id`，`res_type in (1,6)`，`is_single` 同表提供；海外来源为 `aliyun_3d66_dw.ods_ll_relebook_res`，素材 ID 为 `res_id`，`res_type=6`，`is_single` 来自 `aliyun_3d66_dw.ods_ll_relebook_res_su_extra`。
+- 国内候选键为 `(res_type,ll_id)`；海外候选键为 `(res_type,res_id)`。海外主表与 `su_extra` 的关联键、两表快照/删除字段和匹配唯一性仍待大数据回执；当前实现尚未接入海外多表来源绑定，保持 `pending_external_signoff`，不扩大冻结执行合同。
 - `object` / `material` 的数值语义已冻结为“相对重要性等级”：每个值单独保留 0～1，`rank` 负责排序，允许 `0.7/0.5/0.3` 同时出现，不做总和归一化，不解释为概率/占比；重复实体合并取最高等级、不累加。
 - 已新增 `docs/contracts/2026-08-17-kg-four-batch-target-table-request-v1.md` 作为大数据建表需求包，包含逻辑字段、分区、幂等键、版本追溯、Manifest、对账和回退要求。目标表仍是可重建下游投影，不是 Canonical 事实主库。
 - 本次回归：语义合同/映射/3D-SU seed/投影专项 `39+16+22` 通过；后端全量 `1514 passed, 1 skipped, 6 warnings`。warning 仅为既有依赖弃用提示。
-- 本会话不执行 DDL/DML、不申请建表权限、不连接真实业务数据库、不调用真实模型；待大数据回执正式 DDL、国内来源和 Owner/权限后，再冻结四批真实跑批合同。
+- 本会话不执行 DDL/DML、不申请建表权限、不连接真实业务数据库、不调用真实模型；待大数据回执正式 DDL、海外主表/extra 表关联键、两站快照/删除字段和 Owner/权限后，再冻结四批真实跑批合同。
 
 ## 最新实施：3D/SU 真实闭环接入前置冻结（2026-08-16，本地未发布）
 
-- 新增机器可校验的 `3d-su-readiness-v1` manifest，固定 `model_3d_su` 首个纵切的候选源表、`res_type + ll_id` 身份键、四项只读探查哈希、平台字段与类目扩展边界、黄金集、最小权限、RACI、停止条件和全部外部效果为 false。
+- 新增机器可校验的 `3d-su-readiness-v1` manifest；当前实现只覆盖国内 `dim_res_info_union + (res_type,ll_id)` 候选键及原四项只读探查，海外 `ods_ll_relebook_res + (res_type,res_id) + su_extra.is_single` 已补入合同和 Gap，但尚未接入 manifest/运行时。
 - readiness 状态固定为 `pending_external_signoff`；身份、字段、黄金集、权限和六类 RACI 证据不完整时，系统拒绝 `ready_for_real_ingress`。该状态是接入前置冻结，不代表真实接入已就绪。
 - 研发接入包已冻结：来源与身份签认、逐字段 whole/single 与空值语义模板、至少 100 条黄金/挑战样本计划、仅 SELECT/DESCRIBE 的权限模板、产品/数据/算法/平台/审核/下游 RACI，以及九月真实闭环验收依赖。
 - 默认字段质量门槛保持 Precision ≥ 0.80、Recall ≥ 0.70；黄金集真值只能新增 revision，不原地覆盖锁定历史；机制候选启用与标签事实发布继续保持两个独立人工门。
-- 当前仍未签认：真实数据窗口与四项探查结果、字段 Owner/词表/回退版本、黄金集 revision、限时只读权限、六类责任人、真实投影目标与下游消费验收人。
+- 当前仍未签认：两站真实数据窗口与专项探查结果、海外主表/extra 表关联键、字段 Owner/词表/回退版本、黄金集 revision、限时只读权限、六类责任人、真实投影目标与下游消费验收人。
 - 本批未连接 DataWorks/ODPS、真实上游、真实模型或业务数据库，未执行 SQL、申请权限、DML、模型调用、标签发布、存量覆盖、Codeup 推送、MR 合并或部署。合同见 `docs/contracts/3d-su-readiness-freeze-v1.md`。
 
 ## 最新实施：3D/SU Shadow 与确定性标签闭环预备批次（2026-08-16，本地未发布）
@@ -2103,6 +2104,8 @@ npm.cmd run build
   表示 SU。只有同一数据窗口的重复键和多 `res_id` 冲突均为零，且摘要证据经过人工
   批准后，才允许生成 `aliyun_3d66_dw:<res_type>:<ll_id>`；未签认时
   `content_key=null`，冲突时关闭失败，禁止追加随机后缀制造唯一性。
+  该段是 2026-08-15 已完成的国内身份底座；2026-08-17 新确认的海外来源以
+  `(res_type,res_id)` 和 `ods_ll_relebook_res_su_extra.is_single` 为独立 Gap，不能套用此键。
 - 新增 migration 70 `add_source_identity_verification`：保存探查哈希、数据窗口、聚合
   计数、状态和审核人；为内容记录和接入事件增加冻结身份字段、非空 content key
   唯一索引与不可变触发器。历史记录只迁移为 `legacy_unverified`，不回填

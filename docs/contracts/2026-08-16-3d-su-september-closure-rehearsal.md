@@ -17,7 +17,7 @@
 | 序号 | 演练步骤 | 本地 deterministic evidence | 未来真实证据 | 通过条件 |
 |---:|---|---|---|---|
 | 1 | 字段合同冻结 | 平台字段、3D/SU 扩展、whole/single、空值语义快照 | Product/Data/Consumer 签认合同 | 合同 hash 稳定且 Owner 完整 |
-| 2 | 来源身份解析 | 模拟 `res_type=1/6`、`ll_id`、重复与多 `res_id` 冲突 | 只读四项 SELECT 聚合 | 正常样本通过，重复/冲突 fail-closed |
+| 2 | 来源身份解析 | 分别模拟国内 `(res_type,ll_id)` 与海外 `(res_type,res_id)`，并注入海外 `su_extra.is_single` 缺失/多匹配 | 两站只读身份与多表关联探查 | 两套身份正常样本通过，重复/空值/跨表冲突 fail-closed |
 | 3 | 增量素材接入 | 幂等事件、乱序事件、重复事件、缺素材事件 | 上游事件金丝雀与重放记录 | 重复不增包，异常有明确阻塞 |
 | 4 | whole/single 分流 | 两种素材形态与适用性矩阵 | 真实素材身份和人工抽检 | 路由正确且不猜测 not_applicable |
 | 5 | 机制冻结 | Prompt A/B、V3 合同、模型和规则版本快照 | 算法负责人签认版本 | 运行期间不可漂移 |
@@ -31,8 +31,10 @@
 
 ## 必须注入的故障场景
 
-- 重复 `res_type + ll_id`；
-- 同一身份键对应多个 `res_id`；
+- 国内重复 `res_type + ll_id` 或同键对应多个 `res_id`；
+- 海外重复 `res_type + res_id`；
+- 海外主表与 `su_extra` 无匹配或多匹配；
+- 两站 `is_single` 缺失、非法值或快照不一致；
 - 上游事件重复、乱序、缺素材和断点恢复；
 - Prompt/V3/模型/规则版本漂移；
 - AI 候选回归失败；

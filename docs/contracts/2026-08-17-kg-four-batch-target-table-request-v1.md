@@ -21,36 +21,41 @@
 
 | 批次 | 目标表 | `site_scope` | `locale` | `asset_scope` | `is_single` | `prompt_variant` | 当前状态 |
 |---|---|---|---|---|---:|---|---|
-| 国内整体模型 | `kg_model_tag_recognition_cn` | `domestic` | `zh` | `whole` | 0 | `whole` | 目标表待建；国内来源表由大数据确认 |
-| 国内单体模型 | `kg_model_tag_recognition_cn` | `domestic` | `zh` | `single` | 1 | `single` | 目标表待建；国内来源表由大数据确认 |
-| 海外整体模型 | `relebook_kg_model_tag_recognition` | `overseas` | `en` | `whole` | 0 | `whole` | 来源口径已核验 |
-| 海外单体模型 | `relebook_kg_model_tag_recognition` | `overseas` | `en` | `single` | 1 | `single` | 来源口径已核验 |
+| 国内整体模型 | `kg_model_tag_recognition_cn` | `domestic` | `zh` | `whole` | 0 | `whole` | 来源表已确认；目标表待建 |
+| 国内单体模型 | `kg_model_tag_recognition_cn` | `domestic` | `zh` | `single` | 1 | `single` | 来源表已确认；目标表待建 |
+| 海外整体模型 | `relebook_kg_model_tag_recognition` | `overseas` | `en` | `whole` | 0 | `whole` | 主表与 `is_single` 来源已确认；关联键待回执 |
+| 海外单体模型 | `relebook_kg_model_tag_recognition` | `overseas` | `en` | `single` | 1 | `single` | 主表与 `is_single` 来源已确认；关联键待回执 |
 
 正式首批使用同一个 T-1 快照：`2026-08-16`。后续三批继续使用该日期的同一快照，不因批次执行时间不同而重新取数。
 
-## 3. 已核验的海外来源口径
+## 3. 已确认的国内/海外来源口径
 
-海外两批的输入合同固定为：
+### 3.1 国内两批
 
-```sql
-FROM aliyun_3d66_dw.ods_ll_relebook_res AS src
-JOIN aliyun_3d66_dw.dim_res_info AS dim
-  ON src.ll_id = dim.ll_id
- AND src.res_type = dim.res_type
-WHERE src.dt = '20260816'
-  AND src.res_type = 6
-  AND dim.is_delete = 0
-```
+| 项目 | 合同 |
+|---|---|
+| 素材主表 | `aliyun_3d66_dw.dim_res_info_union` |
+| 素材 ID | `ll_id` |
+| 模型类目过滤 | `res_type in (1, 6)` |
+| `is_single` 来源 | `aliyun_3d66_dw.dim_res_info_union` 同表字段 |
+| 整体/单体路由 | `is_single=0` 整体，`is_single=1` 单体 |
 
-说明：
+国内主键候选为 `(res_type,ll_id)`。正式执行前仍需大数据回执该表的快照分区字段、删除字段和唯一性探查结果；不得把 `res_id` 追加进 Canonical 主键，除非探查证明存在冲突并由 Owner 重新签认。
 
-- 关联键必须是 `(ll_id, res_type)`，禁止只用 `ll_id`；
-- `dim.is_single=0` 路由到整体批次，`dim.is_single=1` 路由到单体批次；
-- `ods_ll_relebook_res` 当前已核验为海外素材主表，分区字段为 `dt`；
-- `dim_res_info` 提供 `ll_id`、`res_id`、`res_type`、`is_single`、`is_delete`；
-- `is_delete=1` 的行不得进入四批正式输入。
+### 3.2 海外两批
 
-国内两批的正式生产来源表、过滤条件和快照字段由大数据 Owner 在建表需求回执中补齐；不得把海外表名或未核验的历史候选表名直接套用到国内链路。
+| 项目 | 合同 |
+|---|---|
+| 素材主表 | `aliyun_3d66_dw.ods_ll_relebook_res` |
+| 素材 ID | `res_id` |
+| 模型类目过滤 | `res_type = 6` |
+| `is_single` 来源 | `aliyun_3d66_dw.ods_ll_relebook_res_su_extra` |
+| 整体/单体路由 | extra 表中的 `is_single=0` 整体，`is_single=1` 单体 |
+| 首批快照 | 主表使用 `dt='20260816'` |
+
+海外主键候选为 `(res_type,res_id)`。主表与 `ods_ll_relebook_res_su_extra` 的正式关联键、extra 表快照字段、删除字段和唯一性探查结果必须由大数据回执后才能执行；当前不假设使用 `ll_id` 或任意隐式同名键。
+
+两套来源都必须分别完成空值、重复、跨表匹配、`is_single` 取值和快照一致性探查。国内/海外来源绑定不能复用一条 SQL，也不能把一套来源字段映射硬编码成另一套来源。
 
 ## 4. 目标表
 
@@ -73,14 +78,14 @@ WHERE src.dt = '20260816'
 | `locale` | `STRING` | 是 | `zh` / `en` |
 | `category_key` | `STRING` | 是 | 当前首切片为 `model_3d_su` |
 | `asset_scope` | `STRING` | 是 | `whole` / `single` |
-| `is_single` | `TINYINT` | 是 | 兼容投影字段，仅允许 0/1；由 `asset_scope` 派生 |
-| `res_type` | 源表同类型 | 是 | 来源资源类型；海外首批固定为 6 |
-| `ll_id` | 源表同类型 | 是 | 业务主身份之一 |
-| `res_id` | 源表同类型 | 否 | 来源资源 ID；如源表存在则保留 |
+| `is_single` | `TINYINT` | 是 | 兼容投影字段，仅允许 0/1；由已确认来源字段映射后派生 `asset_scope` |
+| `res_type` | 源表同类型 | 是 | 国内为 1/6；海外固定为 6 |
+| `ll_id` | 源表同类型 | 国内是，海外按来源保留 | 国内素材主身份；海外如来源存在则保留为辅助血缘字段 |
+| `res_id` | 源表同类型 | 海外是，国内按来源保留 | 海外素材主身份；国内如来源存在则保留为辅助血缘字段 |
 | `source_snapshot_dt` | `STRING` | 是 | 与 `dt` 同值，显式记录取数快照 |
 | `source_deleted` | `TINYINT` | 是 | 正式投影必须为 0 |
 
-建议幂等业务键：`batch_id + res_type + ll_id + dt`。如平台不允许复合唯一约束，必须通过批次级去重和对账任务保证同一逻辑键最多一行。
+建议幂等业务键按站点分开：国内为 `batch_id + res_type + ll_id + dt`，海外为 `batch_id + res_type + res_id + dt`。如平台不允许复合唯一约束，必须通过批次级去重和对账任务保证同一逻辑键最多一行。
 
 ### 5.2 平台语义字段
 
@@ -143,11 +148,11 @@ WHERE src.dt = '20260816'
 请回执以下内容后，LabelLab 才能冻结四批真实跑批合同：
 
 1. 两张目标表的正式 DDL、开发/生产表映射和 Schema 版本；
-2. 国内来源表、主键/唯一性、T-1 快照字段和删除字段；
-3. `res_type`、`ll_id`、`res_id`、`is_single` 的实际物理类型；
-4. 表 Owner、读写账号、最小权限、分区保留周期和回退操作人；
-5. 目标表写入方式（DataWorks 节点/离线任务/API 投影）及单写者约束；
-6. 四批预计行数、SLA、失败重试上限和验收窗口。
+2. 国内来源表 `dim_res_info_union` 的主键/唯一性、T-1 快照字段和删除字段；
+3. 海外主表与 `ods_ll_relebook_res_su_extra` 的正式关联键、两表快照/删除字段和唯一性；
+4. `res_type`、`ll_id`、`res_id`、`is_single` 的实际物理类型；
+5. 表 Owner、读写账号、最小权限、分区保留周期和回退操作人；
+6. 目标表写入方式（DataWorks 节点/离线任务/API 投影）及单写者约束；
+7. 四批预计行数、SLA、失败重试上限和验收窗口。
 
 在上述回执前，本会话保持：不申请建表权限、不执行 DDL/DML、不连接真实业务数据库、不调用真实模型、不发布生产标签事实。
-
