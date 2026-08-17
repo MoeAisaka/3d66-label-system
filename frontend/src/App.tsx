@@ -94,6 +94,9 @@ const ProjectionGovernancePage = lazy(() =>
 const TagDemandContractsPage = lazy(() =>
   import("@/pages/tag-demand-contracts-page").then((module) => ({ default: module.TagDemandContractsPage })),
 )
+const AutomationOverviewPage = lazy(() =>
+  import("@/pages/automation-overview-page").then((module) => ({ default: module.AutomationOverviewPage })),
+)
 
 export default function App() {
   const me = useQuery({
@@ -142,6 +145,7 @@ export default function App() {
             <Route path="workflow/incremental" element={<Suspense fallback={<RouteLoading />}><IncrementalWorkspacePage /></Suspense>} />
             <Route path="workflow/stock" element={<Suspense fallback={<RouteLoading />}><StockWorkspacePage /></Suspense>} />
             <Route path="workflow/operations" element={<Suspense fallback={<RouteLoading />}><OperationsCenterPage /></Suspense>} />
+            <Route path="workflow/automation" element={<Suspense fallback={<RouteLoading />}><AutomationOverviewPage /></Suspense>} />
             <Route path="workflow/quality-assets" element={<Suspense fallback={<RouteLoading />}><QualityAssetsPage /></Suspense>} />
             <Route path="workflow/production-line" element={<Suspense fallback={<RouteLoading />}><EvaluationPackagePipelinePage user={user} /></Suspense>} />
             <Route path="workflow/materials/packages" element={<AssetsPage />} />

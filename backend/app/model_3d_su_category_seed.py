@@ -85,6 +85,11 @@ def build_model_3d_su_semantic_contract() -> dict[str, Any]:
         key: {
             "field_key": key,
             "cardinality": "multi" if key not in {"title", "space"} else "single",
+            "weight_semantics": (
+                "relative_importance_level"
+                if key in {"object", "material"}
+                else "none"
+            ),
             "localized": True,
             "vocabulary_owner": "tpeng-semantic-platform",
             "max_values": 10 if key not in {"title", "space"} else 1,

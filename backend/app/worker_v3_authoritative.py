@@ -50,6 +50,7 @@ class V3AuthoritativeError(RuntimeError):
 
 def _validate_v3_bundle(
     *,
+    db: Session,
     category_key: str,
     contract: Any,
     classification_map: Any,
@@ -72,6 +73,7 @@ def _validate_v3_bundle(
             contract,
             classification_map,
             subcategory_dimensions,
+            db=db,
         )
     except MechanismProfileError as exc:
         raise ValueError(str(exc)) from exc
@@ -96,6 +98,7 @@ def v3_authoritative_category(db: Session, category_key: Any) -> dict:
         subcategory_dimensions = json.loads(config.subcategory_dimensions_json or "{}")
 
         _validate_v3_bundle(
+            db=db,
             category_key=category_key,
             contract=contract,
             classification_map=classification_map,
@@ -151,6 +154,7 @@ def v3_authoritative_for_job(db: Session, job: Any) -> dict:
                 )
             try:
                 _validate_v3_bundle(
+                    db=db,
                     category_key=getattr(job, "category_key", None),
                     contract=bundle["contract"],
                     classification_map=bundle["classification_map"],

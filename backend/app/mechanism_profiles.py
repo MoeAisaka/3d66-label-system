@@ -11,17 +11,23 @@ from dataclasses import dataclass
 import re
 from typing import Any, Literal
 
+from sqlalchemy.orm import Session
+
 from .category_evaluation_contract import validate_category_evaluation_contract
 from .dimension_composition import validate_subcategory_dimensions
 from .dimension_deduction_bridge import extract_dimension_deduction_rules
 from .proposal_text_contract import validate_proposal_text_contract
 from .redline_policy import evaluate_redlines
 from .subcategory_resolver import validate_classification_map
+from .three_d_profile import (
+    THREE_D_PROFILE,
+    ThreeDProfileError,
+    validate_three_d_profile_contract,
+)
 
 
 IMAGE_PROFILE = "image-rule-deduction-v1"
 PROPOSAL_PROFILE = "text-proposal-additive-v1"
-FUTURE_3D_PROFILE = "future-3d-controlled-v1"
 FUTURE_SU_PROFILE = "future-su-controlled-v1"
 
 
@@ -62,14 +68,14 @@ PROFILE_REGISTRY = {
         can_execute=True,
         read_only_fallback=False,
     ),
-    FUTURE_3D_PROFILE: MechanismProfileDefinition(
-        profile_type=FUTURE_3D_PROFILE,
+    THREE_D_PROFILE: MechanismProfileDefinition(
+        profile_type=THREE_D_PROFILE,
         version="v1",
-        capabilities=("dedicated_editor_slot",),
-        editor_route=None,
-        editable=False,
-        can_execute=False,
-        read_only_fallback=True,
+        capabilities=_EXECUTION_CAPABILITIES,
+        editor_route="three-d",
+        editable=True,
+        can_execute=True,
+        read_only_fallback=False,
     ),
     FUTURE_SU_PROFILE: MechanismProfileDefinition(
         profile_type=FUTURE_SU_PROFILE,
@@ -368,6 +374,8 @@ def validate_mechanism_artifacts(
     contract: Any,
     classification_map: Any,
     subcategory_dimensions: Any,
+    *,
+    db: Session | None = None,
 ) -> str:
     """Validate one supported mechanism bundle and return its profile type."""
     resolution = describe_mechanism_profile(contract)
@@ -405,6 +413,20 @@ def validate_mechanism_artifacts(
             classification_map,
             subcategory_dimensions,
         )
+    elif resolution.profile_type == THREE_D_PROFILE:
+        _validate_image_artifacts(
+            contract,
+            classification_map,
+            subcategory_dimensions,
+        )
+        try:
+            validate_three_d_profile_contract(db, contract)
+        except ThreeDProfileError as exc:
+            raise MechanismProfileError(
+                exc.code,
+                str(exc),
+                target=exc.target,
+            ) from exc
     else:  # Defensive guard for future registry edits.
         raise MechanismProfileError(
             "profile_type_unsupported",
@@ -417,7 +439,7 @@ def extract_profile_rule_mirror(
     profile_type: str,
     subcategory_dimensions: dict[str, Any],
 ) -> dict[str, Any]:
-    if profile_type == IMAGE_PROFILE:
+    if profile_type in {IMAGE_PROFILE, THREE_D_PROFILE}:
         return extract_dimension_deduction_rules(subcategory_dimensions)
     if profile_type == PROPOSAL_PROFILE:
         return {}
@@ -430,7 +452,7 @@ def extract_profile_rule_mirror(
 def profile_media_penalty_enabled(profile_type: str, contract: dict[str, Any]) -> bool:
     if profile_type == PROPOSAL_PROFILE:
         return False
-    if profile_type == IMAGE_PROFILE:
+    if profile_type in {IMAGE_PROFILE, THREE_D_PROFILE}:
         common_modifiers = contract.get("common_modifiers")
         media_penalty = (
             common_modifiers.get("media_type_penalty")

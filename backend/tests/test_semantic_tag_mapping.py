@@ -79,7 +79,25 @@ def test_duplicate_entities_merge_deterministically() -> None:
         mapping_version="object-map-v1",
     )
     assert len(result.values) == 1
-    assert result.values[0].weight == pytest.approx(1.0)
+    assert result.values[0].weight == pytest.approx(0.6)
+    assert result.values[0].rank == 1
+
+
+def test_duplicate_entities_keep_the_highest_relative_importance_level() -> None:
+    bundle = candidate_bundle(
+        field_key="object",
+        values=[
+            candidate("沙发", rank=2, weight=0.5),
+            candidate("sofa", locale="en", rank=1, weight=0.7),
+        ],
+    )
+    result = map_standard_entities(
+        bundle=bundle,
+        mapping_registry=fixture_mapping("object"),
+        normalization_version="semantic-normalization-v1",
+        mapping_version="object-map-v1",
+    )
+    assert result.values[0].weight == pytest.approx(0.7)
     assert result.values[0].rank == 1
 
 

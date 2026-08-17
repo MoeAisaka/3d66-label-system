@@ -1445,6 +1445,39 @@ def deterministic_correction_report(
         if required_prompt_stage is not None
         else ["A", "B"]
     )
+    route_decision: dict[str, Any] = {
+        "layers": affected_layers,
+        "route_key": "+".join(affected_layers),
+        "dependency_order": affected_layers,
+        "reason_codes": [],
+        "evidence_paths": [],
+        "confidence": "high" if affected_layers else "low",
+    }
+    if affected_layers:
+        try:
+            from .automation_routing import route_correction_evidence
+
+            route = route_correction_evidence(
+                {
+                    "node_corrections": [
+                        node
+                        for item in raw_items
+                        for node in item.get("human_node_corrections", [])
+                    ]
+                }
+            )
+            route_decision = {
+                "layers": list(route.layers),
+                "route_key": route.route_key,
+                "dependency_order": list(route.dependency_order),
+                "reason_codes": list(route.reason_codes),
+                "evidence_paths": list(route.evidence_paths),
+                "confidence": route.confidence,
+            }
+        except ValueError:
+            # Keep the existing report usable for older snapshots; the new
+            # intake gate will reject the same malformed evidence before use.
+            pass
 
     return {
         "schema_version": "baseline-correction-report-v2",
@@ -1490,6 +1523,7 @@ def deterministic_correction_report(
             "allowed_prompt_stages": allowed_prompt_stages,
             "required_prompt_stage": required_prompt_stage,
         },
+        "route_decision": route_decision,
         "prompt_suggestions": prompt_recommendations,
         "dimension_suggestions": dimension_recommendations,
         "confidence": "high" if len(raw_items) >= 30 else "medium" if len(raw_items) >= 10 else "low",

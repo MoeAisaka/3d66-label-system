@@ -1,0 +1,13 @@
+item_id,owner_role,decision_scope,required_evidence,expiry_or_review,status,next_action
+PO-01,product_label_owner,统一产品定位与3D/SU九月纵切,批准记录+方案版本hash+验收清单,按季度或方案变更复审,OWNER_CONFIRMED_PENDING_EVIDENCE,补齐批准记录与方案hash归档
+PO-02,product_label_owner,平台字段与类目扩展边界,字段需求合同版本+适用性矩阵+变更审批,按字段合同版本复审,OWNER_CONFIRMED_PENDING_EVIDENCE,补齐字段合同版本与适用性矩阵归档
+DATA-01,data_owner,源表与数据窗口,表名+窗口+probe_hash+四项聚合结果+签认记录,按数据窗口到期,OWNER_CONFIRMED_PENDING_EVIDENCE,真实接入前补齐数据窗口与只读探查证据
+DATA-02,data_owner,身份键与冲突处理,res_type+ll_id规则+重复键数+多res_id冲突数,每次源表或窗口变化复审,OWNER_CONFIRMED_PENDING_EVIDENCE,真实接入前补齐重复/冲突聚合结果
+ALG-01,algorithm_owner,主模型/调优模型与评测机制,模型版本+Prompt/V3/规则版本+候选回归报告,按机制版本复审,OWNER_CONFIRMED_PENDING_EVIDENCE,补齐模型/Prompt/V3/规则版本与P/R门槛证据
+ALG-02,algorithm_owner,AI纠偏候选与回归口径,冻结样本集+候选差异+自动回归指标+失败样本,每次候选发布复审,OWNER_CONFIRMED_PENDING_EVIDENCE,补齐冻结样本、候选差异和回归报告
+REV-01,review_owner,黄金集与双人工审核,样本清单+真值revision+双人记录+争议裁决,按样本集revision复审,OWNER_CONFIRMED_PENDING_EVIDENCE,补齐黄金集revision与双人工审核记录
+REV-02,review_owner,人工纠偏验收与发布门,审核记录+证据+发布批准记录,每个正式发布批次复审,OWNER_CONFIRMED_PENDING_EVIDENCE,补齐机制轴与事实轴发布批准证据
+PLAT-01,platform_owner,接入/任务/队列/幂等/恢复,运行快照+检查点+故障演练+回退点,按版本发布复审,OWNER_CONFIRMED_PENDING_EVIDENCE,补齐接入、恢复和回退演练证据
+PLAT-02,platform_owner,投影/对账/回退合同,Projection Manifest+行数/缺失/版本/哈希对账+回退演练,按投影版本复审,OWNER_CONFIRMED_PENDING_EVIDENCE,补齐投影Manifest与对账/回退证据
+CON-01,consumer_owner,统一大维表字段映射,字段映射+主键+版本列+读取样例,按下游合同版本复审,PENDING_DOWNSTREAM_SYNC,同步下游负责人确认大维表字段映射与读取范围
+CON-02,consumer_owner,职责小表与Badcase回流,小表职责+回流字段+对账规则+验收记录,按消费场景复审,PENDING_DOWNSTREAM_SYNC,同步下游负责人确认小表职责、对账和Badcase回流

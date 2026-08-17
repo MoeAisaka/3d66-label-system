@@ -1,6 +1,65 @@
 # 3d66 标签系统｜当前项目状态
 
-> 最后更新：2026-08-15
+## 最新实施：全局自动组批证据工作台与灵感图质量门禁（2026-08-18，本地待发布）
+
+- 完成运营理由/证据到调用甲、调用乙、第三版规则的确定性路由，多节点纠偏按 A→B→V3 顺序合并。
+- 完成不可变候选包、三角色回归计划和全局自动化证据接口；候选采用/拒绝不自动发布、不触发存量重跑。
+- 新增灵感图五档精确率/召回率与推荐档、常规档、过滤档三档兜底指标，推荐档占比上限 35%，质量门槛 80%。
+- 新增前端“自动组批总览”页面，展示共享预算、泳道、历史审计和候选二审。
+- 本地验证：后端 1561 passed, 1 skipped, 6 warnings；前端 lint/build/合同脚本通过。
+- 当前仍未推送、未合并、未部署、未填写真实模型密钥，自动化保持关闭。
+
+## 最新实施：全局自动组批 Task 4 消费者接入（2026-08-17，本地未发布）
+
+- 在隔离分支 `codex/global-auto-batching-mechanism-20260817` 接通严格泳道消费者：当数据库没有任何 `enabled` 泳道时保持旧消费者语义；存在启用泳道时按类目、增量/存量链路、代次、机制指纹、路由和提示词版本严格隔离。
+- 自动消费者创建不可变 `AutomationBatch`，冻结策略、资格快照、案例集合哈希和泳道身份；运行冻结输入、运行键、审计事件和返回值携带 `batch_id/lane_key`。dry-run 批次完成态、真实批次处理/成功/失败态及同批次技术重试均已覆盖。
+- 历史审计、待补证据和不完整身份案例在选择层被排除；旧预算、租约、重试、模型执行和人工发布门禁保持兼容。当前仍不调用真实模型、不启用真实自动化、不推送、不合并、不部署。
+- 验证：组批专项 `58 passed, 1 warning`；后端全量 `1547 passed, 1 skipped, 6 warnings`；编译检查和 `git diff --check` 通过。详细证据见 `docs/superpowers/receipts/2026-08-17-global-auto-batching-task4-receipt.md`。
+
+## 最新方案与交接包：45 天 MVP、Q4 一期/二期 Roadmap（2026-08-17，本地未发布）
+
+- 最终方案已按“背景与现状 → 当前痛点 → 解决方案”展开，统一口径为：TPENG 标签实验台（LabelLab）就是新标签体系的事实产品和标签/内容中台通用底座，不再建设第二套标签后台。
+- Roadmap 已冻结为三阶段：`2026-08-17 至 2026-09-30` 的 45 天 MVP 优先跑通知识图谱国内/海外整体与单体四批真实数据、两张目标表和生产消费数据闭环；Q4 前半段完成平台生产化和真人后端接管；Q4 后半段完成多类目快插快拔、增量自动路由和消费 Badcase 回流。
+- 已新增真人后端研发交接文档，明确唯一 Codeup 仓库 `3d66/tepeng/3d66.label-system`、代码地图、运行验证、迁移规则、Git/MR/发布边界、45 天 MVP Gap 和第一张研发任务单。
+- 已新增未发布包台账：确认当前真正需要处理的是 dry-run 11 个独有提交、同工作树未提交的方案/交接包，以及 migration 68～70 冲突的旧 3D Shadow consumption 包；旧运行配置抽屉工作树已被主线更完整实现覆盖，不建议合流且不做清理。
+- 方案交付为可编辑 Markdown 权威源、13 页 PDF 宣讲版和 13 页 Word 视觉手册；Word 手册已通过中文、表格换行、截断和空白页检查。
+- 本批仅生成本地方案、交接文档和可重建手册；未提交、未推送、未创建 MR、未合并、未部署，不连接真实上游/模型/业务数据库，不执行 DataWorks/ODPS SQL 或 DML。
+
+## 最新合同补充：知识图谱四批真实数据与两张目标表建表需求（2026-08-17，本地合同已更新）
+
+- 已冻结四批交付口径：国内整体/单体、海外整体/单体，共用平台语义字段合同和同一投影逻辑；海外目标表为 `relebook_kg_model_tag_recognition`，国内目标表为 `kg_model_tag_recognition_cn`。
+- 四批正式首批统一使用 T-1 快照 `2026-08-16`；国内来源为 `aliyun_3d66_dw.dim_res_info_union`，素材 ID 为 `ll_id`，`res_type in (1,6)`，`is_single` 同表提供；海外来源为 `aliyun_3d66_dw.ods_ll_relebook_res`，素材 ID 为 `res_id`，`res_type=6`，`is_single` 来自 `aliyun_3d66_dw.ods_ll_relebook_res_su_extra`。
+- 国内候选键为 `(res_type,ll_id)`；海外候选键为 `(res_type,res_id)`。已在 DataWorks 生产数据地图只读确认海外主表 `ods_ll_relebook_res` 与 `su_extra` 的正式关联键为 `res_id`，固定快照需同时限定两表同一 `dt`；海外源 `is_single=1` 表示整体、`2` 表示单体，投影到兼容 0/1 字段时必须显式转换。真实多表来源绑定、删除字段和匹配唯一性探查仍待大数据执行回执；当前实现尚未接入海外多表来源绑定，保持 `pending_external_signoff`，不扩大冻结执行合同。
+- `object` / `material` 的数值语义已冻结为“相对重要性等级”：每个值单独保留 0～1，`rank` 负责排序，允许 `0.7/0.5/0.3` 同时出现，不做总和归一化，不解释为概率/占比；重复实体合并取最高等级、不累加。
+- 已新增 `docs/contracts/2026-08-17-kg-four-batch-target-table-request-v1.md` 作为大数据建表需求包，包含逻辑字段、分区、幂等键、版本追溯、Manifest、对账和回退要求。目标表仍是可重建下游投影，不是 Canonical 事实主库。
+- 本次回归：语义合同/映射/3D-SU seed/投影专项 `39+16+22` 通过；后端全量 `1514 passed, 1 skipped, 6 warnings`。warning 仅为既有依赖弃用提示。
+- 本会话不执行 DDL/DML、不申请建表权限、不连接真实业务数据库、不调用真实模型；待大数据回执正式 DDL、两站删除字段/匹配唯一性和 Owner/权限后，再冻结四批真实跑批合同。
+
+## 最新实施：3D/SU 真实闭环接入前置冻结（2026-08-16，本地未发布）
+
+- 新增机器可校验的 `3d-su-readiness-v1` manifest；当前实现只覆盖国内 `dim_res_info_union + (res_type,ll_id)` 候选键及原四项只读探查，海外 `ods_ll_relebook_res + (res_type,res_id) + su_extra.is_single` 已补入合同和 Gap，但尚未接入 manifest/运行时。
+- readiness 状态固定为 `pending_external_signoff`；身份、字段、黄金集、权限和六类 RACI 证据不完整时，系统拒绝 `ready_for_real_ingress`。该状态是接入前置冻结，不代表真实接入已就绪。
+- 研发接入包已冻结：来源与身份签认、逐字段 whole/single 与空值语义模板、至少 100 条黄金/挑战样本计划、仅 SELECT/DESCRIBE 的权限模板、产品/数据/算法/平台/审核/下游 RACI，以及九月真实闭环验收依赖。
+- 默认字段质量门槛保持 Precision ≥ 0.80、Recall ≥ 0.70；黄金集真值只能新增 revision，不原地覆盖锁定历史；机制候选启用与标签事实发布继续保持两个独立人工门。
+- 当前仍未签认：两站真实数据窗口与专项探查结果、海外主表/extra 表关联键、字段 Owner/词表/回退版本、黄金集 revision、限时只读权限、六类责任人、真实投影目标与下游消费验收人。
+- 本批未连接 DataWorks/ODPS、真实上游、真实模型或业务数据库，未执行 SQL、申请权限、DML、模型调用、标签发布、存量覆盖、Codeup 推送、MR 合并或部署。合同见 `docs/contracts/3d-su-readiness-freeze-v1.md`。
+
+## 最新实施：3D/SU Shadow 与确定性标签闭环预备批次（2026-08-16，本地未发布）
+
+- 在 main@9943b8c7ae14dd70a54b7c08197be58c9b8131c2 上按能力移植只读来源合同、字段需求合同、model_3d_su Profile、Shadow 投影底座和 deterministic workflow fixture；业务类目只扩展平台能力，不复制第二套通用底座。
+- migration 72 为增量、幂等迁移：补齐素材来源/版本证据、来源合同、字段合同、Shadow 目标/运行/租约，并安全升级旧 projection_contracts 的 local/test 环境约束；不回填或改写历史评测、纠偏、机制和标签事实。
+- Shadow 只消费 PublishedLabel.status=published，manifest 携带素材版本/来源身份/SHA-256、机制、模型和 quality 溯源；候选机制、人工过程、原始响应、Query×素材策略和向量索引不进入 Canonical 事实或正式投影。
+- 3D/SU dry-run 使用既有五队列与通用运行时，7 步串行链路覆盖来源接入、评测/标注、人工纠偏门、标签事实发布门、Shadow 投影、对账和 Badcase 回流。运行会真实暂停在两个独立人工门，禁止越序审批，人工放行后才继续；首次投影失败从检查点恢复，重复幂等键不新增运行。
+- 运行中心仅增加紧凑一级摘要，详细冻结快照、投影批次、对账与回流证据仍进入二级抽屉；不考虑移动端。
+
+当前验证：
+
+- 后端全量（Python 3.12、全新临时 DATA_DIR）：1503 passed, 1 skipped, 6 warnings；warning 仅为既有依赖弃用提示。
+- 本轮双人工门专项：3 passed；前置 Shadow/来源/Profile/迁移联合专项：85 passed，受影响模块回归：92 passed。
+- 前端 test:lightbox、test:baseline-level-metrics、lint、build 全部通过；构建保留既有 Vite 配置提示和主 chunk 大于 500 kB warning。
+- 本批仅保留在隔离分支 codex/3d-shadow-dry-run-prep-20260816，未推送、未合并、未部署测试服，未连接真实上游/模型/DataWorks/业务数据库，未执行正式标签发布或存量覆盖。详见 docs/superpowers/receipts/2026-08-16-3d-shadow-dry-run-prep.md。
+
+> 最后更新：2026-08-16
 > 本文件只记录“现在做到哪里”；长期原则见 `PRODUCT.md` 和 `AGENTS.md`，历史背景见 `CODEX_HANDOFF.md`。
 
 ## 最新实施：3D/SU 五维 grade 评分回归修复（2026-08-17）
@@ -2070,6 +2129,8 @@ npm.cmd run build
   表示 SU。只有同一数据窗口的重复键和多 `res_id` 冲突均为零，且摘要证据经过人工
   批准后，才允许生成 `aliyun_3d66_dw:<res_type>:<ll_id>`；未签认时
   `content_key=null`，冲突时关闭失败，禁止追加随机后缀制造唯一性。
+  该段是 2026-08-15 已完成的国内身份底座；2026-08-17 新确认的海外来源以
+  `(res_type,res_id)` 和 `ods_ll_relebook_res_su_extra.is_single` 为独立 Gap，不能套用此键。
 - 新增 migration 70 `add_source_identity_verification`：保存探查哈希、数据窗口、聚合
   计数、状态和审核人；为内容记录和接入事件增加冻结身份字段、非空 content key
   唯一索引与不可变触发器。历史记录只迁移为 `legacy_unverified`，不回填
@@ -2103,3 +2164,13 @@ npm.cmd run build
 - 下一份实施计划是未来检查点
   `2026-08-21-script-registry-workflow-runtime.md`：脚本注册、工作流定义、冻结快照、
   五队列和检查点恢复。该日期不是当前授权，也不表示相关能力已经完成。
+
+## 最新完成：标签体系重构业务宣讲与签认工件（2026-08-16）
+
+- 本地生成《TPENG 标签体系重构方案（业务宣讲版）》及配套负责人签认表、3D/SU 九月闭环演练清单、下游大维表/职责小表投影合同。统一口径是：**TPENG 标签实验台（LabelLab）是标签体系重构的统一产品载体和标签/内容中台通用底座**；“标签体系重构”是目标，不再与实验台并列为两条项目线。
+- 方案明确 Canonical 事实、下游投影和策略边界；机制发布与标签事实发布保持双人工门、双发布轴。Query×素材相关性、排序权重、多路召回、在线实验和图谱内部关系仍属于下游策略，不能写回资产事实。
+- 3D/SU 的 2026 年 9 月目标仍是首个真实闭环纵切；当前真实接入前置签认尚未完成，readiness 继续为 `pending_external_signoff`。方案未把本地 fixture、dry-run 或文档生成表述成生产上线事实。
+- 本批只有文档与本地 dry-run 工件：未连接真实上游、真实业务数据库、DataWorks/ODPS、真实模型或生产环境；未申请权限、执行 DML、推送、合并或部署。
+- Word 输出为经过 8 页渲染核验的宣讲视觉版，Markdown 为可编辑权威源；原因是当前 headless LibreOffice 无法稳定渲染 OOXML 中的中文字体，不影响 PDF 与 Markdown 的可读性和内容权威性。
+- Owner 已确认产品、平台字段、数据身份规则、算法机制、审核双人工门和平台运行边界共 10 项签认；这些项当前记为 `OWNER_CONFIRMED_PENDING_EVIDENCE`，不等同于真实证据已验收。下游统一大维表/职责小表及 Badcase 回流 2 项记为 `PENDING_DOWNSTREAM_SYNC`，等待同步下游负责人。
+- 宣讲方案 v1.1 已将主叙事重排为“背景与现状 → 核心痛点 → 解决方案总览 → 方案细节”，先回答为什么做和要解决什么，再展开闭环、架构、事实主权、模型机制、3D/SU、下游投影、指标与路线图。

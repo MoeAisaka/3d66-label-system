@@ -1,6 +1,19 @@
-# 3d66 标签系统
+# TPENG 标签实验台（LabelLab）
 
-面向 3D66 空间与建筑图片的本地评测 Demo。系统把图片分类、形态识别、画质预检、美感维度、外部评分、人工审核、提示词版本和模型迁移放进同一条可追溯流程。
+TPENG 新标签体系的统一产品载体，也是标签/内容中台的通用底座。系统统一承载素材接入、属性标签、美感与质量评测、人工审核纠偏、AI 机制迭代、版本发布、下游表投影、对账和 Badcase 回流；3D、SU、灵感图、Proposal PDF 等类目通过 profile 和专用视图扩展，不复制平台公共能力。
+
+## 项目与交接入口
+
+- 产品与需求 Roadmap（可编辑权威源）：[新标签体系最终方案](docs/proposals/2026-08-16-tpeng-label-system-reconstruction-business-brief.md)
+- 业务宣讲版：[PDF 手册](docs/proposals/2026-08-16-tpeng-label-system-reconstruction-business-brief.pdf) / [Word 手册](docs/proposals/2026-08-16-tpeng-label-system-reconstruction-business-brief.docx)
+- 真人后端研发交接：[后端研发交接文档](docs/handoff/2026-08-17-label-system-human-backend-handoff.md)
+- 未发布迭代与合流边界：[未发布包台账](docs/handoff/2026-08-17-unpublished-package-ledger.md)
+- 当前实现状态：[PROJECT_STATUS.md](PROJECT_STATUS.md)
+- 长期产品原则：[PRODUCT.md](PRODUCT.md)
+- 架构决策：[docs/decisions/](docs/decisions/)
+- 代码仓库：`https://codeup.aliyun.com/3d66/tepeng/3d66.label-system`
+
+当前工程由 Vibe Coding 快速搭建并持续经过确定性测试，后续需要由真人后端研发完成正式接管、代码审查和生产化。测试环境、fixture、Shadow 投影或 dry-run 结果不能当成生产上线事实。
 
 ## 当前能力
 

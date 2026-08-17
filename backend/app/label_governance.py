@@ -632,6 +632,7 @@ def route_content_event_to_incremental_package(
             json.loads(mechanism.contract_json or "{}"),
             json.loads(mechanism.classification_map_json or "{}"),
             json.loads(mechanism.subcategory_dimensions_json or "{}"),
+            db=db,
         )
     except (MechanismProfileError, TypeError, json.JSONDecodeError, ValueError):
         append_audit_event(
@@ -835,6 +836,12 @@ def build_label_snapshot(
         elif field_key.startswith("production_fields."):
             production_fields[field_key.split(".", 1)[1]] = value
     media_form = key_fields.get("media_form", precheck.get("media_form", {}))
+    asset_version = db.scalar(
+        select(AssetVersion)
+        .where(AssetVersion.asset_id == evaluation.asset_id)
+        .order_by(AssetVersion.version.desc(), AssetVersion.id.desc())
+        .limit(1)
+    )
     semantic_result = _approved_semantic_payload(db, evaluation=evaluation)
     schema_version = SEMANTIC_LABEL_SCHEMA_VERSION if semantic_result else LABEL_SCHEMA_VERSION
     payload = {
@@ -861,21 +868,32 @@ def build_label_snapshot(
             "engine_version": evaluation.engine_version,
         },
     }
+    if asset_version is not None:
+        payload["provenance"].update(
+            {
+                "asset_version_id": asset_version.id,
+                "asset_id": evaluation.asset_id,
+                "asset_sha256": asset_version.asset_sha256,
+                "source_system": asset_version.source_system,
+                "source_content_id": asset_version.source_content_id,
+                "source_version": asset_version.source_version,
+            }
+        )
+    payload["quality"] = {
+        "level": final_level,
+        "score": final_score,
+        "dimensions": truth.get("dimensions") or aesthetic.get("dimensions", {}),
+    }
     if semantic_result is not None:
-        asset_version, semantic_meta = semantic_result
+        semantic_asset_version, semantic_meta = semantic_result
         semantic_route = precheck.get("semantic_route") if isinstance(precheck.get("semantic_route"), Mapping) else {}
         payload["semantic"] = semantic_meta["semantic"]
-        payload["quality"] = {
-            "level": final_level,
-            "score": final_score,
-            "dimensions": truth.get("dimensions") or aesthetic.get("dimensions", {}),
-        }
         payload["governance"] = {
             "review_status": "approved",
             "contract_id": semantic_meta["semantic_contract_id"],
         }
         payload["provenance"].update({
-            "asset_version_id": asset_version.id,
+            "asset_version_id": semantic_asset_version.id,
             "asset_id": evaluation.asset_id,
             "final_review_id": final_review.id,
             "normalization_version": semantic_meta["normalization_version"],

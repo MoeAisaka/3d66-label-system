@@ -93,6 +93,10 @@ from .optimization_automation import (
     optimization_worker_tick,
     touch_automation_worker_status,
 )
+from .shadow_projection import (
+    resolve_configured_shadow_projection_adapter,
+    shadow_projection_worker_tick,
+)
 from .workflow_fixture_executor import (
     process_runtime_step_once as process_workflow_runtime_step_once,
     recover_runtime_once,
@@ -2910,6 +2914,22 @@ def run_forever(
                     logger.info("自动优化队列状态：%s", automation["status"])
             except Exception as exc:
                 logger.exception("自动优化队列 tick 失败，评测 Worker 继续运行：%s", exc)
+            try:
+                with session_scope() as db:
+                    shadow_run = shadow_projection_worker_tick(
+                        db,
+                        WORKER_ID,
+                        adapter_resolver=resolve_configured_shadow_projection_adapter,
+                    )
+                if shadow_run is not None and shadow_run.status not in {"queued"}:
+                    logger.info(
+                        "影子投影队列状态：run=%s status=%s code=%s",
+                        shadow_run.id,
+                        shadow_run.status,
+                        shadow_run.error_code,
+                    )
+            except Exception as exc:
+                logger.exception("影子投影队列 tick 失败，评测 Worker 继续运行：%s", exc)
             if not worked:
                 time.sleep(poll_seconds)
     finally:

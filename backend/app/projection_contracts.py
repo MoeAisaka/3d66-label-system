@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Mapping
@@ -94,12 +95,35 @@ def validate_projection_contract(
     environment: str,
     primary_key: list[str],
     field_mappings: Mapping[str, str],
+    write_policy: str = "local_only",
+    target_key: str | None = None,
+    category_key: str | None = None,
+    field_contract_id: int | None = None,
+    max_batch_size: int = 500,
+    adapter_key: str = "local-sqlite",
 ) -> None:
-    expected_table = BUILTIN_LOCAL_TARGETS.get(target_role)
-    if expected_table is None or table_name != expected_table:
-        raise ProjectionContractError("仅支持已登记的本地大维表和小表目标")
-    if environment not in {"local", "test"}:
-        raise ProjectionContractError("本批次只允许 local/test 投影环境")
+    if environment == "shadow":
+        if (
+            write_policy != "shadow_only"
+            or not target_key
+            or not category_key
+            or not field_contract_id
+            or field_contract_id < 1
+            or not adapter_key.strip()
+        ):
+            raise ProjectionContractError(
+                "影子投影必须绑定目标、类目、字段合同和 shadow_only 策略"
+            )
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", table_name):
+            raise ProjectionContractError("影子表名必须是已校验标识符")
+    else:
+        expected_table = BUILTIN_LOCAL_TARGETS.get(target_role)
+        if expected_table is None or table_name != expected_table:
+            raise ProjectionContractError("仅支持已登记的本地大维表和小表目标")
+        if environment not in {"local", "test"} or write_policy != "local_only":
+            raise ProjectionContractError("本地投影只允许 local/test 与 local_only")
+    if not 1 <= max_batch_size <= 500:
+        raise ProjectionContractError("投影批次必须在 1 到 500 条之间")
     if primary_key != ["content_key"]:
         raise ProjectionContractError("本地投影主键必须为 content_key")
     if not field_mappings or field_mappings.get("content_key") != "content_key":
@@ -132,6 +156,12 @@ def contract_payload(contract: ProjectionContract) -> dict[str, Any]:
         "target_role": contract.target_role,
         "table_name": contract.table_name,
         "environment": contract.environment,
+        "adapter_key": contract.adapter_key,
+        "target_key": contract.target_key,
+        "write_policy": contract.write_policy,
+        "category_key": contract.category_key,
+        "field_contract_id": contract.field_contract_id,
+        "max_batch_size": contract.max_batch_size,
         "primary_key": json.loads(contract.primary_key_json),
         "field_mappings": json.loads(contract.field_mappings_json),
         "input_versions": json.loads(contract.input_versions_json),
@@ -166,6 +196,12 @@ def create_contract_version(
     owner: str,
     status: str,
     created_by: str,
+    adapter_key: str = "local-sqlite",
+    target_key: str | None = None,
+    write_policy: str = "local_only",
+    category_key: str | None = None,
+    field_contract_id: int | None = None,
+    max_batch_size: int = 500,
 ) -> ProjectionContract:
     validate_projection_contract(
         target_role=target_role,
@@ -173,6 +209,12 @@ def create_contract_version(
         environment=environment,
         primary_key=primary_key,
         field_mappings=field_mappings,
+        write_policy=write_policy,
+        target_key=target_key,
+        category_key=category_key,
+        field_contract_id=field_contract_id,
+        max_batch_size=max_batch_size,
+        adapter_key=adapter_key,
     )
     latest = db.scalar(
         select(ProjectionContract)
@@ -187,6 +229,12 @@ def create_contract_version(
         "target_role": target_role,
         "table_name": table_name,
         "environment": environment,
+        "adapter_key": adapter_key,
+        "target_key": target_key,
+        "write_policy": write_policy,
+        "category_key": category_key,
+        "field_contract_id": field_contract_id,
+        "max_batch_size": max_batch_size,
         "primary_key": primary_key,
         "field_mappings": dict(field_mappings),
         "input_versions": dict(input_versions),
@@ -204,6 +252,12 @@ def create_contract_version(
         target_role=target_role,
         table_name=table_name,
         environment=environment,
+        adapter_key=adapter_key,
+        target_key=target_key,
+        write_policy=write_policy,
+        category_key=category_key,
+        field_contract_id=field_contract_id,
+        max_batch_size=max_batch_size,
         primary_key_json=canonical_json(primary_key),
         field_mappings_json=canonical_json(dict(field_mappings)),
         input_versions_json=canonical_json(dict(input_versions)),

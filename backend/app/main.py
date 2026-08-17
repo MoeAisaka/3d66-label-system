@@ -71,6 +71,7 @@ from .migration import compare_results
 from .models import (
     AgentPlanVersion,
     Asset,
+    AssetVersion,
     AuditEvent,
     ContentIngressEvent,
     ContentRecord,
@@ -128,11 +129,29 @@ from .models import (
     ProjectionContract,
     ProjectionManifest,
     ProjectionReconciliation,
+    FieldDemandContract,
+    ShadowProjectionRun,
+    ShadowProjectionTarget,
     SourceIdentityVerification,
     TagDemandContract,
+    UpstreamReadRun,
+    UpstreamSourceContract,
     User,
 )
 from .audit import append_audit_event, canonical_json
+from .automation_api import build_automation_router
+from .field_demand_contracts import (
+    FieldDemandContractError,
+    asset_version_payload,
+    create_field_demand_contract,
+    field_demand_contract_payload,
+)
+from .readonly_sources import (
+    ReadOnlySourceError,
+    create_upstream_source_contract,
+    source_contract_payload,
+    source_run_payload,
+)
 from .semantic_tag_contracts import (
     PLATFORM_SEMANTIC_CONTRACT_KEY,
     SemanticTagContractError,
@@ -152,6 +171,16 @@ from .projection_contracts import (
     manifest_payload as projection_manifest_payload,
     persist_reconciliation,
     reconciliation_payload as projection_reconciliation_payload,
+)
+from .shadow_projection import (
+    ShadowProjectionError,
+    create_shadow_projection_target,
+    enqueue_shadow_projection_run,
+    resolve_configured_shadow_projection_adapter,
+    retry_shadow_projection_run,
+    rollback_shadow_projection_run,
+    shadow_projection_run_payload,
+    shadow_projection_target_payload,
 )
 from .quality_assets import build_quality_asset_export
 from .baseline_regression import (
@@ -176,6 +205,7 @@ from .baseline_correction_orchestration import (
     prepare_correction_generation,
     refresh_correction_run,
 )
+from .automation_case_intake import on_final_review_completed
 from .category_evaluation_v3_revisions import (
     CategoryEvaluationV3RevisionError,
     activate_candidate_revision,
@@ -624,14 +654,16 @@ class ConsumerCheckpointRequest(BaseModel):
 
 
 class ProjectionContractCreateRequest(BaseModel):
-    contract_key: str = Field(min_length=1, max_length=120, pattern=r"^[a-z][a-z0-9_-]*$")
+    contract_key: str = Field(min_length=1, max_length=120, pattern=r"^[a-z0-9][a-z0-9_-]*$")
     target_role: Literal["unified_dimension", "search_labels", "quality_governance"]
-    table_name: Literal[
-        "unified_dimension_table",
-        "search_labels_small_table",
-        "quality_governance_small_table",
-    ]
-    environment: Literal["local", "test"] = "local"
+    table_name: str = Field(min_length=1, max_length=120)
+    environment: Literal["local", "test", "shadow"] = "local"
+    adapter_key: str = Field(default="local-sqlite", min_length=1, max_length=80)
+    target_key: str | None = Field(default=None, max_length=120)
+    write_policy: Literal["local_only", "shadow_only"] = "local_only"
+    category_key: str | None = Field(default=None, max_length=40)
+    field_contract_id: int | None = Field(default=None, ge=1)
+    max_batch_size: int = Field(default=500, ge=1, le=500)
     primary_key: list[str] = Field(min_length=1, max_length=4)
     field_mappings: dict[str, str] = Field(min_length=1, max_length=200)
     input_versions: dict[str, Any] = Field(default_factory=dict)
@@ -664,6 +696,70 @@ class SourceIdentityVerificationCreateRequest(BaseModel):
 
 class SourceIdentityVerificationBindRequest(BaseModel):
     verification_id: int = Field(ge=1)
+
+
+class FieldDemandContractCreateRequest(BaseModel):
+    contract_key: str = Field(
+        min_length=1, max_length=120, pattern=r"^[a-z0-9][a-z0-9_-]*$"
+    )
+    category_key: str = Field(min_length=1, max_length=40)
+    consumer_key: str = Field(min_length=1, max_length=120)
+    owner: str = Field(min_length=1, max_length=120)
+    fields: list[dict[str, Any]] = Field(min_length=1, max_length=200)
+    thresholds: dict[str, float] = Field(min_length=1, max_length=40)
+    status: Literal["draft", "active", "retired"] = "draft"
+
+
+class UpstreamSourceContractCreateRequest(BaseModel):
+    contract_key: str = Field(
+        min_length=1, max_length=120, pattern=r"^[a-z0-9][a-z0-9_-]*$"
+    )
+    adapter_key: str = Field(min_length=1, max_length=80)
+    source_system: str = Field(min_length=1, max_length=120)
+    category_key: str = Field(min_length=1, max_length=40)
+    connection_locator: str = Field(min_length=1, max_length=200)
+    secret_reference: str = Field(min_length=1, max_length=200)
+    field_mappings: dict[str, str] = Field(min_length=4, max_length=40)
+    cursor_definition: dict[str, Any] = Field(default_factory=dict)
+    page_size: int = Field(default=100, ge=1, le=500)
+    read_only: bool = True
+    schema_fingerprint: str = Field(min_length=64, max_length=64)
+    owner: str = Field(min_length=1, max_length=120)
+    status: Literal["draft", "active", "retired"] = "draft"
+
+
+class UpstreamPollRequest(BaseModel):
+    limit: int = Field(default=100, ge=1, le=500)
+    cursor: dict[str, Any] = Field(default_factory=dict)
+
+
+class ShadowProjectionTargetCreateRequest(BaseModel):
+    target_key: str = Field(
+        min_length=1, max_length=120, pattern=r"^[a-z0-9][a-z0-9_-]*$"
+    )
+    adapter_key: str = Field(min_length=1, max_length=80)
+    connection_locator: str = Field(min_length=1, max_length=200)
+    secret_reference: str = Field(min_length=1, max_length=200)
+    schema_name: str = Field(
+        min_length=1, max_length=120, pattern=r"^[A-Za-z_][A-Za-z0-9_]*$"
+    )
+    table_name: str = Field(
+        min_length=1, max_length=120, pattern=r"^[A-Za-z_][A-Za-z0-9_]*$"
+    )
+    environment: Literal["shadow"] = "shadow"
+    shadow_only: Literal[True] = True
+    owner: str = Field(min_length=1, max_length=120)
+    schema_fingerprint: str = Field(
+        min_length=64, max_length=64, pattern=r"^[0-9a-fA-F]{64}$"
+    )
+    status: Literal["draft", "active", "retired"] = "draft"
+
+
+class ShadowProjectionRunCreateRequest(BaseModel):
+    projection_contract_id: int = Field(ge=1)
+    field_contract_id: int = Field(ge=1)
+    target_id: int = Field(ge=1)
+    max_rows: int = Field(default=500, ge=1, le=500)
 
 
 class BenchmarkVariantRequest(BaseModel):
@@ -1523,6 +1619,7 @@ app.include_router(build_node_correction_router(_permission_user("reviews:write"
 app.include_router(build_script_registry_router(current_user))
 app.include_router(build_workflow_registry_router(current_user))
 app.include_router(build_workflow_runtime_router(current_user))
+app.include_router(build_automation_router(current_user, admin_user))
 app.include_router(
     build_evaluation_package_router(
         require_permission("releases:read"),
@@ -6857,47 +6954,28 @@ def _finalize_review_panel(
     evaluation.needs_review = decision == "rejected"
     evaluation.updated_at = datetime.now(timezone.utc)
     if decision == "corrected":
-        severity = (
-            "P1"
-            if any(
-                isinstance(item.get("model_value"), int)
-                and isinstance(item.get("human_value"), int)
-                and abs(item["human_value"] - item["model_value"]) >= 2
-                for item in corrections
-            )
-            else "P2"
-        )
         _add_to_category_golden_set(
             db,
             evaluation=evaluation,
             truth=truth,
             actor=reviewer_name,
         )
-        db.add(
-            OptimizationCaseQueue(
-                category_key=evaluation.job.category_key,
-                idempotency_key=f"review-panel:{panel.id}:final:{final_review.id}",
-                evaluation_id=evaluation.id,
-                final_review_id=final_review.id,
-                prompt_version=(
-                    evaluation.prompt_b_version
-                    or evaluation.prompt_a_version
-                ),
-                severity=severity,
-                case_json=json.dumps(
-                    {
-                        "schema_version": "optimization-case-v1",
-                        "source": "review_panel",
-                        "evaluation_id": evaluation.id,
-                        "prompt_version": (
-                            evaluation.prompt_b_version
-                            or evaluation.prompt_a_version
-                        ),
-                        "truth": truth,
-                    },
-                    ensure_ascii=False,
-                ),
+        try:
+            mechanism_snapshot = json.loads(
+                evaluation.strategy_snapshot_json or "{}"
             )
+        except json.JSONDecodeError:
+            mechanism_snapshot = {}
+        on_final_review_completed(
+            db,
+            evaluation=evaluation,
+            final_review=final_review,
+            mechanism_snapshot=(
+                mechanism_snapshot
+                if isinstance(mechanism_snapshot, dict)
+                else {}
+            ),
+            actor=reviewer_name,
         )
     return final_review
 
@@ -8276,6 +8354,293 @@ def activate_tag_demand_contract(
     return _tag_demand_contract_payload(contract)
 
 
+@app.get("/api/field-demand-contracts")
+def list_field_demand_contracts(
+    _user: User = Depends(require_permission("releases:read")),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    contracts = db.scalars(
+        select(FieldDemandContract).order_by(
+            FieldDemandContract.contract_key.asc(),
+            FieldDemandContract.version.desc(),
+            FieldDemandContract.id.desc(),
+        )
+    ).all()
+    return {"items": [field_demand_contract_payload(item) for item in contracts]}
+
+
+@app.post("/api/field-demand-contracts")
+def create_field_demand_contract_api(
+    payload: FieldDemandContractCreateRequest,
+    user: User = Depends(admin_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    try:
+        contract = create_field_demand_contract(
+            db,
+            contract_key=payload.contract_key,
+            category_key=payload.category_key,
+            consumer_key=payload.consumer_key,
+            owner=payload.owner,
+            fields=payload.fields,
+            thresholds=payload.thresholds,
+            status=payload.status,
+            created_by=user.username,
+        )
+    except FieldDemandContractError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from None
+    db.commit()
+    db.refresh(contract)
+    return field_demand_contract_payload(contract)
+
+
+@app.get("/api/upstream-source-contracts")
+def list_upstream_source_contracts(
+    _user: User = Depends(require_permission("releases:read")),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    contracts = db.scalars(
+        select(UpstreamSourceContract).order_by(
+            UpstreamSourceContract.contract_key.asc(),
+            UpstreamSourceContract.version.desc(),
+            UpstreamSourceContract.id.desc(),
+        )
+    ).all()
+    return {"items": [source_contract_payload(item) for item in contracts]}
+
+
+@app.post("/api/upstream-source-contracts")
+def create_upstream_source_contract_api(
+    payload: UpstreamSourceContractCreateRequest,
+    user: User = Depends(admin_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    try:
+        contract = create_upstream_source_contract(
+            db,
+            contract_key=payload.contract_key,
+            adapter_key=payload.adapter_key,
+            source_system=payload.source_system,
+            category_key=payload.category_key,
+            connection_locator=payload.connection_locator,
+            secret_reference=payload.secret_reference,
+            field_mappings=payload.field_mappings,
+            cursor_definition=payload.cursor_definition,
+            page_size=payload.page_size,
+            read_only=payload.read_only,
+            schema_fingerprint=payload.schema_fingerprint,
+            owner=payload.owner,
+            status=payload.status,
+            created_by=user.username,
+        )
+    except ReadOnlySourceError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": exc.code, "message": str(exc)},
+        ) from None
+    db.commit()
+    db.refresh(contract)
+    return source_contract_payload(contract)
+
+
+@app.post("/api/upstream-source-contracts/{contract_id}/poll")
+def poll_upstream_source_api(
+    contract_id: int,
+    _payload: UpstreamPollRequest,
+    _user: User = Depends(admin_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    if db.get(UpstreamSourceContract, contract_id) is None:
+        raise HTTPException(status_code=404, detail="只读来源合同不存在")
+    raise HTTPException(
+        status_code=503,
+        detail={
+            "code": "SOURCE_ADAPTER_UNAVAILABLE",
+            "message": "真实来源适配器与 secret 引用尚未在运行环境激活",
+        },
+    )
+
+
+@app.get("/api/upstream-read-runs")
+def list_upstream_read_runs(
+    limit: int = 100,
+    _user: User = Depends(require_permission("releases:read")),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    runs = db.scalars(
+        select(UpstreamReadRun)
+        .order_by(UpstreamReadRun.id.desc())
+        .limit(min(max(limit, 1), 500))
+    ).all()
+    return {"items": [source_run_payload(item) for item in runs]}
+
+
+@app.get("/api/assets/{asset_id}/versions")
+def list_asset_versions(
+    asset_id: int,
+    _user: User = Depends(require_permission("releases:read")),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    if db.get(Asset, asset_id) is None:
+        raise HTTPException(status_code=404, detail="素材不存在")
+    versions = db.scalars(
+        select(AssetVersion)
+        .where(AssetVersion.asset_id == asset_id)
+        .order_by(AssetVersion.version.desc(), AssetVersion.id.desc())
+    ).all()
+    return {"items": [asset_version_payload(item) for item in versions]}
+
+
+@app.get("/api/shadow-projection-targets")
+def list_shadow_projection_targets(
+    _user: User = Depends(require_permission("releases:read")),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    targets = db.scalars(
+        select(ShadowProjectionTarget).order_by(
+            ShadowProjectionTarget.target_key.asc(),
+            ShadowProjectionTarget.version.desc(),
+            ShadowProjectionTarget.id.desc(),
+        )
+    ).all()
+    return {"items": [shadow_projection_target_payload(item) for item in targets]}
+
+
+@app.post("/api/shadow-projection-targets")
+def create_shadow_projection_target_api(
+    payload: ShadowProjectionTargetCreateRequest,
+    user: User = Depends(admin_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    try:
+        target = create_shadow_projection_target(
+            db,
+            target_key=payload.target_key,
+            adapter_key=payload.adapter_key,
+            connection_locator=payload.connection_locator,
+            secret_reference=payload.secret_reference,
+            schema_name=payload.schema_name,
+            table_name=payload.table_name,
+            environment=payload.environment,
+            shadow_only=payload.shadow_only,
+            owner=payload.owner,
+            schema_fingerprint=payload.schema_fingerprint,
+            status=payload.status,
+            created_by=user.username,
+        )
+    except ShadowProjectionError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=422,
+            detail={"code": exc.code, "message": str(exc)},
+        ) from None
+    db.commit()
+    db.refresh(target)
+    return shadow_projection_target_payload(target)
+
+
+@app.get("/api/shadow-projection-runs")
+def list_shadow_projection_runs(
+    limit: int = 100,
+    _user: User = Depends(require_permission("releases:read")),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    runs = db.scalars(
+        select(ShadowProjectionRun)
+        .order_by(ShadowProjectionRun.id.desc())
+        .limit(min(max(limit, 1), 500))
+    ).all()
+    return {"items": [shadow_projection_run_payload(item) for item in runs]}
+
+
+@app.get("/api/shadow-projection-runs/{run_id}")
+def get_shadow_projection_run(
+    run_id: int,
+    _user: User = Depends(require_permission("releases:read")),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    run = db.get(ShadowProjectionRun, run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="影子投影运行不存在")
+    return shadow_projection_run_payload(run)
+
+
+@app.post("/api/shadow-projection-runs")
+def create_shadow_projection_run_api(
+    payload: ShadowProjectionRunCreateRequest,
+    user: User = Depends(admin_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    contract = db.get(ProjectionContract, payload.projection_contract_id)
+    field_contract = db.get(FieldDemandContract, payload.field_contract_id)
+    target = db.get(ShadowProjectionTarget, payload.target_id)
+    if contract is None:
+        raise HTTPException(status_code=404, detail="影子投影合同不存在")
+    if field_contract is None:
+        raise HTTPException(status_code=404, detail="字段需求合同不存在")
+    if target is None:
+        raise HTTPException(status_code=404, detail="影子目标不存在")
+    run = enqueue_shadow_projection_run(
+        db,
+        projection_contract=contract,
+        field_contract=field_contract,
+        target=target,
+        max_rows=payload.max_rows,
+        actor=user.username,
+    )
+    db.commit()
+    db.refresh(run)
+    return shadow_projection_run_payload(run)
+
+
+@app.post("/api/shadow-projection-runs/{run_id}/retry")
+def retry_shadow_projection_run_api(
+    run_id: int,
+    user: User = Depends(admin_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    run = db.get(ShadowProjectionRun, run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="影子投影运行不存在")
+    try:
+        retry_shadow_projection_run(db, run=run, actor=user.username)
+    except ShadowProjectionError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail={"code": exc.code, "message": str(exc)},
+        ) from None
+    db.commit()
+    db.refresh(run)
+    return shadow_projection_run_payload(run)
+
+
+@app.post("/api/shadow-projection-runs/{run_id}/rollback")
+def rollback_shadow_projection_run_api(
+    run_id: int,
+    user: User = Depends(admin_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    run = db.get(ShadowProjectionRun, run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="影子投影运行不存在")
+    try:
+        adapter = resolve_configured_shadow_projection_adapter(run.target)
+        rollback_shadow_projection_run(
+            db, run=run, adapter=adapter, actor=user.username
+        )
+    except ShadowProjectionError as exc:
+        db.rollback()
+        status_code = 503 if exc.code == "SHADOW_ADAPTER_UNAVAILABLE" else 409
+        raise HTTPException(
+            status_code=status_code,
+            detail={"code": exc.code, "message": str(exc)},
+        ) from None
+    db.commit()
+    db.refresh(run)
+    return shadow_projection_run_payload(run)
+
+
 @app.get("/api/projection-contracts")
 def list_projection_contracts(
     _user: User = Depends(require_permission("releases:read")),
@@ -8330,6 +8695,12 @@ def create_projection_contract(
             owner=payload.owner,
             status=payload.status,
             created_by=user.username,
+            adapter_key=payload.adapter_key,
+            target_key=payload.target_key,
+            write_policy=payload.write_policy,
+            category_key=payload.category_key,
+            field_contract_id=payload.field_contract_id,
+            max_batch_size=payload.max_batch_size,
         )
     except ProjectionContractError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from None

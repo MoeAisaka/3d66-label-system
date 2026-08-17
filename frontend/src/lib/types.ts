@@ -1637,6 +1637,42 @@ export type AutomationRun = {
   publishes_automatically: false
 }
 
+export type AutomationLaneSummary = {
+  id: number
+  category_key: string
+  pipeline_kind: "incremental" | "baseline"
+  generation: number
+  status: string
+  mechanism_fingerprint: string
+  mechanism_fingerprint_prefix: string
+  case_threshold: number
+  min_batch_size: number
+  daily_budget_micros: number
+  golden_sets: { target_error: string | null; stable_control: string | null; blind_holdout: string | null }
+}
+
+export type AutomationOverview = {
+  policy: { enabled: boolean; dry_run: boolean; daily_budget_micros: number }
+  lanes: AutomationLaneSummary[]
+  active_batches: number
+  historical_audit: number
+  pending_candidates: number
+  auto_publish_enabled: false
+  stock_rerun_enabled: false
+}
+
+export type AutomationCandidateReview = {
+  id: number
+  category_key: string
+  status: string
+  dry_run: boolean
+  candidate_count: number
+  estimated_cost_micros: number
+  actual_cost_micros: number
+  result: Record<string, unknown>
+  auto_publish_enabled: false
+}
+
 export type ProductionFeedbackEvent = {
   id: number
   event_id: string

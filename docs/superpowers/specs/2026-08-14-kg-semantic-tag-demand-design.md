@@ -33,7 +33,16 @@
 
 平台统一使用 `asset_id` / `content_key` 作为 Canonical 业务身份，并通过不可变 `asset_version_id` 追踪具体素材版本。
 
-知识图谱需求中的 `ll_id`、`res_id` 只能作为下游表字段别名或来源系统字段，不能形成两套事实主键。
+知识图谱需求中的 `ll_id`、`res_id` 是站点来源身份：国内权威来源 ID 为 `ll_id`，海外权威来源 ID 为 `res_id`。两者必须分别映射到平台统一 `content_key`，不能直接形成两套 Canonical 事实主键。
+
+来源绑定固定为：
+
+| 站点 | 素材主表 | 来源素材 ID | 模型过滤 | `is_single` 来源 |
+|---|---|---|---|---|
+| 国内 | `aliyun_3d66_dw.dim_res_info_union` | `ll_id` | `res_type in (1,6)` | 主表同字段 |
+| 海外 | `aliyun_3d66_dw.ods_ll_relebook_res` | `res_id` | `res_type=6` | `aliyun_3d66_dw.ods_ll_relebook_res_su_extra` |
+
+海外主表与 extra 表的关联键必须由 Data Owner 签认；未签认前只记录合同和 Gap，不接真实数据。
 
 ### 3.2 执行变体
 
@@ -56,9 +65,9 @@ model_version: 冻结模型版本
 | 字段 | Canonical 类型 | 适用性 | 生产路径 | 投影规则 |
 |---|---|---|---|---|
 | `space` | 结构化实体值，支持主值与层级 | 按类目声明，可单值或多值 | 模型/规则/人工 | 知识图谱实体；下游可投影末级名称 |
-| `object` | 实体数组，含 `entity_id`、名称、权重、rank | 多数视觉/模型类目 | 模型→标准化→人工 | 表投影可兼容 `value_weight` 字符串，但 Canonical 保持结构化 |
+| `object` | 实体数组，含 `entity_id`、名称、`rank` 与相对重要性等级 | 多数视觉/模型类目 | 模型→标准化→人工 | 表投影可兼容 `value_weight` 字符串，但 Canonical 保持结构化；等级不做总和归一化 |
 | `style` | 实体数组，含主次 rank | 视觉、案例、模型等类目 | 模型/词表/人工 | 中文/英文名称由实体映射生成 |
-| `material` | 实体数组，含占比/权重 | 有材质语义的类目 | 模型/规则/人工 | 不允许只保留未映射原文 |
+| `material` | 实体数组，含 `rank` 与相对重要性等级 | 有材质语义的类目 | 模型/规则/人工 | 不允许只保留未映射原文；等级不代表概率或占比 |
 | `structural_features` | 特征实体数组 | 模型、空间、结构类目 | 模型/规则/人工 | 记录适用性和证据 |
 | `architectural_element` | 构件实体数组 | 空间、建筑、模型类目 | 模型/规则/人工 | 由类目适用性决定是否输出 |
 | `soft_decoration` | 实体数组 | 空间、案例、模型类目 | 模型/规则/人工 | 与 `object` 保持字段语义分离 |
@@ -69,7 +78,7 @@ model_version: 冻结模型版本
 每个 Canonical 字段值至少携带：
 
 ```text
-value / entity_id / locale / rank / weight
+value / entity_id / locale / rank / weight / weight_semantics
 source / evidence_ref / model_version / prompt_version
 normalization_version / mapping_version / review_status
 ```
@@ -160,7 +169,7 @@ Canonical 不用空字符串表达所有情况。下游兼容表可以按合同�
 以下内容必须由知识图谱、搜索/消费方和标签 Owner 共同签认，未签认前只允许继续设计和本地模拟：
 
 1. `space/style/object/material/color` 的标准词表、层级和实体 Owner；
-2. `0.7/0.5/0.3` 的业务含义、排序和最多值数量；
+2. `0.7/0.5/0.3` 固定解释为相对重要性等级；`rank` 负责排序，等级逐值保留、不做总和归一化，也不解释为概率或占比；同时确认最多值数量；
 3. `asset_id`、素材版本和一行一素材的粒度合同；
 4. 国内/海外的来源判定规则和语言切换规则；
 5. 各类目字段适用性矩阵与空值语义；

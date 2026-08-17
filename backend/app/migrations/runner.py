@@ -8573,7 +8573,537 @@ MIGRATIONS = [
         "add_script_workflow_runtime",
         _migration_071_add_script_workflow_runtime,
     ),
+    Migration(
+        72,
+        "add_3d_shadow_dry_run_contracts",
+        lambda connection: _migration_072_add_3d_shadow_dry_run_contracts(connection),
+    ),
+    Migration(
+        73,
+        "add_global_automation_lanes",
+        lambda connection: _migration_073_add_global_automation_lanes(connection),
+    ),
 ]
+
+
+def _migration_072_add_3d_shadow_dry_run_contracts(connection: Connection) -> None:
+    """Add source/field/shadow contracts without rewriting existing facts."""
+
+    def table_exists(table: str) -> bool:
+        return bool(
+            connection.exec_driver_sql(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                (table,),
+            ).scalar()
+        )
+
+    def columns(table: str) -> set[str]:
+        if not table_exists(table):
+            return set()
+        return {
+            row[1]
+            for row in connection.exec_driver_sql(f"PRAGMA table_info({table})")
+        }
+
+    asset_columns = columns("asset_versions")
+    if asset_columns:
+        for name, definition in (
+            ("source_system", "VARCHAR(120)"),
+            ("source_content_id", "VARCHAR(160)"),
+            ("mime_type", "VARCHAR(120)"),
+            ("size_bytes", "INTEGER"),
+            ("occurred_at", "DATETIME"),
+            ("payload_hash", "VARCHAR(64)"),
+        ):
+            if name not in asset_columns:
+                connection.exec_driver_sql(
+                    f"ALTER TABLE asset_versions ADD COLUMN {name} {definition}"
+                )
+    content_columns = columns("content_records")
+    if "current_asset_version_id" not in content_columns:
+        if not content_columns:
+            content_columns = set()
+        else:
+            connection.exec_driver_sql(
+                "ALTER TABLE content_records ADD COLUMN current_asset_version_id "
+                "INTEGER REFERENCES asset_versions(id) ON DELETE RESTRICT"
+            )
+
+    # The field contract table must exist before adding its FK column to an
+    # already-deployed projection_contracts table.
+    connection.exec_driver_sql("""
+        CREATE TABLE IF NOT EXISTS field_demand_contracts (
+            id INTEGER PRIMARY KEY,
+            contract_key VARCHAR(120) NOT NULL,
+            version INTEGER NOT NULL,
+            category_key VARCHAR(40) NOT NULL,
+            consumer_key VARCHAR(120) NOT NULL,
+            owner VARCHAR(120) NOT NULL,
+            fields_json TEXT NOT NULL,
+            thresholds_json TEXT NOT NULL,
+            status VARCHAR(20) NOT NULL DEFAULT 'draft',
+            contract_hash VARCHAR(64) NOT NULL,
+            created_by VARCHAR(80) NOT NULL DEFAULT 'system',
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(contract_key, version),
+            UNIQUE(contract_key, contract_hash),
+            CHECK(status IN ('draft','active','retired'))
+        )
+    """)
+
+    def rebuild_projection_contracts_for_shadow() -> None:
+        if not table_exists("projection_contracts"):
+            return
+        sql = str(
+            connection.exec_driver_sql(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='projection_contracts'"
+            ).scalar()
+            or ""
+        ).lower()
+        if "environment in ('local','test')" not in sql:
+            return
+        old_columns = columns("projection_contracts")
+        temp = "projection_contracts_v72_new"
+        connection.exec_driver_sql(f"DROP TABLE IF EXISTS {temp}")
+        connection.exec_driver_sql(f"""
+            CREATE TABLE {temp} (
+                id INTEGER PRIMARY KEY,
+                contract_key VARCHAR(120) NOT NULL,
+                version INTEGER NOT NULL,
+                target_role VARCHAR(40) NOT NULL
+                    CHECK(target_role IN ('unified_dimension','search_labels','quality_governance')),
+                table_name VARCHAR(120) NOT NULL,
+                environment VARCHAR(20) NOT NULL DEFAULT 'local'
+                    CHECK(environment IN ('local','test','shadow')),
+                adapter_key VARCHAR(80) NOT NULL DEFAULT 'local-sqlite',
+                target_key VARCHAR(120),
+                write_policy VARCHAR(20) NOT NULL DEFAULT 'local_only'
+                    CHECK(write_policy IN ('local_only','shadow_only')),
+                category_key VARCHAR(40),
+                field_contract_id INTEGER REFERENCES field_demand_contracts(id) ON DELETE RESTRICT,
+                max_batch_size INTEGER NOT NULL DEFAULT 500,
+                primary_key_json TEXT NOT NULL,
+                field_mappings_json TEXT NOT NULL,
+                input_versions_json TEXT NOT NULL DEFAULT '{{}}',
+                mode VARCHAR(30) NOT NULL DEFAULT 'snapshot'
+                    CHECK(mode IN ('snapshot','incremental_outbox')),
+                idempotency_key_template VARCHAR(300) NOT NULL,
+                checkpoint_json TEXT NOT NULL DEFAULT '{{}}',
+                reconciliation_json TEXT NOT NULL DEFAULT '{{}}',
+                rollback_json TEXT NOT NULL DEFAULT '{{}}',
+                owner VARCHAR(120) NOT NULL,
+                status VARCHAR(20) NOT NULL DEFAULT 'draft'
+                    CHECK(status IN ('draft','active','retired')),
+                contract_hash VARCHAR(64) NOT NULL UNIQUE,
+                created_by VARCHAR(80) NOT NULL DEFAULT 'system',
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(contract_key, version)
+            )
+        """)
+        columns_in_order = (
+            "id", "contract_key", "version", "target_role", "table_name",
+            "environment", "adapter_key", "target_key", "write_policy",
+            "category_key", "field_contract_id", "max_batch_size",
+            "primary_key_json", "field_mappings_json", "input_versions_json",
+            "mode", "idempotency_key_template", "checkpoint_json",
+            "reconciliation_json", "rollback_json", "owner", "status",
+            "contract_hash", "created_by", "created_at",
+        )
+        defaults = {
+            "adapter_key": "'local-sqlite'",
+            "target_key": "NULL",
+            "write_policy": "'local_only'",
+            "category_key": "NULL",
+            "field_contract_id": "NULL",
+            "max_batch_size": "500",
+        }
+        expressions = [
+            name if name in old_columns else defaults[name]
+            for name in columns_in_order
+        ]
+        fk_state = int(connection.exec_driver_sql("PRAGMA foreign_keys").scalar() or 0)
+        legacy_alter_state = int(
+            connection.exec_driver_sql("PRAGMA legacy_alter_table").scalar() or 0
+        )
+        connection.exec_driver_sql("PRAGMA foreign_keys=OFF")
+        # Historical partial-schema fixtures can retain unrelated legacy
+        # triggers whose columns are repaired by later migrations.  SQLite's
+        # default rename mode reparses every trigger and would make this safe
+        # projection-table rebuild fail before those repairs can run.
+        connection.exec_driver_sql("PRAGMA legacy_alter_table=ON")
+        try:
+            connection.exec_driver_sql(
+                f"INSERT INTO {temp} ({', '.join(columns_in_order)}) "
+                f"SELECT {', '.join(expressions)} FROM projection_contracts"
+            )
+            connection.exec_driver_sql("DROP TABLE projection_contracts")
+            connection.exec_driver_sql(f"ALTER TABLE {temp} RENAME TO projection_contracts")
+        finally:
+            connection.exec_driver_sql(
+                f"PRAGMA legacy_alter_table={legacy_alter_state}"
+            )
+            connection.exec_driver_sql(f"PRAGMA foreign_keys={fk_state}")
+        for statement in (
+            "CREATE INDEX IF NOT EXISTS ix_projection_contracts_key ON projection_contracts(contract_key, version)",
+            "CREATE INDEX IF NOT EXISTS ix_projection_contracts_target ON projection_contracts(target_role, table_name, status)",
+            """CREATE TRIGGER IF NOT EXISTS trg_projection_contracts_immutable
+               BEFORE UPDATE ON projection_contracts
+               BEGIN SELECT RAISE(ABORT, 'ProjectionContract is immutable'); END""",
+            """CREATE TRIGGER IF NOT EXISTS trg_projection_contracts_no_delete
+               BEFORE DELETE ON projection_contracts
+               BEGIN SELECT RAISE(ABORT, 'ProjectionContract cannot be deleted'); END""",
+        ):
+            connection.exec_driver_sql(statement)
+
+    rebuild_projection_contracts_for_shadow()
+    projection_columns = columns("projection_contracts")
+    if projection_columns:
+        for name, definition in (
+            ("adapter_key", "VARCHAR(80) NOT NULL DEFAULT 'local-sqlite'"),
+            ("target_key", "VARCHAR(120)"),
+            ("write_policy", "VARCHAR(20) NOT NULL DEFAULT 'local_only'"),
+            ("category_key", "VARCHAR(40)"),
+            ("field_contract_id", "INTEGER REFERENCES field_demand_contracts(id) ON DELETE RESTRICT"),
+            ("max_batch_size", "INTEGER NOT NULL DEFAULT 500"),
+        ):
+            if name not in projection_columns:
+                connection.exec_driver_sql(
+                    f"ALTER TABLE projection_contracts ADD COLUMN {name} {definition}"
+                )
+
+    connection.exec_driver_sql("""
+        CREATE TABLE IF NOT EXISTS field_demand_contracts (
+            id INTEGER PRIMARY KEY,
+            contract_key VARCHAR(120) NOT NULL,
+            version INTEGER NOT NULL,
+            category_key VARCHAR(40) NOT NULL,
+            consumer_key VARCHAR(120) NOT NULL,
+            owner VARCHAR(120) NOT NULL,
+            fields_json TEXT NOT NULL,
+            thresholds_json TEXT NOT NULL,
+            status VARCHAR(20) NOT NULL DEFAULT 'draft',
+            contract_hash VARCHAR(64) NOT NULL,
+            created_by VARCHAR(80) NOT NULL DEFAULT 'system',
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(contract_key, version),
+            UNIQUE(contract_key, contract_hash),
+            CHECK(status IN ('draft','active','retired'))
+        )
+    """)
+    connection.exec_driver_sql("""
+        CREATE TABLE IF NOT EXISTS upstream_source_contracts (
+            id INTEGER PRIMARY KEY,
+            contract_key VARCHAR(120) NOT NULL,
+            version INTEGER NOT NULL,
+            adapter_key VARCHAR(80) NOT NULL,
+            source_system VARCHAR(120) NOT NULL,
+            category_key VARCHAR(40) NOT NULL,
+            connection_locator VARCHAR(200) NOT NULL,
+            secret_reference VARCHAR(200) NOT NULL,
+            field_mappings_json TEXT NOT NULL,
+            cursor_definition_json TEXT NOT NULL,
+            page_size INTEGER NOT NULL DEFAULT 100,
+            read_only BOOLEAN NOT NULL DEFAULT 1,
+            schema_fingerprint VARCHAR(64) NOT NULL,
+            owner VARCHAR(120) NOT NULL,
+            status VARCHAR(20) NOT NULL DEFAULT 'draft',
+            contract_hash VARCHAR(64) NOT NULL,
+            created_by VARCHAR(80) NOT NULL DEFAULT 'system',
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(contract_key, version),
+            UNIQUE(contract_key, contract_hash),
+            CHECK(status IN ('draft','active','retired')),
+            CHECK(page_size BETWEEN 1 AND 500)
+        )
+    """)
+    connection.exec_driver_sql("""
+        CREATE TABLE IF NOT EXISTS upstream_read_runs (
+            id INTEGER PRIMARY KEY,
+            source_contract_id INTEGER NOT NULL REFERENCES upstream_source_contracts(id) ON DELETE RESTRICT,
+            source_contract_hash VARCHAR(64) NOT NULL,
+            category_key VARCHAR(40) NOT NULL,
+            requested_cursor_json TEXT NOT NULL DEFAULT '{}',
+            next_cursor_json TEXT NOT NULL DEFAULT '{}',
+            requested_limit INTEGER NOT NULL,
+            status VARCHAR(20) NOT NULL DEFAULT 'queued',
+            schema_fingerprint VARCHAR(64) NOT NULL DEFAULT '',
+            page_hash VARCHAR(64) NOT NULL DEFAULT '',
+            row_count INTEGER NOT NULL DEFAULT 0,
+            package_count INTEGER NOT NULL DEFAULT 0,
+            duplicate_count INTEGER NOT NULL DEFAULT 0,
+            awaiting_material_count INTEGER NOT NULL DEFAULT 0,
+            error_code VARCHAR(80) NOT NULL DEFAULT '',
+            error_message TEXT NOT NULL DEFAULT '',
+            attempt_count INTEGER NOT NULL DEFAULT 1,
+            retry_after DATETIME,
+            actor VARCHAR(80) NOT NULL DEFAULT 'system',
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            CHECK(status IN ('queued','running','succeeded','failed','blocked','cancelled')),
+            CHECK(requested_limit BETWEEN 1 AND 500)
+        )
+    """)
+    connection.exec_driver_sql("""
+        CREATE TABLE IF NOT EXISTS shadow_projection_targets (
+            id INTEGER PRIMARY KEY,
+            target_key VARCHAR(120) NOT NULL,
+            version INTEGER NOT NULL,
+            adapter_key VARCHAR(80) NOT NULL,
+            connection_locator VARCHAR(200) NOT NULL,
+            secret_reference VARCHAR(200) NOT NULL,
+            schema_name VARCHAR(120) NOT NULL,
+            table_name VARCHAR(120) NOT NULL,
+            environment VARCHAR(20) NOT NULL DEFAULT 'shadow',
+            shadow_only BOOLEAN NOT NULL DEFAULT 1,
+            owner VARCHAR(120) NOT NULL,
+            schema_fingerprint VARCHAR(64) NOT NULL,
+            status VARCHAR(20) NOT NULL DEFAULT 'draft',
+            target_hash VARCHAR(64) NOT NULL,
+            consecutive_failures INTEGER NOT NULL DEFAULT 0,
+            circuit_opened_at DATETIME,
+            created_by VARCHAR(80) NOT NULL DEFAULT 'system',
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(target_key, version),
+            UNIQUE(target_key, target_hash),
+            CHECK(environment = 'shadow'),
+            CHECK(shadow_only = 1),
+            CHECK(status IN ('draft','active','retired'))
+        )
+    """)
+    connection.exec_driver_sql("""
+        CREATE TABLE IF NOT EXISTS shadow_projection_runs (
+            id INTEGER PRIMARY KEY,
+            projection_contract_id INTEGER NOT NULL REFERENCES projection_contracts(id) ON DELETE RESTRICT,
+            field_contract_id INTEGER NOT NULL REFERENCES field_demand_contracts(id) ON DELETE RESTRICT,
+            target_id INTEGER NOT NULL REFERENCES shadow_projection_targets(id) ON DELETE RESTRICT,
+            manifest_id INTEGER REFERENCES projection_manifests(id) ON DELETE RESTRICT,
+            batch_id VARCHAR(80) NOT NULL UNIQUE,
+            status VARCHAR(20) NOT NULL DEFAULT 'queued',
+            worker_id VARCHAR(120) NOT NULL DEFAULT '',
+            attempt_count INTEGER NOT NULL DEFAULT 0,
+            max_rows INTEGER NOT NULL DEFAULT 500,
+            checkpoint_json TEXT NOT NULL DEFAULT '{}',
+            expected_row_count INTEGER NOT NULL DEFAULT 0,
+            actual_row_count INTEGER NOT NULL DEFAULT 0,
+            expected_payload_hash VARCHAR(64) NOT NULL DEFAULT '',
+            actual_payload_hash VARCHAR(64) NOT NULL DEFAULT '',
+            error_code VARCHAR(80) NOT NULL DEFAULT '',
+            error_message TEXT NOT NULL DEFAULT '',
+            retry_after DATETIME,
+            actor VARCHAR(80) NOT NULL DEFAULT 'system',
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            started_at DATETIME,
+            finished_at DATETIME,
+            CHECK(status IN ('queued','running','succeeded','failed','blocked','rolled_back')),
+            CHECK(max_rows BETWEEN 1 AND 500)
+        )
+    """)
+    connection.exec_driver_sql("""
+        CREATE TABLE IF NOT EXISTS shadow_projection_leases (
+            id INTEGER PRIMARY KEY,
+            target_id INTEGER NOT NULL UNIQUE REFERENCES shadow_projection_targets(id) ON DELETE CASCADE,
+            worker_id VARCHAR(120) NOT NULL,
+            acquired_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            heartbeat_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            expires_at DATETIME NOT NULL
+        )
+    """)
+    for statement in (
+        "CREATE INDEX IF NOT EXISTS ix_field_demand_contracts_key ON field_demand_contracts(contract_key, version)",
+        "CREATE INDEX IF NOT EXISTS ix_upstream_source_contracts_key ON upstream_source_contracts(contract_key, version)",
+        "CREATE INDEX IF NOT EXISTS ix_upstream_read_runs_status ON upstream_read_runs(status, created_at)",
+        "CREATE INDEX IF NOT EXISTS ix_shadow_projection_targets_key ON shadow_projection_targets(target_key, version)",
+        "CREATE INDEX IF NOT EXISTS ix_shadow_projection_runs_status ON shadow_projection_runs(status, created_at)",
+    ):
+        connection.exec_driver_sql(statement)
+
+
+def _migration_073_add_global_automation_lanes(connection: Connection) -> None:
+    """Add isolated automation lanes and quarantine the pre-enable backlog."""
+
+    def table_exists(table: str) -> bool:
+        return bool(
+            connection.exec_driver_sql(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                (table,),
+            ).scalar()
+        )
+
+    def columns(table: str) -> set[str]:
+        if not table_exists(table):
+            return set()
+        return {
+            row[1]
+            for row in connection.exec_driver_sql(f"PRAGMA table_info({table})")
+        }
+
+    queue_columns = columns("optimization_case_queue")
+    if queue_columns:
+        queue_additions = (
+            (
+                "pipeline_kind",
+                "VARCHAR(20) NOT NULL DEFAULT 'incremental' "
+                "CHECK(pipeline_kind IN ('incremental','baseline'))",
+            ),
+            (
+                "automation_generation",
+                "INTEGER NOT NULL DEFAULT 1 CHECK(automation_generation >= 1)",
+            ),
+            ("mechanism_fingerprint", "VARCHAR(64)"),
+            ("route_key", "VARCHAR(120)"),
+            ("eligibility_snapshot_id", "INTEGER"),
+            (
+                "admission_state",
+                "VARCHAR(30) NOT NULL DEFAULT 'eligible' "
+                "CHECK(admission_state IN ('awaiting_evidence','historical_audit','eligible','admitted','rejected'))",
+            ),
+        )
+        for name, definition in queue_additions:
+            if name not in queue_columns:
+                connection.exec_driver_sql(
+                    f"ALTER TABLE optimization_case_queue ADD COLUMN {name} {definition}"
+                )
+        connection.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_optimization_case_queue_lane "
+            "ON optimization_case_queue(category_key, pipeline_kind, automation_generation, admission_state)"
+        )
+        connection.exec_driver_sql(
+            "UPDATE optimization_case_queue SET admission_state='historical_audit' "
+            "WHERE status IN ('pending','failed') AND admission_state='eligible'"
+        )
+
+    connection.exec_driver_sql(
+        """
+        CREATE TABLE IF NOT EXISTS automation_lane_policies (
+            id INTEGER PRIMARY KEY,
+            category_key VARCHAR(40) NOT NULL,
+            pipeline_kind VARCHAR(20) NOT NULL
+                CHECK(pipeline_kind IN ('incremental','baseline')),
+            generation INTEGER NOT NULL DEFAULT 1 CHECK(generation >= 1),
+            status VARCHAR(20) NOT NULL DEFAULT 'draft'
+                CHECK(status IN ('draft','enabled','paused','retired')),
+            enabled_at DATETIME,
+            case_threshold INTEGER NOT NULL DEFAULT 10 CHECK(case_threshold >= 1),
+            min_batch_size INTEGER NOT NULL DEFAULT 1 CHECK(min_batch_size >= 1),
+            max_wait_seconds INTEGER NOT NULL DEFAULT 3600 CHECK(max_wait_seconds >= 0),
+            immediate_severities_json TEXT NOT NULL DEFAULT '["P0","P1"]'
+                CHECK(json_valid(immediate_severities_json)
+                    AND json_type(immediate_severities_json, '$') = 'array'),
+            daily_budget_micros INTEGER NOT NULL DEFAULT 0 CHECK(daily_budget_micros >= 0),
+            cooldown_seconds INTEGER NOT NULL DEFAULT 21600 CHECK(cooldown_seconds >= 0),
+            max_candidates INTEGER NOT NULL DEFAULT 1 CHECK(max_candidates >= 1),
+            max_consecutive_batches INTEGER NOT NULL DEFAULT 1 CHECK(max_consecutive_batches >= 1),
+            target_sample_set_id VARCHAR(120),
+            stable_control_set_id VARCHAR(120),
+            blind_holdout_set_id VARCHAR(120),
+            mechanism_snapshot_json TEXT NOT NULL DEFAULT '{}'
+                CHECK(json_valid(mechanism_snapshot_json)
+                    AND json_type(mechanism_snapshot_json, '$') = 'object'),
+            mechanism_fingerprint VARCHAR(64) NOT NULL
+                CHECK(length(mechanism_fingerprint) = 64
+                    AND mechanism_fingerprint = lower(mechanism_fingerprint)
+                    AND mechanism_fingerprint NOT GLOB '*[^0-9a-f]*'),
+            revision INTEGER NOT NULL DEFAULT 1,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(category_key, pipeline_kind, generation)
+        )
+        """
+    )
+    connection.exec_driver_sql(
+        """
+        CREATE TABLE IF NOT EXISTS optimization_case_eligibility_snapshots (
+            id INTEGER PRIMARY KEY,
+            case_id INTEGER NOT NULL UNIQUE
+                REFERENCES optimization_case_queue(id) ON DELETE CASCADE,
+            lane_policy_id INTEGER NOT NULL
+                REFERENCES automation_lane_policies(id) ON DELETE RESTRICT,
+            category_key VARCHAR(40) NOT NULL,
+            pipeline_kind VARCHAR(20) NOT NULL
+                CHECK(pipeline_kind IN ('incremental','baseline')),
+            generation INTEGER NOT NULL CHECK(generation >= 1),
+            mechanism_fingerprint VARCHAR(64) NOT NULL
+                CHECK(length(mechanism_fingerprint) = 64
+                    AND mechanism_fingerprint = lower(mechanism_fingerprint)
+                    AND mechanism_fingerprint NOT GLOB '*[^0-9a-f]*'),
+            route_key VARCHAR(120) NOT NULL,
+            correction_revision INTEGER NOT NULL DEFAULT 1,
+            evidence_json TEXT NOT NULL DEFAULT '{}'
+                CHECK(json_valid(evidence_json)
+                    AND json_type(evidence_json, '$') = 'object'),
+            admission_state VARCHAR(30) NOT NULL DEFAULT 'awaiting_evidence'
+                CHECK(admission_state IN ('awaiting_evidence','historical_audit','eligible','admitted','rejected')),
+            eligible_at DATETIME,
+            historical_source VARCHAR(120),
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    connection.exec_driver_sql(
+        """
+        CREATE TABLE IF NOT EXISTS automation_batches (
+            id INTEGER PRIMARY KEY,
+            batch_key VARCHAR(200) NOT NULL UNIQUE,
+            lane_policy_id INTEGER NOT NULL
+                REFERENCES automation_lane_policies(id) ON DELETE RESTRICT,
+            category_key VARCHAR(40) NOT NULL,
+            pipeline_kind VARCHAR(20) NOT NULL
+                CHECK(pipeline_kind IN ('incremental','baseline')),
+            generation INTEGER NOT NULL CHECK(generation >= 1),
+            mechanism_fingerprint VARCHAR(64) NOT NULL,
+            route_key VARCHAR(120) NOT NULL,
+            case_set_hash VARCHAR(64) NOT NULL
+                CHECK(length(case_set_hash) = 64
+                    AND case_set_hash = lower(case_set_hash)
+                    AND case_set_hash NOT GLOB '*[^0-9a-f]*'),
+            frozen_policy_json TEXT NOT NULL DEFAULT '{}'
+                CHECK(json_valid(frozen_policy_json)
+                    AND json_type(frozen_policy_json, '$') = 'object'),
+            status VARCHAR(40) NOT NULL DEFAULT 'queued'
+                CHECK(status IN ('queued','leased','processing','completed','failed','cancelled','awaiting_release_review')),
+            trigger_reason VARCHAR(120) NOT NULL DEFAULT 'threshold',
+            lease_owner VARCHAR(120),
+            lease_token VARCHAR(80),
+            lease_expires_at DATETIME,
+            error_code VARCHAR(80),
+            error_message TEXT NOT NULL DEFAULT '',
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            started_at DATETIME,
+            finished_at DATETIME,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    connection.exec_driver_sql(
+        """
+        CREATE TABLE IF NOT EXISTS automation_batch_cases (
+            id INTEGER PRIMARY KEY,
+            batch_id INTEGER NOT NULL
+                REFERENCES automation_batches(id) ON DELETE CASCADE,
+            eligibility_snapshot_id INTEGER NOT NULL UNIQUE
+                REFERENCES optimization_case_eligibility_snapshots(id) ON DELETE RESTRICT,
+            case_id INTEGER NOT NULL
+                REFERENCES optimization_case_queue(id) ON DELETE RESTRICT,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(batch_id, case_id)
+        )
+        """
+    )
+    for statement in (
+        "CREATE INDEX IF NOT EXISTS ix_automation_lane_policies_status "
+        "ON automation_lane_policies(status, category_key, pipeline_kind)",
+        "CREATE INDEX IF NOT EXISTS ix_automation_case_eligibility_lane "
+        "ON optimization_case_eligibility_snapshots(lane_policy_id, admission_state)",
+        "CREATE INDEX IF NOT EXISTS ix_automation_batches_status "
+        "ON automation_batches(status, created_at)",
+        "CREATE INDEX IF NOT EXISTS ix_automation_batch_cases_batch "
+        "ON automation_batch_cases(batch_id, case_id)",
+    ):
+        connection.exec_driver_sql(statement)
+
+    violations = connection.exec_driver_sql("PRAGMA foreign_key_check").fetchall()
+    if violations:
+        raise RuntimeError(f"v73 全局自动组批迁移外键校验失败：{violations[:3]}")
 
 
 def run_migrations(connection: Connection) -> None:

@@ -20,9 +20,12 @@ any quality gate requires explicit Owner approval.
 
 `whole` keeps the category default for `space`. The `single` execution variant
 must explicitly override `space` to `not_applicable`; it must not emit a guessed
-space value. The source identity remains `unverified` in the seed and therefore
-cannot be activated until a separately approved probe is appended and bound to
-a new candidate contract version.
+space value. The current seed's single source identity remains domestic-only
+and `unverified`; it cannot be activated until a separately approved domestic
+probe is appended and bound to a new candidate contract version. Overseas
+`(res_type,res_id)` plus `su_extra.is_single` requires a later versioned source
+binding and separate approved evidence; it is not silently inherited from the
+domestic contract.
 
 All projection targets remain `dry_run` in this contract. Seeding does not
 execute a model, publish label facts, run DataWorks SQL, or write an external
