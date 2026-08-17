@@ -4,6 +4,10 @@ import json
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session
+from sqlalchemy.pool import StaticPool
+
 
 NOW = datetime(2026, 8, 17, 15, tzinfo=timezone.utc)
 
@@ -71,6 +75,83 @@ def _policy(*, threshold: int = 2):
         cooldown_seconds=0,
         max_candidates=1,
     )
+
+
+def _db():
+    from app.database import Base
+
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    return engine, Session(engine)
+
+
+def _persist_lane(db: Session):
+    from app.models import AutomationLanePolicy
+
+    lane = AutomationLanePolicy(
+        category_key="space_image",
+        pipeline_kind="incremental",
+        generation=1,
+        status="enabled",
+        case_threshold=2,
+        min_batch_size=1,
+        max_wait_seconds=3600,
+        immediate_severities_json='["P0","P1"]',
+        cooldown_seconds=0,
+        max_candidates=1,
+        mechanism_snapshot_json='{"model":"m1"}',
+        mechanism_fingerprint="a" * 64,
+    )
+    db.add(lane)
+    db.flush()
+    return lane
+
+
+def _persist_case(db: Session, lane, *, case_id: int):
+    from app.models import (
+        OptimizationCaseEligibilitySnapshot,
+        OptimizationCaseQueue,
+    )
+
+    case = OptimizationCaseQueue(
+        category_key=lane.category_key,
+        pipeline_kind=lane.pipeline_kind,
+        automation_generation=lane.generation,
+        mechanism_fingerprint=lane.mechanism_fingerprint,
+        route_key="A",
+        admission_state="eligible",
+        idempotency_key=f"batch-case-{case_id}",
+        evaluation_id=case_id,
+        final_review_id=case_id,
+        source_type="human_review",
+        prompt_version="b1",
+        severity="P2",
+        case_json='{"truth":"L2"}',
+        created_at=NOW,
+    )
+    db.add(case)
+    db.flush()
+    snapshot = OptimizationCaseEligibilitySnapshot(
+        case_id=case.id,
+        lane_policy_id=lane.id,
+        category_key=lane.category_key,
+        pipeline_kind=lane.pipeline_kind,
+        generation=lane.generation,
+        mechanism_fingerprint=lane.mechanism_fingerprint,
+        route_key="A",
+        correction_revision=1,
+        evidence_json='{"source":"test"}',
+        admission_state="eligible",
+        eligible_at=NOW,
+    )
+    db.add(snapshot)
+    db.flush()
+    case.eligibility_snapshot_id = snapshot.id
+    return case
 
 
 def test_lane_key_separates_pipeline_generation_mechanism_route_and_prompt():
@@ -155,3 +236,76 @@ def test_selector_supports_immediate_and_low_volume_timeout_without_cross_lane_m
     assert timed is not None
     assert timed["trigger_reason"] == "max_wait"
     assert len(timed["case_ids"]) == 1
+
+
+def test_create_batch_freezes_lane_policy_and_case_set():
+    from app.automation_batching import create_automation_batch
+    from app.models import AutomationBatchCase, AutomationPolicy
+
+    engine, db = _db()
+    try:
+        lane = _persist_lane(db)
+        case_a = _persist_case(db, lane, case_id=101)
+        case_b = _persist_case(db, lane, case_id=102)
+        policy = AutomationPolicy(id=1, enabled=True, dry_run=True, case_threshold=2)
+        db.add(policy)
+        db.flush()
+
+        batch = create_automation_batch(
+            db,
+            lane=lane,
+            selected_cases=[case_a, case_b],
+            policy=policy,
+            trigger_reason="threshold",
+            now=NOW,
+        )
+        db.commit()
+
+        assert batch.status == "queued"
+        assert batch.category_key == lane.category_key
+        assert batch.pipeline_kind == lane.pipeline_kind
+        assert batch.generation == lane.generation
+        assert batch.mechanism_fingerprint == lane.mechanism_fingerprint
+        assert json.loads(batch.frozen_policy_json)["case_threshold"] == 2
+        assert db.query(AutomationBatchCase).count() == 2
+    finally:
+        db.close()
+        engine.dispose()
+
+
+def test_create_batch_is_idempotent_for_same_lane_and_case_set():
+    from app.automation_batching import create_automation_batch
+    from app.models import AutomationBatch, AutomationPolicy
+
+    engine, db = _db()
+    try:
+        lane = _persist_lane(db)
+        case_a = _persist_case(db, lane, case_id=201)
+        case_b = _persist_case(db, lane, case_id=202)
+        policy = AutomationPolicy(id=1, enabled=True, dry_run=True, case_threshold=2)
+        db.add(policy)
+        db.flush()
+
+        first = create_automation_batch(
+            db,
+            lane=lane,
+            selected_cases=[case_a, case_b],
+            policy=policy,
+            trigger_reason="threshold",
+            now=NOW,
+        )
+        second = create_automation_batch(
+            db,
+            lane=lane,
+            selected_cases=[case_b, case_a],
+            policy=policy,
+            trigger_reason="threshold",
+            now=NOW,
+        )
+        db.commit()
+
+        assert first.id == second.id
+        assert db.query(AutomationBatch).count() == 1
+    finally:
+        db.close()
+        engine.dispose()

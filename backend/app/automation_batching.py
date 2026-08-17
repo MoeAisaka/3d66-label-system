@@ -2,11 +2,23 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping, Sequence
 
-from .models import AutomationLanePolicy, AutomationPolicy, OptimizationCaseQueue
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from .audit import append_audit_event, canonical_json
+from .models import (
+    AutomationBatch,
+    AutomationBatchCase,
+    AutomationLanePolicy,
+    AutomationPolicy,
+    OptimizationCaseEligibilitySnapshot,
+    OptimizationCaseQueue,
+)
 
 LaneKey = tuple[str, str, int, str, str, str]
 LaneIdentity = tuple[str, str, int, str]
@@ -255,3 +267,164 @@ def select_ready_lane(
             skipped,
         )
     return None, skipped
+
+
+def _frozen_batch_policy(
+    *,
+    lane: AutomationLanePolicy,
+    policy: AutomationPolicy,
+    prompt_version: str,
+) -> dict[str, Any]:
+    return {
+        "schema_version": "automation-batch-policy-v1",
+        "case_threshold": int(lane.case_threshold),
+        "min_batch_size": int(lane.min_batch_size),
+        "max_candidates": int(lane.max_candidates),
+        "global_policy": {
+            "revision": int(policy.revision),
+            "dry_run": bool(policy.dry_run),
+            "case_threshold": int(policy.case_threshold),
+            "immediate_severities": _safe_string_list(
+                policy.immediate_severities_json, []
+            ),
+            "daily_budget_micros": int(policy.daily_budget_micros),
+            "cooldown_seconds": int(policy.cooldown_seconds),
+            "max_candidates": int(policy.max_candidates),
+        },
+        "lane_policy": {
+            "id": int(lane.id),
+            "revision": int(lane.revision),
+            "category_key": str(lane.category_key),
+            "pipeline_kind": str(lane.pipeline_kind),
+            "generation": int(lane.generation),
+            "mechanism_fingerprint": str(lane.mechanism_fingerprint),
+            "case_threshold": int(lane.case_threshold),
+            "min_batch_size": int(lane.min_batch_size),
+            "max_wait_seconds": int(lane.max_wait_seconds),
+            "immediate_severities": _safe_string_list(
+                lane.immediate_severities_json,
+                policy.immediate_severities_json,
+            ),
+            "daily_budget_micros": int(lane.daily_budget_micros),
+            "cooldown_seconds": int(lane.cooldown_seconds),
+            "max_candidates": int(lane.max_candidates),
+            "max_consecutive_batches": int(lane.max_consecutive_batches),
+        },
+        "prompt_version": prompt_version,
+    }
+
+
+def create_automation_batch(
+    db: Session,
+    *,
+    lane: AutomationLanePolicy,
+    selected_cases: Sequence[OptimizationCaseQueue],
+    policy: AutomationPolicy,
+    trigger_reason: str,
+    now: datetime,
+) -> AutomationBatch:
+    """Persist one immutable batch for an already-selected strict lane."""
+
+    if lane.status != "enabled":
+        raise ValueError("automation lane is not enabled")
+    cases = sorted(selected_cases, key=lambda case: int(case.id))
+    if not cases:
+        raise ValueError("automation batch requires at least one case")
+    first_key = build_case_lane_key(cases[0])
+    expected_identity = _lane_identity(lane)
+    if first_key[:4] != expected_identity:
+        raise ValueError("automation case identity does not match lane")
+    if any(build_case_lane_key(case) != first_key for case in cases):
+        raise ValueError("automation batch cannot mix lane identities")
+    if any(case.admission_state not in {"eligible", "admitted"} for case in cases):
+        raise ValueError("automation batch contains an ineligible case")
+
+    snapshots: list[OptimizationCaseEligibilitySnapshot] = []
+    for case in cases:
+        snapshot = (
+            db.get(
+                OptimizationCaseEligibilitySnapshot,
+                case.eligibility_snapshot_id,
+            )
+            if case.eligibility_snapshot_id is not None
+            else None
+        )
+        if (
+            snapshot is None
+            or snapshot.case_id != case.id
+            or snapshot.lane_policy_id != lane.id
+            or snapshot.admission_state not in {"eligible", "admitted"}
+            or snapshot.category_key != lane.category_key
+            or snapshot.pipeline_kind != lane.pipeline_kind
+            or snapshot.generation != lane.generation
+            or snapshot.mechanism_fingerprint != lane.mechanism_fingerprint
+            or snapshot.route_key != first_key[4]
+        ):
+            raise ValueError("automation case eligibility snapshot does not match lane")
+        snapshots.append(snapshot)
+
+    case_set_payload = {
+        "case_ids": [int(case.id) for case in cases],
+        "eligibility_snapshot_ids": [int(snapshot.id) for snapshot in snapshots],
+    }
+    case_set_hash = hashlib.sha256(
+        canonical_json(case_set_payload).encode("utf-8")
+    ).hexdigest()
+    batch_key = f"automation-batch:{lane.id}:{case_set_hash}"
+    existing = db.scalar(
+        select(AutomationBatch).where(AutomationBatch.batch_key == batch_key)
+    )
+    if existing is not None:
+        return existing
+
+    frozen_policy = _frozen_batch_policy(
+        lane=lane,
+        policy=policy,
+        prompt_version=first_key[5],
+    )
+    batch = AutomationBatch(
+        batch_key=batch_key,
+        lane_policy_id=lane.id,
+        category_key=lane.category_key,
+        pipeline_kind=lane.pipeline_kind,
+        generation=lane.generation,
+        mechanism_fingerprint=lane.mechanism_fingerprint,
+        route_key=first_key[4],
+        case_set_hash=case_set_hash,
+        frozen_policy_json=canonical_json(frozen_policy),
+        status="queued",
+        trigger_reason=trigger_reason,
+        created_at=now,
+        updated_at=now,
+    )
+    db.add(batch)
+    db.flush()
+    for case, snapshot in zip(cases, snapshots, strict=True):
+        db.add(
+            AutomationBatchCase(
+                batch_id=batch.id,
+                eligibility_snapshot_id=snapshot.id,
+                case_id=case.id,
+                created_at=now,
+            )
+        )
+    db.flush()
+    append_audit_event(
+        db,
+        category="automation",
+        action="batch_created",
+        subject_type="automation_batch",
+        subject_id=batch.id,
+        actor="system",
+        payload={
+            "lane_policy_id": lane.id,
+            "case_ids": case_set_payload["case_ids"],
+            "eligibility_snapshot_ids": case_set_payload[
+                "eligibility_snapshot_ids"
+            ],
+            "case_set_hash": case_set_hash,
+            "trigger_reason": trigger_reason,
+        },
+        event_key=f"automation:batch-created:{batch_key}",
+    )
+    return batch
