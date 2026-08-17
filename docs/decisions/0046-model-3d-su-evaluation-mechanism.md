@@ -28,3 +28,15 @@
 - 等级固定为 L1 80–100、L2 61–79、L3 41–60、L4 0–40，L5 disabled。
 - seed 冲突时 fail-closed，不覆盖运营拥有的非本版本合同或 prompt。
 - 历史运行继续读取其冻结快照；后续运营校准只能追加新版本，不回写旧结果。
+
+## 2026-08-17 修订：v2 恢复五维 grade 权威评分
+
+Run #27 的 50 条 `model_3d_su` 回归全部输出 L1。运行证据显示，43 条没有命中任何扣分规则，其余 7 条扣分后仍不低于 90；实际调用身份全部是动态 `dimension-deduction-prompt-v1`，而不是运行配置冻结展示的 `model-3d-su-b-v1-20260814`。根因是 v1 同时声明了静态五维 grade B prompt 和 `deduction_rules`，权威 worker 看到规则后绕过静态 B，改为从 100 分起仅扣命中的少量缺陷。
+
+本修订追加 `model-3d-su-v2-grade-scoring-20260817`，并取代上文第 4 条作为现役机制：
+
+1. 五个维度只保留线性 `grade_points`：`1=0`、`2=25`、`3=50`、`4=75`、`5=100`；不再声明 `deduction_rules`。
+2. 调用 B 必须使用冻结的静态 v2 prompt，且只能返回合同中的五个维度。每个维度必须包含 1-5 整数 grade 和至少一条非空可见证据；缺失、多余、越界或无证据都 fail-closed 为人工复核，不能默认满分。
+3. worker 仅对显式声明 `dimension-grade-output-v1` 的赛道绕过旧八维预评分和旧风险复核；最终分数仍由现有 v3 grade bridge 按赛道权重确定性聚合。
+4. spec、rubric、A/B prompt 和 system owner 全部提升为 v2 身份。startup seed 只升级已知 system-owned v1/v2 行，保留运营编辑的 profile 描述；未知 owner 继续拒绝覆盖。
+5. v1 prompts、v1 projected revision、Run #27 和所有历史冻结任务/结果都保持不变。v1 revision 退役后仍可由历史 snapshot 回放；本修订不授权重跑、部署或生产写入。

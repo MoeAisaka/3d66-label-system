@@ -3,6 +3,21 @@
 > 最后更新：2026-08-15
 > 本文件只记录“现在做到哪里”；长期原则见 `PRODUCT.md` 和 `AGENTS.md`，历史背景见 `CODEX_HANDOFF.md`。
 
+## 最新实施：3D/SU 五维 grade 评分回归修复（2026-08-17）
+
+- Run #27 的 50 条 `model_3d_su` 回归全部落到 L1，运行证据确认实际使用了动态 `dimension-deduction-prompt-v1`，没有执行冻结界面展示的静态五维 B prompt；43 条无规则命中时直接保留 100 分，其余 7 条扣分后仍不低于 90。
+- 现役机制追加为 `model-3d-su-v2-grade-scoring-20260817`：A/B prompt、rubric、dimension schema 和 system owner 均使用独立 v2 身份。五维改为线性 `grade_points`（1/2/3/4/5 = 0/25/50/75/100），不再声明 `deduction_rules`。
+- worker 对显式 `dimension-grade-output-v1` 赛道执行冻结的静态 B prompt，并只绕过无关的旧八维预评分和旧风险复核。五维键必须精确匹配，grade 必须为 1-5 整数，每维必须有非空可见证据；缺失、多余、越界或无证据都保存为 `score/level=None`、`needs_review=true` 的人工复核结果，不默认满分。
+- startup seed 只升级已知 system-owned v1/v2 profile/config，保留运营编辑的 profile 描述；v1 projected revision 退役并追加 v2 子 revision，重复 seed 不再追加。v1 prompts、冻结 revision、Run #27 和所有历史任务/结果均未改写。
+
+当前验证：
+
+- 完整 worker 五档锚点与畸形输出矩阵：`64 passed`；五档确定性结果为 `0/L4`、`25/L4`、`50/L3`、`75/L2`、`100/L1`。
+- 评分桥、维度组合、聚合器、3D/SU seed/语义切片和权威 worker 扩展专项：`182 passed, 1 warning`；warning 为既有 Starlette/httpx 弃用提示。
+- 后端全量：`1470 passed, 1 skipped, 6 warnings`；warning 为既有 FastAPI/httpx 与 PDF SWIG 弃用提示。
+- 前端 `npm --prefix frontend run lint` 和 `LABEL_LAB_BUILD_SHA=9943b8c npm --prefix frontend run build` 通过；构建只保留既有主 chunk 大于 500 kB 提示。
+- 隔离分支为 `codex/model-3d-su-grade-fix-20260817`，基线 `origin/main@9943b8c`。本批未提交、未推送、未创建或合并 MR、未部署、未写生产数据、未调用真实模型、未重跑 Run #27 或其他真实回归。
+
 ## 最新实施：受控脚本注册与工作流运行时 dry-run 底座（2026-08-15）
 
 - 新增 `ScriptDefinition/ScriptVersion`、`WorkflowDefinition/WorkflowVersion`、`ProductionRun/ProductionStepAttempt`、运行分发和追加式审计模型；migration 71 为增量、幂等迁移，不回填或改写历史评测事实。
