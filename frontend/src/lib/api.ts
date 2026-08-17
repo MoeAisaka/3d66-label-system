@@ -14,6 +14,9 @@ import type {
   PromptVersion,
   SourceIdentityVerification,
   TagDemandContract,
+  AutomationOverview,
+  AutomationLaneSummary,
+  AutomationCandidateReview,
 } from "@/lib/types"
 
 export type ApiErrorDetail = {
@@ -331,4 +334,14 @@ export const sourceIdentityApi = {
 
 export const contentIngressApi = {
   list: () => api<{ items: ContentIdentityRecord[] }>("/api/content-ingress/records"),
+}
+
+export const automationApi = {
+  overview: () => api<AutomationOverview>("/api/automation/overview"),
+  lanes: (pipelineKind?: "incremental" | "baseline") => {
+    const query = pipelineKind ? `?pipeline_kind=${pipelineKind}` : ""
+    return api<{ items: AutomationLaneSummary[] }>(`/api/automation/lanes${query}`)
+  },
+  candidates: () => api<{ items: AutomationCandidateReview[]; auto_publish_enabled: false }>("/api/automation/candidates"),
+  decideCandidate: (id: number, decision: "approved" | "rejected", note: string) => api<{ id: number; decision: string; auto_publish: false; stock_rerun: false }>(`/api/automation/candidates/${id}/decision`, { method: "POST", ...jsonBody({ decision, note }) }),
 }

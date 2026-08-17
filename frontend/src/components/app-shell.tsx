@@ -60,6 +60,14 @@ export const primaryWorkflowDomains = [
     ],
   },
   {
+    to: "/workflow/automation",
+    matches: ["/workflow/automation"],
+    index: "07",
+    label: "自动组批",
+    icon: ListChecks,
+    tabs: [{ to: "/workflow/automation", label: "全局总览" }],
+  },
+  {
     to: "/workflow/quality-assets",
     matches: ["/workflow/quality-assets", "/legacy/sample-sets"],
     index: "04",
