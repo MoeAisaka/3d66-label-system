@@ -15,8 +15,11 @@ from sqlalchemy import and_, func, or_, select, update, text
 from sqlalchemy.orm import Session
 
 from .audit import append_audit_event, canonical_json
+from .automation_batching import create_automation_batch, select_ready_lane
 from .database import session_scope
 from .models import (
+    AutomationBatch,
+    AutomationLanePolicy,
     AutomationOptimizationRun,
     AutomationBudgetDay,
     AutomationPolicy,
@@ -1101,6 +1104,80 @@ def _select_ready_case_cohort(
     now: datetime,
 ) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
     """Select one runnable category/prompt cohort without starving later cohorts."""
+    lane_policies = db.scalars(
+        select(AutomationLanePolicy).order_by(
+            AutomationLanePolicy.category_key.asc(),
+            AutomationLanePolicy.pipeline_kind.asc(),
+            AutomationLanePolicy.generation.asc(),
+            AutomationLanePolicy.revision.desc(),
+            AutomationLanePolicy.id.desc(),
+        )
+    ).all()
+    strict_lane_mode = any(lane.status == "enabled" for lane in lane_policies)
+    if strict_lane_mode:
+        last_triggered_at_by_lane: dict[tuple[str, str, int, str, str, str], datetime] = {}
+        batches = db.scalars(select(AutomationBatch)).all()
+        for batch in batches:
+            frozen_policy = _safe_json_object(batch.frozen_policy_json)
+            prompt_version = frozen_policy.get("prompt_version")
+            if not isinstance(prompt_version, str) or not prompt_version:
+                continue
+            lane_key = (
+                str(batch.category_key),
+                str(batch.pipeline_kind),
+                int(batch.generation),
+                str(batch.mechanism_fingerprint),
+                str(batch.route_key),
+                prompt_version,
+            )
+            triggered_at = batch.started_at or batch.created_at
+            if triggered_at is None:
+                continue
+            previous = last_triggered_at_by_lane.get(lane_key)
+            if previous is None or _aware(triggered_at) > _aware(previous):
+                last_triggered_at_by_lane[lane_key] = triggered_at
+
+        selected_lane, skipped = select_ready_lane(
+            available=available,
+            lane_policies=lane_policies,
+            policy=policy,
+            now=now,
+            last_triggered_at_by_lane=last_triggered_at_by_lane,
+        )
+        if selected_lane is None:
+            return None, skipped
+        category_key = selected_lane["category_key"]
+        profile = db.scalar(
+            select(EvaluationCategoryProfile).where(
+                EvaluationCategoryProfile.category_key == category_key
+            )
+        )
+        category_config = _safe_json_object(
+            profile.automation_config_json if profile else "{}"
+        )
+        return (
+            {
+                "category_key": category_key,
+                "category_cases": selected_lane["selected_cases"],
+                "category_config": category_config,
+                "profile": profile,
+                "case_threshold": selected_lane["case_threshold"],
+                "max_candidates": selected_lane["max_candidates"],
+                "trigger_case": selected_lane["trigger_case"],
+                "prompt_version": selected_lane["prompt_version"],
+                "same_prompt": selected_lane["selected_cases"],
+                "strict_lane_mode": True,
+                "lane": selected_lane["lane"],
+                "lane_key": selected_lane["lane_key"],
+                "pipeline_kind": selected_lane["pipeline_kind"],
+                "automation_generation": selected_lane["generation"],
+                "mechanism_fingerprint": selected_lane["mechanism_fingerprint"],
+                "route_key": selected_lane["route_key"],
+                "trigger_reason": selected_lane["trigger_reason"],
+            },
+            skipped,
+        )
+
     immediate_severities = set(json.loads(policy.immediate_severities_json or "[]"))
     categories = _fair_category_order(
         db,
@@ -1308,6 +1385,10 @@ def consume_optimization_queue_once(
         trigger_case = cohort["trigger_case"]
         prompt_version = cohort["prompt_version"]
         same_prompt = cohort["same_prompt"]
+        strict_lane_mode = bool(cohort.get("strict_lane_mode", False))
+        lane = cohort.get("lane")
+        lane_key = cohort.get("lane_key")
+        trigger_reason = cohort.get("trigger_reason")
         adapter = supplied_adapter or configured_optimization_adapter(
             db, category_key=category_key
         )
@@ -1322,7 +1403,11 @@ def consume_optimization_queue_once(
                     "message": f"类目 {category_key} 的优化模型未配置完整。",
                 }
             )
-            remaining = [case for case in remaining if case.category_key != category_key]
+            if strict_lane_mode:
+                blocked_ids = {case.id for case in same_prompt}
+                remaining = [case for case in remaining if case.id not in blocked_ids]
+            else:
+                remaining = [case for case in remaining if case.category_key != category_key]
             continue
         try:
             if hasattr(adapter, "bind_base_prompt"):
@@ -1353,7 +1438,11 @@ def consume_optimization_queue_once(
                     "message": exc.message,
                 }
             )
-            remaining = [case for case in remaining if case.category_key != category_key]
+            if strict_lane_mode:
+                blocked_ids = {case.id for case in same_prompt}
+                remaining = [case for case in remaining if case.id not in blocked_ids]
+            else:
+                remaining = [case for case in remaining if case.category_key != category_key]
             continue
         except ValueError:
             skipped_cohorts.append(
@@ -1364,7 +1453,11 @@ def consume_optimization_queue_once(
                     "message": f"类目 {category_key} 缺少同类目三角色锁定黄金集。",
                 }
             )
-            remaining = [case for case in remaining if case.category_key != category_key]
+            if strict_lane_mode:
+                blocked_ids = {case.id for case in same_prompt}
+                remaining = [case for case in remaining if case.id not in blocked_ids]
+            else:
+                remaining = [case for case in remaining if case.category_key != category_key]
             continue
         break
 
@@ -1387,6 +1480,16 @@ def consume_optimization_queue_once(
         "policy": _policy_payload(policy),
         "cases": frozen_cases,
     }
+    if strict_lane_mode:
+        frozen_input.update(
+            {
+                "lane_key": list(lane_key),
+                "pipeline_kind": cohort["pipeline_kind"],
+                "automation_generation": cohort["automation_generation"],
+                "mechanism_fingerprint": cohort["mechanism_fingerprint"],
+                "route_key": cohort["route_key"],
+            }
+        )
     if regression_binding is not None:
         frozen_input["regression_binding"] = regression_binding
     try:
@@ -1433,6 +1536,47 @@ def consume_optimization_queue_once(
             "budget_micros": policy.daily_budget_micros,
             "recovered_leases": recovered,
         }
+
+    batch: AutomationBatch | None = None
+    if strict_lane_mode:
+        try:
+            batch = create_automation_batch(
+                db,
+                lane=lane,
+                selected_cases=selected,
+                policy=policy,
+                trigger_reason=trigger_reason or "threshold",
+                now=current,
+            )
+        except ValueError as exc:
+            return {
+                "status": "lane_snapshot_mismatch",
+                "reason": "lane_snapshot_mismatch",
+                "message": str(exc),
+                "lane_key": list(lane_key),
+                "recovered_leases": recovered,
+            }
+        if batch.status in {
+            "leased",
+            "processing",
+            "completed",
+            "awaiting_release_review",
+        }:
+            return {
+                "status": "already_planned",
+                "batch_id": batch.id,
+                "lane_key": list(lane_key),
+                "dry_run": policy.dry_run,
+                "case_count": len(selected),
+                "recovered_leases": recovered,
+            }
+        frozen_input["batch_id"] = batch.id
+
+    batch_identity = (
+        {"batch_id": batch.id, "lane_key": list(lane_key)}
+        if batch is not None
+        else {}
+    )
 
     if (
         not policy.dry_run
@@ -1495,6 +1639,7 @@ def consume_optimization_queue_once(
                 "case_ids": selected_ids,
                 "prompt_version": prompt_version,
                 "category_key": category_key,
+                **batch_identity,
                 "attempts": {
                     str(case.id): case.attempt_count + 1 for case in selected
                 },
@@ -1526,7 +1671,11 @@ def consume_optimization_queue_once(
                 updated_at=current,
             )
         )
-        return {"status": "already_planned", "run_id": existing.id}
+        return {
+            "status": "already_planned",
+            "run_id": existing.id,
+            **batch_identity,
+        }
 
     run = AutomationOptimizationRun(
         run_key=run_key,
@@ -1540,9 +1689,12 @@ def consume_optimization_queue_once(
         ),
         dry_run=policy.dry_run,
         trigger_reason=(
-            f"immediate:{trigger_case.severity}"
-            if trigger_case is not None
-            else "case_threshold"
+            trigger_reason
+            or (
+                f"immediate:{trigger_case.severity}"
+                if trigger_case is not None
+                else "case_threshold"
+            )
         ),
         case_ids_json=canonical_json(selected_ids),
         frozen_input_json=canonical_json(frozen_input),
@@ -1552,6 +1704,10 @@ def consume_optimization_queue_once(
     )
     db.add(run)
     db.flush()
+    if batch is not None:
+        batch.status = "completed" if policy.dry_run else "processing"
+        batch.started_at = None if policy.dry_run else current
+        batch.finished_at = current if policy.dry_run else None
     db.execute(
         update(OptimizationCaseQueue)
         .where(
@@ -1585,6 +1741,7 @@ def consume_optimization_queue_once(
             "effective_lease_seconds": execution_lease_seconds,
             "execution_lease_seconds": execution_lease_seconds,
             "execution_lease": execution_lease,
+            **batch_identity,
         },
         event_key=f"automation-run-planned:{run.run_key}",
     )
@@ -1596,10 +1753,14 @@ def consume_optimization_queue_once(
             "dry_run": policy.dry_run,
             "case_count": len(selected_ids),
             "recovered_leases": recovered,
+            **batch_identity,
         }
 
     db.commit()
     run.status = "processing"
+    if batch is not None:
+        batch.status = "processing"
+        batch.started_at = current
     append_audit_event(
         db,
         category="automation",
@@ -1607,7 +1768,7 @@ def consume_optimization_queue_once(
         subject_type="automation_optimization_run",
         subject_id=run.id,
         actor=worker_id,
-        payload={"estimated_cost_micros": estimated_cost},
+        payload={"estimated_cost_micros": estimated_cost, **batch_identity},
         event_key=f"automation-run-processing:{run.run_key}",
     )
     db.commit()
@@ -1684,6 +1845,9 @@ def consume_optimization_queue_once(
         run.total_tokens = result.total_tokens
         run.status = "succeeded"
         run.finished_at = current
+        if batch is not None:
+            batch.status = "completed"
+            batch.finished_at = current
         db.execute(
             update(OptimizationCaseQueue)
             .where(
@@ -1711,6 +1875,7 @@ def consume_optimization_queue_once(
                 "auto_publish": False,
                 "effective_lease_seconds": execution_lease_seconds,
                 "execution_lease": execution_lease,
+                **batch_identity,
             },
             event_key=f"automation-run-reviewed:{run.run_key}",
         )
@@ -1721,6 +1886,7 @@ def consume_optimization_queue_once(
             "candidate_count": run.candidate_count,
             "effective_lease_seconds": execution_lease_seconds,
             "execution_lease_seconds": execution_lease_seconds,
+            **batch_identity,
         }
     except Exception as exc:
         safe_error, retryable = _safe_executor_error(exc)
@@ -1766,6 +1932,11 @@ def consume_optimization_queue_once(
         run.error_message = safe_error
         run.retryable = retryable
         run.finished_at = current
+        if batch is not None:
+            batch.status = "failed"
+            batch.error_code = safe_error
+            batch.error_message = safe_error
+            batch.finished_at = current
         attempt = max(case.attempt_count for case in selected)
         retry_at = (
             current
@@ -1803,6 +1974,7 @@ def consume_optimization_queue_once(
                 "error": safe_error,
                 "retry_at": retry_at.isoformat() if retry_at else None,
                 "retryable": retryable,
+                **batch_identity,
             },
             event_key=f"automation-run-failed:{run.run_key}",
         )
@@ -1811,6 +1983,7 @@ def consume_optimization_queue_once(
             "run_id": run.id,
             "retry_at": retry_at.isoformat() if retry_at else None,
             "recovered_leases": recovered,
+            **batch_identity,
         }
 
 

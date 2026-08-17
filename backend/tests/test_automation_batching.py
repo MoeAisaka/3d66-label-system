@@ -111,7 +111,7 @@ def _persist_lane(db: Session):
     return lane
 
 
-def _persist_case(db: Session, lane, *, case_id: int):
+def _persist_case(db: Session, lane, *, case_id: int, route: str = "A"):
     from app.models import (
         OptimizationCaseEligibilitySnapshot,
         OptimizationCaseQueue,
@@ -122,7 +122,7 @@ def _persist_case(db: Session, lane, *, case_id: int):
         pipeline_kind=lane.pipeline_kind,
         automation_generation=lane.generation,
         mechanism_fingerprint=lane.mechanism_fingerprint,
-        route_key="A",
+        route_key=route,
         admission_state="eligible",
         idempotency_key=f"batch-case-{case_id}",
         evaluation_id=case_id,
@@ -142,7 +142,7 @@ def _persist_case(db: Session, lane, *, case_id: int):
         pipeline_kind=lane.pipeline_kind,
         generation=lane.generation,
         mechanism_fingerprint=lane.mechanism_fingerprint,
-        route_key="A",
+        route_key=route,
         correction_revision=1,
         evidence_json='{"source":"test"}',
         admission_state="eligible",
@@ -306,6 +306,183 @@ def test_create_batch_is_idempotent_for_same_lane_and_case_set():
 
         assert first.id == second.id
         assert db.query(AutomationBatch).count() == 1
+    finally:
+        db.close()
+        engine.dispose()
+
+
+def test_consumer_batches_only_one_strict_lane_and_returns_batch_identity():
+    from app.models import AutomationBatch, AutomationPolicy, OptimizationCaseQueue
+    from app.optimization_automation import consume_optimization_queue_once
+
+    engine, db = _db()
+    try:
+        lane = _persist_lane(db)
+        lane.case_threshold = 1
+        case_a = _persist_case(db, lane, case_id=301, route="A")
+        case_b = _persist_case(db, lane, case_id=302, route="B")
+        db.add(
+            AutomationPolicy(
+                id=1,
+                enabled=True,
+                dry_run=True,
+                case_threshold=99,
+            )
+        )
+        db.commit()
+
+        result = consume_optimization_queue_once(
+            db,
+            worker_id="strict-lane-worker",
+            now=NOW,
+        )
+        db.commit()
+
+        assert result["status"] == "planned"
+        assert result["batch_id"] is not None
+        assert tuple(result["lane_key"])[4] == "A"
+        assert db.query(AutomationBatch).count() == 1
+        batch = db.query(AutomationBatch).one()
+        assert batch.status == "completed"
+        assert batch.finished_at.replace(tzinfo=timezone.utc) == NOW
+        from app.models import AutomationOptimizationRun
+
+        run = db.query(AutomationOptimizationRun).one()
+        frozen_input = json.loads(run.frozen_input_json)
+        assert frozen_input["batch_id"] == batch.id
+        assert tuple(frozen_input["lane_key"])[4] == "A"
+        assert frozen_input["pipeline_kind"] == "incremental"
+        assert frozen_input["automation_generation"] == 1
+        assert frozen_input["mechanism_fingerprint"] == "a" * 64
+        assert frozen_input["route_key"] == "A"
+        db.refresh(case_a)
+        db.refresh(case_b)
+        assert case_a.status == "batched"
+        assert case_b.status == "pending"
+        assert db.query(OptimizationCaseQueue).count() == 2
+
+        second = consume_optimization_queue_once(
+            db,
+            worker_id="strict-lane-worker",
+            now=NOW + timedelta(minutes=1),
+        )
+        db.commit()
+        assert second["status"] == "planned"
+        assert tuple(second["lane_key"])[4] == "B"
+        assert db.query(AutomationBatch).count() == 2
+    finally:
+        db.close()
+        engine.dispose()
+
+
+def test_consumer_never_dispatches_awaiting_evidence_in_strict_lane_mode():
+    from app.models import AutomationBatch, AutomationPolicy
+    from app.optimization_automation import consume_optimization_queue_once
+
+    engine, db = _db()
+    try:
+        lane = _persist_lane(db)
+        lane.case_threshold = 1
+        case = _persist_case(db, lane, case_id=401)
+        case.admission_state = "awaiting_evidence"
+        db.add(
+            AutomationPolicy(
+                id=1,
+                enabled=True,
+                dry_run=True,
+                case_threshold=1,
+            )
+        )
+        db.commit()
+
+        result = consume_optimization_queue_once(
+            db,
+            worker_id="awaiting-evidence-worker",
+            now=NOW,
+        )
+
+        assert result["status"] == "idle"
+        assert db.query(AutomationBatch).count() == 0
+    finally:
+        db.close()
+        engine.dispose()
+
+
+def test_failed_strict_batch_retries_with_same_frozen_batch_and_new_run():
+    from app.models import AutomationBatch, AutomationOptimizationRun, AutomationPolicy
+    from app.optimization_automation import (
+        AutomationAdapterResult,
+        consume_optimization_queue_once,
+    )
+
+    class RetryableModelError(RuntimeError):
+        technical_error_type = "timeout"
+        retryable = True
+
+    class FlakyAdapter:
+        attempts = 0
+
+        def estimate_cost_micros(self, *, frozen_input):
+            del frozen_input
+            return 1000
+
+        def optimize(self, *, frozen_input, max_candidates):
+            del frozen_input, max_candidates
+            self.attempts += 1
+            if self.attempts == 1:
+                raise RetryableModelError("provider timeout")
+            return AutomationAdapterResult(
+                candidates=[{"system_prompt": "s", "user_prompt": "u"}],
+                regression={},
+                actual_cost_micros=500,
+                input_tokens=10,
+                output_tokens=5,
+                total_tokens=15,
+            )
+
+    engine, db = _db()
+    try:
+        lane = _persist_lane(db)
+        lane.case_threshold = 1
+        lane.cooldown_seconds = 0
+        _persist_case(db, lane, case_id=501)
+        db.add(
+            AutomationPolicy(
+                id=1,
+                enabled=True,
+                dry_run=False,
+                case_threshold=1,
+                daily_budget_micros=10_000,
+                base_retry_seconds=1,
+            )
+        )
+        db.commit()
+        adapter = FlakyAdapter()
+
+        first = consume_optimization_queue_once(
+            db,
+            worker_id="retry-worker",
+            adapter=adapter,
+            now=NOW,
+        )
+        db.commit()
+        assert first["status"] == "failed"
+        assert first["batch_id"] is not None
+        retry_at = datetime.fromisoformat(first["retry_at"])
+
+        second = consume_optimization_queue_once(
+            db,
+            worker_id="retry-worker",
+            adapter=adapter,
+            now=retry_at + timedelta(seconds=1),
+        )
+        db.commit()
+
+        assert second["status"] == "succeeded"
+        assert second["batch_id"] == first["batch_id"]
+        batch = db.query(AutomationBatch).one()
+        assert batch.status == "completed"
+        assert db.query(AutomationOptimizationRun).count() == 2
     finally:
         db.close()
         engine.dispose()

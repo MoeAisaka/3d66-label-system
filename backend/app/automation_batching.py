@@ -87,12 +87,27 @@ def select_ready_lane(
     """Select one strict lane without mixing pipeline or mechanism identities."""
 
     current = _aware(now)
-    eligible = [
-        case
-        for case in available
-        if case.admission_state in {"eligible", "admitted"}
-        and _complete_lane_identity(case)
-    ]
+    skipped: list[dict[str, Any]] = []
+    eligible: list[OptimizationCaseQueue] = []
+    for case in available:
+        if case.admission_state not in {"eligible", "admitted"}:
+            continue
+        if not _complete_lane_identity(case):
+            skipped.append(
+                {
+                    "code": "lane_identity_incomplete",
+                    "category_key": str(case.category_key),
+                    "pipeline_kind": str(case.pipeline_kind),
+                    "generation": int(case.automation_generation),
+                    "route_key": str(case.route_key or ""),
+                    "prompt_version": str(case.prompt_version),
+                    "available": 1,
+                    "severity": "blocking",
+                    "message": "案例缺少完整的机制指纹或路由身份。",
+                }
+            )
+            continue
+        eligible.append(case)
     grouped: dict[LaneKey, list[OptimizationCaseQueue]] = {}
     for case in eligible:
         grouped.setdefault(build_case_lane_key(case), []).append(case)
@@ -105,10 +120,18 @@ def select_ready_lane(
         scope = (str(lane.category_key), str(lane.pipeline_kind), int(lane.generation))
         policies_by_scope.setdefault(scope, []).append(lane)
         policies_by_identity.setdefault(_lane_identity(lane), []).append(lane)
-    skipped: list[dict[str, Any]] = []
     triggered = last_triggered_at_by_lane or {}
+    minimum = datetime.min.replace(tzinfo=timezone.utc)
+    ordered_keys = sorted(
+        grouped,
+        key=lambda key: (
+            triggered.get(key) is not None,
+            _aware(triggered[key]) if triggered.get(key) is not None else minimum,
+            key,
+        ),
+    )
 
-    for key in sorted(grouped):
+    for key in ordered_keys:
         category_key, pipeline_kind, generation, fingerprint, route_key, prompt = key
         cases = grouped[key]
         scope = (category_key, pipeline_kind, generation)
