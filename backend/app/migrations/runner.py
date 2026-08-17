@@ -8578,6 +8578,11 @@ MIGRATIONS = [
         "add_3d_shadow_dry_run_contracts",
         lambda connection: _migration_072_add_3d_shadow_dry_run_contracts(connection),
     ),
+    Migration(
+        73,
+        "add_global_automation_lanes",
+        lambda connection: _migration_073_add_global_automation_lanes(connection),
+    ),
 ]
 
 
@@ -8911,6 +8916,194 @@ def _migration_072_add_3d_shadow_dry_run_contracts(connection: Connection) -> No
         "CREATE INDEX IF NOT EXISTS ix_shadow_projection_runs_status ON shadow_projection_runs(status, created_at)",
     ):
         connection.exec_driver_sql(statement)
+
+
+def _migration_073_add_global_automation_lanes(connection: Connection) -> None:
+    """Add isolated automation lanes and quarantine the pre-enable backlog."""
+
+    def table_exists(table: str) -> bool:
+        return bool(
+            connection.exec_driver_sql(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                (table,),
+            ).scalar()
+        )
+
+    def columns(table: str) -> set[str]:
+        if not table_exists(table):
+            return set()
+        return {
+            row[1]
+            for row in connection.exec_driver_sql(f"PRAGMA table_info({table})")
+        }
+
+    queue_columns = columns("optimization_case_queue")
+    if queue_columns:
+        queue_additions = (
+            (
+                "pipeline_kind",
+                "VARCHAR(20) NOT NULL DEFAULT 'incremental' "
+                "CHECK(pipeline_kind IN ('incremental','baseline'))",
+            ),
+            (
+                "automation_generation",
+                "INTEGER NOT NULL DEFAULT 1 CHECK(automation_generation >= 1)",
+            ),
+            ("mechanism_fingerprint", "VARCHAR(64)"),
+            ("route_key", "VARCHAR(120)"),
+            ("eligibility_snapshot_id", "INTEGER"),
+            (
+                "admission_state",
+                "VARCHAR(30) NOT NULL DEFAULT 'eligible' "
+                "CHECK(admission_state IN ('awaiting_evidence','historical_audit','eligible','admitted','rejected'))",
+            ),
+        )
+        for name, definition in queue_additions:
+            if name not in queue_columns:
+                connection.exec_driver_sql(
+                    f"ALTER TABLE optimization_case_queue ADD COLUMN {name} {definition}"
+                )
+        connection.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_optimization_case_queue_lane "
+            "ON optimization_case_queue(category_key, pipeline_kind, automation_generation, admission_state)"
+        )
+        connection.exec_driver_sql(
+            "UPDATE optimization_case_queue SET admission_state='historical_audit' "
+            "WHERE status IN ('pending','failed') AND admission_state='eligible'"
+        )
+
+    connection.exec_driver_sql(
+        """
+        CREATE TABLE IF NOT EXISTS automation_lane_policies (
+            id INTEGER PRIMARY KEY,
+            category_key VARCHAR(40) NOT NULL,
+            pipeline_kind VARCHAR(20) NOT NULL
+                CHECK(pipeline_kind IN ('incremental','baseline')),
+            generation INTEGER NOT NULL DEFAULT 1 CHECK(generation >= 1),
+            status VARCHAR(20) NOT NULL DEFAULT 'draft'
+                CHECK(status IN ('draft','enabled','paused','retired')),
+            enabled_at DATETIME,
+            case_threshold INTEGER NOT NULL DEFAULT 10 CHECK(case_threshold >= 1),
+            min_batch_size INTEGER NOT NULL DEFAULT 1 CHECK(min_batch_size >= 1),
+            max_wait_seconds INTEGER NOT NULL DEFAULT 3600 CHECK(max_wait_seconds >= 0),
+            immediate_severities_json TEXT NOT NULL DEFAULT '["P0","P1"]'
+                CHECK(json_valid(immediate_severities_json)
+                    AND json_type(immediate_severities_json, '$') = 'array'),
+            daily_budget_micros INTEGER NOT NULL DEFAULT 0 CHECK(daily_budget_micros >= 0),
+            cooldown_seconds INTEGER NOT NULL DEFAULT 21600 CHECK(cooldown_seconds >= 0),
+            max_candidates INTEGER NOT NULL DEFAULT 1 CHECK(max_candidates >= 1),
+            max_consecutive_batches INTEGER NOT NULL DEFAULT 1 CHECK(max_consecutive_batches >= 1),
+            target_sample_set_id VARCHAR(120),
+            stable_control_set_id VARCHAR(120),
+            blind_holdout_set_id VARCHAR(120),
+            mechanism_snapshot_json TEXT NOT NULL DEFAULT '{}'
+                CHECK(json_valid(mechanism_snapshot_json)
+                    AND json_type(mechanism_snapshot_json, '$') = 'object'),
+            mechanism_fingerprint VARCHAR(64) NOT NULL
+                CHECK(length(mechanism_fingerprint) = 64
+                    AND mechanism_fingerprint = lower(mechanism_fingerprint)
+                    AND mechanism_fingerprint NOT GLOB '*[^0-9a-f]*'),
+            revision INTEGER NOT NULL DEFAULT 1,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(category_key, pipeline_kind, generation)
+        )
+        """
+    )
+    connection.exec_driver_sql(
+        """
+        CREATE TABLE IF NOT EXISTS optimization_case_eligibility_snapshots (
+            id INTEGER PRIMARY KEY,
+            case_id INTEGER NOT NULL UNIQUE
+                REFERENCES optimization_case_queue(id) ON DELETE CASCADE,
+            lane_policy_id INTEGER NOT NULL
+                REFERENCES automation_lane_policies(id) ON DELETE RESTRICT,
+            category_key VARCHAR(40) NOT NULL,
+            pipeline_kind VARCHAR(20) NOT NULL
+                CHECK(pipeline_kind IN ('incremental','baseline')),
+            generation INTEGER NOT NULL CHECK(generation >= 1),
+            mechanism_fingerprint VARCHAR(64) NOT NULL
+                CHECK(length(mechanism_fingerprint) = 64
+                    AND mechanism_fingerprint = lower(mechanism_fingerprint)
+                    AND mechanism_fingerprint NOT GLOB '*[^0-9a-f]*'),
+            route_key VARCHAR(120) NOT NULL,
+            correction_revision INTEGER NOT NULL DEFAULT 1,
+            evidence_json TEXT NOT NULL DEFAULT '{}'
+                CHECK(json_valid(evidence_json)
+                    AND json_type(evidence_json, '$') = 'object'),
+            admission_state VARCHAR(30) NOT NULL DEFAULT 'awaiting_evidence'
+                CHECK(admission_state IN ('awaiting_evidence','historical_audit','eligible','admitted','rejected')),
+            eligible_at DATETIME,
+            historical_source VARCHAR(120),
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    connection.exec_driver_sql(
+        """
+        CREATE TABLE IF NOT EXISTS automation_batches (
+            id INTEGER PRIMARY KEY,
+            batch_key VARCHAR(200) NOT NULL UNIQUE,
+            lane_policy_id INTEGER NOT NULL
+                REFERENCES automation_lane_policies(id) ON DELETE RESTRICT,
+            category_key VARCHAR(40) NOT NULL,
+            pipeline_kind VARCHAR(20) NOT NULL
+                CHECK(pipeline_kind IN ('incremental','baseline')),
+            generation INTEGER NOT NULL CHECK(generation >= 1),
+            mechanism_fingerprint VARCHAR(64) NOT NULL,
+            route_key VARCHAR(120) NOT NULL,
+            case_set_hash VARCHAR(64) NOT NULL
+                CHECK(length(case_set_hash) = 64
+                    AND case_set_hash = lower(case_set_hash)
+                    AND case_set_hash NOT GLOB '*[^0-9a-f]*'),
+            frozen_policy_json TEXT NOT NULL DEFAULT '{}'
+                CHECK(json_valid(frozen_policy_json)
+                    AND json_type(frozen_policy_json, '$') = 'object'),
+            status VARCHAR(40) NOT NULL DEFAULT 'queued'
+                CHECK(status IN ('queued','leased','processing','completed','failed','cancelled','awaiting_release_review')),
+            trigger_reason VARCHAR(120) NOT NULL DEFAULT 'threshold',
+            lease_owner VARCHAR(120),
+            lease_token VARCHAR(80),
+            lease_expires_at DATETIME,
+            error_code VARCHAR(80),
+            error_message TEXT NOT NULL DEFAULT '',
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            started_at DATETIME,
+            finished_at DATETIME,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    connection.exec_driver_sql(
+        """
+        CREATE TABLE IF NOT EXISTS automation_batch_cases (
+            id INTEGER PRIMARY KEY,
+            batch_id INTEGER NOT NULL
+                REFERENCES automation_batches(id) ON DELETE CASCADE,
+            eligibility_snapshot_id INTEGER NOT NULL UNIQUE
+                REFERENCES optimization_case_eligibility_snapshots(id) ON DELETE RESTRICT,
+            case_id INTEGER NOT NULL
+                REFERENCES optimization_case_queue(id) ON DELETE RESTRICT,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(batch_id, case_id)
+        )
+        """
+    )
+    for statement in (
+        "CREATE INDEX IF NOT EXISTS ix_automation_lane_policies_status "
+        "ON automation_lane_policies(status, category_key, pipeline_kind)",
+        "CREATE INDEX IF NOT EXISTS ix_automation_case_eligibility_lane "
+        "ON optimization_case_eligibility_snapshots(lane_policy_id, admission_state)",
+        "CREATE INDEX IF NOT EXISTS ix_automation_batches_status "
+        "ON automation_batches(status, created_at)",
+        "CREATE INDEX IF NOT EXISTS ix_automation_batch_cases_batch "
+        "ON automation_batch_cases(batch_id, case_id)",
+    ):
+        connection.exec_driver_sql(statement)
+
+    violations = connection.exec_driver_sql("PRAGMA foreign_key_check").fetchall()
+    if violations:
+        raise RuntimeError(f"v73 全局自动组批迁移外键校验失败：{violations[:3]}")
 
 
 def run_migrations(connection: Connection) -> None:

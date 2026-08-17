@@ -87,6 +87,7 @@ MIGRATION_NAMES = [
     "add_source_identity_verification",
     "add_script_workflow_runtime",
     "add_3d_shadow_dry_run_contracts",
+    "add_global_automation_lanes",
 ]
 
 

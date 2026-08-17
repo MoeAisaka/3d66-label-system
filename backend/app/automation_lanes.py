@@ -9,8 +9,14 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from datetime import datetime, timezone
 from typing import Any, Literal, Mapping
 
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from .audit import append_audit_event
+from .models import AutomationLanePolicy, OptimizationCaseQueue
 
 PipelineKind = Literal["incremental", "baseline"]
 _FINGERPRINT_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -109,6 +115,132 @@ def validate_lane_snapshot(snapshot: Mapping[str, Any]) -> None:
         mechanism_fingerprint=snapshot["mechanism_fingerprint"],
         route_key=snapshot["route_key"],
     )
+
+
+def case_is_dispatchable(
+    case: OptimizationCaseQueue,
+    *,
+    now: datetime | None = None,
+) -> bool:
+    """Return whether a queue case is eligible for the automated consumer."""
+
+    current = now or datetime.now(timezone.utc)
+    if case.status not in {"pending", "failed"}:
+        return False
+    if case.admission_state not in {"eligible", "admitted"}:
+        return False
+    if case.next_attempt_at is not None and case.next_attempt_at > current:
+        return False
+    if case.lease_expires_at is not None and case.lease_expires_at > current:
+        return False
+    return True
+
+
+def quarantine_pre_enable_cases(
+    db: Session,
+    *,
+    enabled_at: datetime,
+    actor: str,
+) -> int:
+    """Move pre-enable pending cases into audit-only state without rewriting facts."""
+
+    cases = db.scalars(
+        select(OptimizationCaseQueue).where(
+            OptimizationCaseQueue.created_at < enabled_at,
+            OptimizationCaseQueue.status.in_(["pending", "failed"]),
+            OptimizationCaseQueue.admission_state != "historical_audit",
+        )
+    ).all()
+    for case in cases:
+        case.admission_state = "historical_audit"
+        append_audit_event(
+            db,
+            category="automation",
+            action="quarantine_pre_enable_case",
+            subject_type="optimization_case_queue",
+            subject_id=case.id,
+            actor=actor,
+            payload={
+                "enabled_at": enabled_at.isoformat(),
+                "admission_state": "historical_audit",
+            },
+            event_key=f"automation:quarantine:{case.id}:{enabled_at.isoformat()}",
+        )
+    db.flush()
+    return len(cases)
+
+
+def admit_historical_case(
+    db: Session,
+    *,
+    case_id: int,
+    lane_policy_id: int,
+    actor: str,
+    reason: str,
+) -> OptimizationCaseQueue:
+    """Create one idempotent, lane-frozen copy of a historical human-review case."""
+
+    source = db.get(OptimizationCaseQueue, case_id)
+    if source is None:
+        raise ValueError("historical source case does not exist")
+    lane = db.get(AutomationLanePolicy, lane_policy_id)
+    if lane is None:
+        raise ValueError("automation lane policy does not exist")
+    if source.admission_state != "historical_audit":
+        raise ValueError("only historical_audit cases can be admitted")
+    if source.source_type != "human_review":
+        raise ValueError("historical admission currently requires a human_review source")
+    if source.evaluation_id is None or source.final_review_id is None:
+        raise ValueError("human_review source is missing immutable review references")
+
+    idempotency_key = (
+        f"historical-admission:{source.id}:lane:{lane.id}:revision:{lane.revision}"
+    )
+    existing = db.scalar(
+        select(OptimizationCaseQueue).where(
+            OptimizationCaseQueue.idempotency_key == idempotency_key
+        )
+    )
+    if existing is not None:
+        return existing
+
+    admitted = OptimizationCaseQueue(
+        category_key=lane.category_key,
+        pipeline_kind=lane.pipeline_kind,
+        automation_generation=lane.generation,
+        mechanism_fingerprint=lane.mechanism_fingerprint,
+        route_key=source.route_key or "historical-admission",
+        eligibility_snapshot_id=None,
+        admission_state="admitted",
+        idempotency_key=idempotency_key,
+        evaluation_id=source.evaluation_id,
+        final_review_id=source.final_review_id,
+        source_type="human_review",
+        prompt_version=source.prompt_version,
+        severity=source.severity,
+        case_json=source.case_json,
+        status="pending",
+    )
+    db.add(admitted)
+    db.flush()
+    append_audit_event(
+        db,
+        category="automation",
+        action="admit_historical_case",
+        subject_type="optimization_case_queue",
+        subject_id=admitted.id,
+        actor=actor,
+        payload={
+            "source_case_id": source.id,
+            "lane_policy_id": lane.id,
+            "reason": reason,
+            "pipeline_kind": lane.pipeline_kind,
+            "generation": lane.generation,
+            "mechanism_fingerprint": lane.mechanism_fingerprint,
+        },
+        event_key=f"automation:admit:{idempotency_key}",
+    )
+    return admitted
 
 
 def _validate_lane_identity(

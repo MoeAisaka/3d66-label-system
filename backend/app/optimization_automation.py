@@ -1244,6 +1244,9 @@ def consume_optimization_queue_once(
     available = db.scalars(
         select(OptimizationCaseQueue)
         .where(
+            OptimizationCaseQueue.admission_state.in_(
+                ["eligible", "admitted"]
+            ),
             or_(
                 OptimizationCaseQueue.status == "pending",
                 and_(
@@ -2066,6 +2069,9 @@ def _eligible_cases(db: Session, policy: AutomationPolicy, now: datetime) -> lis
     return db.scalars(
         select(OptimizationCaseQueue)
         .where(
+            OptimizationCaseQueue.admission_state.in_(
+                ["eligible", "admitted"]
+            ),
             or_(
                 OptimizationCaseQueue.status == "pending",
                 and_(
