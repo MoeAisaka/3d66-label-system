@@ -191,7 +191,14 @@ def map_standard_entities(
             continue
         merged_weight = None
         if existing.weight is not None or item.weight is not None:
-            merged_weight = min(1.0, float(existing.weight or 0) + float(item.weight or 0))
+            weights = [
+                float(weight)
+                for weight in (existing.weight, item.weight)
+                if weight is not None
+            ]
+            # Relative-importance levels are not additive. Duplicate aliases
+            # must not inflate the level; keep the strongest observed evidence.
+            merged_weight = max(weights)
         mapped[entity_id] = SemanticMappedValue(
             entity_id=existing.entity_id,
             localized_names=existing.localized_names,

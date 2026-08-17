@@ -7,7 +7,6 @@ not perform persistence, model calls, external projections, or other IO.
 from __future__ import annotations
 
 import hashlib
-import math
 import re
 from collections.abc import Mapping
 from typing import Any, Literal, Sequence
@@ -96,14 +95,12 @@ class SemanticFieldResult(BaseModel):
         ranks = [item.rank for item in self.values]
         if len(ranks) != len(set(ranks)):
             raise ValueError("values 的 rank 不能重复")
-        weights = [item.weight for item in self.values if item.weight is not None]
-        if math.fsum(weights) > 1.0 + 1e-9:
-            raise ValueError("values 的 weight 总和不能超过 1.0")
         object.__setattr__(self, "values", tuple(self.values))
         return self
 
 
 SemanticApplicability = Literal["required", "optional", "not_applicable"]
+WeightSemantics = Literal["none", "relative_importance_level"]
 
 
 class SemanticFieldDefinition(BaseModel):
@@ -111,6 +108,7 @@ class SemanticFieldDefinition(BaseModel):
 
     field_key: str
     cardinality: Literal["single", "multi"]
+    weight_semantics: WeightSemantics = "none"
     localized: bool = True
     vocabulary_owner: str = Field(min_length=1, max_length=120)
     max_values: int = Field(ge=1, le=100)
@@ -132,9 +130,6 @@ class SemanticFieldDefinition(BaseModel):
         ranks = [item.rank for item in self.default_value]
         if len(ranks) != len(set(ranks)):
             raise ValueError("default_value 的 rank 不能重复")
-        weights = [item.weight for item in self.default_value if item.weight is not None]
-        if math.fsum(weights) > 1.0 + 1e-9:
-            raise ValueError("default_value 的 weight 总和不能超过 1.0")
         object.__setattr__(self, "default_value", tuple(self.default_value))
         return self
 

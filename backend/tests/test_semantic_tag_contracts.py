@@ -35,6 +35,9 @@ def _field_definition(key: str) -> dict:
     return {
         "field_key": key,
         "cardinality": "multi" if key == "object" else "single",
+        "weight_semantics": "relative_importance_level"
+        if key in {"object", "material"}
+        else "none",
         "localized": True,
         "vocabulary_owner": "tpeng-semantic-platform",
         "max_values": 10 if key == "object" else 1,
@@ -156,7 +159,7 @@ def test_v1_contract_remains_valid_without_v2_fields() -> None:
     parsed = validate_tag_demand_contract(valid_contract())
     assert parsed.schema_version == "tag-demand-contract-v1"
     assert canonical_contract_hash(parsed) == (
-        "2c0b0b9b08f910651c073012fd4b26e9d0bae42ee66ff4601cf0a7db333b4d1c"
+        "ffa9ceddc1e424188d1955c6da42bf43b9e5c7e4db0db2d56d54c52f9be19ac4"
     )
 
 
@@ -207,17 +210,28 @@ def test_field_result_rejects_duplicate_ranks() -> None:
         )
 
 
-def test_field_result_rejects_aggregate_weight_over_one() -> None:
-    with pytest.raises(SemanticTagContractError, match="weight 总和不能超过 1.0"):
-        validate_semantic_field_result(
-            {
-                "status": "optional",
-                "values": [
-                    _tag_value(value="现代", rank=1, weight=0.7),
-                    _tag_value(value="极简", rank=2, weight=0.6),
-                ],
-            }
-        )
+def test_field_result_preserves_relative_importance_levels_without_normalizing() -> None:
+    result = validate_semantic_field_result(
+        {
+            "status": "optional",
+            "values": [
+                _tag_value(value="沙发", rank=1, weight=0.7),
+                _tag_value(value="茶几", rank=2, weight=0.5),
+                _tag_value(value="落地灯", rank=3, weight=0.3),
+            ],
+        }
+    )
+    assert [item.weight for item in result.values] == [0.7, 0.5, 0.3]
+
+
+def test_contract_declares_relative_importance_for_object_and_material() -> None:
+    parsed = validate_tag_demand_contract(valid_contract())
+    assert parsed.semantic_schema.fields["object"].weight_semantics == (
+        "relative_importance_level"
+    )
+    assert parsed.semantic_schema.fields["material"].weight_semantics == (
+        "relative_importance_level"
+    )
 
 
 @pytest.mark.parametrize(

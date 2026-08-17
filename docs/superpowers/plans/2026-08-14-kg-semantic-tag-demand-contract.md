@@ -13,7 +13,8 @@
 - 统一产品名称为 **TPENG 标签实验台（LabelLab）**；“标签体系重构”是转型目标，不再建设独立平台。
 - `space`、`object`、`style`、`material`、`structural_features`、`architectural_element`、`soft_decoration`、`hard_decoration`、`color` 是平台通用语义字段；`title` 是按类目和 locale 声明的本地化字段。
 - 业务类目只能提供字段适用性、`category.<category_key>.*` 扩展、预处理、Prompt/模型/规则绑定、专用编辑视图和字段级质量门槛，不复制模型管理、纠偏、版本、发布、重跑或投影能力。
-- Canonical 多值字段必须结构化保存 `value`、`entity_id`、`locale`、`rank`、`weight` 和完整 provenance；禁止将逗号字符串作为事实主存储。
+- Canonical 多值字段必须结构化保存 `value`、`entity_id`、`locale`、`rank`、`weight`、`weight_semantics` 和完整 provenance；禁止将逗号字符串作为事实主存储。
+- `object`、`material` 使用 `weight_semantics=relative_importance_level`：每个值的 0～1 数值单独保留，`rank` 负责排序，不做总和归一化；同一实体重复出现时取最高等级，不累加。
 - `not_applicable`、`not_detected`、`needs_review` 必须可区分；禁止使用空字符串折叠空值语义。
 - 国内/海外、整体/单体通过 `site_scope`、`asset_scope`、`locale`、`category_key`、`prompt_variant`、`prompt_version`、`model_version` 参数路由，不复制四套流水线。
 - 机制发布轴与标签事实发布轴保持独立；启用候选机制不自动发布标签事实，不自动覆盖存量。
@@ -192,7 +193,7 @@ class TagDemandContractDefinition(BaseModel):
     projection_targets: Sequence[ProjectionTargetDefinition]
 ```
 
-Implement explicit validators so `not_applicable` and `not_detected` require an empty value list, `required` cannot publish empty values, ranks are unique, and weights never exceed `1.0` in aggregate.
+Implement explicit validators so `not_applicable` and `not_detected` require an empty value list, `required` cannot publish empty values, ranks are unique, each relative-importance level remains within `0..1`, and no aggregate-weight normalization is applied.
 
 - [ ] **Step 4: Add canonical hash and exact execution-variant validation**
 
@@ -540,7 +541,7 @@ def test_duplicate_entities_merge_deterministically() -> None:
         mapping_version="object-map-v1",
     )
     assert len(result.values) == 1
-    assert result.values[0].weight == pytest.approx(1.0)
+    assert result.values[0].weight == pytest.approx(0.6)
 ```
 
 - [ ] **Step 2: Confirm red**
@@ -555,7 +556,7 @@ Reject strings where an array/object is required, trim Unicode whitespace, norma
 
 - [ ] **Step 4: Implement versioned mapping and conflict detection**
 
-Map by exact standard value first, then declared alias; never perform uncontrolled fuzzy mapping. Emit conflicts when two entity IDs claim the same rank, a single-value field maps to multiple entities, or weights/ranks violate the field contract.
+Map by exact standard value first, then declared alias; never perform uncontrolled fuzzy mapping. Emit conflicts when two entity IDs claim the same rank, a single-value field maps to multiple entities, or rank/individual-level constraints violate the field contract. Duplicate aliases for one entity keep the highest relative-importance level and merge evidence without adding levels.
 
 - [ ] **Step 5: Connect `schema_adapter.py` to evidence candidates only**
 
@@ -1089,7 +1090,7 @@ Record completed local capabilities, exact test/build/browser results, migration
 
 ```text
 standard vocabularies and entity owners
-0.7/0.5/0.3 business semantics and maximum value counts
+0.7/0.5/0.3 relative-importance semantics and maximum value counts
 real upstream asset-version events
 domestic/overseas database table contracts and least-privilege accounts
 knowledge-graph consumer SLA and badcase callback

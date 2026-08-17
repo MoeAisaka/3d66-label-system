@@ -1,5 +1,14 @@
 # 3d66 标签系统｜当前项目状态
 
+## 最新合同补充：知识图谱四批真实数据与两张目标表建表需求（2026-08-17，本地合同已更新）
+
+- 已冻结四批交付口径：国内整体/单体、海外整体/单体，共用平台语义字段合同和同一投影逻辑；海外目标表为 `relebook_kg_model_tag_recognition`，国内目标表为 `kg_model_tag_recognition_cn`。
+- 四批正式首批统一使用 T-1 快照 `2026-08-16`；海外来源固定为 `aliyun_3d66_dw.ods_ll_relebook_res(dt='20260816', res_type=6)`，通过 `(ll_id,res_type)` 关联 `aliyun_3d66_dw.dim_res_info`，过滤 `is_delete=0`，按 `is_single` 拆分整体/单体。
+- `object` / `material` 的数值语义已冻结为“相对重要性等级”：每个值单独保留 0～1，`rank` 负责排序，允许 `0.7/0.5/0.3` 同时出现，不做总和归一化，不解释为概率/占比；重复实体合并取最高等级、不累加。
+- 已新增 `docs/contracts/2026-08-17-kg-four-batch-target-table-request-v1.md` 作为大数据建表需求包，包含逻辑字段、分区、幂等键、版本追溯、Manifest、对账和回退要求。目标表仍是可重建下游投影，不是 Canonical 事实主库。
+- 本次回归：语义合同/映射/3D-SU seed/投影专项 `39+16+22` 通过；后端全量 `1514 passed, 1 skipped, 6 warnings`。warning 仅为既有依赖弃用提示。
+- 本会话不执行 DDL/DML、不申请建表权限、不连接真实业务数据库、不调用真实模型；待大数据回执正式 DDL、国内来源和 Owner/权限后，再冻结四批真实跑批合同。
+
 ## 最新实施：3D/SU 真实闭环接入前置冻结（2026-08-16，本地未发布）
 
 - 新增机器可校验的 `3d-su-readiness-v1` manifest，固定 `model_3d_su` 首个纵切的候选源表、`res_type + ll_id` 身份键、四项只读探查哈希、平台字段与类目扩展边界、黄金集、最小权限、RACI、停止条件和全部外部效果为 false。
