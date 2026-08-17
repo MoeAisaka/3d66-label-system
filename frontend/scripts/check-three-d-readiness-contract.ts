@@ -23,7 +23,7 @@ const permissionRaci = source(
 )
 
 requireText(readiness, "aliyun_3d66_dw.dim_res_info_union")
-requireText(readiness, "res_type=1")
+requireText(readiness, "res_type in (1,6)")
 requireText(readiness, "res_type=6")
 requireText(readiness, "pending_external_signoff")
 requireText(readiness, "双人工门")

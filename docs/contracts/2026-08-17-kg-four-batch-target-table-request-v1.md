@@ -23,8 +23,8 @@
 |---|---|---|---|---|---:|---|---|
 | 国内整体模型 | `kg_model_tag_recognition_cn` | `domestic` | `zh` | `whole` | 0 | `whole` | 来源表已确认；目标表待建 |
 | 国内单体模型 | `kg_model_tag_recognition_cn` | `domestic` | `zh` | `single` | 1 | `single` | 来源表已确认；目标表待建 |
-| 海外整体模型 | `relebook_kg_model_tag_recognition` | `overseas` | `en` | `whole` | 0 | `whole` | 主表与 `is_single` 来源已确认；关联键待回执 |
-| 海外单体模型 | `relebook_kg_model_tag_recognition` | `overseas` | `en` | `single` | 1 | `single` | 主表与 `is_single` 来源已确认；关联键待回执 |
+| 海外整体模型 | `relebook_kg_model_tag_recognition` | `overseas` | `en` | `whole` | 0 | `whole` | `res_id + dt` 已确认；源 `is_single=1` |
+| 海外单体模型 | `relebook_kg_model_tag_recognition` | `overseas` | `en` | `single` | 1 | `single` | `res_id + dt` 已确认；源 `is_single=2` |
 
 正式首批使用同一个 T-1 快照：`2026-08-16`。后续三批继续使用该日期的同一快照，不因批次执行时间不同而重新取数。
 
@@ -50,10 +50,10 @@
 | 素材 ID | `res_id` |
 | 模型类目过滤 | `res_type = 6` |
 | `is_single` 来源 | `aliyun_3d66_dw.ods_ll_relebook_res_su_extra` |
-| 整体/单体路由 | extra 表中的 `is_single=0` 整体，`is_single=1` 单体 |
+| 整体/单体路由 | extra 表中的 `is_single=1` 整体，`is_single=2` 单体；投影字段如需兼容 0/1，显式转换为整体 0、单体 1 |
 | 首批快照 | 主表使用 `dt='20260816'` |
 
-海外主键候选为 `(res_type,res_id)`。主表与 `ods_ll_relebook_res_su_extra` 的正式关联键、extra 表快照字段、删除字段和唯一性探查结果必须由大数据回执后才能执行；当前不假设使用 `ll_id` 或任意隐式同名键。
+海外主键为 `(res_type,res_id)`。DataWorks 生产元数据已确认主表与 `ods_ll_relebook_res_su_extra` 以 `res_id` 关联；两表均按 `dt` 分区，固定批次应限定同一 `dt`，因此抽取关系使用 `main.res_id = extra.res_id AND main.dt = extra.dt`。`dt` 是快照一致性约束，不是素材身份键；当前不使用 `ll_id` 或任意隐式同名键。
 
 两套来源都必须分别完成空值、重复、跨表匹配、`is_single` 取值和快照一致性探查。国内/海外来源绑定不能复用一条 SQL，也不能把一套来源字段映射硬编码成另一套来源。
 
@@ -149,7 +149,7 @@
 
 1. 两张目标表的正式 DDL、开发/生产表映射和 Schema 版本；
 2. 国内来源表 `dim_res_info_union` 的主键/唯一性、T-1 快照字段和删除字段；
-3. 海外主表与 `ods_ll_relebook_res_su_extra` 的正式关联键、两表快照/删除字段和唯一性；
+3. 海外主表与 `ods_ll_relebook_res_su_extra` 的 `res_id + dt` 关联、两表删除字段和匹配唯一性；
 4. `res_type`、`ll_id`、`res_id`、`is_single` 的实际物理类型；
 5. 表 Owner、读写账号、最小权限、分区保留周期和回退操作人；
 6. 目标表写入方式（DataWorks 节点/离线任务/API 投影）及单写者约束；
