@@ -31,6 +31,7 @@ from .category_evaluation_contract import (
     bind_category_evaluation_prompt_versions,
     validate_category_evaluation_prompt_bindings,
 )
+from .automation_candidate_pipeline import build_immutable_candidate_package
 from .doubao import DoubaoClient
 from .models import (
     BaselineCorrectionRun,
@@ -765,6 +766,39 @@ def advance_correction_run(
         orchestration["generated_candidate"] = _generator_payload(generated)
         correction.orchestration_json = canonical_json(orchestration)
     _validate_candidate_routing(generated, report)
+    mechanism_fingerprint = str(
+        report.get("mechanism_fingerprint")
+        or generated.model_snapshot.get("mechanism_fingerprint")
+        or ""
+    )
+    candidate_manifest = {
+        "category_key": correction.category_key,
+        "lane_key": str(report.get("route_decision", {}).get("route_key") or ""),
+        "mechanism_fingerprint": mechanism_fingerprint,
+        "route_decision": report.get("route_decision") or {},
+        "prompt_snapshot": {
+            "stage": generated.prompt.stage,
+            "change_note": generated.prompt.change_note,
+        },
+        "v3_snapshot": generated.revision.contract,
+        "change_reasons": generated.summary.get("change_codes", []),
+    }
+    if len(mechanism_fingerprint) == 64 and all(
+        character in "0123456789abcdef" for character in mechanism_fingerprint
+    ):
+        package = build_immutable_candidate_package(candidate_manifest)
+        orchestration["candidate_package"] = {
+            "package_key": package.package_key,
+            "manifest": json.loads(
+                canonical_json(
+                    {
+                        "schema_version": "automation-candidate-v1",
+                        **candidate_manifest,
+                    }
+                )
+            ),
+        }
+        correction.orchestration_json = canonical_json(orchestration)
     if generated.revision.contract.get("category_key") != correction.category_key:
         raise CorrectionOrchestrationError(
             "CORRECTION_CANDIDATE_CATEGORY_MISMATCH",
