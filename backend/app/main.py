@@ -139,6 +139,7 @@ from .models import (
     User,
 )
 from .audit import append_audit_event, canonical_json
+from .automation_api import build_automation_router
 from .field_demand_contracts import (
     FieldDemandContractError,
     asset_version_payload,
@@ -1618,6 +1619,7 @@ app.include_router(build_node_correction_router(_permission_user("reviews:write"
 app.include_router(build_script_registry_router(current_user))
 app.include_router(build_workflow_registry_router(current_user))
 app.include_router(build_workflow_runtime_router(current_user))
+app.include_router(build_automation_router(current_user, admin_user))
 app.include_router(
     build_evaluation_package_router(
         require_permission("releases:read"),
