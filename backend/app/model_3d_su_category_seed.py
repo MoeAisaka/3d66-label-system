@@ -42,14 +42,36 @@ from .subcategory_resolver import CLASSIFICATION_MAP_FORMAT_VERSION, validate_cl
 
 
 MODEL_3D_SU_CATEGORY_KEY = "model_3d_su"
-MODEL_3D_SU_SPEC_VERSION = "model-3d-su-v1-dingtalk-20260814"
-MODEL_3D_SU_RUBRIC_VERSION = "model-3d-su-rubric-v1"
-MODEL_3D_SU_CALL_A_VERSION = "model-3d-su-a-v1-20260814"
-MODEL_3D_SU_CALL_B_VERSION = "model-3d-su-b-v1-20260814"
-MODEL_3D_SU_CREATED_BY = "system:model-3d-su-v1"
+MODEL_3D_SU_V1_SPEC_VERSION = "model-3d-su-v1-dingtalk-20260814"
+MODEL_3D_SU_V1_RUBRIC_VERSION = "model-3d-su-rubric-v1"
+MODEL_3D_SU_V1_CALL_A_VERSION = "model-3d-su-a-v1-20260814"
+MODEL_3D_SU_V1_CALL_B_VERSION = "model-3d-su-b-v1-20260814"
+MODEL_3D_SU_V1_CREATED_BY = "system:model-3d-su-v1"
+
+MODEL_3D_SU_SPEC_VERSION = "model-3d-su-v2-grade-scoring-20260817"
+MODEL_3D_SU_RUBRIC_VERSION = "model-3d-su-rubric-v2"
+MODEL_3D_SU_CALL_A_VERSION = "model-3d-su-a-v2-20260817"
+MODEL_3D_SU_CALL_B_VERSION = "model-3d-su-b-v2-20260817"
+MODEL_3D_SU_CREATED_BY = "system:model-3d-su-v2"
 MODEL_3D_SU_SCHEMA_KEY = "model_3d_su_aesthetic"
-MODEL_3D_SU_SCHEMA_VERSION = "v1"
+MODEL_3D_SU_SCHEMA_VERSION = "v2"
 MODEL_3D_SU_SEMANTIC_CONTRACT_KEY = "semantic-platform"
+
+_MODEL_3D_SU_SYSTEM_OWNERS = {
+    MODEL_3D_SU_V1_CREATED_BY,
+    MODEL_3D_SU_CREATED_BY,
+}
+_MODEL_3D_SU_RUBRIC_VERSIONS = {
+    MODEL_3D_SU_V1_RUBRIC_VERSION,
+    MODEL_3D_SU_RUBRIC_VERSION,
+}
+_LINEAR_GRADE_POINTS = {
+    "1": 0.0,
+    "2": 25.0,
+    "3": 50.0,
+    "4": 75.0,
+    "5": 100.0,
+}
 
 TRACK_SPACE_BUILDING = "space_building"
 TRACK_SOFT_FURNISHING = "soft_furnishing"
@@ -192,33 +214,16 @@ def _seed_model_3d_su_semantic_contract(db: Session) -> TagDemandContract:
     return row
 
 
-def _rule(rule_id: str, description: str, deduction: int) -> dict[str, Any]:
-    return {
-        "rule_id": rule_id,
-        "description": description,
-        "deduction": deduction,
-        "tags": ["模型美感"],
-    }
-
-
 def _dimension(
     key: str,
     label: str,
     weight: float,
-    *,
-    minor: str,
-    obvious: str,
-    severe: str,
 ) -> dict[str, Any]:
     return {
         "key": key,
         "label": label,
         "weight": weight,
-        "deduction_rules": [
-            _rule("minor_defect", f"微瑕：{minor}", 20),
-            _rule("obvious_defect", f"明显缺陷：{obvious}", 50),
-            _rule("severe_defect", f"严重硬伤：{severe}", 80),
-        ],
+        "grade_points": dict(_LINEAR_GRADE_POINTS),
     }
 
 
@@ -227,41 +232,26 @@ def _track_dimensions(track_key: str, weights: list[float]) -> dict[str, Any]:
         "model_detail",
         "模型细节",
         weights[0],
-        minor="少量边缘倒角、接缝、螺丝或褶皱实体化不足",
-        obvious="核心棱角无倒角，缝线/卡扣/沟槽主要依赖平面贴图",
-        severe="主体比例畸形，大量结构细节缺失或软质材料呈硬质平板",
     )
     material = _dimension(
         "material_rendering",
         "质感渲染",
         weights[1],
-        minor="粗糙度或微观印痕略有偏差",
-        obvious="材质属性混淆、纹理重复或高光过曝",
-        severe="贴图模糊/UV 拉伸，反光参数混乱且材质与现实属性脱节",
     )
     lighting = _dimension(
         "lighting",
         "光感表现",
         weights[2],
-        minor="暗部细节略欠缺或局部补光略突兀",
-        obvious="阴影单薄、边缘生硬、无来源亮光或接触阴影缺失",
-        severe="光线违背物理衰减，出现大面积过曝/死黑或多光源冲突",
     )
     design = _dimension(
         "design_trend",
         "设计感及流行度",
         weights[3],
-        minor="风格混搭生硬、设计平庸，或功能比例略别扭",
-        obvious="整体过时、造型同质化，或功能布局明显不合理",
-        severe="造型严重违背审美/制造/使用逻辑，形成虚假功能设计",
     )
     composition = _dimension(
         "visual_composition",
         "视觉构图",
         weights[4],
-        minor="主体重心略偏或边缘有少量无关物件",
-        obvious="构图过满/过空，主体裁切或被遮挡超过约 30%",
-        severe="无视觉重心、元素堆砌，主体被杂乱背景淹没",
     )
     dimensions = [details, material, lighting, design, composition]
     if abs(sum(item["weight"] for item in dimensions) - 1.0) > 1e-9:
@@ -270,6 +260,11 @@ def _track_dimensions(track_key: str, weights: list[float]) -> dict[str, Any]:
         "format_version": SUBCATEGORY_DIMENSIONS_FORMAT_VERSION,
         "sub_category_key": track_key,
         "dimension_max": 100,
+        "grade_output_contract": {
+            "format_version": "dimension-grade-output-v1",
+            "require_exact_keys": True,
+            "evidence_required": True,
+        },
         "common_group": {
             "group_weight": 1.0,
             "schema_definition": {
@@ -299,7 +294,7 @@ def _normalize_weight_points(points: list[int]) -> list[float]:
 
 
 def build_model_3d_su_contract() -> dict[str, Any]:
-    """Build and validate the frozen first-pass v3 contract."""
+    """Build and validate the v2 five-dimension grade-scored contract."""
     contract = {
         "schema_version": CATEGORY_EVALUATION_CONTRACT_VERSION,
         "spec_version": MODEL_3D_SU_SPEC_VERSION,
@@ -543,16 +538,16 @@ def seed_model_3d_su(db: Session, settings: Any) -> None:
         stage="A",
         version=MODEL_3D_SU_CALL_A_VERSION,
         name="3D/SU 模型分类与字段预检",
-        system_prompt=_read_prompt(settings, "model_3d_su_call_a_v1.txt"),
-        change_note="2026-08-14 钉钉 3D/SU 美感机制首版调用 A；输出平台通用字段与类目标记。",
+        system_prompt=_read_prompt(settings, "model_3d_su_call_a_v2.txt"),
+        change_note="2026-08-17 3D/SU 五维 grade 评分机制 v2 调用 A；输出平台通用字段与类目标记。",
     )
     prompt_b = _seed_prompt(
         db,
         stage="B",
         version=MODEL_3D_SU_CALL_B_VERSION,
         name="3D/SU 模型五维美感评审",
-        system_prompt=_read_prompt(settings, "model_3d_su_call_b_v1.txt"),
-        change_note="2026-08-14 钉钉 3D/SU 美感机制首版调用 B；输出五维等级与证据，不输出最终等级。",
+        system_prompt=_read_prompt(settings, "model_3d_su_call_b_v2.txt"),
+        change_note="2026-08-17 3D/SU 五维 grade 评分机制 v2 调用 B；输出严格五维等级与证据，不输出最终等级。",
     )
 
     pipeline = model_3d_su_pipeline()
@@ -563,7 +558,7 @@ def seed_model_3d_su(db: Session, settings: Any) -> None:
     )
     profile_values = {
         "display_name": "3D & SU 模型",
-        "description": "model-3d-su-v1：三赛道五维美感评测，SU 未渲染和风险字段只做标记。",
+        "description": "model-3d-su-v2：三赛道五维美感评测，SU 未渲染和风险字段只做标记。",
         "status": "active",
         "allowed_mime_types_json": canonical_json(
             ["image/jpeg", "image/png", "image/webp", "image/gif"]
@@ -580,18 +575,19 @@ def seed_model_3d_su(db: Session, settings: Any) -> None:
     }
     if profile is None:
         db.add(EvaluationCategoryProfile(category_key=MODEL_3D_SU_CATEGORY_KEY, pipeline_revision=1, **profile_values))
-    elif profile.rubric_version not in {MODEL_3D_SU_RUBRIC_VERSION, ""}:
-        raise RuntimeError("model_3d_su 已存在非本版本类目配置，拒绝覆盖")
+    elif profile.created_by not in _MODEL_3D_SU_SYSTEM_OWNERS:
+        raise RuntimeError("model_3d_su 已存在运营/外部类目配置，拒绝覆盖")
+    elif profile.rubric_version not in {*_MODEL_3D_SU_RUBRIC_VERSIONS, ""}:
+        raise RuntimeError("model_3d_su 已存在未知 rubric 类目配置，拒绝覆盖")
     else:
-        profile.prompt_a_id = profile.prompt_a_id or prompt_a.id
-        profile.prompt_b_id = profile.prompt_b_id or prompt_b.id
+        profile.prompt_a_id = prompt_a.id
+        profile.prompt_b_id = prompt_b.id
         profile.model_config_id = profile.model_config_id or primary.id
-        profile.created_by = profile.created_by or MODEL_3D_SU_CREATED_BY
+        profile.created_by = MODEL_3D_SU_CREATED_BY
         if profile.pipeline_config_json in {"", "{}"}:
             profile.pipeline_config_json = profile_values["pipeline_config_json"]
             profile.pipeline_revision = (profile.pipeline_revision or 0) + 1
-        if profile.rubric_version == "":
-            profile.rubric_version = MODEL_3D_SU_RUBRIC_VERSION
+        profile.rubric_version = MODEL_3D_SU_RUBRIC_VERSION
 
     contract = build_model_3d_su_contract()
     classification_map = build_model_3d_su_classification_map()
@@ -625,7 +621,7 @@ def seed_model_3d_su(db: Session, settings: Any) -> None:
         db.flush()
         ensure_projected_revision(db, row)
         return
-    if row.created_by != MODEL_3D_SU_CREATED_BY:
+    if row.created_by not in _MODEL_3D_SU_SYSTEM_OWNERS:
         raise RuntimeError("model_3d_su v3 合同已存在运营/外部版本，拒绝覆盖")
     try:
         existing_contract = json.loads(row.contract_json or "{}")

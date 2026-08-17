@@ -199,6 +199,91 @@ def v3_uses_rule_deductions(v3_bundle: Any, precheck: Any) -> bool:
         return False
 
 
+def v3_uses_static_grade_output(v3_bundle: Any, precheck: Any) -> bool:
+    """Return whether the resolved track explicitly owns a static grade B output."""
+    if not isinstance(v3_bundle, dict) or not isinstance(precheck, dict):
+        return False
+    try:
+        from .redline_policy import evaluate_redlines
+        from .subcategory_resolver import resolve_subcategory
+
+        contract = v3_bundle["contract"]
+        if evaluate_redlines(precheck, policy=contract["redline_policy"]).get("hit"):
+            return False
+        resolved = resolve_subcategory(
+            precheck,
+            classification_map=v3_bundle["classification_map"],
+            track_classification=contract["track_classification"],
+        )
+        config = v3_bundle["subcategory_dimensions"].get(resolved["track_key"])
+        # Presence routes around the unrelated legacy preliminary scorer.  The
+        # authoritative evaluator validates the exact contract and fails closed.
+        return isinstance(config, dict) and "grade_output_contract" in config
+    except Exception:  # noqa: BLE001 - probe only; authoritative path reports
+        return False
+
+
+def _strict_static_grades(
+    aesthetic: Any,
+    *,
+    track_config: dict[str, Any],
+    expected_keys: list[str],
+) -> dict[str, int] | None:
+    """Validate an explicitly contracted static grade payload, or return None."""
+    grade_contract = track_config.get("grade_output_contract")
+    if grade_contract is None:
+        return None
+    if not isinstance(grade_contract, dict) or grade_contract != {
+        "format_version": "dimension-grade-output-v1",
+        "require_exact_keys": True,
+        "evidence_required": True,
+    }:
+        raise V3AuthoritativeError(
+            "grade_output_contract_invalid",
+            "静态 grade 输出合同无效，拒绝解释调用B结果",
+        )
+    dimensions = aesthetic.get("dimensions") if isinstance(aesthetic, dict) else None
+    if not isinstance(dimensions, dict):
+        raise V3AuthoritativeError(
+            "grade_output_invalid", "调用B必须返回 dimensions 对象"
+        )
+    expected = set(expected_keys)
+    actual = set(dimensions)
+    if actual != expected:
+        missing = sorted(expected - actual)
+        extra = sorted(actual - expected)
+        raise V3AuthoritativeError(
+            "grade_output_invalid",
+            f"调用B维度键必须与冻结合同完全一致（缺失 {missing}，多余 {extra}）",
+        )
+    grades: dict[str, int] = {}
+    for key in expected_keys:
+        item = dimensions.get(key)
+        if not isinstance(item, dict):
+            raise V3AuthoritativeError(
+                "grade_output_invalid", f"调用B维度 {key} 必须是对象"
+            )
+        grade = item.get("grade")
+        if isinstance(grade, bool) or not isinstance(grade, int) or not 1 <= grade <= 5:
+            raise V3AuthoritativeError(
+                "grade_output_invalid", f"调用B维度 {key} 的 grade 必须是 1-5 整数"
+            )
+        evidence = item.get("evidence")
+        if (
+            not isinstance(evidence, list)
+            or not evidence
+            or any(
+                not isinstance(value, str) or not value.strip()
+                for value in evidence
+            )
+        ):
+            raise V3AuthoritativeError(
+                "grade_output_invalid", f"调用B维度 {key} 必须包含非空可见证据"
+            )
+        grades[key] = grade
+    return grades
+
+
 async def evaluate_v3_authoritative(
     client: Any,
     image_path: Any,
@@ -360,11 +445,22 @@ async def evaluate_v3_authoritative(
                     "v3_rule_engine_failed", f"v3 规则计分聚合失败：{exc}"
                 ) from exc
 
-        # @deprecated fallback: contracts without deduction_rules keep the
-        # historic 1-5 grade bridge byte-for-byte compatible.
+        # Grade-scored contracts use their frozen static B payload.  Older
+        # grade fallback contracts retain the historical permissive extractor.
         common_keys = _dimension_keys(track_config.get("common_group"))
+        specific_dims = _dimension_defs(track_config.get("specific_group"))
+        specific_keys = [item["key"] for item in specific_dims]
+        strict_grades = _strict_static_grades(
+            aesthetic,
+            track_config=track_config,
+            expected_keys=[*common_keys, *specific_keys],
+        )
         if common_keys:
-            common_grades = _common_grades_from_aesthetic(aesthetic, common_keys)
+            common_grades = (
+                {key: strict_grades[key] for key in common_keys}
+                if strict_grades is not None
+                else _common_grades_from_aesthetic(aesthetic, common_keys)
+            )
             if common_grades is None:
                 raise V3AuthoritativeError(
                     "common_grade_unavailable",
@@ -373,24 +469,32 @@ async def evaluate_v3_authoritative(
                 )
             common_grades_by_track[track_key] = common_grades
 
-        specific_dims = _dimension_defs(track_config.get("specific_group"))
         if specific_dims:
-            shadow = await fetch_v3_specific_grades(
-                client,
-                image_path,
-                mime_type,
-                track_key,
-                specific_dims,
-                enabled=True,
-            )
-            if not (isinstance(shadow, dict) and shadow.get("status") == "ok"):
-                detail = shadow.get("error") if isinstance(shadow, dict) else "调用B 未返回结果"
-                raise V3AuthoritativeError(
-                    "specific_grade_unavailable",
-                    f"track {track_key} 的特有维度调用B 未产出完整 grade（{detail}），"
-                    f"权威路径拒绝硬猜",
+            if strict_grades is not None:
+                specific_grades_by_track[track_key] = {
+                    key: strict_grades[key] for key in specific_keys
+                }
+            else:
+                shadow = await fetch_v3_specific_grades(
+                    client,
+                    image_path,
+                    mime_type,
+                    track_key,
+                    specific_dims,
+                    enabled=True,
                 )
-            specific_grades_by_track[track_key] = shadow["grades"]
+                if not (isinstance(shadow, dict) and shadow.get("status") == "ok"):
+                    detail = (
+                        shadow.get("error")
+                        if isinstance(shadow, dict)
+                        else "调用B 未返回结果"
+                    )
+                    raise V3AuthoritativeError(
+                        "specific_grade_unavailable",
+                        f"track {track_key} 的特有维度调用B 未产出完整 grade（{detail}），"
+                        f"权威路径拒绝硬猜",
+                    )
+                specific_grades_by_track[track_key] = shadow["grades"]
 
     try:
         outcome = evaluate_one(

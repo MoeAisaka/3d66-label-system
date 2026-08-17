@@ -3,10 +3,11 @@ from __future__ import annotations
 import asyncio
 import json
 from contextlib import contextmanager
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
@@ -16,6 +17,11 @@ from app.database import Base
 from app.doubao import DoubaoResponse
 from app.main import _category_execution_snapshot
 from app.media import PdfPreprocessResult
+from app.model_3d_su_category_seed import (
+    MODEL_3D_SU_CALL_B_VERSION,
+    MODEL_3D_SU_CATEGORY_KEY,
+    seed_model_3d_su,
+)
 from app.models import (
     Asset,
     EvaluationCategoryProfile,
@@ -25,6 +31,16 @@ from app.models import (
     PromptVersion,
 )
 from tests.v3_contract_fixtures import add_active_v3_contract
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+MODEL_3D_SU_DIMENSION_KEYS = (
+    "model_detail",
+    "material_rendering",
+    "lighting",
+    "design_trend",
+    "visual_composition",
+)
 
 
 def _combined_payload() -> dict[str, object]:
@@ -105,6 +121,201 @@ def _aesthetic_payload() -> dict[str, object]:
         "review_reasons": [],
         "decision_rules": payload["decision_rules"],
     }
+
+
+def _run_model_3d_su_worker(
+    monkeypatch,
+    tmp_path,
+    *,
+    dimensions: dict[str, dict[str, object]],
+) -> dict[str, object]:
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    db = Session(engine, expire_on_commit=False)
+    source_path = tmp_path / "model-3d-su.jpg"
+    source_path.write_bytes(b"jpeg")
+    asset = Asset(
+        original_name=source_path.name,
+        stored_name=source_path.name,
+        mime_type="image/jpeg",
+        size_bytes=source_path.stat().st_size,
+        sha256="9" * 64,
+        category_key=MODEL_3D_SU_CATEGORY_KEY,
+    )
+    model = ModelConfig(
+        provider="custom-compatible",
+        model_id="vision-model-3d-su",
+        encrypted_api_key="credential-reference",
+        high_risk_review_enabled=False,
+        active=True,
+    )
+    db.add_all([asset, model])
+    db.commit()
+    seed_model_3d_su(db, SimpleNamespace(project_root=PROJECT_ROOT))
+    db.commit()
+    profile = db.scalar(
+        select(EvaluationCategoryProfile).where(
+            EvaluationCategoryProfile.category_key == MODEL_3D_SU_CATEGORY_KEY
+        )
+    )
+    prompt_a = db.get(PromptVersion, profile.prompt_a_id)
+    prompt_b = db.get(PromptVersion, profile.prompt_b_id)
+    v3_bundle = worker.v3_authoritative_category(db, MODEL_3D_SU_CATEGORY_KEY)
+    snapshot = _category_execution_snapshot(
+        profile,
+        prompt_a_id=prompt_a.id,
+        prompt_b_id=prompt_b.id,
+        model_config=model,
+        v3_authoritative_bundle=v3_bundle,
+    )
+    job = EvaluationJob(
+        asset_id=asset.id,
+        category_key=MODEL_3D_SU_CATEGORY_KEY,
+        category_profile_snapshot_json=snapshot,
+        prompt_a_id=prompt_a.id,
+        prompt_b_id=prompt_b.id,
+        status="processing",
+    )
+    db.add(job)
+    db.commit()
+
+    @contextmanager
+    def test_scope():
+        try:
+            yield db
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+
+    calls: list[tuple[str, str]] = []
+
+    class FakeClient:
+        def __init__(self, _config) -> None:
+            pass
+
+        async def chat_json(self, system_prompt, user_prompt, **_kwargs):
+            calls.append((system_prompt, user_prompt))
+            if len(calls) == 1:
+                parsed = _precheck_payload()
+                parsed["classification"]["primary_category"] = "家装"
+            else:
+                parsed = {
+                    "dimensions": dimensions,
+                    "overall_note": "按五维锚点完成评审。",
+                }
+            return DoubaoResponse(
+                parsed=parsed,
+                raw_text=json.dumps(parsed, ensure_ascii=False),
+                raw_payload=parsed,
+            )
+
+    monkeypatch.setattr(worker, "session_scope", test_scope)
+    monkeypatch.setattr(worker, "settings", SimpleNamespace(upload_dir=tmp_path))
+    monkeypatch.setattr(worker, "DoubaoClient", FakeClient)
+    monkeypatch.setattr(
+        worker,
+        "prepare_model_image",
+        lambda *_args, **_kwargs: (source_path, "image/jpeg"),
+    )
+    try:
+        asyncio.run(worker.evaluate_job(job.id))
+        db.expire_all()
+        result = db.query(EvaluationResult).filter_by(job_id=job.id).one()
+        return {
+            "calls": calls,
+            "prompt_b_system": prompt_b.system_prompt,
+            "job_status": db.get(EvaluationJob, job.id).status,
+            "score": result.score,
+            "level": result.level,
+            "needs_review": result.needs_review,
+            "prompt_b_version": result.prompt_b_version,
+            "scoring": json.loads(result.scoring_json),
+        }
+    finally:
+        db.close()
+        engine.dispose()
+
+
+@pytest.mark.parametrize(
+    ("grade", "expected_score", "expected_level"),
+    [
+        (1, 0, "L4"),
+        (2, 25, "L4"),
+        (3, 50, "L3"),
+        (4, 75, "L2"),
+        (5, 100, "L1"),
+    ],
+)
+def test_model_3d_su_worker_uses_static_b_and_maps_grade_anchors(
+    monkeypatch,
+    tmp_path,
+    grade,
+    expected_score,
+    expected_level,
+) -> None:
+    outcome = _run_model_3d_su_worker(
+        monkeypatch,
+        tmp_path,
+        dimensions={
+            key: {"grade": grade, "evidence": [f"{key} 可见表现符合 {grade} 档"]}
+            for key in MODEL_3D_SU_DIMENSION_KEYS
+        },
+    )
+
+    calls = outcome["calls"]
+    assert outcome["job_status"] == "completed"
+    assert len(calls) == 2
+    assert calls[1][0] == outcome["prompt_b_system"]
+    assert "hit_rules" not in calls[1][0]
+    assert "hit_rules" not in calls[1][1]
+    assert outcome["score"] == expected_score
+    assert outcome["level"] == expected_level
+    assert outcome["needs_review"] is False
+    assert outcome["prompt_b_version"] == MODEL_3D_SU_CALL_B_VERSION
+    assert outcome["scoring"]["dimension_scoring_mode"] == "grade_fallback"
+
+
+@pytest.mark.parametrize(
+    "malformation",
+    ["missing_dimension", "extra_dimension", "grade_out_of_range", "empty_evidence"],
+)
+def test_model_3d_su_worker_sends_invalid_static_b_to_manual_review(
+    monkeypatch,
+    tmp_path,
+    malformation,
+) -> None:
+    dimensions = {
+        key: {"grade": 3, "evidence": [f"{key} 可见表现处于一般水平"]}
+        for key in MODEL_3D_SU_DIMENSION_KEYS
+    }
+    if malformation == "missing_dimension":
+        dimensions.pop(MODEL_3D_SU_DIMENSION_KEYS[-1])
+    elif malformation == "extra_dimension":
+        dimensions["unexpected_dimension"] = {
+            "grade": 3,
+            "evidence": ["合同之外的多余维度"],
+        }
+    elif malformation == "grade_out_of_range":
+        dimensions[MODEL_3D_SU_DIMENSION_KEYS[0]]["grade"] = 6
+    else:
+        dimensions[MODEL_3D_SU_DIMENSION_KEYS[0]]["evidence"] = []
+    outcome = _run_model_3d_su_worker(
+        monkeypatch,
+        tmp_path,
+        dimensions=dimensions,
+    )
+
+    assert outcome["job_status"] == "completed"
+    assert outcome["score"] is None
+    assert outcome["level"] is None
+    assert outcome["needs_review"] is True
+    assert outcome["scoring"]["scoring_mode"] == "v3_authoritative_failed"
+    assert outcome["scoring"]["v3_error_code"] == "grade_output_invalid"
 
 
 def test_material_prompt_context_is_explicit_and_can_be_disabled() -> None:

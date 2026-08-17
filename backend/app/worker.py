@@ -184,6 +184,7 @@ from .worker_v3_authoritative import (
     v3_authoritative_category,
     v3_authoritative_for_job,
     v3_uses_rule_deductions,
+    v3_uses_static_grade_output,
 )
 from .level_semantics import UNIFIED_LEVEL_SEMANTICS_VERSION
 
@@ -1734,6 +1735,14 @@ async def evaluate_job(job_id: int) -> None:
     v3_rule_deduction_active = proposal_text_active or v3_uses_rule_deductions(
         v3_bundle_for_job, precheck
     )
+    v3_static_grade_active = v3_uses_static_grade_output(
+        v3_bundle_for_job, precheck
+    )
+    v3_authoritative_dimension_active = (
+        v3_rule_deduction_active
+        or v3_static_grade_active
+        or aesthetic_foundation_active
+    )
 
     response_b = None
     response_b_attempts: list[object] = []
@@ -1991,7 +2000,7 @@ async def evaluate_job(job_id: int) -> None:
         "interpretation_status": "manual_required",
     }
     try:
-        if v3_rule_deduction_active or aesthetic_foundation_active:
+        if v3_authoritative_dimension_active:
             dimension_definition = project_dimension_definition(
                 source_dimension_definition,
                 dimension_selection,
@@ -2033,7 +2042,7 @@ async def evaluate_job(job_id: int) -> None:
             dimension_selection,
         )
         preliminary_scoring = dict(manual_scoring)
-    trigger_reasons = [] if (freeform_unscored or v3_rule_deduction_active or aesthetic_foundation_active) else risk_review_reasons(
+    trigger_reasons = [] if (freeform_unscored or v3_authoritative_dimension_active) else risk_review_reasons(
         precheck,
         aesthetic,
         preliminary_scoring,
@@ -2046,7 +2055,7 @@ async def evaluate_job(job_id: int) -> None:
             and frozen_bundle.risk_review_version == RISK_REVIEW_VERSION
         )
     if (
-        not v3_rule_deduction_active and not aesthetic_foundation_active
+        not v3_authoritative_dimension_active
         and risk_review_enabled
         and aesthetic
         and trigger_reasons
@@ -2124,7 +2133,7 @@ async def evaluate_job(job_id: int) -> None:
         "needs_review": False,
         "caps": [],
         "review_reasons": [],
-    } if (v3_rule_deduction_active or aesthetic_foundation_active) else {
+    } if v3_authoritative_dimension_active else {
         "engine_version": ENGINE_VERSION,
         "scoring_mode": "freeform_manual",
         "formal": False,

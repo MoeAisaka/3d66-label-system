@@ -10,8 +10,12 @@ from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
 from app.category_evaluation_contract import validate_category_evaluation_contract
+from app.category_evaluation_contract import canonical_contract_hash
+from app.category_evaluation_v3_revisions import ensure_projected_revision
 from app.category_pipeline import default_pipeline
 from app.database import Base
+from app.dimension_deduction_bridge import extract_dimension_deduction_rules
+from app.dimension_schema_registry import canonical_json
 from app.dimension_composition import validate_subcategory_dimensions
 from app.models import (
     CategoryEvaluationV3Config,
@@ -33,6 +37,7 @@ from app.model_3d_su_category_seed import (
     build_model_3d_su_contract,
     build_model_3d_su_subcategory_dimensions,
     build_model_3d_su_semantic_contract,
+    model_3d_su_pipeline,
     seed_model_3d_su,
 )
 from app.subcategory_resolver import validate_classification_map
@@ -96,7 +101,17 @@ def test_model_3d_su_has_three_tracks_and_document_weights() -> None:
             expected_weights[track_key]
         )
         assert sum(row["weight"] for row in rows) == pytest.approx(1.0)
-        assert {rule["deduction"] for row in rows for rule in row["deduction_rules"]} == {20, 50, 80}
+        assert all("deduction_rules" not in row for row in rows)
+        assert all(
+            row["grade_points"]
+            == {"1": 0.0, "2": 25.0, "3": 50.0, "4": 75.0, "5": 100.0}
+            for row in rows
+        )
+        assert config["grade_output_contract"] == {
+            "format_version": "dimension-grade-output-v1",
+            "require_exact_keys": True,
+            "evidence_required": True,
+        }
 
 
 def test_model_3d_su_is_registered_as_an_image_category() -> None:
@@ -287,6 +302,153 @@ def test_model_3d_su_prompts_keep_common_fields_and_forbid_final_level() -> None
         assert "predicted_level" not in prompt_a.system_prompt
         assert "不得输出 final_level" in prompt_b.system_prompt
         assert "任何最终等级" in prompt_b.system_prompt
+        assert "全部为 5" in prompt_b.system_prompt
+        assert "全部为 4" in prompt_b.system_prompt
+        assert "全部为 3" in prompt_b.system_prompt
+        assert "全部为 1 或 2" in prompt_b.system_prompt
+
+
+def test_model_3d_su_seed_upgrades_known_v1_rows_once_without_rewriting_history() -> None:
+    engine = _engine()
+    with Session(engine) as db:
+        model = ModelConfig(active=True)
+        db.add(model)
+        db.flush()
+        prompt_a_v1 = PromptVersion(
+            stage="A",
+            category_key=MODEL_3D_SU_CATEGORY_KEY,
+            pipeline_scope="shared",
+            name="3D/SU v1 A",
+            version="model-3d-su-a-v1-20260814",
+            system_prompt=(PROJECT_ROOT / "backend/prompts/model_3d_su_call_a_v1.txt").read_text(encoding="utf-8").strip(),
+            user_prompt="",
+            rubric_version="model-3d-su-rubric-v1",
+            status="published",
+            source="imported",
+            created_by="system:model-3d-su-v1",
+        )
+        prompt_b_v1 = PromptVersion(
+            stage="B",
+            category_key=MODEL_3D_SU_CATEGORY_KEY,
+            pipeline_scope="shared",
+            name="3D/SU v1 B",
+            version="model-3d-su-b-v1-20260814",
+            system_prompt=(PROJECT_ROOT / "backend/prompts/model_3d_su_call_b_v1.txt").read_text(encoding="utf-8").strip(),
+            user_prompt="",
+            rubric_version="model-3d-su-rubric-v1",
+            status="published",
+            source="imported",
+            created_by="system:model-3d-su-v1",
+        )
+        db.add_all([prompt_a_v1, prompt_b_v1])
+        db.flush()
+        profile = EvaluationCategoryProfile(
+            category_key=MODEL_3D_SU_CATEGORY_KEY,
+            display_name="3D & SU 模型",
+            description="运营已编辑描述",
+            status="active",
+            allowed_mime_types_json=canonical_json(
+                ["image/jpeg", "image/png", "image/webp", "image/gif"]
+            ),
+            preprocess_config_json=canonical_json(
+                {"preprocess": "image", "su_unrendered_marker": True}
+            ),
+            pipeline_config_json=canonical_json(model_3d_su_pipeline()),
+            pipeline_revision=1,
+            prompt_a_id=prompt_a_v1.id,
+            prompt_b_id=prompt_b_v1.id,
+            model_config_id=model.id,
+            rubric_version="model-3d-su-rubric-v1",
+            created_by="system:model-3d-su-v1",
+        )
+        legacy_contract = build_model_3d_su_contract()
+        legacy_contract["spec_version"] = "model-3d-su-v1-dingtalk-20260814"
+        legacy_contract["prompt_bindings"] = {
+            "call_a_version": prompt_a_v1.version,
+            "call_b_version": prompt_b_v1.version,
+        }
+        legacy_dimensions = build_model_3d_su_subcategory_dimensions()
+        for config in legacy_dimensions.values():
+            config.pop("grade_output_contract", None)
+            for dimension in config["common_group"]["schema_definition"]["dimensions"]:
+                dimension.pop("grade_points", None)
+                dimension["deduction_rules"] = [
+                    {
+                        "rule_id": "minor_defect",
+                        "description": "微瑕：可见轻微缺陷",
+                        "deduction": 20,
+                        "tags": ["模型美感"],
+                    },
+                    {
+                        "rule_id": "obvious_defect",
+                        "description": "明显缺陷：可见明显问题",
+                        "deduction": 50,
+                        "tags": ["模型美感"],
+                    },
+                    {
+                        "rule_id": "severe_defect",
+                        "description": "严重硬伤：可见严重问题",
+                        "deduction": 80,
+                        "tags": ["模型美感"],
+                    },
+                ]
+        legacy_config = CategoryEvaluationV3Config(
+            category_key=MODEL_3D_SU_CATEGORY_KEY,
+            display_name="3D & SU 模型",
+            revision=1,
+            status="active",
+            contract_json=canonical_json(legacy_contract),
+            classification_map_json=canonical_json(
+                build_model_3d_su_classification_map()
+            ),
+            subcategory_dimensions_json=canonical_json(legacy_dimensions),
+            dimension_deduction_rules_json=canonical_json(
+                extract_dimension_deduction_rules(legacy_dimensions)
+            ),
+            media_penalty_enabled=False,
+            contract_hash=canonical_contract_hash(legacy_contract),
+            created_by="system:model-3d-su-v1",
+        )
+        db.add_all([profile, legacy_config])
+        db.flush()
+        legacy_revision = ensure_projected_revision(db, legacy_config)
+        legacy_revision_contract = legacy_revision.contract_json
+        db.commit()
+
+        settings = SimpleNamespace(project_root=PROJECT_ROOT)
+        seed_model_3d_su(db, settings)
+        db.commit()
+        first_v2_revision_id = legacy_config.projected_revision_id
+        first_v2_revision_number = legacy_config.revision
+        seed_model_3d_su(db, settings)
+        db.commit()
+
+        prompts = db.scalars(
+            select(PromptVersion).where(
+                PromptVersion.category_key == MODEL_3D_SU_CATEGORY_KEY
+            )
+        ).all()
+        assert MODEL_3D_SU_CALL_A_VERSION == "model-3d-su-a-v2-20260817"
+        assert MODEL_3D_SU_CALL_B_VERSION == "model-3d-su-b-v2-20260817"
+        assert {prompt.version for prompt in prompts} == {
+            prompt_a_v1.version,
+            prompt_b_v1.version,
+            MODEL_3D_SU_CALL_A_VERSION,
+            MODEL_3D_SU_CALL_B_VERSION,
+        }
+        assert profile.prompt_a_id != prompt_a_v1.id
+        assert profile.prompt_b_id != prompt_b_v1.id
+        assert profile.rubric_version == MODEL_3D_SU_RUBRIC_VERSION
+        assert profile.description == "运营已编辑描述"
+        assert legacy_config.revision == first_v2_revision_number == 2
+        assert legacy_config.projected_revision_id == first_v2_revision_id
+        assert legacy_revision.status == "retired"
+        assert legacy_revision.contract_json == legacy_revision_contract
+        active_revision = db.get(
+            CategoryEvaluationV3Revision, legacy_config.projected_revision_id
+        )
+        assert active_revision.status == "active"
+        assert active_revision.parent_revision_id == legacy_revision.id
 
 
 def test_model_3d_su_semantic_contract_seed_is_draft_and_platform_wide() -> None:
