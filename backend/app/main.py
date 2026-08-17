@@ -204,6 +204,7 @@ from .baseline_correction_orchestration import (
     prepare_correction_generation,
     refresh_correction_run,
 )
+from .automation_case_intake import on_final_review_completed
 from .category_evaluation_v3_revisions import (
     CategoryEvaluationV3RevisionError,
     activate_candidate_revision,
@@ -6951,47 +6952,28 @@ def _finalize_review_panel(
     evaluation.needs_review = decision == "rejected"
     evaluation.updated_at = datetime.now(timezone.utc)
     if decision == "corrected":
-        severity = (
-            "P1"
-            if any(
-                isinstance(item.get("model_value"), int)
-                and isinstance(item.get("human_value"), int)
-                and abs(item["human_value"] - item["model_value"]) >= 2
-                for item in corrections
-            )
-            else "P2"
-        )
         _add_to_category_golden_set(
             db,
             evaluation=evaluation,
             truth=truth,
             actor=reviewer_name,
         )
-        db.add(
-            OptimizationCaseQueue(
-                category_key=evaluation.job.category_key,
-                idempotency_key=f"review-panel:{panel.id}:final:{final_review.id}",
-                evaluation_id=evaluation.id,
-                final_review_id=final_review.id,
-                prompt_version=(
-                    evaluation.prompt_b_version
-                    or evaluation.prompt_a_version
-                ),
-                severity=severity,
-                case_json=json.dumps(
-                    {
-                        "schema_version": "optimization-case-v1",
-                        "source": "review_panel",
-                        "evaluation_id": evaluation.id,
-                        "prompt_version": (
-                            evaluation.prompt_b_version
-                            or evaluation.prompt_a_version
-                        ),
-                        "truth": truth,
-                    },
-                    ensure_ascii=False,
-                ),
+        try:
+            mechanism_snapshot = json.loads(
+                evaluation.strategy_snapshot_json or "{}"
             )
+        except json.JSONDecodeError:
+            mechanism_snapshot = {}
+        on_final_review_completed(
+            db,
+            evaluation=evaluation,
+            final_review=final_review,
+            mechanism_snapshot=(
+                mechanism_snapshot
+                if isinstance(mechanism_snapshot, dict)
+                else {}
+            ),
+            actor=reviewer_name,
         )
     return final_review
 
