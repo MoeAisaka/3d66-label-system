@@ -1,12 +1,318 @@
-# TPENG 标签实验台（LabelLab）
+# 特鹏标签实验台（LabelLab）
 
-TPENG 新标签体系的统一产品载体，也是标签/内容中台的通用底座。系统统一承载素材接入、属性标签、美感与质量评测、人工审核纠偏、AI 机制迭代、版本发布、下游表投影、对账和 Badcase 回流；3D、SU、灵感图、Proposal PDF 等类目通过 profile 和专用视图扩展，不复制平台公共能力。
+> 新标签体系的统一产品载体，也是标签/内容中台重构的通用底座。
+>
+> 当前状态更新于 2026-08-18：代码主线和公司内网测试环境已经具备可运行、可演示、可确定性验证的工程底座；真实上游、真实模型、生产数据库写入和生产发布仍需真人研发按专项合同完成。
 
-## 项目与交接入口
+## 5 分钟读懂项目
 
-- 产品与需求 Roadmap（可编辑权威源）：[新标签体系最终方案](docs/proposals/2026-08-16-tpeng-label-system-reconstruction-business-brief.md)
-- 业务宣讲版：[PDF 手册](docs/proposals/2026-08-16-tpeng-label-system-reconstruction-business-brief.pdf) / [Word 手册](docs/proposals/2026-08-16-tpeng-label-system-reconstruction-business-brief.docx)
-- 真人后端研发交接：[后端研发交接文档](docs/handoff/2026-08-17-label-system-human-backend-handoff.md)
+LabelLab 不是单一的美感评测工具，也不再与“标签体系重构”并列建设。平台统一承载：
+
+```text
+下游字段需求合同
+→ 素材接入与身份解析
+→ 自动标注 / 美感与质量评测
+→ 人工审核纠偏
+→ AI 生成候选机制并自动回归
+→ 人工决定是否启用机制
+→ 人工决定是否发布标签事实
+→ 大维表 / 职责小表投影与对账
+→ 下游消费效果和 Badcase 回流
+```
+
+3D/SU、灵感图、Proposal PDF 等类目只扩展自己的字段、Prompt、V3 合同、规则和专用编辑视图，不能复制模型中心、任务调度、人工审核、版本发布、投影和回流等平台公共能力。
+
+当前最高优先级是 45 天 MVP：在 2026-09-30 前跑通知识图谱国内/海外、整体/单体四批真实模型素材打标，写入国内和海外两张目标表，并完成生产、消费、对账、回退和 Badcase 回流。
+
+## 当前权威基线
+
+| 项目 | 当前状态 |
+|---|---|
+| 唯一代码仓库 | Codeup `3d66/tepeng/3d66.label-system` |
+| 当前主线 | `main@fbe6e835b5a95d6e1fc84d871badbb3b236a25c2` |
+| 公司内网测试环境 | `http://192.168.1.35:8081` |
+| 数据库迁移 | migration 73 |
+| 测试环境状态 | 健康检查与 readiness 通过，静态资源包含 build `fbe6e83` |
+| 自动组批 | 总开关关闭，保持 dry-run，不调用真实调优模型 |
+| 生产状态 | 尚未接入真实上游、真实生产模型及目标表 DML，不得表述为生产上线 |
+
+历史章节、旧分支回执和旧部署记录只用于追溯。判断当前能力时以 Codeup `main`、本文件、`PROJECT_STATUS.md` 顶部“当前权威基线”和最新迁移为准。
+
+## 已经具备什么
+
+### 已进入主线和测试环境的工程底座
+
+- 增量评测、存量回归、运行中心和质量资产工作区；
+- 主模型、调优模型注册与凭据引用；
+- 类目 Profile、Prompt A/B、V3 合同、Rubric 和多版本机制管理；
+- 3D/SU、灵感图、Proposal PDF 等类目扩展骨架；
+- 自动标注、人工审核、节点纠偏、理由和证据留痕；
+- 纠偏样本到候选 Prompt/V3/规则、自动回归和人工二审的编排；
+- 机制启用与标签事实发布两条独立人工门；
+- 黄金集、挑战集、真值 revision、CSV/JSON/Manifest 导出；
+- 字段级 Precision/Recall、L1-L5 五档矩阵及推荐/常规/过滤三档附加指标；
+- 受控脚本注册、工作流注册、五队列、检查点、重试和恢复；
+- 字段需求合同、资产版本、语义事实、发布版本和 Outbox；
+- 大维表/小表投影合同、Shadow 投影、Manifest 和对账；
+- 下游反馈、Badcase 回流、自动组批泳道、预算与证据工作台。
+
+### 已有代码或合同，但还不是生产能力
+
+- 国内 `ll_id` 和海外 `res_id` 的来源合同与确定性演练；
+- 四批知识图谱任务的 fixed-snapshot Manifest 设计；
+- 3D/SU whole/single 路由和 readiness 门禁；
+- Shadow Projection 和本地投影适配器；
+- 自动组批、候选包、自动回归和质量门禁；
+- macOS、Windows 和 Docker 的受控安装、备份、恢复及部署脚本。
+
+这些能力证明产品和技术路线可行，但不能替代真实数据探查、正式模型联调、生产 Writer、容量压测、监控告警、灰度和回退演练。
+
+## 业务接入与迁移原则
+
+### 下游字段先盘清，再进入迁移
+
+算法、搜索池、知识图谱、海外等下游必须先提交一份字段盘点，逐项写清：当前正在消费的字段、来源表/查询、字段含义、更新频率、质量要求、负责人和下游验收方式。这些字段进入“迁移支持范围”。同时登记未来新增字段、使用场景、优先级和期望上线时间，进入“增量支持范围”。平台不凭页面猜字段，也不因为某个业务临时加列就绕过字段需求合同。
+
+| 盘点结果 | 平台处理方式 | 验收方式 |
+|---|---|---|
+| 当前正在消费 | 先兼容旧字段语义，建立来源、版本和对账规则 | 下游读取结果与旧链路对账 |
+| 后续新增需求 | 新建字段需求合同，经过评测、质量门禁和发布流程 | 字段级 Precision/Recall、缺失率和下游验收 |
+| 已弃用字段 | 保留历史追溯和迁移映射，不再进入新生产默认输出 | 明确下线日期和回退策略 |
+
+### 真人研发第一批任务：先审旧链路，再分期迁移
+
+第一批研发工作不是立即复制旧代码，而是复盘旧标签链路并形成四类清单：
+
+1. 已弃用：没有下游消费、没有历史追溯价值或已被新字段替代；
+2. 直接迁移：语义、来源和质量口径清楚，可以接入新平台合同；
+3. 需要改造：仍在消费但来源、口径、表结构或任务方式不适合新平台；
+4. 外部依赖：需要下游、算法、数仓或权限负责人补齐信息后才能迁移。
+
+研发需按“先 3D/SU 知识图谱四批真实批次，再高价值共用字段，再其他类目和存量”的顺序给出分期计划。每一期都要有旧链路对账、迁移结果、回退点和下游验收，不做一次性全量搬迁。
+
+## 正式生产链路（研发必须按此验收）
+
+```text
+上游增量素材
+    ↓
+身份解析与类目路由（国内/海外、整体/单体）
+    ↓
+按类目自动分配工作流
+    ↓
+调用评测机制：逐字段标注 + 美感分/质量分
+    ↓
+等级撮合器：将维度结果撮合为美感等级
+    ↓
+汇总正式标签事实：美感等级 + 下游固定字段
+    ↓
+写入统一大维表和职责小表（需正式 DDL、Writer 和对账）
+    ↓
+下游改造旧链路，从正式发布表消费
+    ↓
+效果、Badcase 和使用反馈回流平台
+```
+
+真实生产验收必须同时覆盖上游接入、中间机制执行、人工纠偏、双人工发布门、目标表建表需求、正式落表、下游读取改造和回流。任何候选机制、实验结果或人工过程都不能被下游直接读取。
+
+## 新研发从哪里开始
+
+研发接手时按以下顺序阅读：
+
+1. [本 README](README.md)：项目定位、工程入口、下游迁移原则和当前边界；
+2. [产品原则](PRODUCT.md)：不可改变的产品定位与数据边界；
+3. [开发规则](AGENTS.md)：修改、测试、迁移和完成定义；
+4. [知识图谱四批两表合同](docs/contracts/2026-08-17-kg-four-batch-target-table-request-v1.md)；
+5. [3D/SU readiness 合同](docs/contracts/3d-su-readiness-freeze-v1.md)；
+6. [当前项目状态](PROJECT_STATUS.md)；
+7. [架构决策](docs/decisions/README.md)。
+
+旧的 `CODEX_HANDOFF.md` 保存早期 Demo 演进、历史故障和旧环境约束，只用于追溯，不得覆盖上述最新文档。
+
+## 技术架构
+
+| 层 | 当前实现 | 主要职责 |
+|---|---|---|
+| 前端 | React、TypeScript、Vite | 工作区、任务操作、审核纠偏、配置、证据和对账 |
+| API | FastAPI、Pydantic | 合同校验、权限、任务、版本、发布和查询 |
+| 领域与持久化 | SQLAlchemy、当前 SQLite | 资产、评测、真值、机制、事实、运行和审计 |
+| Worker | 五队列调度与后台 Worker | 执行、租约、重试、检查点、恢复和组批 |
+| 模型层 | Provider Adapter + 凭据引用 | 主模型评测、调优模型分析和调用治理 |
+| 投影层 | Projection Registry、Outbox、Manifest | 大维表/小表输出、幂等、对账和回退 |
+
+### 不可破坏的数据边界
+
+- `semantic.*`、`quality.*`、`governance.*` 属于平台 Canonical 事实；
+- 人工真值、来源、模型、Prompt、规则、机制、审核和发布状态必须可追溯；
+- 机制候选启用和标签事实发布是两道独立人工门；
+- 下游只能读取正式发布事实；
+- 数据库表、搜索索引、知识图谱和向量索引是可重建投影，不是事实主库；
+- Query×素材相关性、排序权重和知识图谱内部关系不进入素材事实；
+- 业务类目不得复制平台公共能力。
+
+## 代码地图
+
+### 后端核心入口
+
+| 路径 | 职责 |
+|---|---|
+| `backend/app/main.py` | FastAPI 应用入口和路由装配 |
+| `backend/app/models.py` | SQLAlchemy 领域模型 |
+| `backend/app/migrations/runner.py` | 追加式、幂等数据库迁移 |
+| `backend/app/asset_identity.py` | 素材身份和版本 |
+| `backend/app/field_demand_contracts.py` | 下游字段需求合同 |
+| `backend/app/label_governance.py` | 候选事实、人工审批和正式发布 |
+| `backend/app/semantic_tag_quality.py` | 字段级 Precision/Recall 和质量快照 |
+| `backend/app/baseline_correction_orchestration.py` | 人工纠偏到 AI 候选和自动回归 |
+| `backend/app/workflow_runtime.py` | 工作流运行、步骤、检查点和恢复 |
+| `backend/app/queue_scheduler.py` | 五队列、配额、租约和恢复调度 |
+| `backend/app/automation_*.py` | 自动组批泳道、候选、路由和证据 API |
+| `backend/app/projection_contracts.py` | 大维表/小表投影合同和对账 |
+| `backend/app/production_feedback.py` | 下游反馈和 Badcase 回流 |
+| `backend/app/three_d_*.py` | 3D/SU Profile、readiness 和闭环 fixture |
+
+### 前端核心入口
+
+| 路径 | 职责 |
+|---|---|
+| `frontend/src/App.tsx` | 路由和应用入口 |
+| `frontend/src/pages/incremental-workspace-page.tsx` | 增量链路 |
+| `frontend/src/pages/stock-workspace-page.tsx` | 存量链路 |
+| `frontend/src/pages/operations-center-page.tsx` | 运行中心 |
+| `frontend/src/pages/model-registry-page.tsx` | 模型注册中心 |
+| `frontend/src/pages/tag-demand-contracts-page.tsx` | 字段需求合同 |
+| `frontend/src/pages/projection-governance-page.tsx` | 投影、Manifest 和对账 |
+| `frontend/src/pages/quality-assets-page.tsx` | 黄金集和质量资产 |
+| `frontend/src/pages/automation-overview-page.tsx` | 自动组批和候选二审 |
+| `frontend/src/features/baseline-regression/` | 回归、指标和纠偏工作台 |
+| `frontend/src/features/mechanism-config/` | 类目机制编辑器注册 |
+
+## 在干净环境启动
+
+### macOS
+
+```bash
+./scripts/macos/install.sh --check
+./scripts/macos/install.sh
+./scripts/macos/doctor.sh
+./scripts/macos/start.sh
+```
+
+### Windows
+
+```powershell
+.\scripts\windows\install.ps1 -Check
+.\scripts\windows\install.ps1
+.\scripts\windows\doctor.ps1
+.\scripts\windows\start.ps1
+```
+
+受控启动脚本默认监听 `127.0.0.1`，不会自动修改防火墙、系统服务、注册表、PowerShell 策略或公司网络。对局域网开放前必须完成单独审批。
+
+运行数据必须放在仓库之外。Git 只保存代码、文档、提示词和配置结构；数据库、图片、日志、备份、`.env`、`.venv`、`node_modules` 和真实凭据不得进入 Git。
+
+## 开发验证
+
+### 后端全量测试
+
+测试必须使用全新的临时数据目录：
+
+```bash
+TASK_DATA_DIR=$(mktemp -d)
+DATA_DIR="$TASK_DATA_DIR" PYTHONPATH=. .venv/bin/python -m pytest -q backend/tests
+```
+
+### 前端验证
+
+```bash
+npm --prefix frontend ci
+npm --prefix frontend run lint
+npm --prefix frontend run build
+```
+
+前端专项合同位于 `frontend/scripts/check-*.ts`。修改字段、模型、工作区、运行中心、3D/SU、自动组批或回归指标时，必须执行对应 `contract:*` / `test:*` 脚本。
+
+### 完成前最低门禁
+
+- 受影响专项测试通过；
+- 后端全量测试通过；
+- 前端 lint、production build 和相关合同脚本通过；
+- `git diff --check` 通过；
+- 数据变更完成迁移测试和旧库升级验证；
+- 页面变更完成真实桌面浏览器检查；
+- `PROJECT_STATUS.md` 已同步当前状态和回退边界。
+
+## 数据库和迁移规则
+
+- 当前测试和本地形态使用 SQLite；真人研发需评估生产数据库选型，但不能改变现有 API、版本、幂等、Outbox 和发布合同；
+- 迁移只允许追加，禁止修改、删除或重排已经发布的 migration；
+- 每个迁移必须同时支持全新库初始化和旧库升级；
+- 不回填、覆盖或重新解释历史评测、人工真值、机制和标签事实；
+- 部署前创建数据库快照并执行 `integrity_check`、外键检查和迁移版本核对；
+- 数据库恢复是独立破坏性操作，不能因为代码回滚自动执行。
+
+## 凭据、权限和安全
+
+- macOS 使用 Keychain、Windows 使用当前用户 DPAPI；数据库只保存凭据引用或版本化密文；
+- Token、API Key、Cookie、会话、密码和私钥不得进入代码、日志、截图、Markdown、测试或 Git；
+- 真实 DataWorks/ODPS 查询、目标表 DML、模型调用和生产发布均需要精确授权；
+- 当前四批真实接入仍保持 `pending_external_signoff`；
+- 未签认身份、字段、黄金集、权限、RACI、灰度和回退时必须 fail-closed。
+
+## Git、MR 和部署
+
+1. Codeup `main` 是唯一代码主线；
+2. 每项需求使用独立分支和 MR，不在服务器直接改代码；
+3. MR 必须写明目标、范围、非目标、迁移、测试、风险、回退和验收；
+4. 推送或合并不等于授权部署；
+5. 共享测试环境只允许部署 Codeup `main` 的明确完整 SHA；
+6. 部署前确认没有运行中的评测、回归、纠偏、重跑和投影任务；
+7. 部署后核对服务器 HEAD、静态 build SHA、健康检查、迁移、数据库完整性和运行队列；
+8. 禁止 force push 覆盖未知远端历史，禁止把旧候选分支整包覆盖主线。
+
+测试服受保护部署入口为：
+
+```bash
+./scripts/deploy-test-server.sh
+```
+
+脚本要求操作者核对摘要并显式确认。生产部署不在当前仓库文档的默认授权范围内。
+
+## 45 天 MVP：研发真正要交付什么
+
+MVP 不是“把现有页面再开发一遍”，而是在现有底座上补齐真实生产链路：
+
+1. 国内 `ll_id`、海外 `res_id` 两套正式 Source Adapter；
+2. 国内整体、国内单体、海外整体、海外单体四批固定快照与 Manifest；
+3. 正式模型、Prompt、V3 合同、成本、限流、超时和重试；
+4. 至少 100 条锁定黄金/挑战样本和字段级质量报告；
+5. 双人工门、人工纠偏、AI 候选和自动回归；
+6. 国内 `kg_model_tag_recognition_cn` 与海外 `relebook_kg_model_tag_recognition` 受控 Writer；
+7. 行数、缺失、重复、版本、哈希、重试和回退对账；
+8. 下游读取验收和至少一次 Badcase 回流。
+
+以下外部依赖不阻塞研发先完成接口和工作流开发，但会阻塞真实跑批：目标表正式 DDL、数据账号与最小权限、来源物理字段/删除语义/唯一性探查、正式模型版本、黄金集真值以及下游验收 Owner。
+
+## 新研发第一天检查表
+
+- 从 Codeup `main` 干净克隆，不使用聊天附件或历史恢复副本；
+- 阅读本 README、`PRODUCT.md`、`AGENTS.md`、方案和真人研发交接文档；
+- 完成受控安装、doctor、后端全量测试和前端构建；
+- 确认 migration 73、当前测试环境 build 和自动组批关闭状态；
+- 说明资产、评测、人工真值、机制、标签事实和投影之间的关系；
+- 输出“直接复用 / 需要重构 / 需要生产化 / 外部依赖”四类代码审查结果；
+- 第一周完成旧标签链路审计、下游字段盘点和分期迁移计划，先按四批知识图谱任务建立可验证的真实链路。
+
+## 操作与历史资料
+
+- 一线操作：[docs/user-guide.md](docs/user-guide.md)
+- 当前进度：[PROJECT_STATUS.md](PROJECT_STATUS.md)
+- 历史演进：[CODEX_HANDOFF.md](CODEX_HANDOFF.md)
+- 架构决策：[docs/decisions/](docs/decisions/)
+- 验证回执：[docs/superpowers/receipts/](docs/superpowers/receipts/)
+- 研发接手材料和宣讲方案由项目负责人单独维护，确认后再按发布边界进入仓库。
+
+任何文档与 Codeup `main`、最新 migration 或当前正式合同冲突时，应先停止实施并修正文档，不得用口头约定绕过版本和发布门禁。
+真人后端研发交接：[后端研发交接文档](docs/handoff/2026-08-17-label-system-human-backend-handoff.md)
 - 未发布迭代与合流边界：[未发布包台账](docs/handoff/2026-08-17-unpublished-package-ledger.md)
 - 当前实现状态：[PROJECT_STATUS.md](PROJECT_STATUS.md)
 - 长期产品原则：[PRODUCT.md](PRODUCT.md)
