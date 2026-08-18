@@ -8261,6 +8261,42 @@ def _migration_071_add_script_workflow_runtime(connection: Connection) -> None:
         raise RuntimeError(f"v71 工作流运行时迁移外键校验失败：{violations[:3]}")
 
 
+def _migration_074_add_review_rounds(connection: Connection) -> None:
+    """Keep completed human truth immutable while allowing a new review round."""
+
+    def columns(table: str) -> set[str]:
+        return {
+            row[1]
+            for row in connection.exec_driver_sql(
+                f"PRAGMA table_info({table})"
+            )
+        }
+
+    panel_columns = columns("review_panels")
+    if panel_columns and "review_round" not in panel_columns:
+        connection.exec_driver_sql(
+            "ALTER TABLE review_panels ADD COLUMN review_round "
+            "INTEGER NOT NULL DEFAULT 1 CHECK(review_round >= 1)"
+        )
+    review_columns = columns("human_reviews")
+    if review_columns and "review_round" not in review_columns:
+        connection.exec_driver_sql(
+            "ALTER TABLE human_reviews ADD COLUMN review_round "
+            "INTEGER NOT NULL DEFAULT 1 CHECK(review_round >= 1)"
+        )
+        review_columns = columns("human_reviews")
+    if {"panel_id", "review_round", "reviewer_name"}.issubset(review_columns):
+        connection.exec_driver_sql(
+            "DROP INDEX IF EXISTS uq_human_review_panel_reviewer"
+        )
+        connection.exec_driver_sql(
+            "CREATE UNIQUE INDEX IF NOT EXISTS "
+            "uq_human_review_panel_round_reviewer "
+            "ON human_reviews(panel_id, review_round, reviewer_name) "
+            "WHERE panel_id IS NOT NULL"
+        )
+
+
 MIGRATIONS = [
     Migration(1, "add_sample_expected_level", _migration_001_add_sample_expected_level),
     Migration(2, "add_review_corrections", _migration_002_add_review_corrections),
@@ -8582,6 +8618,11 @@ MIGRATIONS = [
         73,
         "add_global_automation_lanes",
         lambda connection: _migration_073_add_global_automation_lanes(connection),
+    ),
+    Migration(
+        74,
+        "add_review_rounds",
+        _migration_074_add_review_rounds,
     ),
 ]
 

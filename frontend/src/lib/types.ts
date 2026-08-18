@@ -58,6 +58,7 @@ export type ReviewStage = "initial" | "secondary" | "arbitration" | "completed"
 
 export type HumanReview = {
   id: number
+  review_round?: number
   stage: Exclude<ReviewStage, "completed">
   reviewer_name: string
   decision: "approved" | "corrected" | "rejected"
@@ -1219,6 +1220,7 @@ export type ReviewPanelSummary = {
   submitted_count: number
   status: "collecting" | "lead_adjudication" | "completed"
   revision: number
+  review_round?: number
   blind_answers_hidden: boolean
 }
 

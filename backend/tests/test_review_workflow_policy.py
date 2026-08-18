@@ -243,6 +243,268 @@ def test_single_reviewer_vote_finishes_initial_review_without_second_round() -> 
         _close(engine, db)
 
 
+def test_v3_human_dimension_correction_does_not_reverse_l1_and_l5() -> None:
+    engine, db, client, result = _client_with_result()
+    try:
+        aesthetic_payload = json.loads(result.aesthetic_json)
+        aesthetic_payload["dimensions"]["presentation_integrity"]["grade"] = 5
+        result.aesthetic_json = json.dumps(aesthetic_payload, ensure_ascii=False)
+        precheck_payload = json.loads(result.precheck_json)
+        precheck_payload["classification"]["primary_confidence"] = 0.95
+        result.precheck_json = json.dumps(precheck_payload, ensure_ascii=False)
+        result.scoring_json = json.dumps(
+            {
+                "formal": True,
+                "level": "L2",
+                "v3_context": {
+                    "contract": {
+                        "aesthetic_foundation": {
+                            "score_thresholds": [
+                                {"level": "L1", "min_score": 90},
+                                {"level": "L2", "min_score": 80},
+                                {"level": "L3", "min_score": 76},
+                                {"level": "L4", "min_score": 60},
+                                {"level": "L5", "min_score": 0},
+                            ]
+                        }
+                    }
+                },
+            },
+            ensure_ascii=False,
+        )
+        db.commit()
+
+        opened = client.post(
+            f"/api/evaluations/{result.id}/review-panel/open",
+            json={},
+        )
+        assert opened.status_code == 200, opened.text
+        corrections = [
+            {
+                "target_type": "dimension",
+                "field_key": key,
+                "model_value": 4,
+                "human_value": 5,
+                "reason_codes": ["underrated"],
+                "note": "人工确认维度优于模型评分",
+            }
+            for key in (
+                "composition_viewpoint",
+                "spatial_design_furnishing",
+                "visual_hierarchy",
+                "inspiration_reference",
+            )
+        ]
+        completed = client.post(
+            f"/api/evaluations/{result.id}/review-panel/votes",
+            json={
+                "reviewer_name": "唯一审核员",
+                "decision": "corrected",
+                "expected_panel_revision": 0,
+                "note": "人工确认高质量素材",
+                "corrections": corrections,
+            },
+        )
+
+        assert completed.status_code == 200, completed.text
+        assert completed.json()["final_truth"]["corrected_level"] == "L1"
+        detail = client.get(f"/api/evaluations/{result.id}")
+        assert detail.status_code == 200, detail.text
+        assert detail.json()["evaluation"]["final_level"] == "L1"
+    finally:
+        _close(engine, db)
+
+
+def test_completed_panel_can_reopen_without_mixing_previous_votes() -> None:
+    engine, db, client, result = _client_with_result()
+    try:
+        opened = client.post(
+            f"/api/evaluations/{result.id}/review-panel/open",
+            json={},
+        )
+        assert opened.status_code == 200, opened.text
+        assert opened.json()["review_round"] == 1
+
+        completed = client.post(
+            f"/api/evaluations/{result.id}/review-panel/votes",
+            json={
+                "reviewer_name": "第一轮审核员",
+                "decision": "approved",
+                "expected_panel_revision": 0,
+                "note": "第一轮人工确认",
+                "corrections": [],
+            },
+        )
+        assert completed.status_code == 200, completed.text
+        assert completed.json()["status"] == "completed"
+        assert completed.json()["submitted_count"] == 1
+        assert completed.json()["review_round"] == 1
+
+        db.expire_all()
+        revision = db.get(EvaluationResult, result.id).review_revision
+        reopened = client.post(
+            f"/api/evaluations/{result.id}/review-panel/reopen",
+            json={"expected_review_revision": revision},
+        )
+        assert reopened.status_code == 200, reopened.text
+        assert reopened.json()["status"] == "collecting"
+        assert reopened.json()["review_round"] == 2
+        assert reopened.json()["submitted_count"] == 0
+        assert reopened.json()["final_truth"] is None
+        assert reopened.json()["evaluation_review_stage"] == "initial"
+        assert reopened.json()["evaluation_review_revision"] == revision + 1
+
+        second = client.post(
+            f"/api/evaluations/{result.id}/review-panel/votes",
+            json={
+                "reviewer_name": "第一轮审核员",
+                "decision": "approved",
+                "expected_panel_revision": reopened.json()["revision"],
+                "note": "第二轮确认",
+                "corrections": [],
+            },
+        )
+        assert second.status_code == 200, second.text
+        assert second.json()["status"] == "completed"
+        assert second.json()["review_round"] == 2
+        assert second.json()["submitted_count"] == 1
+
+        db.expire_all()
+        panel = db.query(ReviewPanel).filter_by(evaluation_id=result.id).one()
+        votes = (
+            db.query(HumanReview)
+            .filter(HumanReview.panel_id == panel.id)
+            .order_by(HumanReview.id.asc())
+            .all()
+        )
+        assert [vote.review_round for vote in votes] == [1, 2]
+        assert len(result.reviews) >= 4
+    finally:
+        _close(engine, db)
+
+
+def test_reopen_rejects_stale_review_revision() -> None:
+    engine, db, client, result = _client_with_result()
+    try:
+        result.scoring_json = json.dumps(
+            {
+                "formal": True,
+                "level": "L3",
+                "v3_context": {
+                    "contract": {
+                        "aesthetic_foundation": {
+                            "score_thresholds": [
+                                {"level": "L1", "min_score": 90},
+                                {"level": "L2", "min_score": 80},
+                                {"level": "L3", "min_score": 76},
+                                {"level": "L4", "min_score": 60},
+                                {"level": "L5", "min_score": 0},
+                            ]
+                        }
+                    }
+                },
+            },
+            ensure_ascii=False,
+        )
+        db.commit()
+        assert client.post(
+            f"/api/evaluations/{result.id}/review-panel/open",
+            json={},
+        ).status_code == 200
+        completed = client.post(
+            f"/api/evaluations/{result.id}/review-panel/votes",
+            json={
+                "reviewer_name": "唯一审核员",
+                "decision": "approved",
+                "expected_panel_revision": 0,
+                "note": "形成首轮真值",
+                "corrections": [],
+            },
+        )
+        assert completed.status_code == 200, completed.text
+
+        stale = client.post(
+            f"/api/evaluations/{result.id}/review-panel/reopen",
+            json={"expected_review_revision": 0},
+        )
+        assert stale.status_code == 409
+        assert stale.json()["detail"]["code"] == "STALE_REVIEW_SNAPSHOT"
+    finally:
+        _close(engine, db)
+
+
+def test_reopened_panel_keeps_previous_correction_visible_as_edit_seed() -> None:
+    engine, db, client, result = _client_with_result()
+    try:
+        precheck_payload = json.loads(result.precheck_json)
+        precheck_payload["classification"]["primary_confidence"] = 0.95
+        result.precheck_json = json.dumps(precheck_payload, ensure_ascii=False)
+        result.scoring_json = json.dumps(
+            {
+                "formal": True,
+                "level": "L3",
+                "v3_context": {
+                    "contract": {
+                        "aesthetic_foundation": {
+                            "score_thresholds": [
+                                {"level": "L1", "min_score": 90},
+                                {"level": "L2", "min_score": 80},
+                                {"level": "L3", "min_score": 76},
+                                {"level": "L4", "min_score": 60},
+                                {"level": "L5", "min_score": 0},
+                            ]
+                        }
+                    }
+                },
+            },
+            ensure_ascii=False,
+        )
+        db.commit()
+        assert client.post(
+            f"/api/evaluations/{result.id}/review-panel/open",
+            json={},
+        ).status_code == 200
+        corrections = [{
+            "target_type": "dimension",
+            "field_key": "presentation_integrity",
+            "model_value": 4,
+            "human_value": 5,
+            "reason_codes": ["underrated"],
+            "note": "上一轮人工证据",
+        }]
+        completed = client.post(
+            f"/api/evaluations/{result.id}/review-panel/votes",
+            json={
+                "reviewer_name": "唯一审核员",
+                "decision": "corrected",
+                "expected_panel_revision": 0,
+                "note": "首轮纠偏",
+                "corrections": corrections,
+            },
+        )
+        assert completed.status_code == 200, completed.text
+        db.expire_all()
+        revision = db.get(EvaluationResult, result.id).review_revision
+        reopened = client.post(
+            f"/api/evaluations/{result.id}/review-panel/reopen",
+            json={"expected_review_revision": revision},
+        )
+        assert reopened.status_code == 200, reopened.text
+
+        detail = client.get(f"/api/evaluations/{result.id}")
+        assert detail.status_code == 200, detail.text
+        evaluation = detail.json()["evaluation"]
+        assert evaluation["review_stage"] == "initial"
+        assert evaluation["human_review"]["review_round"] == 1
+        assert evaluation["human_review"]["corrections"] == corrections
+        assert any(
+            review["note"] == "首轮纠偏"
+            for review in evaluation["review_history"]
+        )
+    finally:
+        _close(engine, db)
+
+
 def test_login_session_identity_overrides_spoofed_vote_and_query_name() -> None:
     engine, db, client, result = _client_with_result()
     try:

@@ -88,6 +88,7 @@ MIGRATION_NAMES = [
     "add_script_workflow_runtime",
     "add_3d_shadow_dry_run_contracts",
     "add_global_automation_lanes",
+    "add_review_rounds",
 ]
 
 
@@ -3537,5 +3538,68 @@ def test_migration_71_creates_runtime_tables_without_rewriting_history(tmp_path)
                 "SELECT status FROM evaluation_production_runs WHERE id=7"
             ).scalar_one() == "published"
             assert connection.exec_driver_sql("PRAGMA foreign_key_check").all() == []
+    finally:
+        engine.dispose()
+
+
+def test_migration_74_adds_review_rounds_and_replaces_reviewer_uniqueness(
+    tmp_path,
+) -> None:
+    engine = create_engine(f"sqlite:///{tmp_path / 'review-rounds-v74.db'}")
+    try:
+        with engine.begin() as connection:
+            connection.exec_driver_sql(
+                "CREATE TABLE review_panels ("
+                "id INTEGER PRIMARY KEY, revision INTEGER NOT NULL DEFAULT 0)"
+            )
+            connection.exec_driver_sql(
+                "CREATE TABLE human_reviews ("
+                "id INTEGER PRIMARY KEY, panel_id INTEGER, "
+                "reviewer_name VARCHAR(80) NOT NULL)"
+            )
+            connection.exec_driver_sql(
+                "CREATE UNIQUE INDEX uq_human_review_panel_reviewer "
+                "ON human_reviews(panel_id, reviewer_name) "
+                "WHERE panel_id IS NOT NULL"
+            )
+            migration = next(item for item in MIGRATIONS if item.version == 74)
+            migration.up(connection)
+            migration.up(connection)
+
+            panel_columns = {
+                row[1]
+                for row in connection.exec_driver_sql(
+                    "PRAGMA table_info(review_panels)"
+                )
+            }
+            review_columns = {
+                row[1]
+                for row in connection.exec_driver_sql(
+                    "PRAGMA table_info(human_reviews)"
+                )
+            }
+            assert "review_round" in panel_columns
+            assert "review_round" in review_columns
+
+            connection.exec_driver_sql(
+                "INSERT INTO review_panels (id, revision, review_round) "
+                "VALUES (1, 0, 2)"
+            )
+            connection.exec_driver_sql(
+                "INSERT INTO human_reviews "
+                "(id, panel_id, reviewer_name, review_round) "
+                "VALUES (1, 1, 'reviewer', 1)"
+            )
+            connection.exec_driver_sql(
+                "INSERT INTO human_reviews "
+                "(id, panel_id, reviewer_name, review_round) "
+                "VALUES (2, 1, 'reviewer', 2)"
+            )
+            with pytest.raises(IntegrityError):
+                connection.exec_driver_sql(
+                    "INSERT INTO human_reviews "
+                    "(id, panel_id, reviewer_name, review_round) "
+                    "VALUES (3, 1, 'reviewer', 2)"
+                )
     finally:
         engine.dispose()

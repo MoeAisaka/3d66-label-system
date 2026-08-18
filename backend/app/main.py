@@ -1075,6 +1075,10 @@ class ReviewPanelOpenRequest(BaseModel):
         return self
 
 
+class ReviewPanelReopenRequest(BaseModel):
+    expected_review_revision: int = Field(ge=0)
+
+
 class PromptOptimizationCreateRequest(BaseModel):
     prompt_id: int = Field(ge=1)
     sample_set_id: int = Field(ge=1)
@@ -1719,16 +1723,40 @@ def _result_payload(result: EvaluationResult | None) -> dict[str, Any] | None:
         key=lambda review: (_aware(review.created_at), review.id or 0),
     )
     panel = result.review_panel
+    current_round_reviews = (
+        [
+            review
+            for review in ordered_reviews
+            if review.panel_id == panel.id
+            and review.review_round == panel.review_round
+        ]
+        if panel is not None
+        else []
+    )
     visible_reviews = (
         ordered_reviews
         if panel is None or panel.status == "completed"
-        else [review for review in ordered_reviews if review.panel_id is None]
+        else [
+            review
+            for review in ordered_reviews
+            if not (
+                review.panel_id == panel.id
+                and review.review_round == panel.review_round
+            )
+        ]
     )
-    latest_review = visible_reviews[-1] if visible_reviews else None
+    # While a reopened round is collecting blind votes, retain the last
+    # completed correction as the editable seed without revealing current
+    # round votes. Once complete, the current round is authoritative.
+    review_for_display = (
+        current_round_reviews[-1]
+        if current_round_reviews and panel is not None and panel.status == "completed"
+        else visible_reviews[-1] if visible_reviews else None
+    )
     completed_review = (
-        latest_review if result.review_stage == "completed" else None
+        review_for_display if result.review_stage == "completed" else None
     )
-    display_review = completed_review or latest_review
+    display_review = completed_review or review_for_display
     final_level = (
         display_review.corrected_level or result.level
         if display_review and display_review.decision == "corrected"
@@ -1745,6 +1773,7 @@ def _result_payload(result: EvaluationResult | None) -> dict[str, Any] | None:
     review_history = [
         {
             "id": review.id,
+            "review_round": review.review_round,
             "stage": review.stage,
             "reviewer_name": review.reviewer_name,
             "decision": review.decision,
@@ -1754,7 +1783,18 @@ def _result_payload(result: EvaluationResult | None) -> dict[str, Any] | None:
             "corrections": json.loads(review.corrections_json or "[]"),
             "created_at": review.created_at,
         }
-        for review in visible_reviews
+        for review in (
+            ordered_reviews
+            if panel is None or panel.status == "completed"
+            else [
+                review
+                for review in ordered_reviews
+                if not (
+                    review.panel_id == panel.id
+                    and review.review_round == panel.review_round
+                )
+            ]
+        )
     ]
     return {
         "id": result.id,
@@ -1794,9 +1834,11 @@ def _result_payload(result: EvaluationResult | None) -> dict[str, Any] | None:
                     1
                     for review in ordered_reviews
                     if review.panel_id == panel.id
+                    and review.review_round == panel.review_round
                 ),
                 "status": panel.status,
                 "revision": panel.revision,
+                "review_round": panel.review_round,
                 "blind_answers_hidden": panel.status != "completed",
             }
             if panel
@@ -1804,17 +1846,18 @@ def _result_payload(result: EvaluationResult | None) -> dict[str, Any] | None:
         ),
         "human_review": (
             {
-                "id": latest_review.id,
-                "stage": latest_review.stage,
-                "reviewer_name": latest_review.reviewer_name,
-                "decision": latest_review.decision,
-                "corrected_level": latest_review.corrected_level,
-                "corrected_score": latest_review.corrected_score,
-                "note": latest_review.note,
-                "corrections": json.loads(latest_review.corrections_json or "[]"),
-                "created_at": latest_review.created_at,
+                "id": review_for_display.id,
+                "review_round": review_for_display.review_round,
+                "stage": review_for_display.stage,
+                "reviewer_name": review_for_display.reviewer_name,
+                "decision": review_for_display.decision,
+                "corrected_level": review_for_display.corrected_level,
+                "corrected_score": review_for_display.corrected_score,
+                "note": review_for_display.note,
+                "corrections": json.loads(review_for_display.corrections_json or "[]"),
+                "created_at": review_for_display.created_at,
             }
-            if latest_review
+            if review_for_display
             else None
         ),
         "risk_review": (
@@ -6773,6 +6816,7 @@ def _panel_payload(
         review
         for review in panel.evaluation.reviews
         if review.panel_id == panel.id
+        and review.review_round == panel.review_round
     ]
     my_vote = next(
         (
@@ -6790,6 +6834,9 @@ def _panel_payload(
         "submitted_count": len(panel_votes),
         "status": panel.status,
         "revision": panel.revision,
+        "review_round": panel.review_round,
+        "evaluation_review_stage": panel.evaluation.review_stage,
+        "evaluation_review_revision": panel.evaluation.review_revision,
         "my_vote": (
             {
                 "id": my_vote.id,
@@ -6879,6 +6926,36 @@ def _evaluation_aesthetic_and_dimension_schema(
     )
 
 
+def _review_level_thresholds(
+    evaluation: EvaluationResult,
+) -> dict[str, float] | None:
+    """Return frozen V3 minimum-score thresholds for human correction replay."""
+    try:
+        scoring = json.loads(evaluation.scoring_json or "{}")
+    except json.JSONDecodeError:
+        scoring = {}
+    if not isinstance(scoring, dict):
+        scoring = {}
+    context = scoring.get("v3_context")
+    contract = context.get("contract") if isinstance(context, dict) else None
+    foundation = contract.get("aesthetic_foundation") if isinstance(contract, dict) else None
+    thresholds = foundation.get("score_thresholds") if isinstance(foundation, dict) else None
+    if not isinstance(thresholds, list):
+        return None
+    resolved: dict[str, float] = {}
+    for item in thresholds:
+        if not isinstance(item, dict):
+            return None
+        level = item.get("level")
+        minimum = item.get("min_score")
+        if level not in {"L1", "L2", "L3", "L4", "L5"}:
+            return None
+        if isinstance(minimum, bool) or not isinstance(minimum, (int, float)):
+            return None
+        resolved[level] = float(minimum)
+    return resolved or None
+
+
 def _calculate_review_dimension_score(
     evaluation: EvaluationResult,
     dimension_corrections: list[dict[str, Any]],
@@ -6896,6 +6973,7 @@ def _calculate_review_dimension_score(
         aesthetic,
         dimension_corrections,
         dimension_schema=dimension_schema,
+        level_thresholds=_review_level_thresholds(evaluation),
     )
 
 
@@ -6946,6 +7024,7 @@ def _finalize_review_panel(
     final_review = HumanReview(
         evaluation_id=evaluation.id,
         reviewer_name=reviewer_name,
+        review_round=panel.review_round,
         stage=final_stage,
         decision=decision,
         corrected_level=corrected_level,
@@ -6964,6 +7043,7 @@ def _finalize_review_panel(
         "dimensions": resolved_dimensions or {},
         "key_fields": resolved_key_fields or {},
         "panel_id": panel.id,
+        "review_round": panel.review_round,
         "required_reviewers": panel.required_reviewers,
         "resolution_mode": resolution_mode,
     }
@@ -7127,6 +7207,88 @@ def open_review_panel(
     return _panel_payload(panel)
 
 
+@app.post("/api/evaluations/{evaluation_id}/review-panel/reopen")
+def reopen_review_panel(
+    evaluation_id: int,
+    payload: ReviewPanelReopenRequest,
+    _user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    evaluation = db.get(EvaluationResult, evaluation_id)
+    panel = evaluation.review_panel if evaluation is not None else None
+    if evaluation is None or panel is None:
+        raise HTTPException(status_code=404, detail="初审组不存在")
+    if evaluation.review_stage != "completed" or panel.status != "completed":
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "REVIEW_NOT_COMPLETED",
+                "message": "只有已完成的人工结果可以创建新修订",
+                "review_stage": evaluation.review_stage,
+                "review_revision": evaluation.review_revision,
+            },
+        )
+    if evaluation.review_revision != payload.expected_review_revision:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "STALE_REVIEW_SNAPSHOT",
+                "message": "审核修订号已变化，请刷新后重试",
+                "review_stage": evaluation.review_stage,
+                "review_revision": evaluation.review_revision,
+            },
+        )
+
+    next_evaluation_revision = evaluation.review_revision + 1
+    next_panel_revision = panel.revision + 1
+    next_round = panel.review_round + 1
+    claimed_evaluation = db.execute(
+        update(EvaluationResult)
+        .where(
+            EvaluationResult.id == evaluation.id,
+            EvaluationResult.review_stage == "completed",
+            EvaluationResult.review_revision == payload.expected_review_revision,
+        )
+        .values(
+            review_stage="initial",
+            review_revision=next_evaluation_revision,
+            needs_review=True,
+            updated_at=datetime.now(timezone.utc),
+        )
+    )
+    claimed_panel = db.execute(
+        update(ReviewPanel)
+        .where(
+            ReviewPanel.id == panel.id,
+            ReviewPanel.status == "completed",
+            ReviewPanel.revision == panel.revision,
+            ReviewPanel.review_round == panel.review_round,
+        )
+        .values(
+            status="collecting",
+            revision=next_panel_revision,
+            review_round=next_round,
+            final_review_id=None,
+            final_truth_json="{}",
+            completed_at=None,
+        )
+    )
+    if claimed_evaluation.rowcount != 1 or claimed_panel.rowcount != 1:
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "STALE_REVIEW_SNAPSHOT",
+                "message": "审核记录已被其他操作更新，请刷新后重试",
+            },
+        )
+    db.commit()
+    db.expire_all()
+    reopened = db.get(ReviewPanel, panel.id)
+    assert reopened is not None
+    return _panel_payload(reopened)
+
+
 @app.get("/api/evaluations/{evaluation_id}/review-panel")
 def get_review_panel(
     evaluation_id: int,
@@ -7195,6 +7357,7 @@ def submit_review_panel_vote(
         select(HumanReview).where(
             HumanReview.panel_id == panel.id,
             HumanReview.reviewer_name == user.username,
+            HumanReview.review_round == panel.review_round,
         )
     ):
         raise HTTPException(status_code=409, detail="当前审核员已经提交盲审")
@@ -7229,6 +7392,7 @@ def submit_review_panel_vote(
         evaluation_id=evaluation.id,
         panel_id=panel.id,
         panel_revision=payload.expected_panel_revision,
+        review_round=panel.review_round,
         reviewer_name=user.username,
         stage="initial",
         decision=payload.decision,
@@ -7243,7 +7407,10 @@ def submit_review_panel_vote(
     votes = list(
         db.scalars(
             select(HumanReview)
-            .where(HumanReview.panel_id == panel.id)
+            .where(
+                HumanReview.panel_id == panel.id,
+                HumanReview.review_round == panel.review_round,
+            )
             .order_by(HumanReview.id.asc())
         ).all()
     )
