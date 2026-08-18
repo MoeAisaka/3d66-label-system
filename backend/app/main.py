@@ -353,6 +353,10 @@ from .dimension_schema_registry import (
     SPACE_SCHEMA_KEY,
     canonical_hash,
 )
+from .v3_review_dimensions import (
+    calculate_v3_review_corrected_score,
+    v3_review_dimension_schema_payload,
+)
 from .strategy_bundle import (
     build_model_config_snapshot,
     build_strategy_snapshot,
@@ -1835,6 +1839,9 @@ def _evaluation_dimension_schema_payload(
 ) -> dict[str, Any]:
     """Expose the exact result-bound dimension contract to UI consumers."""
     try:
+        v3_payload = v3_review_dimension_schema_payload(result)
+        if v3_payload is not None:
+            return v3_payload
         definition, dimension_keys, identity = (
             dimension_contract_for_result(result)
         )
@@ -6872,6 +6879,26 @@ def _evaluation_aesthetic_and_dimension_schema(
     )
 
 
+def _calculate_review_dimension_score(
+    evaluation: EvaluationResult,
+    dimension_corrections: list[dict[str, Any]],
+) -> dict[str, Any]:
+    v3_recalculated = calculate_v3_review_corrected_score(
+        evaluation, dimension_corrections
+    )
+    if v3_recalculated is not None:
+        return v3_recalculated
+    aesthetic, dimension_schema = _evaluation_aesthetic_and_dimension_schema(
+        evaluation
+    )
+    return calculate_corrected_score(
+        json.loads(evaluation.precheck_json),
+        aesthetic,
+        dimension_corrections,
+        dimension_schema=dimension_schema,
+    )
+
+
 def _finalize_review_panel(
     db: Session,
     *,
@@ -6898,14 +6925,9 @@ def _finalize_review_panel(
             if correction.get("target_type") == "dimension"
         ]
         if dimension_corrections:
-            aesthetic, dimension_schema = (
-                _evaluation_aesthetic_and_dimension_schema(evaluation)
-            )
-            recalculated = calculate_corrected_score(
-                json.loads(evaluation.precheck_json),
-                aesthetic,
+            recalculated = _calculate_review_dimension_score(
+                evaluation,
                 dimension_corrections,
-                dimension_schema=dimension_schema,
             )
             corrected_score = recalculated.get("score")
             corrected_level = recalculated.get("level")
@@ -7184,14 +7206,9 @@ def submit_review_panel_vote(
                 if item.get("target_type") == "dimension"
             ]
             if dimension_corrections:
-                aesthetic, dimension_schema = (
-                    _evaluation_aesthetic_and_dimension_schema(evaluation)
-                )
-                recalculated = calculate_corrected_score(
-                    json.loads(evaluation.precheck_json),
-                    aesthetic,
+                recalculated = _calculate_review_dimension_score(
+                    evaluation,
                     dimension_corrections,
-                    dimension_schema=dimension_schema,
                 )
                 corrected_score = recalculated.get("score")
                 corrected_level = recalculated.get("level")
@@ -9588,14 +9605,9 @@ def create_review(
                 if item.get("target_type") == "dimension"
             ]
             if dimension_corrections:
-                aesthetic, dimension_schema = (
-                    _evaluation_aesthetic_and_dimension_schema(evaluation)
-                )
-                recalculated = calculate_corrected_score(
-                    json.loads(evaluation.precheck_json),
-                    aesthetic,
+                recalculated = _calculate_review_dimension_score(
+                    evaluation,
                     dimension_corrections,
-                    dimension_schema=dimension_schema,
                 )
                 corrected_score = recalculated.get("score")
                 corrected_level = recalculated.get("level")

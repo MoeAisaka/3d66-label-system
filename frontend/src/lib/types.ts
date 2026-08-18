@@ -88,9 +88,19 @@ export type DimensionSchemaDefinition = {
   dimensions: DimensionDefinition[]
   aggregation?: {
     engine_version?: string
+    preview_mode?: string
     grade_points?: Record<string, number>
     level_thresholds?: Record<string, number>
     score_round_digits?: number
+    base_score?: number
+    dimension_max?: number
+    track_cap?: number
+    level_scale?: Array<{
+      level?: string
+      enabled?: boolean
+      min_score?: number
+      display_name?: string
+    }>
     collapse_rule?: Record<string, unknown>
     high_evidence_rule?: Record<string, unknown>
     top_level_rule?: Record<string, unknown>

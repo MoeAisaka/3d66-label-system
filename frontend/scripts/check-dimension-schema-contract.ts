@@ -80,6 +80,71 @@ assert.deepEqual(
   { score: 59, level: "L2" },
 )
 
+const model3dSuSchema: EvaluationDimensionSchema = {
+  status: "resolved",
+  schema_id: null,
+  schema_key: "model_3d_su_aesthetic:space_building",
+  version: "model-3d-su-v2-grade-scoring-20260817",
+  canonical_hash: "c".repeat(64),
+  legacy_derived: false,
+  dimension_keys: [
+    "model_detail",
+    "material_rendering",
+    "lighting",
+    "design_trend",
+    "visual_composition",
+  ],
+  definition: {
+    format_version: "v3-review-dimension-schema-v1",
+    dimensions: [
+      { key: "model_detail", label: "模型细节", weight: 0.2, grade_points: { "1": 0, "2": 25, "3": 50, "4": 75, "5": 100 } },
+      { key: "material_rendering", label: "质感渲染", weight: 0.25, grade_points: { "1": 0, "2": 25, "3": 50, "4": 75, "5": 100 } },
+      { key: "lighting", label: "光感表现", weight: 0.2, grade_points: { "1": 0, "2": 25, "3": 50, "4": 75, "5": 100 } },
+      { key: "design_trend", label: "设计感及流行度", weight: 0.2, grade_points: { "1": 0, "2": 25, "3": 50, "4": 75, "5": 100 } },
+      { key: "visual_composition", label: "视觉构图", weight: 0.15, grade_points: { "1": 0, "2": 25, "3": 50, "4": 75, "5": 100 } },
+    ],
+    aggregation: {
+      preview_mode: "v3_grade_bridge",
+      score_round_digits: 0,
+      base_score: 0,
+      dimension_max: 100,
+      track_cap: 100,
+      level_scale: [
+        { level: "L1", enabled: true, min_score: 80, display_name: "好" },
+        { level: "L2", enabled: true, min_score: 61, display_name: "中等" },
+        { level: "L3", enabled: true, min_score: 41, display_name: "中差" },
+        { level: "L4", enabled: true, min_score: 0, display_name: "极差" },
+        { level: "L5", enabled: false, display_name: "过滤" },
+      ],
+    },
+    output_contract: {
+      dimension_output_keys: [
+        "model_detail",
+        "material_rendering",
+        "lighting",
+        "design_trend",
+        "visual_composition",
+      ],
+      unknown_key_policy: "reject",
+    },
+  },
+  error: null,
+}
+
+assert.deepEqual(
+  calculateDimensionPreview(
+    model3dSuSchema,
+    {
+      model_detail: 5,
+      material_rendering: 1,
+      lighting: 5,
+      design_trend: 5,
+      visual_composition: 5,
+    },
+  ),
+  { score: 75, level: "L2" },
+)
+
 const summary = (patch: Partial<DimensionSchemaRegistryItem>): DimensionSchemaRegistryItem => ({
   id: 1,
   schema_key: "common_core",
