@@ -6,6 +6,8 @@ import type {
   BaselineRegressionDetail,
   BaselineRegressionRun,
   BaselineSemanticQualityMetrics,
+  CorrectionSubmissionRequest,
+  CorrectionView,
   BaselineSetDetail,
   BaselineSetSummary,
   BaselineV3RevisionList,
@@ -233,6 +235,13 @@ export const baselineRegressionApi = {
       `/api/baseline-regressions/${runId}?${params.toString()}`,
     )
   },
+  getCorrectionView: (runId: number, itemId: number) => api<CorrectionView>(
+    `/api/baseline-regressions/${runId}/items/${itemId}/correction-view`,
+  ),
+  submitCorrectionNodes: (runId: number, itemId: number, payload: CorrectionSubmissionRequest) => api<CorrectionView>(
+    `/api/baseline-regressions/${runId}/items/${itemId}/corrections`,
+    { method: "POST", ...jsonBody(payload) },
+  ),
   getMetrics: (runId: number) => api<BaselineFieldMetrics>(
     `/api/baseline-regressions/${runId}/metrics`,
   ),
@@ -280,6 +289,16 @@ export const baselineRegressionApi = {
       method: "POST",
       ...jsonBody({ expected_review_revision: expectedReviewRevision }),
     },
+  ),
+}
+
+export const candidateRegressionApi = {
+  getCorrectionView: (runId: number, itemId: number) => api<CorrectionView>(
+    `/api/prompt-regressions/${runId}/items/${itemId}/correction-view`,
+  ),
+  submitCorrectionNodes: (runId: number, itemId: number, payload: CorrectionSubmissionRequest) => api<CorrectionView>(
+    `/api/prompt-regressions/${runId}/items/${itemId}/corrections`,
+    { method: "POST", ...jsonBody(payload) },
   ),
 }
 

@@ -11245,6 +11245,10 @@ def _baseline_correction_payload(row: BaselineCorrectionRun) -> dict[str, Any]:
             "contract_hash": baseline_run.correction_contract_hash,
             "category_key": baseline_run.category_key,
         }
+    orchestration = json.loads(row.orchestration_json or "{}")
+    mechanism_refresh = orchestration.get("mechanism_refresh")
+    if not isinstance(mechanism_refresh, dict):
+        mechanism_refresh = None
     return {
         "id": row.id,
         "baseline_run_id": row.baseline_run_id,
@@ -11257,7 +11261,7 @@ def _baseline_correction_payload(row: BaselineCorrectionRun) -> dict[str, Any]:
         "blockers": json.loads(row.blockers_json or "[]"),
         "candidate_revision_id": row.candidate_revision_id,
         "regression_run_id": row.regression_run_id,
-        "orchestration": json.loads(row.orchestration_json or "{}"),
+        "orchestration": orchestration,
         "error": {
             "code": row.error_code,
             "message": row.error_message,
@@ -11273,6 +11277,7 @@ def _baseline_correction_payload(row: BaselineCorrectionRun) -> dict[str, Any]:
         "updated_at": row.updated_at,
         "finished_at": row.finished_at,
         "correction_contract": correction_contract,
+        "mechanism_refresh": mechanism_refresh,
     }
 
 
@@ -11947,6 +11952,38 @@ def decide_baseline_correction(
             profile.prompt_a_id = candidate_prompt.id
         else:
             profile.prompt_b_id = candidate_prompt.id
+        candidate_run = (
+            db.get(BaselineRegressionRun, row.regression_run_id)
+            if row.regression_run_id is not None
+            else None
+        )
+        candidate_contract = json.loads(candidate.contract_json or "{}")
+        candidate_correction_contract = candidate_contract.get("correction_contract")
+        if not isinstance(candidate_correction_contract, dict) and isinstance(
+            candidate_contract.get("nodes"), list
+        ):
+            candidate_correction_contract = candidate_contract
+        refresh_contract_hash = (
+            candidate_run.correction_contract_hash
+            if candidate_run is not None and candidate_run.correction_contract_hash
+            else (
+                correction_contract_hash(candidate_correction_contract)
+                if isinstance(candidate_correction_contract, dict)
+                else candidate.contract_hash
+            )
+        )
+        mechanism_refresh = {
+            "category_key": row.category_key,
+            "prompt_version_ids": [
+                value
+                for value in (profile.prompt_a_id, profile.prompt_b_id)
+                if isinstance(value, int)
+            ],
+            "v3_revision_id": candidate.id,
+            "contract_hash": refresh_contract_hash,
+        }
+        orchestration["mechanism_refresh"] = mechanism_refresh
+        row.orchestration_json = baseline_canonical_json(orchestration)
 
     row.status = payload.decision
     row.decision = payload.decision

@@ -1014,6 +1014,9 @@ def production_run_payload(db: Session, run: EvaluationProductionRun) -> dict[st
         "job_ids": [int(value) for value in _loads_list(run.job_ids_json) if isinstance(value, int)],
         "job_counts": facts["counts"],
         "pending_first_review_count": len(facts["pending_review_ids"]),
+        "pending_first_review_ids": [
+            int(value) for value in facts["pending_review_ids"] if isinstance(value, int)
+        ],
         "progress": _progress(run, facts),
         "automation_run_id": run.automation_run_id,
         "automation": (

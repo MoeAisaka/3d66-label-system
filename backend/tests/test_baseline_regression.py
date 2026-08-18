@@ -1963,6 +1963,12 @@ def test_category_dimension_snapshot_and_isolated_correction_retry(
         assert approved_payload["status"] == "approved"
         assert approved_payload["decision"] == "approved"
         assert approved_payload["decided_by"] == user.username
+        assert approved_payload["mechanism_refresh"] == {
+            "category_key": run.category_key,
+            "prompt_version_ids": [candidate_prompt.id],
+            "v3_revision_id": candidate_revision.id,
+            "contract_hash": candidate_run.correction_contract_hash,
+        }
         db.refresh(profile)
         db.refresh(active_config)
         db.refresh(candidate_revision)

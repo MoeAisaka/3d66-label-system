@@ -1,5 +1,7 @@
 import { ApiError, api, jsonBody } from "@/lib/api"
 import type {
+  CorrectionSubmissionRequest,
+  CorrectionView,
   EvaluationCategoryProfile,
   EvaluationPackageDetail,
   EvaluationPackageStatus,
@@ -72,6 +74,13 @@ export const evaluationProductionApi = {
   reconcile: (runId: number) => api<EvaluationProductionRun>(`/api/evaluation-production-runs/${runId}/reconcile`, {
     method: "POST",
   }),
+  getCorrectionView: (runId: number, evaluationId: number) => api<CorrectionView>(
+    `/api/evaluation-production-runs/${runId}/evaluations/${evaluationId}/correction-view`,
+  ),
+  submitCorrectionNodes: (runId: number, evaluationId: number, payload: CorrectionSubmissionRequest) => api<CorrectionView>(
+    `/api/evaluation-production-runs/${runId}/evaluations/${evaluationId}/corrections`,
+    { method: "POST", ...jsonBody(payload) },
+  ),
 }
 
 export const evaluationPackageApi = {

@@ -124,10 +124,12 @@ def test_admit_historical_case_creates_new_idempotent_copy_without_mutating_sour
 def test_review_round_migration_follows_global_automation_contract():
     from app.migrations.runner import MIGRATIONS
 
-    assert MIGRATIONS[-2].version == 73
-    assert MIGRATIONS[-2].name == "add_global_automation_lanes"
-    assert MIGRATIONS[-1].version == 74
-    assert MIGRATIONS[-1].name == "add_review_rounds"
+    assert MIGRATIONS[-3].version == 73
+    assert MIGRATIONS[-3].name == "add_global_automation_lanes"
+    assert MIGRATIONS[-2].version == 74
+    assert MIGRATIONS[-2].name == "add_review_rounds"
+    assert MIGRATIONS[-1].version == 75
+    assert MIGRATIONS[-1].name == "add_correction_contract_snapshots"
 
 
 def test_consumer_does_not_dispatch_historical_audit_cases():

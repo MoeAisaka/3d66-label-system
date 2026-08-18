@@ -330,6 +330,79 @@ export type ReviewCorrection = {
   note: string
 }
 
+export type CorrectionLayer = "A" | "B" | "V3"
+
+export type CorrectionContractNode = {
+  node_key: string
+  layer: CorrectionLayer
+  path: string
+  order?: number
+  label: string
+  description: string
+  type: string
+  semantic_version: string
+  compatibility_key: string
+  required: boolean
+  evidence: {
+    description: string
+    required?: boolean
+    [key: string]: unknown
+  }
+  options?: unknown[]
+  allowed_values?: unknown[]
+  values?: unknown[]
+  min?: number
+  max?: number
+  minimum?: number
+  maximum?: number
+  recompute_ref?: string
+  metadata?: Record<string, unknown>
+  model_value?: unknown
+  current_value?: unknown
+  human_value?: unknown
+  reason?: string
+  inheritance?: { status: string; [key: string]: unknown }
+  editable?: boolean
+  read_only?: boolean
+  read_only_reason?: string
+  steps?: string[]
+  [key: string]: unknown
+}
+
+export type CorrectionView = {
+  schema_version: string
+  lane?: "baseline" | "incremental" | "candidate" | string
+  run_id: number | null
+  item_id: number | null
+  evaluation_id: number | null
+  category_key: string | null
+  snapshot_status: "frozen" | "legacy_read_only" | string
+  snapshot_source?: string
+  read_only: boolean
+  unavailable_reason?: string | null
+  unavailable_nodes?: string[]
+  contract: {
+    contract_version: string | null
+    contract_hash: string
+    category_key: string
+  } | null
+  review_revision: number
+  nodes: CorrectionContractNode[]
+  idempotent_replay?: boolean
+}
+
+export type CorrectionSubmissionRequest = {
+  contract_hash: string
+  review_revision: number
+  idempotency_key: string
+  nodes: Array<{
+    node_key: string
+    human_value: unknown
+    reason: string
+    evidence: Array<Record<string, unknown>>
+  }>
+}
+
 export type Asset = {
   id: number
   name: string
@@ -831,6 +904,13 @@ export type BaselineCorrectionOrchestration = {
   }
 }
 
+export type MechanismRefresh = {
+  category_key: string
+  prompt_version_ids: number[]
+  v3_revision_id: number
+  contract_hash: string
+}
+
 export type BaselineCorrectionRun = {
   id: number
   baseline_run_id: number
@@ -858,6 +938,7 @@ export type BaselineCorrectionRun = {
   created_at: string
   updated_at: string
   finished_at: string | null
+  mechanism_refresh?: MechanismRefresh | null
 }
 
 export type MaterialPackage = {
@@ -1005,6 +1086,7 @@ export type EvaluationProductionRun = {
     failed: number
   }
   pending_first_review_count: number
+  pending_first_review_ids: number[]
   progress: EvaluationProductionProgress
   automation_run_id: number | null
   automation: { id: number; status: string; dry_run: boolean; href: string } | null

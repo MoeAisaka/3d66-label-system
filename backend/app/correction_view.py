@@ -176,12 +176,15 @@ def build_correction_nodes(
         metadata_editable = node["metadata"].get("editable", True) is not False
         frozen_value = node["metadata"].get("frozen_value")
         model_value = model_values.get(node_key)
+        if model_value is None and "archived_value" in node["metadata"]:
+            model_value = deepcopy(node["metadata"]["archived_value"])
         if model_value is None and not metadata_editable and "frozen_value" in node["metadata"]:
             model_value = frozen_value
         node["model_value"] = deepcopy(model_value)
-        node["current_value"] = deepcopy(
-            current_values.get(node_key, model_value)
-        )
+        current_value = current_values.get(node_key)
+        if current_value is None and "archived_value" in node["metadata"]:
+            current_value = deepcopy(node["metadata"]["archived_value"])
+        node["current_value"] = deepcopy(current_value if current_value is not None else model_value)
         previous = previous_values.get(node_key)
         inherited = inherit_correction_node(
             previous if isinstance(previous, Mapping) else None,
@@ -410,6 +413,246 @@ def _previous_human_values(previous_item: Any | None) -> dict[str, Any]:
     }
 
 
+def _legacy_archive_payload(item: Any) -> Mapping[str, Any] | list[Any] | None:
+    """Read only item-owned archive fields; never consult a live mechanism."""
+
+    snapshot = _json_object(getattr(item, "result_snapshot_json", None))
+    for key in (
+        "archived_correction_fields",
+        "archived_correction_contract",
+        "archived_fields",
+        "correction_fields",
+        "frozen_correction_fields",
+    ):
+        value = snapshot.get(key)
+        if isinstance(value, (Mapping, list)):
+            return value
+    for key in (
+        "archived_correction_fields",
+        "archived_correction_contract",
+        "archived_fields",
+        "correction_fields",
+    ):
+        value = getattr(item, key, None)
+        if isinstance(value, (Mapping, list)):
+            return value
+    return None
+
+
+def _legacy_archive_nodes(
+    archive: Mapping[str, Any] | list[Any],
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Normalize a historical field subset and report unavailable node keys."""
+
+    if isinstance(archive, Mapping):
+        raw_nodes = archive.get("nodes")
+        if not isinstance(raw_nodes, list):
+            raw_nodes = archive.get("fields")
+        if isinstance(raw_nodes, Mapping):
+            raw_nodes = [
+                {"node_key": key, "value": value}
+                for key, value in raw_nodes.items()
+            ]
+        if raw_nodes is None:
+            reserved = {
+                "contract_version",
+                "category_key",
+                "expected_nodes",
+                "node_keys",
+                "contract",
+                "contract_hash",
+                "nodes",
+                "fields",
+            }
+            direct_fields = {
+                key: value
+                for key, value in archive.items()
+                if key not in reserved
+            }
+            if direct_fields:
+                raw_nodes = [
+                    {"node_key": key, "value": value}
+                    for key, value in direct_fields.items()
+                ]
+        expected = archive.get("expected_nodes")
+        if not isinstance(expected, list):
+            expected = archive.get("node_keys")
+    else:
+        raw_nodes = archive
+        expected = None
+    if not isinstance(raw_nodes, list):
+        raw_nodes = []
+    expected_keys = [str(value) for value in expected or [] if str(value).strip()]
+    nodes: list[dict[str, Any]] = []
+    unavailable: list[str] = []
+    seen: set[str] = set()
+    required_fields = (
+        "node_key",
+        "layer",
+        "path",
+        "label",
+        "description",
+        "type",
+        "semantic_version",
+        "compatibility_key",
+        "required",
+        "evidence",
+    )
+    for index, raw in enumerate(raw_nodes):
+        if not isinstance(raw, Mapping):
+            unavailable.append(f"归档节点[{index}]")
+            continue
+        source = deepcopy(dict(raw))
+        node_key = str(source.get("node_key") or source.get("key") or "").strip()
+        path = str(source.get("path") or node_key).strip()
+        if not node_key and path:
+            node_key = path
+        layer = str(source.get("layer") or "").strip()
+        if not layer:
+            layer = "V3" if path.startswith(("v3.", "scoring.")) else "B" if path.startswith(("call_b.", "dimension.", "dimensions.")) else "A"
+        missing = [field for field in required_fields if field not in source]
+        if layer == "V3" and not source.get("recompute_ref"):
+            missing.append("recompute_ref")
+        if not node_key:
+            unavailable.append(f"归档节点[{index}]")
+            continue
+        if node_key in seen:
+            unavailable.append(node_key)
+            continue
+        seen.add(node_key)
+        raw_metadata = source.get("metadata")
+        metadata = deepcopy(dict(raw_metadata)) if isinstance(raw_metadata, Mapping) else {}
+        metadata.setdefault("node_type", source.get("node_type") or "call_a_field")
+        metadata["archived_value"] = deepcopy(
+            source.get("value", source.get("model_value"))
+        )
+        metadata["archive_complete"] = not missing
+        node = {
+            **source,
+            "node_key": node_key,
+            "layer": layer,
+            "path": path or node_key,
+            "order": int(source.get("order", index) or index),
+            "metadata": metadata,
+        }
+        node.pop("value", None)
+        node.pop("model_value", None)
+        if missing:
+            unavailable.append(f"{node_key}（缺少：{'、'.join(missing)}）")
+        nodes.append(node)
+    for expected_key in expected_keys:
+        if expected_key not in seen:
+            unavailable.append(expected_key)
+    return nodes, unavailable
+
+
+def legacy_correction_view_from_archived_fields(item: Any) -> dict[str, Any]:
+    """Build the narrowest possible view for a run predating contract snapshots.
+
+    The archive is intentionally treated as untrusted metadata.  Complete
+    archived nodes can be edited in place; any missing node description or
+    server recompute reference makes the entire legacy view read-only.  No
+    current category, prompt, or V3 configuration is queried here.
+    """
+
+    run = getattr(item, "run", None)
+    evaluation = getattr(item, "evaluation", None)
+    archive = _legacy_archive_payload(item)
+    contract: dict[str, Any] | None = None
+    unavailable: list[str] = []
+    nodes: list[dict[str, Any]] = []
+    if archive is not None:
+        archive_mapping = archive if isinstance(archive, Mapping) else {}
+        raw_contract = (
+            archive_mapping.get("contract")
+            if isinstance(archive_mapping, Mapping)
+            else None
+        )
+        raw_nodes_source: Mapping[str, Any] | list[Any] = (
+            raw_contract if isinstance(raw_contract, Mapping) else archive
+        )
+        nodes, unavailable = _legacy_archive_nodes(raw_nodes_source)
+        category_key = str(
+            archive_mapping.get("category_key")
+            if isinstance(archive_mapping, Mapping)
+            else ""
+        ) or str(getattr(run, "category_key", "legacy"))
+        contract = {
+            "contract_version": str(
+                archive_mapping.get("contract_version", "legacy-correction-contract-v1")
+                if isinstance(archive_mapping, Mapping)
+                else "legacy-correction-contract-v1"
+            ),
+            "category_key": category_key,
+            "nodes": nodes,
+            "sources": {"archive": deepcopy(dict(archive_mapping))}
+            if isinstance(archive_mapping, Mapping)
+            else {"archive": deepcopy(archive)},
+        }
+        normalized = deepcopy(contract)
+        normalized["contract_hash"] = correction_contract_hash(normalized)
+        contract = normalized
+        validation_errors = validate_correction_contract(contract)
+        if validation_errors:
+            unavailable.extend(
+                error.split(".", 1)[0]
+                if error.startswith("nodes[") and "." not in error.split(" ", 1)[0][7:]
+                else error
+                for error in validation_errors
+            )
+    else:
+        unavailable = ["全部合同节点"]
+
+    review_revision = int(getattr(evaluation, "review_revision", 0) or 0)
+    read_only = bool(unavailable or evaluation is None or contract is None)
+    if contract is not None:
+        model_values = _values_for_contract(_model_roots(item), contract)
+        current_values = _values_for_contract(_current_roots(item), contract)
+        materialized = build_correction_nodes(
+            contract,
+            model_values=model_values,
+            current_values=current_values,
+            human_values=_human_values(item, contract),
+            previous_values={},
+        )
+        if read_only:
+            for node in materialized:
+                node["editable"] = False
+                node["read_only"] = True
+                node["read_only_reason"] = "历史归档字段不完整，只能查看"
+        nodes = materialized
+    lane = "baseline"
+    if getattr(run, "__tablename__", "") == "evaluation_production_runs":
+        lane = "incremental"
+    elif getattr(run, "__tablename__", "") == "prompt_regression_runs":
+        lane = "candidate"
+    return {
+        "schema_version": "correction-view-v1",
+        "lane": lane,
+        "run_id": getattr(run, "id", getattr(item, "run_id", None)),
+        "item_id": getattr(item, "id", None),
+        "evaluation_id": getattr(item, "evaluation_id", None),
+        "category_key": contract.get("category_key") if contract else getattr(run, "category_key", None),
+        "snapshot_status": "legacy_compatible" if contract is not None and not read_only else "legacy_read_only",
+        "snapshot_source": "archived_item_fields",
+        "read_only": read_only,
+        "unavailable_reason": "；".join(unavailable) if unavailable else None,
+        "unavailable_nodes": list(dict.fromkeys(unavailable)),
+        "contract": (
+            {
+                "contract_version": contract.get("contract_version"),
+                "contract_hash": contract["contract_hash"],
+                "category_key": contract["category_key"],
+            }
+            if contract
+            else None
+        ),
+        "review_revision": review_revision,
+        "nodes": nodes,
+        "idempotent_replay": False,
+    }
+
+
 def build_correction_view(
     db: Session | None,
     *,
@@ -424,24 +667,7 @@ def build_correction_view(
     evaluation = getattr(item, "evaluation", None)
     review_revision = int(getattr(evaluation, "review_revision", 0) or 0)
     if contract is None:
-        return {
-            "schema_version": "correction-view-v1",
-            "lane": "baseline",
-            "run_id": getattr(run, "id", None),
-            "item_id": getattr(item, "id", None),
-            "evaluation_id": getattr(item, "evaluation_id", None),
-            "category_key": getattr(run, "category_key", None),
-            "snapshot_status": "legacy_read_only",
-            "read_only": True,
-            "unavailable_reason": (
-                "历史运行未冻结纠偏合同，不能读取现役合同补齐"
-            ),
-            "unavailable_nodes": ["全部合同节点"],
-            "contract": None,
-            "review_revision": review_revision,
-            "nodes": [],
-            "idempotent_replay": False,
-        }
+        return legacy_correction_view_from_archived_fields(item)
 
     actual_hash = correction_contract_hash(contract)
     contract_errors = validate_correction_contract(contract)

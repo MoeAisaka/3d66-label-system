@@ -5,6 +5,13 @@ import { Button } from "@/components/ui/button"
 import { ImagePreviewButton, ImageReferenceDock } from "@/components/image-lightbox"
 import { NodeCorrectionEditor } from "@/pages/node-correction-editor"
 import type { BaselineRegressionItem, Evaluation } from "@/lib/types"
+import {
+  CorrectionContractRenderer,
+} from "@/features/correction-contract/contract-renderer.tsx"
+import type {
+  CorrectionDraft,
+  CorrectionView,
+} from "@/features/correction-contract/types"
 
 export function CorrectionWorkbench({
   item,
@@ -16,6 +23,13 @@ export function CorrectionWorkbench({
   hasPrevious,
   onNext,
   hasNext,
+  correctionView,
+  correctionDraft,
+  onCorrectionChange,
+  onCorrectionSubmit,
+  correctionSubmitPending,
+  correctionSubmitDisabled,
+  correctionDisabled,
   children,
 }: {
   item: BaselineRegressionItem
@@ -27,6 +41,13 @@ export function CorrectionWorkbench({
   hasPrevious?: boolean
   onNext?: () => void
   hasNext?: boolean
+  correctionView?: CorrectionView | null
+  correctionDraft?: CorrectionDraft
+  onCorrectionChange?: (nodeKey: string, patch: Partial<CorrectionDraft[string]>) => void
+  onCorrectionSubmit?: () => void
+  correctionSubmitPending?: boolean
+  correctionSubmitDisabled?: boolean
+  correctionDisabled?: boolean
   children?: ReactNode
 }) {
   const evaluation = item.evaluation as Evaluation | null
@@ -68,7 +89,17 @@ export function CorrectionWorkbench({
       <div className="min-w-0 border-t border-[var(--line-strong)] px-0 py-0 xl:border-l xl:border-t-0">
         <div className="grid grid-cols-1 gap-4">
           {children}
-          {evaluation && evaluation.scoring?.v3_context && (
+          {correctionView && correctionDraft && onCorrectionChange ? (
+            <CorrectionContractRenderer
+              view={correctionView}
+              draft={correctionDraft}
+              onChange={onCorrectionChange}
+              onSubmit={onCorrectionSubmit}
+              pending={correctionSubmitPending}
+              submitDisabled={correctionSubmitDisabled}
+              disabled={correctionDisabled}
+            />
+          ) : evaluation && evaluation.scoring?.v3_context && (
             <NodeCorrectionEditor key={`${evaluation.id}-${evaluation.review_revision}`} evaluation={evaluation} corrector={corrector} onCorrected={onCorrected} />
           )}
         </div>

@@ -54,9 +54,17 @@ import {
 import { BaselineSetDialog } from "@/features/baseline-regression/baseline-set-dialog"
 import { CorrectionWorkbench } from "@/features/baseline-regression/correction-workbench"
 import {
+  correctionDraftFromView,
+  correctionSubmissionPayload,
+  mergeCorrectionResponse,
+  updateCorrectionDraft,
+} from "@/features/correction-contract/correction-view-state"
+import type { CorrectionDraft, CorrectionView } from "@/features/correction-contract/types"
+import {
   nextPendingCorrectionId,
   previousCorrectionId,
 } from "@/features/baseline-regression/correction-navigation"
+import { candidateRefreshPlan } from "@/features/correction-contract/candidate-refresh"
 import { LevelPerformanceSummary } from "@/features/baseline-regression/level-performance-summary"
 import { MetricsDrawer } from "@/features/baseline-regression/metrics-drawer"
 import { RunConfigDrawer } from "@/features/baseline-regression/run-config-drawer"
@@ -74,6 +82,13 @@ const levelNames: Record<BaselineLevel, string> = {
 const ASSET_PAGE_SIZE = 200
 const RUN_PAGE_SIZE = 200
 const ACCEPTANCE_PAGE_SIZE = 1000
+
+function correctionIdempotencyKey(runId: number, itemId: number): string {
+  const random = typeof globalThis.crypto?.randomUUID === "function"
+    ? globalThis.crypto.randomUUID()
+    : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`
+  return `baseline-contract:${runId}:${itemId}:${random}`
+}
 
 export function BaselineRegressionPage() {
   const queryClient = useQueryClient()
@@ -1415,7 +1430,10 @@ function RegressionResults({
       )
     },
     onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: ["baseline-regression", run.id] })
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["baseline-regression", run.id] }),
+        queryClient.invalidateQueries({ queryKey: ["baseline-correction-view", run.id, correctionItemId] }),
+      ])
       toast.success("已创建新的人工审核轮次，可继续修改")
     },
     onError: (error) => toast.error(error.message),
@@ -1424,6 +1442,55 @@ function RegressionResults({
   const metrics = run.metrics
   const pageCount = Math.max(1, Math.ceil(pagination.total / pagination.limit))
   const correctionItem = items.find((item) => item.id === correctionItemId)
+  const correctionViewQuery = useQuery<CorrectionView>({
+    queryKey: ["baseline-correction-view", run.id, correctionItemId],
+    queryFn: () => baselineRegressionApi.getCorrectionView(run.id, correctionItemId),
+    enabled: correctionItemId > 0 && Boolean(correctionItem),
+  })
+  const [correctionDraft, setCorrectionDraft] = useState<CorrectionDraft | null>(null)
+  const [correctionDraftKey, setCorrectionDraftKey] = useState("")
+  const correctionViewKey = correctionViewQuery.data
+    ? `${correctionViewQuery.data.item_id}:${correctionViewQuery.data.contract?.contract_hash ?? "legacy"}:${correctionViewQuery.data.review_revision}`
+    : ""
+
+  useEffect(() => {
+    if (!correctionViewQuery.data || !correctionViewKey) return
+    if (correctionDraftKey === correctionViewKey) return
+    setCorrectionDraft(correctionDraftFromView(correctionViewQuery.data))
+    setCorrectionDraftKey(correctionViewKey)
+  }, [correctionDraftKey, correctionViewKey, correctionViewQuery.data])
+
+  useEffect(() => {
+    if (correctionItemId > 0) return
+    setCorrectionDraft(null)
+    setCorrectionDraftKey("")
+  }, [correctionItemId])
+
+  const submitContractCorrection = useMutation({
+    mutationFn: async () => {
+      const view = correctionViewQuery.data
+      if (!view || !correctionDraft) throw new Error("合同纠偏面板尚未加载")
+      const payload = correctionSubmissionPayload(
+        correctionDraft,
+        view,
+        correctionIdempotencyKey(run.id, correctionItemId),
+      )
+      if (!payload.nodes.length) throw new Error("请先修改至少一个纠偏节点")
+      return baselineRegressionApi.submitCorrectionNodes(run.id, correctionItemId, payload)
+    },
+    onSuccess: async (response) => {
+      setCorrectionDraft(mergeCorrectionResponse(correctionDraft ?? {}, response))
+      setCorrectionDraftKey(`${response.item_id}:${response.contract?.contract_hash ?? "legacy"}:${response.review_revision}`)
+      await queryClient.invalidateQueries({ queryKey: ["baseline-regression", run.id] })
+      void Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["baseline-acceptance", run.id] }),
+        queryClient.invalidateQueries({ queryKey: ["evaluations"] }),
+        queryClient.invalidateQueries({ queryKey: ["dashboard"] }),
+      ])
+      toast.success("合同纠偏已保存，当前素材保持不变")
+    },
+    onError: (error) => toast.error(error.message),
+  })
 
   if (correctionItemId > 0 && correctionItem) {
     return (
@@ -1441,6 +1508,15 @@ function RegressionResults({
           if (nextId) onOpenCorrection(nextId)
         }}
         hasNext={Boolean(nextPendingCorrectionId(items, correctionItem.id))}
+        correctionView={correctionViewQuery.data ?? null}
+        correctionDraft={correctionDraft ?? undefined}
+        onCorrectionChange={(nodeKey, patch) => {
+          setCorrectionDraft((current) => current ? updateCorrectionDraft(current, nodeKey, patch) : current)
+        }}
+        onCorrectionSubmit={() => submitContractCorrection.mutate()}
+        correctionSubmitPending={submitContractCorrection.isPending}
+        correctionSubmitDisabled={correctionViewQuery.isLoading || correctionViewQuery.isError}
+        correctionDisabled={correctionItem.evaluation?.review_stage === "completed"}
         onCorrected={async () => {
           await Promise.all([
             queryClient.invalidateQueries({ queryKey: ["baseline-regression", run.id] }),
@@ -1512,7 +1588,7 @@ function RegressionResults({
                     </Button>
                   </div>
                 )}
-                {correctionItem.evaluation.scoring?.dimension_scoring_mode !== "rule_deduction" && (
+                {!correctionViewQuery.data && correctionItem.evaluation.scoring?.dimension_scoring_mode !== "rule_deduction" && (
                   <ReviewCorrectionForm
                     key={`${correctionItem.evaluation.id}-${correctionItem.evaluation.review_revision}`}
                     dimensions={correctionItem.evaluation.aesthetic?.dimensions ?? {}}
@@ -1863,10 +1939,16 @@ function CorrectionAnalysisPanel({
       note: string
     }) => baselineRegressionApi.decideCorrectionRun(correctionRunId, decision, note),
     onSuccess: async (result) => {
+      const refreshPlan = result.mechanism_refresh
+        ? candidateRefreshPlan(result.mechanism_refresh, run.id)
+        : null
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ["baseline-correction-runs", run.id] }),
-        queryClient.invalidateQueries({ queryKey: ["evaluation-categories"] }),
-        queryClient.invalidateQueries({ queryKey: ["prompts", run.category_key] }),
+        ...(refreshPlan?.invalidate ?? [
+          ["evaluation-categories"],
+          ["prompts", run.category_key],
+          ["baseline-v3-revisions", run.category_key],
+        ]).map((queryKey) => queryClient.invalidateQueries({ queryKey })),
       ])
       toast.success(result.status === "approved" ? "候选已启用" : "候选已拒绝")
     },
