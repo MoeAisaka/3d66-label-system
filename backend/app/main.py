@@ -62,6 +62,10 @@ from .category_pipeline import (
     validate_pipeline_config,
 )
 from .database import SessionLocal, get_db, init_database
+from .correction_contract import (
+    correction_contract_hash,
+    freeze_contract_from_execution_snapshot,
+)
 from .production_dimension_contract import (
     ProductionDimensionContractError,
     resolve_published_dimension_contract,
@@ -10854,6 +10858,11 @@ def create_baseline_run(
                     "site_scope": next(iter(site_scopes)),
                     "asset_scope": "unknown",
                 }
+    correction_contract = freeze_contract_from_execution_snapshot(
+        category_key=baseline_set.category_key,
+        execution_snapshot=execution_payload,
+    )
+    execution_payload["correction_contract"] = correction_contract
     execution_snapshot = baseline_canonical_json(execution_payload)
     previous = db.scalar(
         select(BaselineRegressionRun)
@@ -10881,6 +10890,8 @@ def create_baseline_run(
         category_key=baseline_set.category_key,
         strategy_snapshot_json=strategy_snapshot,
         execution_snapshot_json=execution_snapshot,
+        correction_contract_json=baseline_canonical_json(correction_contract),
+        correction_contract_hash=correction_contract_hash(correction_contract),
         baseline_set_fingerprint=baseline_set.fingerprint,
         status="running",
         total=len(frozen_items),
@@ -12863,6 +12874,10 @@ def _create_paired_regression(
         model_config=candidate_model,
         dimension_contract=paired_dimension_contract,
     )
+    candidate_correction_contract = freeze_contract_from_execution_snapshot(
+        category_key=sample_set.category_key,
+        execution_snapshot=json.loads(candidate_category_snapshot),
+    )
 
     frozen: list[dict[str, Any]] = []
     for requested in payload.samples:
@@ -12942,6 +12957,8 @@ def _create_paired_regression(
         candidate_strategy_bundle_id=candidate_bundle.id,
         baseline_strategy_snapshot_json=baseline_strategy_snapshot_json,
         candidate_strategy_snapshot_json=candidate_strategy_snapshot_json,
+        correction_contract_json=baseline_canonical_json(candidate_correction_contract),
+        correction_contract_hash=correction_contract_hash(candidate_correction_contract),
         sample_set_version=sample_set_version,
         sample_manifest_json=manifest_json,
         metric_rules_version=payload.metric_rules_version.strip(),

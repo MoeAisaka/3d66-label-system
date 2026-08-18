@@ -89,6 +89,7 @@ MIGRATION_NAMES = [
     "add_3d_shadow_dry_run_contracts",
     "add_global_automation_lanes",
     "add_review_rounds",
+    "add_correction_contract_snapshots",
 ]
 
 

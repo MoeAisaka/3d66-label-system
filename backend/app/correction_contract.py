@@ -281,3 +281,168 @@ def inherit_correction_node(
     else:
         result["inheritance"] = {"status": "changed"}
     return result
+
+
+def _fallback_label(prefix: str, key: Any) -> str:
+    return f"{prefix}{str(key or '未命名')}"
+
+
+def _source_nodes(
+    source: Mapping[str, Any] | None,
+    *,
+    layer: str,
+    path_prefix: str,
+    label_prefix: str,
+) -> list[dict[str, Any]]:
+    if not isinstance(source, Mapping):
+        return []
+    raw_nodes = source.get("nodes")
+    if isinstance(raw_nodes, list):
+        result: list[dict[str, Any]] = []
+        for index, raw in enumerate(raw_nodes):
+            if not isinstance(raw, Mapping):
+                continue
+            node = deepcopy(dict(raw))
+            key = str(node.get("node_key") or node.get("key") or f"node_{index}")
+            node["node_key"] = key
+            node.setdefault("layer", layer)
+            node.setdefault("path", f"{path_prefix}.{key}")
+            node.setdefault("order", index)
+            node.setdefault("label", node.get("name") or _fallback_label(label_prefix, key))
+            node.setdefault("description", f"冻结{node['label']}的纠偏判断")
+            node.setdefault("type", node.get("value_type") or "text")
+            node.setdefault("semantic_version", "1")
+            node.setdefault("compatibility_key", key)
+            node.setdefault("required", False)
+            node.setdefault("evidence", {"description": f"请提供{node['label']}的图片证据"})
+            result.append(node)
+        return result
+    raw_fields = source.get("fields")
+    if not isinstance(raw_fields, list):
+        return []
+    result = []
+    for index, raw in enumerate(raw_fields):
+        if not isinstance(raw, Mapping):
+            continue
+        key = str(raw.get("key") or raw.get("field_key") or f"field_{index}")
+        label = str(raw.get("label") or raw.get("name") or _fallback_label(label_prefix, key))
+        node = {
+            **deepcopy(dict(raw)),
+            "node_key": f"{path_prefix}.{key}",
+            "layer": layer,
+            "path": f"{path_prefix}.{key}",
+            "order": index,
+            "label": label,
+            "description": str(raw.get("description") or f"冻结{label}的纠偏判断"),
+            "type": str(raw.get("type") or raw.get("value_type") or "text"),
+            "semantic_version": str(raw.get("semantic_version") or "1"),
+            "compatibility_key": str(raw.get("compatibility_key") or key),
+            "required": bool(raw.get("required", False)),
+            "evidence": raw.get("evidence") if isinstance(raw.get("evidence"), Mapping) else {"description": f"请提供{label}的图片证据"},
+        }
+        result.append(node)
+    return result
+
+
+def freeze_correction_contract(
+    *,
+    category_key: str,
+    prompt_snapshot: Mapping[str, Any],
+    dimension_snapshot: Mapping[str, Any],
+    production_field_snapshot: Mapping[str, Any],
+    v3_snapshot: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Compose and hash an immutable contract from the selected run inputs."""
+    prompt_nodes = _source_nodes(
+        prompt_snapshot,
+        layer=str(prompt_snapshot.get("layer") or prompt_snapshot.get("stage") or "A"),
+        path_prefix="prompt",
+        label_prefix="提示词节点 ",
+    )
+    dimension_nodes = _source_nodes(
+        dimension_snapshot,
+        layer="A",
+        path_prefix="dimensions",
+        label_prefix="维度 ",
+    )
+    field_nodes = _source_nodes(
+        production_field_snapshot,
+        layer="B",
+        path_prefix="production_fields",
+        label_prefix="生产字段 ",
+    )
+    v3_nodes = _source_nodes(
+        v3_snapshot,
+        layer="V3",
+        path_prefix="v3",
+        label_prefix="规则节点 ",
+    )
+    # V3 nodes must retain the server-side recompute reference; a missing
+    # reference intentionally remains incomplete and is blocked at release.
+    nodes = prompt_nodes + dimension_nodes + field_nodes + v3_nodes
+    contract = normalize_correction_contract(
+        {
+            "contract_version": "correction-contract-v1",
+            "category_key": category_key,
+            "nodes": nodes,
+            "sources": {
+                "prompt": deepcopy(dict(prompt_snapshot)),
+                "dimensions": deepcopy(dict(dimension_snapshot)),
+                "production_fields": deepcopy(dict(production_field_snapshot)),
+                "v3": deepcopy(dict(v3_snapshot)),
+            },
+        },
+        category_key=category_key,
+    )
+    contract["contract_hash"] = correction_contract_hash(contract)
+    return contract
+
+
+def correction_contract_from_run_snapshot(
+    snapshot: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Extract a detached contract from a run snapshot without active fallback."""
+    if not isinstance(snapshot, Mapping):
+        return None
+    candidate = snapshot.get("correction_contract")
+    if not isinstance(candidate, Mapping):
+        if "contract_version" in snapshot and isinstance(snapshot.get("nodes"), list):
+            candidate = snapshot
+        else:
+            return None
+    return deepcopy(dict(candidate))
+
+
+def freeze_contract_from_execution_snapshot(
+    *, category_key: str, execution_snapshot: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Build a contract from a frozen category execution snapshot."""
+    pipeline = execution_snapshot.get("pipeline_config")
+    if not isinstance(pipeline, Mapping):
+        pipeline = {}
+    dimension_contract = execution_snapshot.get("dimension_contract")
+    if not isinstance(dimension_contract, Mapping):
+        dimension_contract = {}
+    dimension_definition = dimension_contract.get("definition")
+    if not isinstance(dimension_definition, Mapping):
+        dimension_definition = execution_snapshot.get("dimension_selection")
+    if not isinstance(dimension_definition, Mapping):
+        dimension_definition = {}
+    production_fields = pipeline.get("production_fields")
+    if not isinstance(production_fields, Mapping):
+        production_fields = {"fields": []}
+    v3 = execution_snapshot.get("v3_authoritative_bundle")
+    if not isinstance(v3, Mapping):
+        v3 = {}
+    prompt_snapshot = {
+        "stage": "A",
+        "version": execution_snapshot.get("rubric_version") or "frozen",
+        "nodes": [],
+    }
+    return freeze_correction_contract(
+        category_key=category_key,
+        prompt_snapshot=prompt_snapshot,
+        dimension_snapshot=dimension_definition,
+        production_field_snapshot=production_fields,
+        v3_snapshot=v3,
+    )
