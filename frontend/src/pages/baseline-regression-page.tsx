@@ -1437,7 +1437,7 @@ function RegressionResults({
         }}
         onPreview={onPreview}
       >
-        <div className="grid gap-4 md:grid-cols-2">
+        <div className="grid grid-cols-1 gap-4">
           <LevelExplanation item={correctionItem} />
           <div className="space-y-3">
             <p className="text-sm font-semibold">人工决策</p>

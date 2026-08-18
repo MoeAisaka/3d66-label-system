@@ -16,6 +16,12 @@ assert.match(formSource, /initialCorrections/)
 assert.match(pageSource, /再次修改/)
 assert.match(pageSource, /下一个/)
 assert.match(workbenchSource, /xl:grid-cols-\[minmax\(0,1fr\)_420px\]/)
+assert.match(workbenchSource, /ImagePreviewButton/)
+assert.match(workbenchSource, /max-w-full/)
+assert.match(workbenchSource, /onPreview=\{onPreview\}/)
+assert.doesNotMatch(workbenchSource, /<img src=\{item\.image_url\} alt=\{item\.asset\.name\} className=\"max-h-\[72vh\] w-full object-contain\" \/>/)
+assert.match(pageSource, /<div className=\"grid grid-cols-1 gap-4\">\s*<LevelExplanation/)
+assert.doesNotMatch(pageSource, /<div className=\"grid gap-4 md:grid-cols-2\">\s*<LevelExplanation/)
 assert.match(workbenchSource, /v3_context/)
 assert.equal(
   nextPendingCorrectionId([
