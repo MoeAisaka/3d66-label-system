@@ -558,7 +558,7 @@ export function BaselineRegressionPage() {
       <PageHeader
         index="03.7"
         title="基准回归"
-        description="按类目冻结素材与 L1–L5 期望等级，可独立选择提示词重复运行；每轮只使用启动时冻结的 active v3 合同，回归结果与后续纠偏分析互相隔离。"
+        description="按类目冻结素材与 L1–L5 期望等级，可独立选择提示词重复运行；每轮只使用启动时冻结的现役等级规则，回归结果与后续纠偏分析互相隔离。"
         actions={
           <>
             <input
@@ -990,7 +990,7 @@ export function BaselineRegressionPage() {
                     <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                       <div className="min-w-0 text-xs leading-5 text-[var(--muted)]">
                         <p className="font-semibold text-[var(--ink)]">启动摘要</p>
-                        <p className="truncate">A {selectedPromptA?.version ?? "—"} · B {selectedPromptB?.version ?? "—"} · V3 {selectedV3Revision ? `Revision ${selectedV3Revision.revision}` : "未加载"}</p>
+                        <p className="truncate">A {selectedPromptA?.version ?? "—"} · B {selectedPromptB?.version ?? "—"} · 等级规则 {selectedV3Revision ? `Revision ${selectedV3Revision.revision}` : "未加载"}</p>
                       </div>
                       <Button
                         className="shrink-0"
@@ -1054,11 +1054,11 @@ export function BaselineRegressionPage() {
 
                     <section className="space-y-4 border-t border-[var(--line)] pt-6" aria-labelledby="baseline-v3-config">
                       <div>
-                        <p id="baseline-v3-config" className="text-sm font-bold">V3 合同配置</p>
+                        <p id="baseline-v3-config" className="text-sm font-bold">等级规则配置</p>
                         <p className="mt-1 text-xs leading-5 text-[var(--muted)]">默认使用当前现役；候选只允许同类目且仍在现役祖先链上的版本。</p>
                       </div>
                       <label>
-                        <span className="mb-2 block text-xs font-semibold">合同取值方式</span>
+                        <span className="mb-2 block text-xs font-semibold">等级规则取值方式</span>
                         <select
                           className="h-11 w-full rounded-[4px] border border-[var(--line-strong)] bg-white px-3 text-sm"
                           value={v3SelectionMode}
@@ -1074,7 +1074,7 @@ export function BaselineRegressionPage() {
                         </select>
                       </label>
                       <label>
-                        <span className="mb-2 block text-xs font-semibold">V3 合同版本</span>
+                        <span className="mb-2 block text-xs font-semibold">等级规则版本</span>
                         <select
                           className="h-11 w-full rounded-[4px] border border-[var(--line-strong)] bg-white px-3 text-sm"
                           value={selectedV3Revision?.id ?? 0}
@@ -1093,15 +1093,15 @@ export function BaselineRegressionPage() {
                           })}
                         </select>
                       </label>
-                      {v3Revisions.isError && <div className="border border-[#d7a09d] bg-[#fff5f4] px-3 py-3 text-xs text-[#8d2924]">V3 版本列表加载失败，无法启动。<button type="button" className="ml-2 underline" onClick={() => v3Revisions.refetch()}>重试</button></div>}
+                      {v3Revisions.isError && <div className="border border-[#d7a09d] bg-[#fff5f4] px-3 py-3 text-xs text-[#8d2924]">等级规则版本列表加载失败，无法启动。<button type="button" className="ml-2 underline" onClick={() => v3Revisions.refetch()}>重试</button></div>}
                       {selectedV3Revision && <div className="border border-[var(--line)] bg-[#fafbf8] px-3 py-3 text-xs leading-5"><p className="font-semibold">{selectedV3Revision.display_name} · Revision {selectedV3Revision.revision}</p><p className="text-[var(--muted)]">状态：{selectedV3Revision.status} · Hash {selectedV3Revision.contract_hash.slice(0, 12)}</p></div>}
-                      {v3SelectionMode === "candidate" && promptBindingMismatch && <div className="border border-[#d7a09d] bg-[#fff5f4] px-3 py-3 text-xs leading-5 text-[#8d2924]">候选合同绑定版本不匹配：{candidatePromptBindingA ? `A 需要 ${candidatePromptBindingA}` : ""}{candidatePromptBindingB ? `，B 需要 ${candidatePromptBindingB}` : ""}。请调整 A/B 后再启动。</div>}
+                      {v3SelectionMode === "candidate" && promptBindingMismatch && <div className="border border-[#d7a09d] bg-[#fff5f4] px-3 py-3 text-xs leading-5 text-[#8d2924]">候选等级规则绑定版本不匹配：{candidatePromptBindingA ? `A 需要 ${candidatePromptBindingA}` : ""}{candidatePromptBindingB ? `，B 需要 ${candidatePromptBindingB}` : ""}。请调整 A/B 后再启动。</div>}
                     </section>
 
                     <section className="space-y-4 border-t border-[var(--line)] pt-6" aria-labelledby="baseline-execution-config">
                       <div>
                         <p id="baseline-execution-config" className="text-sm font-bold">执行方式</p>
-                        <p className="mt-1 text-xs leading-5 text-[var(--muted)]">运行启动后会冻结提示词、V3 合同和执行模式；历史记录不会被后续版本覆盖。</p>
+                        <p className="mt-1 text-xs leading-5 text-[var(--muted)]">运行启动后会冻结提示词、等级规则和执行模式；历史记录不会被后续版本覆盖。</p>
                       </div>
                       <label>
                         <span className="mb-2 block text-xs font-semibold">结果判定方式</span>
@@ -1836,7 +1836,7 @@ function CorrectionAnalysisPanel({
     const approved = decision === "approved"
     const confirmed = window.confirm(
       approved
-        ? "确认启用该机制候选？启用后会切换当前类目的现役提示词与 v3 机制版本，但不会发布标签事实。"
+        ? "确认启用该等级规则候选？启用后会切换当前类目的现役提示词与等级规则版本，但不会发布标签事实。"
         : "确认拒绝该机制候选？本次候选与回归证据会保留，结论提交后不可修改。",
     )
     if (!confirmed) return

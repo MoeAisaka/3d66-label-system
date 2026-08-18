@@ -16,7 +16,7 @@ export function UnknownMechanismSummary({
   const [jsonOpen, setJsonOpen] = useState(false)
   const explanation = reason
     ?? detail?.mechanism_profile.reason
-    ?? "当前版本不支持结构化编辑，请先确认机制插件与合同版本。"
+    ?? "当前版本不支持结构化编辑，请先确认机制插件与等级规则版本。"
 
   return (
     <section className="border-y border-[var(--line-strong)] bg-white px-5 py-6">
@@ -37,7 +37,7 @@ export function UnknownMechanismSummary({
           open={jsonOpen}
           onOpenChange={setJsonOpen}
           title={`${detail.category_key} · revision ${detail.revision}`}
-          description="只读合同工件。未知机制不会猜测字段结构，也不会写回运行时投影。"
+          description="只读等级规则工件。未知机制不会猜测字段结构，也不会写回运行时投影。"
         >
           <pre className="overflow-x-auto whitespace-pre-wrap break-words bg-[#f6f8f3] p-4 font-data text-xs leading-6">
             {JSON.stringify({

@@ -16,7 +16,7 @@ import {
 import type { JsonObject, MechanismEditorProps } from "./types"
 
 const STEPS = [
-  { id: "identity", label: "合同身份", hint: "版本、来源与显示名" },
+  { id: "identity", label: "等级规则身份", hint: "版本、来源与显示名" },
   { id: "input", label: "PDF 输入与确定性预检", hint: "文本层、A/B 调用与审计" },
   { id: "redline", label: "红线与人工复核", hint: "淘汰封顶与 fail-closed" },
   { id: "tracks", label: "赛道与三分项评分", hint: "对象型赛道与分项上限" },
@@ -156,11 +156,11 @@ export function ProposalTextEditor({
   return (
     <div className="border border-[var(--line-strong)] bg-[#f6f8f3]">
       <div className="grid min-h-[720px] grid-cols-[190px_minmax(0,1fr)_280px]">
-        <nav className="border-r border-[var(--line)] bg-[#11130f] p-3 text-white" aria-label="Proposal PDF 合同编辑步骤">
+        <nav className="border-r border-[var(--line)] bg-[#11130f] p-3 text-white" aria-label="Proposal PDF 等级规则编辑步骤">
           <div className="mb-4 px-2 py-3">
             <Badge tone="active">专用机制</Badge>
             <h2 className="font-editorial mt-3 text-xl font-bold">Proposal PDF</h2>
-            <p className="mt-2 text-xs leading-5 text-white/60">六步编辑完整三分项加法合同</p>
+            <p className="mt-2 text-xs leading-5 text-white/60">六步编辑完整三分项加法等级规则</p>
           </div>
           <ol className="space-y-1">
             {STEPS.map((item, index) => (
@@ -239,13 +239,13 @@ export function ProposalTextEditor({
                   ))}
                 </ul>
               ) : (
-                <p className="mt-2 text-[0.68rem] leading-5 text-[var(--muted)]">点击校验后展示合同边界错误。候选不会自动发布。</p>
+                <p className="mt-2 text-[0.68rem] leading-5 text-[var(--muted)]">点击校验后展示等级规则边界错误。候选不会自动发布。</p>
               )}
             </section>
 
             <div className="grid gap-2">
               <Button variant="secondary" size="sm" onClick={onValidate} disabled={busy}>
-                <Check />校验完整合同
+                <Check />校验完整等级规则
               </Button>
               <Button size="sm" onClick={onCreateCandidate} disabled={busy}>
                 <FloppyDisk />创建候选版本
@@ -279,7 +279,7 @@ export function ProposalTextEditor({
         open={diffOpen}
         onOpenChange={setDiffOpen}
         title="所选 revision → 当前草稿"
-        description="这里列出变化路径；提交时仍发送完整合同对象。"
+        description="这里列出变化路径；提交时仍发送完整等级规则对象。"
       >
         <div className="space-y-2">
           {displayNameChanged && <DiffRow path="display_name" before={selectedRevision?.display_name} after={draft.display_name} />}
@@ -323,13 +323,13 @@ function IdentityStep({ contract, displayName, patch, patchDisplayName }: {
   patchDisplayName: (value: string) => void
 }) {
   return (
-    <Section title="合同身份与版本" description="profile、category 与合同骨架固定；运营版本标识可随候选迭代。">
+    <Section title="等级规则身份与版本" description="profile、category 与等级规则骨架固定；运营版本标识可随候选迭代。">
       <div className="grid gap-4 md:grid-cols-2">
         <ReadOnlyValue label="contract_version" value={contract.contract_version} />
         <ReadOnlyValue label="profile_type" value={contract.profile_type} />
         <ReadOnlyValue label="category_key" value={contract.category_key} />
         <Field label="显示名称"><Input className={inputClass} value={displayName} onChange={(event) => patchDisplayName(event.target.value)} /></Field>
-        <Field label="合同 spec_version"><Input className={inputClass} maxLength={128} value={String(contract.spec_version ?? "")} onChange={(event) => patch(["spec_version"], event.target.value)} /></Field>
+        <Field label="等级规则 spec_version"><Input className={inputClass} maxLength={128} value={String(contract.spec_version ?? "")} onChange={(event) => patch(["spec_version"], event.target.value)} /></Field>
         <Field label="调用 A 版本"><Input className={inputClass} maxLength={128} value={String(contract.call_a_version ?? "")} onChange={(event) => patch(["call_a_version"], event.target.value)} /></Field>
         <Field label="调用 B 版本"><Input className={inputClass} maxLength={128} value={String(contract.call_b_version ?? "")} onChange={(event) => patch(["call_b_version"], event.target.value)} /></Field>
         <Field label="来源标准"><Textarea className="min-h-20 text-xs" value={String(contract.source_standard ?? "")} onChange={(event) => patch(["source_standard"], event.target.value)} /></Field>

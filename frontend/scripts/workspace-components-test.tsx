@@ -129,7 +129,7 @@ function findButton(name: string) {
 createRoot(document.getElementById("root")!).render(<Harness />)
 
 setTimeout(() => {
-  expectText("TPENG 标签实验台")
+  expectText("特鹏标签实验台")
   expectText("LabelLab")
 
   const drawerTrigger = document.querySelector<HTMLButtonElement>('[data-testid="open-drawer"]')

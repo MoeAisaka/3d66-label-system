@@ -25,7 +25,7 @@ const ROWS: { slot: EvaluationBoundarySlot; title: string; body: string }[] = [
   {
     slot: "B",
     title: "调用 B · 维度评价（好不好）",
-    body: "只按赛道逐条判断维度扣分规则是否命中，并为每条命中规则给出独立证据；不算总分、不做媒介降权与封顶。旧合同没有扣分规则时才兼容 grade（1-5）路径。",
+    body: "只按赛道逐条判断维度扣分规则是否命中，并为每条命中规则给出独立证据；不算总分、不做媒介降权与封顶。旧评测机制没有扣分规则时才兼容 grade（1-5）路径。",
   },
   {
     slot: "dimension",
