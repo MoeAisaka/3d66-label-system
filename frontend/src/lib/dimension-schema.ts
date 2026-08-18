@@ -117,6 +117,9 @@ export function calculateDimensionPreview(
 ): { score: number; level: string } | null {
   const definitions = resolvedDimensionDefinitions(schema)
   const aggregation = schema?.definition?.aggregation
+  if (aggregation?.preview_mode === "v3_grade_bridge") {
+    return calculateV3GradePreview(definitions, aggregation, grades)
+  }
   const defaultGradePoints = aggregation?.grade_points
   const thresholds = aggregation?.level_thresholds
   if (
@@ -163,6 +166,62 @@ export function calculateDimensionPreview(
     score = Math.min(score, Number(thresholds[`L${cap + 1}`]) - 1)
   }
   return { score, level }
+}
+
+function calculateV3GradePreview(
+  definitions: DimensionDefinition[],
+  aggregation: NonNullable<DimensionSchemaDefinition["aggregation"]>,
+  grades: Record<string, number>,
+): { score: number; level: string } | null {
+  const dimensionMax = Number(aggregation.dimension_max)
+  const baseScore = Number(aggregation.base_score)
+  const trackCap = Number(aggregation.track_cap)
+  const levels = aggregation.level_scale
+  if (
+    !definitions.length
+    || !Number.isFinite(dimensionMax)
+    || !Number.isFinite(baseScore)
+    || !Number.isFinite(trackCap)
+    || !Array.isArray(levels)
+  ) {
+    return null
+  }
+
+  let score = baseScore
+  for (const definition of definitions) {
+    const grade = grades[definition.key]
+    const gradePoints = definition.grade_points
+    const minPoints = Number(gradePoints?.["1"])
+    const maxPoints = Number(gradePoints?.["5"])
+    const points = Number(gradePoints?.[String(grade)])
+    const weight = Number(definition.weight)
+    if (
+      !Number.isInteger(grade)
+      || grade < 1
+      || grade > 5
+      || !Number.isFinite(minPoints)
+      || !Number.isFinite(maxPoints)
+      || maxPoints <= minPoints
+      || !Number.isFinite(points)
+      || !Number.isFinite(weight)
+    ) {
+      return null
+    }
+    score += ((points - minPoints) / (maxPoints - minPoints)) * weight * dimensionMax
+  }
+
+  const digits = Number(aggregation.score_round_digits ?? 0)
+  const factor = 10 ** digits
+  score = Math.min(trackCap, Math.max(0, Math.round(score * factor) / factor))
+  const enabledLevels = levels
+    .filter((item) => item.enabled === true && Number.isFinite(Number(item.min_score)))
+    .map((item) => ({ level: item.level, minScore: Number(item.min_score) }))
+    .filter((item): item is { level: string; minScore: number } => (
+      typeof item.level === "string" && /^L[1-5]$/.test(item.level)
+    ))
+    .sort((left, right) => right.minScore - left.minScore)
+  const matched = enabledLevels.find((item) => score >= item.minScore)
+  return matched ? { score, level: matched.level } : null
 }
 
 function levelForScore(
