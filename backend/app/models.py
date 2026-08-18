@@ -2991,9 +2991,19 @@ def _require_strategy_snapshot_for_new_result(
 class HumanReview(Base):
     __tablename__ = "human_reviews"
     __table_args__ = (
+        UniqueConstraint(
+            "panel_id",
+            "review_round",
+            "reviewer_name",
+            name="uq_human_review_panel_round_reviewer",
+        ),
         CheckConstraint(
             "stage IN ('initial','secondary','arbitration')",
             name="ck_human_reviews_stage",
+        ),
+        CheckConstraint(
+            "review_round >= 1",
+            name="ck_human_reviews_review_round",
         ),
     )
 
@@ -3008,6 +3018,7 @@ class HumanReview(Base):
         index=True,
     )
     panel_revision: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    review_round: Mapped[int] = mapped_column(Integer, default=1)
     stage: Mapped[str] = mapped_column(String(20), default="initial", index=True)
     decision: Mapped[str] = mapped_column(String(30))
     corrected_level: Mapped[str | None] = mapped_column(String(10), nullable=True)
@@ -3033,6 +3044,10 @@ class ReviewPanel(Base):
             name="ck_review_panels_status",
         ),
         CheckConstraint("revision >= 0", name="ck_review_panels_revision"),
+        CheckConstraint(
+            "review_round >= 1",
+            name="ck_review_panels_review_round",
+        ),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -3046,6 +3061,7 @@ class ReviewPanel(Base):
         String(30), default="collecting", index=True
     )
     revision: Mapped[int] = mapped_column(Integer, default=0)
+    review_round: Mapped[int] = mapped_column(Integer, default=1)
     final_review_id: Mapped[int | None] = mapped_column(
         ForeignKey("human_reviews.id", ondelete="RESTRICT"), nullable=True
     )

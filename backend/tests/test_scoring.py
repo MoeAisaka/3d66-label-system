@@ -182,3 +182,29 @@ def test_human_dimension_correction_recalculates_score_and_level() -> None:
     )
     assert result["score"] == 70.84
     assert result["level"] == "L3"
+
+
+def test_human_dimension_correction_uses_v3_l1_best_level_semantics() -> None:
+    baseline = aesthetic(4)
+    baseline["dimensions"]["presentation_integrity"]["grade"] = 5
+    result = calculate_corrected_score(
+        precheck(),
+        baseline,
+        [
+            {
+                "target_type": "dimension",
+                "field_key": key,
+                "human_value": 5,
+            }
+            for key in (
+                "composition_viewpoint",
+                "spatial_design_furnishing",
+                "visual_hierarchy",
+                "inspiration_reference",
+            )
+        ],
+        level_thresholds={"L1": 90, "L2": 80, "L3": 76, "L4": 60, "L5": 0},
+    )
+
+    assert result["score"] == 90.58
+    assert result["level"] == "L1"

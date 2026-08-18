@@ -5,6 +5,7 @@ import type {
   EvaluationDimensionSchema,
   SampleTruth,
 } from "@/lib/types"
+import { levelForMinimumScore, type LevelThresholds } from "@/lib/level-thresholds"
 
 type ScoreCap = { cap?: unknown }
 
@@ -114,6 +115,7 @@ export function calculateDimensionPreview(
   schema: EvaluationDimensionSchema | null | undefined,
   grades: Record<string, number>,
   caps: ScoreCap[] = [],
+  levelThresholds?: LevelThresholds | null,
 ): { score: number; level: string } | null {
   const definitions = resolvedDimensionDefinitions(schema)
   const aggregation = schema?.definition?.aggregation
@@ -156,14 +158,17 @@ export function calculateDimensionPreview(
   const digits = Number(aggregation?.score_round_digits ?? 2)
   const factor = 10 ** digits
   score = Math.round(score * factor) / factor
-  let level = levelForScore(score, thresholds)
+  let level = levelThresholds
+    ? levelForMinimumScore(score, levelThresholds)
+    : levelForScore(score, thresholds)
   const capLevels = caps
     .map((item) => Number(String(item.cap || "").replace("L", "")))
     .filter((value) => Number.isInteger(value) && value >= 1 && value <= 4)
   if (capLevels.length) {
     const cap = Math.min(...capLevels)
     level = `L${Math.min(Number(level.slice(1)), cap)}`
-    score = Math.min(score, Number(thresholds[`L${cap + 1}`]) - 1)
+    const capThresholds = levelThresholds ?? thresholds
+    score = Math.min(score, Number(capThresholds[`L${cap + 1}`]) - 1)
   }
   return { score, level }
 }

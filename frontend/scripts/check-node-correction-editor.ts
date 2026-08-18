@@ -244,7 +244,7 @@ const correctionWorkbenchSource = readFileSync(
 )
 assert.match(
   correctionWorkbenchSource,
-  /evaluation\.scoring\?\.dimension_scoring_mode === "rule_deduction"/,
+  /evaluation\.scoring\?\.v3_context/,
 )
 assert.match(correctionWorkbenchSource, /<NodeCorrectionEditor/)
 

@@ -123,6 +123,28 @@ def _level_for_score(
     return "L5"
 
 
+def _level_for_minimum_thresholds(
+    score: float,
+    thresholds: dict[str, float],
+) -> str:
+    """Map a higher-is-better score to the frozen L1-best level semantics."""
+    ordered = sorted(
+        (
+            (str(level), float(minimum))
+            for level, minimum in thresholds.items()
+            if str(level) in {"L1", "L2", "L3", "L4", "L5"}
+        ),
+        key=lambda item: item[1],
+        reverse=True,
+    )
+    if not ordered:
+        raise ValueError("等级阈值不能为空")
+    for level, minimum in ordered:
+        if score >= minimum:
+            return level
+    return ordered[-1][0]
+
+
 def _compile_dimension_contract(
     definition: dict[str, Any],
 ) -> dict[str, Any]:
@@ -753,6 +775,7 @@ def calculate_corrected_score(
     corrections: list[dict[str, Any]],
     *,
     dimension_schema: dict[str, Any] | None = None,
+    level_thresholds: dict[str, float] | None = None,
 ) -> dict[str, Any]:
     """Recalculate the authoritative score after human dimension corrections."""
     if not aesthetic:
@@ -784,8 +807,16 @@ def calculate_corrected_score(
         ):
             raise ValueError(f"维度 {key} 的人工分数无效")
         dimensions[key]["grade"] = grade
-    return calculate_score(
+    recalculated = calculate_score(
         precheck,
         corrected,
         dimension_schema=definition,
     )
+    if level_thresholds is not None and recalculated.get("score") is not None:
+        corrected_level = _level_for_minimum_thresholds(
+            float(recalculated["score"]),
+            level_thresholds,
+        )
+        recalculated["raw_level"] = corrected_level
+        recalculated["level"] = corrected_level
+    return recalculated

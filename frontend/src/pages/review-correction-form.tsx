@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react"
+import { useEffect, useMemo, useState } from "react"
 import { ArrowCounterClockwise, Check, WarningCircle } from "@phosphor-icons/react"
 
 import { Badge } from "@/components/ui/badge"
@@ -9,6 +9,10 @@ import {
   dimensionKeys as dimensionKeysForSchema,
   dimensionLabels as dimensionLabelsForSchema,
 } from "@/lib/dimension-schema"
+import {
+  dimensionGradeOptions,
+  type LevelThresholds,
+} from "@/lib/level-thresholds"
 import type {
   EvaluationDimensionSchema,
   ReviewCorrection,
@@ -33,6 +37,7 @@ const reasons = [
 type Draft = { humanGrade: number; reasons: string[]; note: string }
 type KeyFieldDraft = { rawValue: string; reasons: string[]; note: string }
 type KeyFieldKind = "text" | "number" | "json"
+const EMPTY_CORRECTIONS: ReviewCorrection[] = []
 const keyFieldConfigs: Array<{
   path: string
   label: string
@@ -85,6 +90,7 @@ export function ReviewCorrectionForm({
   scoring,
   pending,
   editable = true,
+  initialCorrections = EMPTY_CORRECTIONS,
   onSubmit,
 }: {
   dimensions: Record<string, any>
@@ -93,6 +99,7 @@ export function ReviewCorrectionForm({
   scoring: Record<string, any>
   pending: boolean
   editable?: boolean
+  initialCorrections?: ReviewCorrection[]
   onSubmit: (payload: { note: string; corrections: ReviewCorrection[] }) => void
 }) {
   const dimensionKeys = useMemo(
@@ -107,6 +114,44 @@ export function ReviewCorrectionForm({
   const [keyFieldDrafts, setKeyFieldDrafts] = useState<Record<string, KeyFieldDraft>>({})
   const [overallNote, setOverallNote] = useState("")
   const [error, setError] = useState("")
+  const initialCorrectionsKey = useMemo(
+    () => JSON.stringify(initialCorrections),
+    [initialCorrections],
+  )
+
+  useEffect(() => {
+    const nextDimensions: Record<string, Draft> = {}
+    const nextKeyFields: Record<string, KeyFieldDraft> = {}
+    for (const correction of initialCorrections) {
+      const reasonsForCorrection = Array.isArray(correction.reason_codes)
+        ? correction.reason_codes.map(String)
+        : []
+      const noteForCorrection = String(correction.note ?? "")
+      if (correction.target_type === "dimension") {
+        const grade = Number(correction.human_value)
+        if (dimensionKeys.includes(correction.field_key) && Number.isInteger(grade) && grade >= 1 && grade <= 5) {
+          nextDimensions[correction.field_key] = {
+            humanGrade: grade,
+            reasons: reasonsForCorrection,
+            note: noteForCorrection,
+          }
+        }
+      } else if (correction.target_type === "key_field") {
+        const config = keyFieldConfigs.find((item) => item.path === correction.field_key)
+        if (config) {
+          nextKeyFields[correction.field_key] = {
+            rawValue: editableValue(correction.human_value, config.kind),
+            reasons: reasonsForCorrection,
+            note: noteForCorrection,
+          }
+        }
+      }
+    }
+    setDrafts(nextDimensions)
+    setKeyFieldDrafts(nextKeyFields)
+    setOverallNote("")
+    setError("")
+  }, [dimensionKeys, initialCorrectionsKey])
 
   const changedKeys = useMemo(
     () =>
@@ -130,6 +175,18 @@ export function ReviewCorrectionForm({
     }),
     [availableKeyFields, keyFieldDrafts, precheck],
   )
+  const v3LevelThresholds = useMemo<LevelThresholds | null>(() => {
+    const thresholds = scoring?.v3_context?.contract?.aesthetic_foundation?.score_thresholds
+    if (!Array.isArray(thresholds)) return null
+    const entries = thresholds.flatMap((item: any) => (
+      item
+      && /^L[1-5]$/.test(String(item.level))
+      && Number.isFinite(Number(item.min_score))
+        ? [[String(item.level), Number(item.min_score)] as const]
+        : []
+    ))
+    return entries.length ? Object.fromEntries(entries) : null
+  }, [scoring])
 
   const preview = useMemo(() => {
     const grades = Object.fromEntries(
@@ -143,8 +200,9 @@ export function ReviewCorrectionForm({
       dimensionSchema,
       grades,
       scoring?.caps ?? [],
+      v3LevelThresholds,
     )
-  }, [dimensionKeys, dimensionSchema, dimensions, drafts, scoring])
+  }, [dimensionKeys, dimensionSchema, dimensions, drafts, scoring, v3LevelThresholds])
 
   function updateDraft(key: string, patch: Partial<Draft>) {
     setError("")
@@ -341,7 +399,7 @@ export function ReviewCorrectionForm({
                     <div className="flex flex-wrap items-center justify-between gap-2">
                       <div>
                         <p className="text-xs font-semibold">人工分数</p>
-                        <p className="mt-1 text-[0.68rem] text-[var(--muted)]">直接在模型评分处修正；未修改则保持模型值。</p>
+                        <p className="mt-1 text-[0.68rem] text-[var(--muted)]">维度质量分为 5 级最好、1 级最差；最终等级为 L1 最好、L5 最差。未修改则保持模型值。</p>
                       </div>
                       {changed && (
                         <Button type="button" variant="ghost" size="sm" onClick={() => resetDraft(key)}>
@@ -350,11 +408,11 @@ export function ReviewCorrectionForm({
                       )}
                     </div>
                     <div className="mt-3 grid grid-cols-5 gap-1.5">
-                      {[1, 2, 3, 4, 5].map((grade) => (
-                        <button
+                    {dimensionGradeOptions.map(({ grade, label }) => (
+                      <button
                           key={grade}
                           type="button"
-                          aria-label={`${dimensionLabels[key]}人工评分${grade}`}
+                        aria-label={`${dimensionLabels[key]}人工评分${grade}级（${label}）`}
                           aria-pressed={humanGrade === grade}
                           onClick={() => updateDraft(key, { humanGrade: grade })}
                           className={`min-h-10 rounded-[4px] border text-sm font-semibold transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#6f8614] ${
@@ -363,7 +421,7 @@ export function ReviewCorrectionForm({
                               : "border-[var(--line-strong)] bg-white hover:bg-[#f3f5f0]"
                           }`}
                         >
-                          {grade}
+                        {grade}级 · {label}
                         </button>
                       ))}
                     </div>

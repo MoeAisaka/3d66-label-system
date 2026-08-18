@@ -17,6 +17,7 @@ import type {
   AutomationOverview,
   AutomationLaneSummary,
   AutomationCandidateReview,
+  ReviewPanelSummary,
 } from "@/lib/types"
 
 export type ApiErrorDetail = {
@@ -272,6 +273,13 @@ export const baselineRegressionApi = {
   ) => api<BaselineCorrectionRun>(
     `/api/baseline-corrections/${correctionRunId}/decision`,
     { method: "POST", ...jsonBody({ decision, note }) },
+  ),
+  reopenReview: (evaluationId: number, expectedReviewRevision: number) => api<ReviewPanelSummary>(
+    `/api/evaluations/${evaluationId}/review-panel/reopen`,
+    {
+      method: "POST",
+      ...jsonBody({ expected_review_revision: expectedReviewRevision }),
+    },
   ),
 }
 

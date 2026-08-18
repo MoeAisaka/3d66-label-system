@@ -53,6 +53,7 @@ import {
 } from "@/features/baseline-regression/baseline-regression-contract"
 import { BaselineSetDialog } from "@/features/baseline-regression/baseline-set-dialog"
 import { CorrectionWorkbench } from "@/features/baseline-regression/correction-workbench"
+import { nextPendingCorrectionId } from "@/features/baseline-regression/correction-navigation"
 import { LevelPerformanceSummary } from "@/features/baseline-regression/level-performance-summary"
 import { MetricsDrawer } from "@/features/baseline-regression/metrics-drawer"
 import { RunConfigDrawer } from "@/features/baseline-regression/run-config-drawer"
@@ -1323,6 +1324,7 @@ function RegressionResults({
   )
   const [activeView, setActiveView] = useState<"results" | "correction">("results")
   const [reviewNotes, setReviewNotes] = useState<Record<number, string>>({})
+  const [reopenSeeds, setReopenSeeds] = useState<Record<number, ReviewCorrection[]>>({})
 
   useEffect(() => {
     setSelectedDeviationIds(new Set(availableDeviationIds))
@@ -1370,17 +1372,19 @@ function RegressionResults({
       })
     },
     onSuccess: async (_result, variables) => {
-      await Promise.all([
-        queryClient.invalidateQueries({
-          queryKey: ["baseline-regression", run.id],
-        }),
+      const nextId = nextPendingCorrectionId(items, variables.item.id)
+      await queryClient.invalidateQueries({
+        queryKey: ["baseline-regression", run.id],
+      })
+      void Promise.all([
         queryClient.invalidateQueries({ queryKey: ["baseline-acceptance", run.id] }),
         queryClient.invalidateQueries({ queryKey: ["evaluations"] }),
         queryClient.invalidateQueries({ queryKey: ["dashboard"] }),
         queryClient.invalidateQueries({ queryKey: ["optimization-cases"] }),
       ])
       setReviewNotes((current) => ({ ...current, [variables.item.id]: "" }))
-      onCloseCorrection()
+      if (nextId) onOpenCorrection(nextId)
+      else onCloseCorrection()
       toast.success(
         variables.decision === "corrected"
           ? "人工纠偏与最终等级已保存"
@@ -1388,6 +1392,22 @@ function RegressionResults({
             ? "已确认模型结果"
             : "已退回复核",
       )
+    },
+    onError: (error) => toast.error(error.message),
+  })
+  const reopenReview = useMutation({
+    mutationFn: ({ item }: { item: BaselineRegressionItem }) => {
+      if (!item.evaluation) throw new Error("该回归结果没有可重开的评测记录")
+      const corrections = item.evaluation.human_review?.corrections ?? []
+      setReopenSeeds((current) => ({ ...current, [item.id]: corrections }))
+      return baselineRegressionApi.reopenReview(
+        item.evaluation.id,
+        item.evaluation.review_revision,
+      )
+    },
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["baseline-regression", run.id] })
+      toast.success("已创建新的人工审核轮次，可继续修改")
     },
     onError: (error) => toast.error(error.message),
   })
@@ -1402,6 +1422,11 @@ function RegressionResults({
         item={correctionItem}
         onBack={onCloseCorrection}
         corrector={me.data?.username ?? ""}
+        onNext={() => {
+          const nextId = nextPendingCorrectionId(items, correctionItem.id)
+          if (nextId) onOpenCorrection(nextId)
+        }}
+        hasNext={Boolean(nextPendingCorrectionId(items, correctionItem.id))}
         onCorrected={async () => {
           await Promise.all([
             queryClient.invalidateQueries({ queryKey: ["baseline-regression", run.id] }),
@@ -1416,7 +1441,7 @@ function RegressionResults({
           <LevelExplanation item={correctionItem} />
           <div className="space-y-3">
             <p className="text-sm font-semibold">人工决策</p>
-            <p className="text-xs leading-5 text-[var(--muted)]">确认或纠偏完成后返回轮次列表，继续处理下一条素材。</p>
+            <p className="text-xs leading-5 text-[var(--muted)]">确认或纠偏完成后自动进入下一条待处理素材，也可以手动点击“下一个”。</p>
             {correctionItem.evaluation && (
               <div className="space-y-4 border-t border-[var(--line)] pt-4">
                 <label>
@@ -1431,7 +1456,24 @@ function RegressionResults({
                     }))}
                   />
                 </label>
-                {correctionItem.evaluation.review_stage !== "completed" && (
+                {correctionItem.evaluation.review_stage === "completed" ? (
+                  <div className="space-y-3 rounded-[4px] border border-[#ead7a5] bg-[#fff9ea] px-4 py-3">
+                    <p className="text-sm font-semibold">人工结果已保存</p>
+                    <p className="text-xs leading-5 text-[#6b4b0b]">
+                      当前轮次已完成，{correctionItem.evaluation.human_review?.corrections?.length ?? 0} 处纠偏记录可回看。点击“再次修改”会保留本轮历史并创建新审核轮次。
+                    </p>
+                    {correctionItem.evaluation.human_review?.note && (
+                      <p className="text-xs leading-5 text-[var(--muted)]">说明：{correctionItem.evaluation.human_review.note}</p>
+                    )}
+                    <Button
+                      variant="secondary"
+                      disabled={reopenReview.isPending}
+                      onClick={() => reopenReview.mutate({ item: correctionItem })}
+                    >
+                      <PencilSimple />{reopenReview.isPending ? "正在创建新轮次" : "再次修改"}
+                    </Button>
+                  </div>
+                ) : (
                   <div className="flex flex-wrap gap-2">
                     <Button
                       variant="secondary"
@@ -1465,6 +1507,7 @@ function RegressionResults({
                     scoring={correctionItem.evaluation.scoring ?? {}}
                     pending={reviewResult.isPending}
                     editable={correctionItem.evaluation.review_stage !== "completed"}
+                    initialCorrections={reopenSeeds[correctionItem.id] ?? correctionItem.evaluation.human_review?.corrections ?? []}
                     onSubmit={({ note, corrections }) => reviewResult.mutate({
                       item: correctionItem,
                       decision: "corrected",
@@ -2460,6 +2503,12 @@ function baselineErrorMessage(error: string) {
 
 function reviewStatus(evaluation: BaselineRegressionItem["evaluation"]) {
   if (!evaluation) return null
+  if (evaluation.review_panel && evaluation.review_panel.status !== "completed") {
+    return {
+      label: `审核中 ${evaluation.review_panel.submitted_count}/${evaluation.review_panel.required_reviewers}`,
+      tone: "active" as const,
+    }
+  }
   const decision = evaluation.human_review?.decision
   if (decision === "approved") return { label: "已确认", tone: "success" as const }
   if (decision === "corrected") {
