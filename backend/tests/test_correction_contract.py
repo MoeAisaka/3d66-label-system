@@ -155,3 +155,33 @@ def test_validate_node_value_rejects_value_outside_enum() -> None:
 
     assert exc_info.value.code == "CORRECTION_NODE_VALUE_INVALID"
     assert exc_info.value.fields == ["a"]
+
+
+def test_complete_contract_rejects_unknown_node_type_but_accepts_rule_hit() -> None:
+    base = {
+        "contract_version": "1",
+        "category_key": "inspiration_image",
+        "nodes": [
+            {
+                "node_key": "v3.rule",
+                "layer": "V3",
+                "path": "dimension.composition.hit_rules.r1",
+                "order": 1,
+                "label": "构图规则",
+                "description": "人工判断构图规则是否命中",
+                "type": "unknown_widget",
+                "semantic_version": "1",
+                "compatibility_key": "composition-r1",
+                "required": True,
+                "evidence": {"description": "需要图片证据"},
+                "recompute_ref": "evaluation_v3_pipeline.recompute_qualified_v3",
+            }
+        ],
+    }
+
+    with pytest.raises(ContractValidationError) as exc_info:
+        assert_correction_contract_complete(base)
+    assert "type" in str(exc_info.value)
+
+    base["nodes"][0]["type"] = "rule_hit"
+    assert_correction_contract_complete(base)

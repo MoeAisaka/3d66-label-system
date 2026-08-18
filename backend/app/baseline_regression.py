@@ -324,6 +324,8 @@ def result_snapshot(result: EvaluationResult) -> dict[str, Any]:
         if isinstance(scoring.get("caps"), list)
         else [],
         "stage_a": precheck,
+        "stage_b": aesthetic,
+        "scoring": scoring,
         "level_explanation": level_explanation(
             precheck=precheck,
             aesthetic=aesthetic,
@@ -1235,6 +1237,17 @@ def correction_input_snapshot(
         "category_key": run.category_key,
         "strategy_bundle_id": run.strategy_bundle_id,
         "execution_snapshot": execution_snapshot,
+        "correction_contract": (
+            {
+                "contract_version": _json_object(
+                    run.correction_contract_json
+                ).get("contract_version"),
+                "contract_hash": run.correction_contract_hash,
+                "category_key": run.category_key,
+            }
+            if getattr(run, "correction_contract_hash", None)
+            else None
+        ),
         "dimension_selection": dimension_selection,
         "run_metrics": _json_object(run.metrics_json),
         "items": frozen_rows,

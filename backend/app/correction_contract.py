@@ -12,6 +12,28 @@ from typing import Any, Mapping
 
 _HAN_PATTERN = re.compile(r"[\u3400-\u9fff]")
 _LAYER_ORDER = {"A": 0, "B": 1, "V3": 2}
+SUPPORTED_CORRECTION_NODE_TYPES = frozenset(
+    {
+        "enum",
+        "enumeration",
+        "integer",
+        "int",
+        "number",
+        "float",
+        "decimal",
+        "boolean",
+        "bool",
+        "text",
+        "string",
+        "list",
+        "array",
+        "object",
+        "json_object",
+        "rule_hit",
+        "rule_judgement",
+        "rule_judgment",
+    }
+)
 _NODE_FIELDS = {
     "node_key",
     "layer",
@@ -191,6 +213,12 @@ def validate_correction_contract(contract: Mapping[str, Any]) -> list[str]:
         ):
             errors.append(f"{field_prefix}.evidence.description 缺失")
         node_type = str(node.get("type", "")).lower()
+        if (
+            node_type
+            and node_type not in SUPPORTED_CORRECTION_NODE_TYPES
+            and not _is_numeric_type(node_type)
+        ):
+            errors.append(f"{field_prefix}.type 不受支持")
         options = node.get("options", node.get("allowed_values", node.get("values")))
         if node_type in {"enum", "enumeration"} and (
             not isinstance(options, list) or not options
@@ -200,7 +228,12 @@ def validate_correction_contract(contract: Mapping[str, Any]) -> list[str]:
             lower, upper = _bounds(node)
             if lower is None or upper is None:
                 errors.append(f"{field_prefix} 必须声明数值上下界")
-            elif not isinstance(lower, Real) or isinstance(lower, bool) or not isinstance(upper, Real) or isinstance(upper, bool):
+            elif (
+                not isinstance(lower, Real)
+                or isinstance(lower, bool)
+                or not isinstance(upper, Real)
+                or isinstance(upper, bool)
+            ):
                 errors.append(f"{field_prefix} 数值上下界必须是数字")
             elif lower > upper:
                 errors.append(f"{field_prefix} 数值上下界无效")
@@ -249,6 +282,15 @@ def validate_node_value(node: Mapping[str, Any], value: Any) -> None:
         valid = isinstance(value, str)
     elif node_type in {"list", "array"}:
         valid = isinstance(value, list)
+    elif node_type in {"object", "json_object"}:
+        valid = isinstance(value, Mapping)
+    elif node_type in {"rule_hit", "rule_judgement", "rule_judgment"}:
+        valid = (
+            isinstance(value, Mapping)
+            and _nonempty_string(value.get("rule_id"))
+            and value.get("confidence") in {"high", "medium", "low"}
+            and _nonempty_string(value.get("evidence"))
+        )
     if valid and _is_numeric_type(node_type):
         lower, upper = _bounds(node)
         valid = (lower is None or value >= lower) and (upper is None or value <= upper)

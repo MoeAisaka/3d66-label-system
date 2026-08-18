@@ -66,6 +66,11 @@ from .correction_contract import (
     correction_contract_hash,
     freeze_contract_from_execution_snapshot,
 )
+from .correction_view import (
+    CorrectionViewError,
+    build_correction_view,
+    submit_correction_nodes,
+)
 from .production_dimension_contract import (
     ProductionDimensionContractError,
     resolve_published_dimension_contract,
@@ -1206,6 +1211,33 @@ class BaselineCorrectionCreateRequest(BaseModel):
     def validate_unique_items(self) -> "BaselineCorrectionCreateRequest":
         if len(self.item_ids) != len(set(self.item_ids)):
             raise ValueError("纠偏样本不能重复")
+        return self
+
+
+class BaselineCorrectionNodeRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    node_key: str = Field(min_length=1, max_length=160)
+    human_value: Any
+    reason: str = Field(min_length=1, max_length=2000)
+    evidence: list[dict[str, Any]] = Field(default_factory=list, max_length=30)
+
+
+class BaselineCorrectionSubmitRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    contract_hash: str = Field(min_length=64, max_length=64)
+    nodes: list[BaselineCorrectionNodeRequest] = Field(
+        min_length=1, max_length=100
+    )
+    review_revision: int = Field(ge=0)
+    idempotency_key: str = Field(min_length=8, max_length=160)
+
+    @model_validator(mode="after")
+    def validate_unique_nodes(self) -> "BaselineCorrectionSubmitRequest":
+        node_keys = [node.node_key for node in self.nodes]
+        if len(node_keys) != len(set(node_keys)):
+            raise ValueError("纠偏节点不能重复")
         return self
 
 
@@ -11200,6 +11232,17 @@ def baseline_run_semantic_metrics(
 
 
 def _baseline_correction_payload(row: BaselineCorrectionRun) -> dict[str, Any]:
+    baseline_run = row.baseline_run
+    correction_contract = None
+    if baseline_run is not None and baseline_run.correction_contract_hash:
+        frozen_contract = json.loads(
+            baseline_run.correction_contract_json or "{}"
+        )
+        correction_contract = {
+            "contract_version": frozen_contract.get("contract_version"),
+            "contract_hash": baseline_run.correction_contract_hash,
+            "category_key": baseline_run.category_key,
+        }
     return {
         "id": row.id,
         "baseline_run_id": row.baseline_run_id,
@@ -11227,7 +11270,125 @@ def _baseline_correction_payload(row: BaselineCorrectionRun) -> dict[str, Any]:
         "created_at": row.created_at,
         "updated_at": row.updated_at,
         "finished_at": row.finished_at,
+        "correction_contract": correction_contract,
     }
+
+
+def _baseline_correction_item(
+    db: Session,
+    *,
+    run_id: int,
+    item_id: int,
+) -> tuple[BaselineRegressionRun, BaselineRegressionItem]:
+    run = db.get(BaselineRegressionRun, run_id)
+    if run is None:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "code": "BASELINE_RUN_NOT_FOUND",
+                "message": "基准回归 run 不存在",
+            },
+        )
+    item = db.get(BaselineRegressionItem, item_id)
+    if item is None or item.run_id != run.id:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "code": "BASELINE_ITEM_NOT_FOUND",
+                "message": "基准回归条目不存在",
+            },
+        )
+    return run, item
+
+
+def _previous_baseline_correction_item(
+    db: Session,
+    *,
+    run: BaselineRegressionRun,
+    item: BaselineRegressionItem,
+) -> BaselineRegressionItem | None:
+    if run.previous_run_id is None:
+        return None
+    return db.scalar(
+        select(BaselineRegressionItem)
+        .where(
+            BaselineRegressionItem.run_id == run.previous_run_id,
+            BaselineRegressionItem.asset_id == item.asset_id,
+        )
+        .order_by(BaselineRegressionItem.id.desc())
+        .limit(1)
+    )
+
+
+def _raise_correction_view_http(exc: CorrectionViewError) -> None:
+    raise HTTPException(status_code=exc.status_code, detail=exc.detail()) from exc
+
+
+@app.get(
+    "/api/baseline-regressions/{run_id}/items/{item_id}/correction-view"
+)
+def get_baseline_item_correction_view(
+    run_id: int,
+    item_id: int,
+    _user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    run, item = _baseline_correction_item(db, run_id=run_id, item_id=item_id)
+    return build_correction_view(
+        db,
+        run=run,
+        item=item,
+        previous_item=_previous_baseline_correction_item(
+            db, run=run, item=item
+        ),
+    )
+
+
+@app.post(
+    "/api/baseline-regressions/{run_id}/items/{item_id}/corrections"
+)
+def submit_baseline_item_corrections(
+    run_id: int,
+    item_id: int,
+    payload: BaselineCorrectionSubmitRequest,
+    user: User = Depends(_permission_user("reviews:write")),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    run, item = _baseline_correction_item(db, run_id=run_id, item_id=item_id)
+    try:
+        response = submit_correction_nodes(
+            db,
+            run=run,
+            item=item,
+            contract_hash=payload.contract_hash,
+            nodes=[node.model_dump(mode="json") for node in payload.nodes],
+            review_revision=payload.review_revision,
+            idempotency_key=payload.idempotency_key,
+            actor=user.username,
+        )
+    except CorrectionViewError as exc:
+        _raise_correction_view_http(exc)
+    if not response.get("idempotent_replay"):
+        append_audit_event(
+            db,
+            category="baseline_regression",
+            action="contract_correction_submitted",
+            subject_type="baseline_regression_item",
+            subject_id=item.id,
+            actor=user.username,
+            payload={
+                "baseline_run_id": run.id,
+                "contract_hash": payload.contract_hash,
+                "node_keys": [node.node_key for node in payload.nodes],
+                "review_revision": response["review_revision"],
+            },
+            event_key=(
+                f"baseline-item:{item.id}:contract-correction:"
+                f"{payload.idempotency_key}"
+            ),
+        )
+    db.commit()
+    return response
 
 
 @app.post("/api/baseline-regressions/{run_id}/auto-corrections")
