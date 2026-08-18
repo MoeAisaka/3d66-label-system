@@ -35,6 +35,56 @@ export function ImagePreviewButton({
   )
 }
 
+export function ImageReferenceDock({
+  preview,
+  onOpenChange,
+}: {
+  preview: ImagePreview | null
+  onOpenChange: (open: boolean) => void
+}) {
+  if (!preview) return null
+
+  return (
+    <aside
+      aria-label="原图参考浮窗"
+      className="sticky top-4 z-20 mt-3 overflow-hidden border border-[var(--line-strong)] bg-white shadow-xl"
+    >
+      <div className="flex items-center justify-between gap-3 border-b border-[var(--line)] bg-[#fafbf8] px-4 py-3">
+        <div className="min-w-0">
+          <p className="text-xs font-bold">原图参考浮窗</p>
+          <p className="mt-1 truncate text-[0.68rem] text-[var(--muted)]">{preview.alt}</p>
+        </div>
+        <button
+          type="button"
+          aria-label="关闭原图参考浮窗"
+          className="flex size-8 shrink-0 items-center justify-center rounded-[4px] border border-[var(--line-strong)] bg-white text-foreground hover:bg-[#eef1eb] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+          onClick={() => onOpenChange(false)}
+        >
+          <X size={18} />
+        </button>
+      </div>
+      <div
+        data-testid="image-reference-dock-canvas"
+        className="flex max-h-[calc(100dvh-12rem)] min-h-64 items-center justify-center overflow-auto p-3"
+        style={{
+          backgroundColor: "#eef0eb",
+          backgroundImage:
+            "linear-gradient(45deg,#cfd4ca 25%,transparent 25%),linear-gradient(-45deg,#cfd4ca 25%,transparent 25%),linear-gradient(45deg,transparent 75%,#cfd4ca 75%),linear-gradient(-45deg,transparent 75%,#cfd4ca 75%)",
+          backgroundPosition: "0 0,0 8px,8px -8px,-8px 0",
+          backgroundSize: "16px 16px",
+        }}
+      >
+        <img
+          data-testid="image-reference-dock-image"
+          src={preview.src}
+          alt={preview.alt}
+          className="block h-auto max-h-[calc(100dvh-14rem)] w-auto max-w-full border border-black/60 object-contain"
+        />
+      </div>
+    </aside>
+  )
+}
+
 export function ImageLightbox({
   preview,
   onOpenChange,
