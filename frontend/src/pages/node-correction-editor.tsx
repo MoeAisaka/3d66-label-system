@@ -172,7 +172,7 @@ export function NodeCorrectionEditor({
       {!hasReplayContext && (
         <div className="flex items-start gap-3 border-b border-[var(--line)] bg-[#fff8f7] px-5 py-5 md:px-7">
           <WarningCircle className="mt-0.5 shrink-0 text-[#8d2924]" size={22} />
-          <div><p className="text-sm font-bold">这条旧评测无法重放评分链路</p><p className="mt-1 text-xs leading-5 text-[var(--muted)]">已存储的调用A字段仍可独立纠偏；红线、赛道和维度节点保持只读，建议使用当前 v3 配置重跑。</p></div>
+          <div><p className="text-sm font-bold">这条旧评测无法重放评分链路</p><p className="mt-1 text-xs leading-5 text-[var(--muted)]">已存储的调用A字段仍可独立纠偏；红线、赛道和维度节点保持只读，建议使用当前等级规则重跑。</p></div>
         </div>
       )}
       <>

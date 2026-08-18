@@ -15,11 +15,11 @@ import type { User } from "@/lib/types"
 const managementGroups = [
   {
     title: "评测方案",
-    description: "维护类目评测 v3 合同、提示词和模型配置。普通审核员开始评测时无需配置这些内容。",
+    description: "维护类目评测等级规则、提示词和模型配置。普通审核员开始评测时无需配置这些内容。",
     icon: SlidersHorizontal,
     entries: [
-      { to: "/workflow/optimization/category-evaluation-preview", label: "类目评测底座预览", note: "查看四类目的评测合同、校验状态和运行边界" },
-      { to: "/workflow/optimization/category-evaluation-v3-config", label: "类目评测 v3 合同配置", note: "四类目的分类赛道与子类目维度唯一配置入口" },
+      { to: "/workflow/optimization/category-evaluation-preview", label: "类目评测底座预览", note: "查看四类目的评测机制、校验状态和运行边界" },
+      { to: "/workflow/optimization/category-evaluation-v3-config", label: "类目评测等级规则配置", note: "四类目的分类赛道与子类目维度唯一配置入口" },
       { to: "/workflow/optimization/candidates", label: "提示词版本", note: "查看候选、变更说明和人工发布门禁" },
       { to: "/workflow/governance/model-registry", label: "模型注册中心", note: "列表维护主模型、调优模型、协议和调用限制" },
       { to: "/workflow/governance/tag-demand-contracts", label: "字段需求合同", note: "维护平台通用语义字段、类目适用性和质量门槛版本" },

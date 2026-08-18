@@ -22,7 +22,7 @@
 | 模块 | 职责 |
 |---|---|
 | `redline_policy.py` | 红线（可自由增删/开关/无数量限制，命中→L5 淘汰、封顶 49） |
-| `category_evaluation_contract.py` | v3 合同骨架（赛道/子类目 + 固定通用维度 + canonical hash） |
+| `category_evaluation_contract.py` | 等级规则骨架（赛道/子类目 + 固定通用维度 + canonical hash；代码仍保留 v3 标识） |
 | `category_evaluation_aggregator.py` | 确定性聚合器（红线→赛道→维度扣分→媒介降权→高分压分→封顶→L等级；**doc-l5-worst 语义**） |
 | `dimension_grade_bridge.py` | grade(1-5) → deduction 桥（扣分制，可回归） |
 | `dimension_composition.py` | 共性维度 + 特有维度组合（两组均可自由增删、可为 0，空组重归一化，双空=仅提示词） |
@@ -31,7 +31,7 @@
 
 ### 4. 前端
 - **A/B/维度边界说明组件**：提示词管理器、维度管理器嵌入固定用法说明。
-- **类目评测预览页**（`/workflow/optimization/category-evaluation-preview`）：查看灵感图 v3 合同 + 干跑单图评测。
+- **类目评测预览页**（`/workflow/optimization/category-evaluation-preview`）：查看灵感图等级规则 + 干跑单图评测。
 
 ### 5. 只读/干跑预览 API（隔离、无副作用）
 - `GET /api/category-evaluation/preview/inspiration/contract`（读取装配好的合同）
