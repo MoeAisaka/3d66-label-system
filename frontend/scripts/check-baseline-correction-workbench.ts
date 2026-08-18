@@ -4,7 +4,10 @@ import {
   dimensionGradeOptions,
   levelForMinimumScore,
 } from "../src/lib/level-thresholds.ts"
-import { nextPendingCorrectionId } from "../src/features/baseline-regression/correction-navigation.ts"
+import {
+  nextPendingCorrectionId,
+  previousCorrectionId,
+} from "../src/features/baseline-regression/correction-navigation.ts"
 
 const apiSource = readFileSync("src/lib/api.ts", "utf8")
 const formSource = readFileSync("src/pages/review-correction-form.tsx", "utf8")
@@ -20,12 +23,19 @@ assert.match(formSource, /initialDimensionCorrections/)
 assert.match(formSource, /initialKeyFieldCorrections/)
 assert.match(formSource, /correctionChanged/)
 assert.match(pageSource, /再次修改/)
-assert.match(pageSource, /下一个/)
+assert.match(pageSource, /上一条/)
+assert.match(pageSource, /previousCorrectionId/)
 assert.match(pageSource, /reopenSeeds.*corrections/)
 assert.match(pageSource, /reopenSeeds.*note/)
+assert.doesNotMatch(pageSource, /const nextId = nextPendingCorrectionId\(items, variables\.item\.id\)/)
 assert.match(workbenchSource, /xl:grid-cols-\[minmax\(280px,360px\)_minmax\(0,1fr\)\]/)
 assert.match(workbenchSource, /ImagePreviewButton/)
 assert.match(workbenchSource, /ImageReferenceDock/)
+assert.match(workbenchSource, /上一条/)
+assert.match(workbenchSource, /下一条/)
+assert.match(workbenchSource, /window\.confirm/)
+assert.match(workbenchSource, /requestNavigation\(onPrevious\)/)
+assert.match(workbenchSource, /requestNavigation\(onNext\)/)
 assert.match(workbenchSource, /referenceOpen/)
 assert.match(imageLightboxSource, /原图参考浮窗/)
 assert.match(workbenchSource, /max-w-full/)
@@ -47,6 +57,21 @@ assert.equal(
   nextPendingCorrectionId([
     { id: 1, review_stage: "initial" },
     { id: 2, review_stage: "completed" },
+  ], 1),
+  null,
+)
+assert.equal(
+  previousCorrectionId([
+    { id: 1, review_stage: "initial" },
+    { id: 2, review_stage: "completed" },
+    { id: 3, review_stage: "initial" },
+  ], 3),
+  2,
+)
+assert.equal(
+  previousCorrectionId([
+    { id: 1, review_stage: "initial" },
+    { id: 2, review_stage: "initial" },
   ], 1),
   null,
 )

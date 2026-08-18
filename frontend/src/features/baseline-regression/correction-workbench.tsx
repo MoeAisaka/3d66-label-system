@@ -1,5 +1,5 @@
 import { useState, type ReactNode } from "react"
-import { ArrowLeft, ArrowRight } from "@phosphor-icons/react"
+import { ArrowLeft, CaretLeft, CaretRight } from "@phosphor-icons/react"
 
 import { Button } from "@/components/ui/button"
 import { ImagePreviewButton, ImageReferenceDock } from "@/components/image-lightbox"
@@ -12,6 +12,8 @@ export function CorrectionWorkbench({
   corrector,
   onCorrected,
   onPreview,
+  onPrevious,
+  hasPrevious,
   onNext,
   hasNext,
   children,
@@ -21,6 +23,8 @@ export function CorrectionWorkbench({
   corrector: string
   onCorrected: () => Promise<void> | void
   onPreview: (preview: { src: string; alt: string }) => void
+  onPrevious?: () => void
+  hasPrevious?: boolean
   onNext?: () => void
   hasNext?: boolean
   children?: ReactNode
@@ -29,13 +33,18 @@ export function CorrectionWorkbench({
   const [referenceOpen, setReferenceOpen] = useState(false)
   const reference = { src: item.image_url, alt: item.asset.name }
   const openReference = () => setReferenceOpen(true)
+  const requestNavigation = (navigate?: () => void) => {
+    if (!navigate) return
+    if (window.confirm("切换素材不会保存当前未提交的修改，是否继续？")) navigate()
+  }
 
   return <section className="border-y border-[var(--line-strong)] bg-white" aria-label="逐条确认与纠偏">
     <div className="flex flex-wrap items-start justify-between gap-4 border-b border-[var(--line)] px-5 py-4 md:px-7">
       <div><div className="flex items-center gap-2"><Button variant="ghost" size="sm" onClick={onBack}><ArrowLeft />返回轮次列表</Button><h2 className="font-editorial text-2xl font-bold">逐条确认与纠偏</h2></div><p className="mt-2 text-xs leading-5 text-[var(--muted)]">当前素材：{item.asset.name} · 期望 {item.expected_level} · 预测 {item.predicted_level ?? "—"}</p></div>
       <div className="flex flex-wrap gap-2">
         <Button variant="secondary" onClick={() => onPreview({ src: item.image_url, alt: item.asset.name })}>放大查看</Button>
-        {onNext && <Button variant="secondary" onClick={onNext} disabled={!hasNext}><ArrowRight />下一个</Button>}
+        {onPrevious && <Button variant="secondary" onClick={() => requestNavigation(onPrevious)} disabled={!hasPrevious}><CaretLeft />上一条</Button>}
+        {onNext && <Button variant="secondary" onClick={() => requestNavigation(onNext)} disabled={!hasNext}><CaretRight />下一条</Button>}
       </div>
     </div>
     <div className="grid gap-0 xl:grid-cols-[minmax(280px,360px)_minmax(0,1fr)]">
