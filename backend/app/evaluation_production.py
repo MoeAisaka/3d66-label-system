@@ -13,6 +13,10 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from .audit import append_audit_event
+from .correction_contract import (
+    correction_contract_hash,
+    freeze_contract_from_execution_snapshot,
+)
 from .database import get_db
 from .evaluation_packages import (
     EvaluationPackageCreateRequest,
@@ -1010,6 +1014,9 @@ def production_run_payload(db: Session, run: EvaluationProductionRun) -> dict[st
         "job_ids": [int(value) for value in _loads_list(run.job_ids_json) if isinstance(value, int)],
         "job_counts": facts["counts"],
         "pending_first_review_count": len(facts["pending_review_ids"]),
+        "pending_first_review_ids": [
+            int(value) for value in facts["pending_review_ids"] if isinstance(value, int)
+        ],
         "progress": _progress(run, facts),
         "automation_run_id": run.automation_run_id,
         "automation": (
@@ -1105,6 +1112,10 @@ def create_production_run(
     snapshot = _validate_frozen_configuration(snapshot_json, payload.category_key)
     normalized_snapshot = _canonical_json(snapshot)
     profile_hash = hashlib.sha256(normalized_snapshot.encode("utf-8")).hexdigest()
+    correction_contract = freeze_contract_from_execution_snapshot(
+        category_key=payload.category_key,
+        execution_snapshot=snapshot,
+    )
     job_ids = queued.get("job_ids")
     batch_key = queued.get("batch_key")
     if (
@@ -1123,6 +1134,8 @@ def create_production_run(
         workflow_kind=payload.workflow_kind,
         category_profile_snapshot_json=normalized_snapshot,
         category_profile_hash=profile_hash,
+        correction_contract_json=_canonical_json(correction_contract),
+        correction_contract_hash=correction_contract_hash(correction_contract),
         job_ids_json=_canonical_json(job_ids),
         batch_key=batch_key,
         status="queued",

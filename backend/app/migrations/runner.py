@@ -8297,6 +8297,133 @@ def _migration_074_add_review_rounds(connection: Connection) -> None:
         )
 
 
+def _migration_075_add_correction_contract_snapshots(
+    connection: Connection,
+) -> None:
+    """Store immutable correction contracts for every evaluation lane."""
+
+    def table_columns(table: str) -> set[str]:
+        exists = connection.exec_driver_sql(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+            (table,),
+        ).scalar_one_or_none()
+        if exists is None:
+            return set()
+        return {
+            row[1]
+            for row in connection.exec_driver_sql(f"PRAGMA table_info({table})")
+        }
+
+    for table in (
+        "baseline_regression_runs",
+        "evaluation_production_runs",
+        "prompt_regression_runs",
+    ):
+        columns = table_columns(table)
+        if not columns:
+            continue
+        if "correction_contract_json" not in columns:
+            connection.exec_driver_sql(
+                f"ALTER TABLE {table} ADD COLUMN correction_contract_json TEXT"
+            )
+        if "correction_contract_hash" not in columns:
+            connection.exec_driver_sql(
+                f"ALTER TABLE {table} ADD COLUMN correction_contract_hash VARCHAR(64)"
+            )
+        connection.exec_driver_sql(
+            f"CREATE INDEX IF NOT EXISTS ix_{table}_correction_contract_hash "
+            f"ON {table}(correction_contract_hash)"
+        )
+
+    baseline = table_columns("baseline_regression_runs")
+    if {
+        "baseline_set_id",
+        "sequence_no",
+        "previous_run_id",
+        "strategy_bundle_id",
+        "strategy_snapshot_json",
+        "execution_snapshot_json",
+        "correction_contract_json",
+        "correction_contract_hash",
+        "baseline_set_fingerprint",
+        "total",
+        "created_by",
+        "created_at",
+    } <= baseline:
+        connection.exec_driver_sql("DROP TRIGGER IF EXISTS trg_baseline_runs_frozen")
+        connection.exec_driver_sql(
+            "CREATE TRIGGER trg_baseline_runs_frozen BEFORE UPDATE OF "
+            "baseline_set_id, sequence_no, previous_run_id, strategy_bundle_id, "
+            "strategy_snapshot_json, execution_snapshot_json, "
+            "correction_contract_json, correction_contract_hash, "
+            "baseline_set_fingerprint, total, created_by, created_at "
+            "ON baseline_regression_runs BEGIN SELECT RAISE(ABORT, "
+            "'BaselineRegressionRun snapshot is immutable'); END"
+        )
+
+    production = table_columns("evaluation_production_runs")
+    if {
+        "idempotency_key",
+        "request_hash",
+        "material_package_id",
+        "category_key",
+        "category_profile_snapshot_json",
+        "category_profile_hash",
+        "correction_contract_json",
+        "correction_contract_hash",
+        "batch_key",
+        "created_by",
+        "created_at",
+        "started_at",
+    } <= production:
+        connection.exec_driver_sql(
+            "DROP TRIGGER IF EXISTS trg_evaluation_production_runs_frozen"
+        )
+        connection.exec_driver_sql(
+            """CREATE TRIGGER trg_evaluation_production_runs_frozen
+            BEFORE UPDATE ON evaluation_production_runs
+            WHEN NEW.idempotency_key IS NOT OLD.idempotency_key
+              OR NEW.request_hash IS NOT OLD.request_hash
+              OR NEW.material_package_id IS NOT OLD.material_package_id
+              OR NEW.category_key IS NOT OLD.category_key
+              OR NEW.category_profile_snapshot_json IS NOT OLD.category_profile_snapshot_json
+              OR NEW.category_profile_hash IS NOT OLD.category_profile_hash
+              OR NEW.correction_contract_json IS NOT OLD.correction_contract_json
+              OR NEW.correction_contract_hash IS NOT OLD.correction_contract_hash
+              OR NEW.batch_key IS NOT OLD.batch_key
+              OR NEW.created_by IS NOT OLD.created_by
+              OR NEW.created_at IS NOT OLD.created_at
+              OR NEW.started_at IS NOT OLD.started_at
+            BEGIN SELECT RAISE(ABORT, 'EvaluationProductionRun frozen fields are immutable'); END"""
+        )
+
+    prompt = table_columns("prompt_regression_runs")
+    if {
+        "name",
+        "sample_set_id",
+        "prompt_a_id",
+        "prompt_b_id",
+        "baseline_strategy_snapshot_json",
+        "candidate_strategy_snapshot_json",
+        "correction_contract_json",
+        "correction_contract_hash",
+        "created_by",
+        "created_at",
+    } <= prompt:
+        connection.exec_driver_sql(
+            "DROP TRIGGER IF EXISTS trg_prompt_regression_runs_correction_contract_frozen"
+        )
+        connection.exec_driver_sql(
+            """CREATE TRIGGER trg_prompt_regression_runs_correction_contract_frozen
+            BEFORE UPDATE OF name, sample_set_id, prompt_a_id, prompt_b_id,
+                baseline_strategy_snapshot_json, candidate_strategy_snapshot_json,
+                correction_contract_json, correction_contract_hash,
+                created_by, created_at
+            ON prompt_regression_runs
+            BEGIN SELECT RAISE(ABORT, 'PromptRegressionRun snapshot is immutable'); END"""
+        )
+
+
 MIGRATIONS = [
     Migration(1, "add_sample_expected_level", _migration_001_add_sample_expected_level),
     Migration(2, "add_review_corrections", _migration_002_add_review_corrections),
@@ -8623,6 +8750,11 @@ MIGRATIONS = [
         74,
         "add_review_rounds",
         _migration_074_add_review_rounds,
+    ),
+    Migration(
+        75,
+        "add_correction_contract_snapshots",
+        _migration_075_add_correction_contract_snapshots,
     ),
 ]
 

@@ -62,6 +62,16 @@ from .category_pipeline import (
     validate_pipeline_config,
 )
 from .database import SessionLocal, get_db, init_database
+from .correction_contract import (
+    correction_contract_hash,
+    freeze_contract_from_execution_snapshot,
+)
+from .correction_view import (
+    CorrectionViewError,
+    build_correction_view,
+    submit_correction_nodes,
+)
+from .adaptive_correction import wrap_evaluation_item
 from .production_dimension_contract import (
     ProductionDimensionContractError,
     resolve_published_dimension_contract,
@@ -92,6 +102,7 @@ from .models import (
     EvaluationControl,
     EvaluationPackage,
     EvaluationJob,
+    EvaluationProductionRun,
     EvaluationResult,
     HumanReview,
     MaterialPackage,
@@ -1202,6 +1213,33 @@ class BaselineCorrectionCreateRequest(BaseModel):
     def validate_unique_items(self) -> "BaselineCorrectionCreateRequest":
         if len(self.item_ids) != len(set(self.item_ids)):
             raise ValueError("纠偏样本不能重复")
+        return self
+
+
+class BaselineCorrectionNodeRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    node_key: str = Field(min_length=1, max_length=160)
+    human_value: Any
+    reason: str = Field(min_length=1, max_length=2000)
+    evidence: list[dict[str, Any]] = Field(default_factory=list, max_length=30)
+
+
+class BaselineCorrectionSubmitRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    contract_hash: str = Field(min_length=64, max_length=64)
+    nodes: list[BaselineCorrectionNodeRequest] = Field(
+        min_length=1, max_length=100
+    )
+    review_revision: int = Field(ge=0)
+    idempotency_key: str = Field(min_length=8, max_length=160)
+
+    @model_validator(mode="after")
+    def validate_unique_nodes(self) -> "BaselineCorrectionSubmitRequest":
+        node_keys = [node.node_key for node in self.nodes]
+        if len(node_keys) != len(set(node_keys)):
+            raise ValueError("纠偏节点不能重复")
         return self
 
 
@@ -10854,6 +10892,11 @@ def create_baseline_run(
                     "site_scope": next(iter(site_scopes)),
                     "asset_scope": "unknown",
                 }
+    correction_contract = freeze_contract_from_execution_snapshot(
+        category_key=baseline_set.category_key,
+        execution_snapshot=execution_payload,
+    )
+    execution_payload["correction_contract"] = correction_contract
     execution_snapshot = baseline_canonical_json(execution_payload)
     previous = db.scalar(
         select(BaselineRegressionRun)
@@ -10881,6 +10924,8 @@ def create_baseline_run(
         category_key=baseline_set.category_key,
         strategy_snapshot_json=strategy_snapshot,
         execution_snapshot_json=execution_snapshot,
+        correction_contract_json=baseline_canonical_json(correction_contract),
+        correction_contract_hash=correction_contract_hash(correction_contract),
         baseline_set_fingerprint=baseline_set.fingerprint,
         status="running",
         total=len(frozen_items),
@@ -11189,6 +11234,21 @@ def baseline_run_semantic_metrics(
 
 
 def _baseline_correction_payload(row: BaselineCorrectionRun) -> dict[str, Any]:
+    baseline_run = row.baseline_run
+    correction_contract = None
+    if baseline_run is not None and baseline_run.correction_contract_hash:
+        frozen_contract = json.loads(
+            baseline_run.correction_contract_json or "{}"
+        )
+        correction_contract = {
+            "contract_version": frozen_contract.get("contract_version"),
+            "contract_hash": baseline_run.correction_contract_hash,
+            "category_key": baseline_run.category_key,
+        }
+    orchestration = json.loads(row.orchestration_json or "{}")
+    mechanism_refresh = orchestration.get("mechanism_refresh")
+    if not isinstance(mechanism_refresh, dict):
+        mechanism_refresh = None
     return {
         "id": row.id,
         "baseline_run_id": row.baseline_run_id,
@@ -11201,7 +11261,7 @@ def _baseline_correction_payload(row: BaselineCorrectionRun) -> dict[str, Any]:
         "blockers": json.loads(row.blockers_json or "[]"),
         "candidate_revision_id": row.candidate_revision_id,
         "regression_run_id": row.regression_run_id,
-        "orchestration": json.loads(row.orchestration_json or "{}"),
+        "orchestration": orchestration,
         "error": {
             "code": row.error_code,
             "message": row.error_message,
@@ -11216,7 +11276,372 @@ def _baseline_correction_payload(row: BaselineCorrectionRun) -> dict[str, Any]:
         "created_at": row.created_at,
         "updated_at": row.updated_at,
         "finished_at": row.finished_at,
+        "correction_contract": correction_contract,
+        "mechanism_refresh": mechanism_refresh,
     }
+
+
+def _baseline_correction_item(
+    db: Session,
+    *,
+    run_id: int,
+    item_id: int,
+) -> tuple[BaselineRegressionRun, BaselineRegressionItem]:
+    run = db.get(BaselineRegressionRun, run_id)
+    if run is None:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "code": "BASELINE_RUN_NOT_FOUND",
+                "message": "基准回归 run 不存在",
+            },
+        )
+    item = db.get(BaselineRegressionItem, item_id)
+    if item is None or item.run_id != run.id:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "code": "BASELINE_ITEM_NOT_FOUND",
+                "message": "基准回归条目不存在",
+            },
+        )
+    return run, item
+
+
+def _previous_baseline_correction_item(
+    db: Session,
+    *,
+    run: BaselineRegressionRun,
+    item: BaselineRegressionItem,
+) -> BaselineRegressionItem | None:
+    if run.previous_run_id is None:
+        return None
+    return db.scalar(
+        select(BaselineRegressionItem)
+        .where(
+            BaselineRegressionItem.run_id == run.previous_run_id,
+            BaselineRegressionItem.asset_id == item.asset_id,
+        )
+        .order_by(BaselineRegressionItem.id.desc())
+        .limit(1)
+    )
+
+
+def _raise_correction_view_http(exc: CorrectionViewError) -> None:
+    raise HTTPException(status_code=exc.status_code, detail=exc.detail()) from exc
+
+
+@app.get(
+    "/api/baseline-regressions/{run_id}/items/{item_id}/correction-view"
+)
+def get_baseline_item_correction_view(
+    run_id: int,
+    item_id: int,
+    _user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    run, item = _baseline_correction_item(db, run_id=run_id, item_id=item_id)
+    return build_correction_view(
+        db,
+        run=run,
+        item=item,
+        previous_item=_previous_baseline_correction_item(
+            db, run=run, item=item
+        ),
+    )
+
+
+@app.post(
+    "/api/baseline-regressions/{run_id}/items/{item_id}/corrections"
+)
+def submit_baseline_item_corrections(
+    run_id: int,
+    item_id: int,
+    payload: BaselineCorrectionSubmitRequest,
+    user: User = Depends(_permission_user("reviews:write")),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    run, item = _baseline_correction_item(db, run_id=run_id, item_id=item_id)
+    try:
+        response = submit_correction_nodes(
+            db,
+            run=run,
+            item=item,
+            contract_hash=payload.contract_hash,
+            nodes=[node.model_dump(mode="json") for node in payload.nodes],
+            review_revision=payload.review_revision,
+            idempotency_key=payload.idempotency_key,
+            actor=user.username,
+        )
+    except CorrectionViewError as exc:
+        _raise_correction_view_http(exc)
+    if not response.get("idempotent_replay"):
+        append_audit_event(
+            db,
+            category="baseline_regression",
+            action="contract_correction_submitted",
+            subject_type="baseline_regression_item",
+            subject_id=item.id,
+            actor=user.username,
+            payload={
+                "baseline_run_id": run.id,
+                "contract_hash": payload.contract_hash,
+                "node_keys": [node.node_key for node in payload.nodes],
+                "review_revision": response["review_revision"],
+            },
+            event_key=(
+                f"baseline-item:{item.id}:contract-correction:"
+                f"{payload.idempotency_key}"
+            ),
+        )
+    db.commit()
+    return response
+
+
+def _lane_result_snapshot(
+    result: EvaluationResult,
+    *,
+    archived_json: str | None = None,
+) -> str:
+    archived = json.loads(archived_json or "{}")
+    frozen = archived.get("correction_result_snapshot")
+    if isinstance(frozen, dict):
+        return baseline_canonical_json(frozen)
+    precheck = json.loads(result.precheck_json or "{}")
+    aesthetic = json.loads(result.aesthetic_json or "{}")
+    scoring = json.loads(result.scoring_json or "{}")
+    return baseline_canonical_json(
+        {
+            "schema_version": "lane-correction-result-v1",
+            "evaluation_id": result.id,
+            "job_id": result.job_id,
+            "category_key": (
+                result.job.category_key
+                if result.job is not None
+                else result.asset.category_key
+            ),
+            "predicted_level": result.level,
+            "authoritative_score": result.score,
+            "stage_a": precheck if isinstance(precheck, dict) else {},
+            "stage_b": aesthetic if isinstance(aesthetic, dict) else {},
+            "scoring": scoring if isinstance(scoring, dict) else {},
+            "confidence": result.confidence,
+            "needs_review": result.needs_review,
+        }
+    )
+
+
+def _production_correction_item(
+    db: Session,
+    *,
+    run_id: int,
+    evaluation_id: int,
+) -> tuple[EvaluationProductionRun, Any]:
+    run = db.get(EvaluationProductionRun, run_id)
+    if run is None:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "code": "PRODUCTION_RUN_NOT_FOUND",
+                "message": "评测生产记录不存在",
+            },
+        )
+    result = db.get(EvaluationResult, evaluation_id)
+    job_ids = {
+        int(value)
+        for value in json.loads(run.job_ids_json or "[]")
+        if isinstance(value, int)
+    }
+    job = db.get(EvaluationJob, result.job_id) if result is not None else None
+    belongs_to_run = bool(
+        result is not None
+        and job is not None
+        and (
+            job.id in job_ids
+            or job.root_job_id in job_ids
+            or job.batch_key == run.batch_key
+        )
+    )
+    if not belongs_to_run or result is None:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "code": "PRODUCTION_EVALUATION_NOT_FOUND",
+                "message": "该生产运行中不存在此评测结果",
+            },
+        )
+    return run, wrap_evaluation_item(
+        run,
+        result,
+        item_id=result.id,
+        result_snapshot_json=_lane_result_snapshot(result),
+    )
+
+
+def _candidate_correction_item(
+    db: Session,
+    *,
+    run_id: int,
+    item_id: int,
+) -> tuple[PromptRegressionRun, Any]:
+    run = db.get(PromptRegressionRun, run_id)
+    item = db.scalar(
+        select(PromptRegressionItem).where(
+            PromptRegressionItem.id == item_id,
+            PromptRegressionItem.run_id == run_id,
+        )
+    )
+    if run is None or item is None:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "code": "CANDIDATE_REGRESSION_ITEM_NOT_FOUND",
+                "message": "候选回归条目不存在",
+            },
+        )
+    result = item.candidate_evaluation or item.evaluation
+    if result is None:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "CANDIDATE_EVALUATION_UNAVAILABLE",
+                "message": "候选回归条目尚无评测结果",
+            },
+        )
+    return run, wrap_evaluation_item(
+        run,
+        result,
+        item_id=item.id,
+        result_snapshot_json=_lane_result_snapshot(
+            result,
+            archived_json=item.candidate_result_json,
+        ),
+    )
+
+
+def _submit_lane_corrections(
+    db: Session,
+    *,
+    run: Any,
+    item: Any,
+    lane: Literal["incremental", "candidate"],
+    payload: BaselineCorrectionSubmitRequest,
+    user: User,
+) -> dict[str, Any]:
+    try:
+        response = submit_correction_nodes(
+            db,
+            run=run,
+            item=item,
+            contract_hash=payload.contract_hash,
+            nodes=[node.model_dump(mode="json") for node in payload.nodes],
+            review_revision=payload.review_revision,
+            idempotency_key=payload.idempotency_key,
+            actor=user.username,
+        )
+    except CorrectionViewError as exc:
+        _raise_correction_view_http(exc)
+    response["lane"] = lane
+    if not response.get("idempotent_replay"):
+        append_audit_event(
+            db,
+            category="adaptive_correction",
+            action="contract_correction_submitted",
+            subject_type=f"{lane}_evaluation",
+            subject_id=item.evaluation_id,
+            actor=user.username,
+            payload={
+                "run_id": run.id,
+                "item_id": item.id,
+                "contract_hash": payload.contract_hash,
+                "node_keys": [node.node_key for node in payload.nodes],
+                "review_revision": response["review_revision"],
+            },
+            event_key=(
+                f"{lane}:{run.id}:{item.id}:contract-correction:"
+                f"{payload.idempotency_key}"
+            ),
+        )
+    db.commit()
+    return response
+
+
+@app.get(
+    "/api/evaluation-production-runs/{run_id}/evaluations/"
+    "{evaluation_id}/correction-view"
+)
+def get_incremental_correction_view(
+    run_id: int,
+    evaluation_id: int,
+    _user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    run, item = _production_correction_item(
+        db, run_id=run_id, evaluation_id=evaluation_id
+    )
+    response = build_correction_view(db, run=run, item=item)
+    response["lane"] = "incremental"
+    return response
+
+
+@app.post(
+    "/api/evaluation-production-runs/{run_id}/evaluations/"
+    "{evaluation_id}/corrections"
+)
+def submit_incremental_corrections(
+    run_id: int,
+    evaluation_id: int,
+    payload: BaselineCorrectionSubmitRequest,
+    user: User = Depends(_permission_user("reviews:write")),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    run, item = _production_correction_item(
+        db, run_id=run_id, evaluation_id=evaluation_id
+    )
+    return _submit_lane_corrections(
+        db,
+        run=run,
+        item=item,
+        lane="incremental",
+        payload=payload,
+        user=user,
+    )
+
+
+@app.get(
+    "/api/prompt-regressions/{run_id}/items/{item_id}/correction-view"
+)
+def get_candidate_correction_view(
+    run_id: int,
+    item_id: int,
+    _user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    run, item = _candidate_correction_item(db, run_id=run_id, item_id=item_id)
+    response = build_correction_view(db, run=run, item=item)
+    response["lane"] = "candidate"
+    return response
+
+
+@app.post(
+    "/api/prompt-regressions/{run_id}/items/{item_id}/corrections"
+)
+def submit_candidate_corrections(
+    run_id: int,
+    item_id: int,
+    payload: BaselineCorrectionSubmitRequest,
+    user: User = Depends(_permission_user("reviews:write")),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    run, item = _candidate_correction_item(db, run_id=run_id, item_id=item_id)
+    return _submit_lane_corrections(
+        db,
+        run=run,
+        item=item,
+        lane="candidate",
+        payload=payload,
+        user=user,
+    )
 
 
 @app.post("/api/baseline-regressions/{run_id}/auto-corrections")
@@ -11527,6 +11952,38 @@ def decide_baseline_correction(
             profile.prompt_a_id = candidate_prompt.id
         else:
             profile.prompt_b_id = candidate_prompt.id
+        candidate_run = (
+            db.get(BaselineRegressionRun, row.regression_run_id)
+            if row.regression_run_id is not None
+            else None
+        )
+        candidate_contract = json.loads(candidate.contract_json or "{}")
+        candidate_correction_contract = candidate_contract.get("correction_contract")
+        if not isinstance(candidate_correction_contract, dict) and isinstance(
+            candidate_contract.get("nodes"), list
+        ):
+            candidate_correction_contract = candidate_contract
+        refresh_contract_hash = (
+            candidate_run.correction_contract_hash
+            if candidate_run is not None and candidate_run.correction_contract_hash
+            else (
+                correction_contract_hash(candidate_correction_contract)
+                if isinstance(candidate_correction_contract, dict)
+                else candidate.contract_hash
+            )
+        )
+        mechanism_refresh = {
+            "category_key": row.category_key,
+            "prompt_version_ids": [
+                value
+                for value in (profile.prompt_a_id, profile.prompt_b_id)
+                if isinstance(value, int)
+            ],
+            "v3_revision_id": candidate.id,
+            "contract_hash": refresh_contract_hash,
+        }
+        orchestration["mechanism_refresh"] = mechanism_refresh
+        row.orchestration_json = baseline_canonical_json(orchestration)
 
     row.status = payload.decision
     row.decision = payload.decision
@@ -12863,6 +13320,10 @@ def _create_paired_regression(
         model_config=candidate_model,
         dimension_contract=paired_dimension_contract,
     )
+    candidate_correction_contract = freeze_contract_from_execution_snapshot(
+        category_key=sample_set.category_key,
+        execution_snapshot=json.loads(candidate_category_snapshot),
+    )
 
     frozen: list[dict[str, Any]] = []
     for requested in payload.samples:
@@ -12942,6 +13403,8 @@ def _create_paired_regression(
         candidate_strategy_bundle_id=candidate_bundle.id,
         baseline_strategy_snapshot_json=baseline_strategy_snapshot_json,
         candidate_strategy_snapshot_json=candidate_strategy_snapshot_json,
+        correction_contract_json=baseline_canonical_json(candidate_correction_contract),
+        correction_contract_hash=correction_contract_hash(candidate_correction_contract),
         sample_set_version=sample_set_version,
         sample_manifest_json=manifest_json,
         metric_rules_version=payload.metric_rules_version.strip(),

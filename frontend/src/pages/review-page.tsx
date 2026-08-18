@@ -18,6 +18,7 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { api, jsonBody } from "@/lib/api"
+import { evaluationProductionApi } from "@/lib/evaluation-packages"
 import { formatRuleConfidence } from "@/lib/node-correction"
 import { submitReviewDecision } from "@/lib/review-submit"
 import {
@@ -27,6 +28,14 @@ import {
 import type { EvaluationRecord, ReviewCorrection, ReviewStage, User } from "@/lib/types"
 import { NodeCorrectionEditor } from "@/pages/node-correction-editor"
 import { ReviewCorrectionForm } from "@/pages/review-correction-form"
+import { CorrectionContractRenderer } from "@/features/correction-contract/contract-renderer.tsx"
+import {
+  correctionDraftFromView,
+  correctionSubmissionPayload,
+  mergeCorrectionResponse,
+  updateCorrectionDraft,
+} from "@/features/correction-contract/correction-view-state"
+import type { CorrectionDraft, CorrectionView } from "@/features/correction-contract/types"
 import {
   filterReviewAssets,
   ReviewList,
@@ -74,6 +83,7 @@ export function ReviewPage({ user }: { user: User }) {
   const [searchParams, setSearchParams] = useSearchParams()
   const requestedEvaluationId = Number(searchParams.get("evaluation") || 0)
   const legacyAssetId = Number(searchParams.get("asset") || 0)
+  const productionRunId = Number(searchParams.get("run") || 0)
   const [zoom, setZoom] = useState(100)
   const reviewer = user.username
   const [note, setNote] = useState("")
@@ -97,6 +107,45 @@ export function ReviewPage({ user }: { user: User }) {
   const currentIndex = filteredAssets.findIndex((item) => item.evaluation.id === currentId)
   const asset = detail.data
   const evaluation = asset?.evaluation
+  const correctionViewQuery = useQuery<CorrectionView>({
+    queryKey: ["incremental-correction-view", productionRunId, currentId],
+    queryFn: () => evaluationProductionApi.getCorrectionView(productionRunId, currentId),
+    enabled: productionRunId > 0 && currentId > 0,
+  })
+  const [correctionDraft, setCorrectionDraft] = useState<CorrectionDraft | null>(null)
+  const [correctionDraftKey, setCorrectionDraftKey] = useState("")
+  const correctionViewKey = correctionViewQuery.data
+    ? `${correctionViewQuery.data.item_id}:${correctionViewQuery.data.contract?.contract_hash ?? "legacy"}:${correctionViewQuery.data.review_revision}`
+    : ""
+  useEffect(() => {
+    if (!correctionViewQuery.data || !correctionViewKey || correctionDraftKey === correctionViewKey) return
+    setCorrectionDraft(correctionDraftFromView(correctionViewQuery.data))
+    setCorrectionDraftKey(correctionViewKey)
+  }, [correctionDraftKey, correctionViewKey, correctionViewQuery.data])
+  const submitContractCorrection = useMutation({
+    mutationFn: () => {
+      if (!correctionViewQuery.data || !correctionDraft) throw new Error("合同纠偏面板尚未加载")
+      return evaluationProductionApi.submitCorrectionNodes(
+        productionRunId,
+        currentId,
+        correctionSubmissionPayload(
+          correctionDraft,
+          correctionViewQuery.data,
+          correctionIdempotencyKey(productionRunId, currentId),
+        ),
+      )
+    },
+    onSuccess: async (response) => {
+      setCorrectionDraft(mergeCorrectionResponse(correctionDraft ?? {}, response))
+      setCorrectionDraftKey(`${response.item_id}:${response.contract?.contract_hash ?? "legacy"}:${response.review_revision}`)
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["evaluation", currentId] }),
+        queryClient.invalidateQueries({ queryKey: ["evaluations"] }),
+      ])
+      toast.success("合同纠偏已保存")
+    },
+    onError: (error) => toast.error(error.message),
+  })
   const proposalTextPdf = isProposalTextPdfEvaluation(evaluation)
   const sampling = asset?.sampling
   const dimensions = evaluation?.aesthetic?.dimensions ?? {}
@@ -438,7 +487,15 @@ export function ReviewPage({ user }: { user: User }) {
             )}
           </aside>
         </div>
-        {evaluation && ruleMode && <NodeCorrectionEditor
+        {correctionViewQuery.data && correctionDraft ? <CorrectionContractRenderer
+          view={correctionViewQuery.data}
+          draft={correctionDraft}
+          onChange={(nodeKey, patch) => setCorrectionDraft((current) => updateCorrectionDraft(current ?? {}, nodeKey, patch))}
+          onSubmit={() => submitContractCorrection.mutate()}
+          pending={submitContractCorrection.isPending}
+          submitDisabled={correctionViewQuery.isLoading || correctionViewQuery.isError}
+          disabled={evaluation?.review_stage === "completed"}
+        /> : evaluation && ruleMode && <NodeCorrectionEditor
           evaluation={evaluation}
           corrector={user.display_name || user.username}
           onCorrected={async () => {
@@ -453,6 +510,13 @@ export function ReviewPage({ user }: { user: User }) {
       )}
     </>
   )
+}
+
+function correctionIdempotencyKey(runId: number, evaluationId: number): string {
+  const random = typeof globalThis.crypto?.randomUUID === "function"
+    ? globalThis.crypto.randomUUID()
+    : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`
+  return `incremental-contract:${runId}:${evaluationId}:${random}`
 }
 
 function riskFieldLabel(field: string, dimensionLabels: Record<string, string>) {

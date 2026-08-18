@@ -31,6 +31,10 @@ from .category_evaluation_contract import (
     bind_category_evaluation_prompt_versions,
     validate_category_evaluation_prompt_bindings,
 )
+from .correction_contract import (
+    correction_contract_hash,
+    freeze_contract_from_execution_snapshot,
+)
 from .automation_candidate_pipeline import build_immutable_candidate_package
 from .doubao import DoubaoClient
 from .models import (
@@ -567,6 +571,11 @@ def _create_candidate_baseline_run(
         "source_baseline_run_id": source.id,
         "candidate_revision_id": candidate_revision.id,
     }
+    candidate_correction_contract = freeze_contract_from_execution_snapshot(
+        category_key=source.category_key,
+        execution_snapshot=candidate_execution,
+    )
+    candidate_execution["correction_contract"] = candidate_correction_contract
     execution_snapshot = canonical_json(candidate_execution)
     maximum_sequence = db.scalar(
         select(func.max(BaselineRegressionRun.sequence_no)).where(
@@ -589,6 +598,8 @@ def _create_candidate_baseline_run(
         category_key=source.category_key,
         strategy_snapshot_json=strategy_snapshot,
         execution_snapshot_json=execution_snapshot,
+        correction_contract_json=canonical_json(candidate_correction_contract),
+        correction_contract_hash=correction_contract_hash(candidate_correction_contract),
         baseline_set_fingerprint=source.baseline_set_fingerprint,
         status="running",
         total=len(source.items),

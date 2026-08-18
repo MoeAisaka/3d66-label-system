@@ -730,6 +730,12 @@ class EvaluationProductionRun(Base):
     )
     category_profile_snapshot_json: Mapped[str] = mapped_column(Text)
     category_profile_hash: Mapped[str] = mapped_column(String(64), index=True)
+    correction_contract_json: Mapped[str | None] = mapped_column(
+        Text, nullable=True
+    )
+    correction_contract_hash: Mapped[str | None] = mapped_column(
+        String(64), nullable=True, index=True
+    )
     job_ids_json: Mapped[str] = mapped_column(Text, default="[]")
     batch_key: Mapped[str] = mapped_column(String(120), unique=True, index=True)
     automation_run_id: Mapped[int | None] = mapped_column(
@@ -4718,6 +4724,12 @@ class BaselineRegressionRun(Base):
     execution_snapshot_json: Mapped[str] = mapped_column(
         Text, default="{}", server_default="{}"
     )
+    correction_contract_json: Mapped[str | None] = mapped_column(
+        Text, nullable=True
+    )
+    correction_contract_hash: Mapped[str | None] = mapped_column(
+        String(64), nullable=True, index=True
+    )
     baseline_set_fingerprint: Mapped[str] = mapped_column(String(64), index=True)
     status: Mapped[str] = mapped_column(String(30), default="running", index=True)
     total: Mapped[int] = mapped_column(Integer)
@@ -4947,6 +4959,12 @@ class PromptRegressionRun(Base):
     )
     candidate_strategy_snapshot_json: Mapped[str] = mapped_column(
         Text, default="{}"
+    )
+    correction_contract_json: Mapped[str | None] = mapped_column(
+        Text, nullable=True
+    )
+    correction_contract_hash: Mapped[str | None] = mapped_column(
+        String(64), nullable=True, index=True
     )
     sample_set_version: Mapped[str | None] = mapped_column(
         String(64), nullable=True, index=True

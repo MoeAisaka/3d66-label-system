@@ -8,7 +8,15 @@ import { PageHeader } from "@/components/app-shell"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
-import { api, jsonBody } from "@/lib/api"
+import { api, candidateRegressionApi, jsonBody } from "@/lib/api"
+import {
+  correctionDraftFromView,
+  correctionSubmissionPayload,
+  mergeCorrectionResponse,
+  updateCorrectionDraft,
+} from "@/features/correction-contract/correction-view-state"
+import { CorrectionContractRenderer } from "@/features/correction-contract/contract-renderer.tsx"
+import type { CorrectionDraft, CorrectionView } from "@/features/correction-contract/types"
 import type { RegressionDetail, RegressionSummary, User } from "@/lib/types"
 
 type PairedRegressionItem = RegressionDetail["items"][number] & {
@@ -49,6 +57,7 @@ export function PairedRegressionPage({ user }: { user: User }) {
     pairedRuns.find((item) => item.id === requestedRunId)
     ?? pairedRuns[0]
   const selectedRunId = selectedRun?.id ?? 0
+  const requestedItemId = Number(searchParams.get("item") || 0)
   const detail = useQuery({
     queryKey: ["prompt-regression", selectedRunId],
     queryFn: () => api<PairedRegressionDetail>(`/api/prompt-regressions/${selectedRunId}`),
@@ -57,6 +66,42 @@ export function PairedRegressionPage({ user }: { user: User }) {
       ["queued", "running"].includes(query.state.data?.summary.status ?? "")
         ? 3000
         : false,
+  })
+  const selectedItem = detail.data?.items.find((item) => item.id === requestedItemId) ?? null
+  const correctionViewQuery = useQuery<CorrectionView>({
+    queryKey: ["candidate-correction-view", selectedRunId, requestedItemId],
+    queryFn: () => candidateRegressionApi.getCorrectionView(selectedRunId, requestedItemId),
+    enabled: selectedRunId > 0 && requestedItemId > 0 && Boolean(selectedItem),
+  })
+  const [correctionDraft, setCorrectionDraft] = useState<CorrectionDraft | null>(null)
+  const [correctionDraftKey, setCorrectionDraftKey] = useState("")
+  const correctionViewKey = correctionViewQuery.data
+    ? `${correctionViewQuery.data.item_id}:${correctionViewQuery.data.contract?.contract_hash ?? "legacy"}:${correctionViewQuery.data.review_revision}`
+    : ""
+  useEffect(() => {
+    if (!correctionViewQuery.data || !correctionViewKey || correctionDraftKey === correctionViewKey) return
+    setCorrectionDraft(correctionDraftFromView(correctionViewQuery.data))
+    setCorrectionDraftKey(correctionViewKey)
+  }, [correctionDraftKey, correctionViewKey, correctionViewQuery.data])
+  const submitCorrection = useMutation({
+    mutationFn: () => {
+      if (!correctionViewQuery.data || !correctionDraft) throw new Error("合同纠偏面板尚未加载")
+      return candidateRegressionApi.submitCorrectionNodes(
+        selectedRunId,
+        requestedItemId,
+        correctionSubmissionPayload(
+          correctionDraft,
+          correctionViewQuery.data,
+          `candidate-contract:${selectedRunId}:${requestedItemId}:${Date.now()}`,
+        ),
+      )
+    },
+    onSuccess: (response) => {
+      setCorrectionDraft(mergeCorrectionResponse(correctionDraft ?? {}, response))
+      setCorrectionDraftKey(`${response.item_id}:${response.contract?.contract_hash ?? "legacy"}:${response.review_revision}`)
+      toast.success("候选回归纠偏已保存")
+    },
+    onError: (error) => toast.error(error.message),
   })
 
   useEffect(() => {
@@ -198,7 +243,7 @@ export function PairedRegressionPage({ user }: { user: User }) {
                 </div>
                 <div className="divide-y divide-[var(--line)]">
                   {detail.data?.items.map((item) => (
-                    <div key={item.id} className="grid gap-3 px-5 py-4 sm:grid-cols-[64px_minmax(0,1fr)_130px_120px] sm:items-center">
+                    <div key={item.id} className="grid gap-3 px-5 py-4 sm:grid-cols-[64px_minmax(0,1fr)_130px_120px_auto] sm:items-center">
                       <img src={item.image_url} alt="" className="size-14 border border-[var(--line)] object-cover" />
                       <div className="min-w-0">
                         <p className="file-name truncate text-sm">{item.asset_name}</p>
@@ -210,6 +255,7 @@ export function PairedRegressionPage({ user }: { user: User }) {
                       <Badge tone={item.passed === true ? "success" : item.passed === false ? "danger" : "neutral"}>
                         {item.passed === true ? "通过" : item.passed === false ? "未通过" : item.status}
                       </Badge>
+                      <Button size="sm" variant={item.id === requestedItemId ? "primary" : "secondary"} onClick={() => setSearchParams({ run: String(selectedRunId), item: String(item.id) })}>纠偏</Button>
                     </div>
                   ))}
                   {!detail.isLoading && !detail.data?.items.length && (
@@ -217,6 +263,19 @@ export function PairedRegressionPage({ user }: { user: User }) {
                   )}
                 </div>
               </section>
+
+              {requestedItemId > 0 && selectedItem && correctionViewQuery.data && correctionDraft && (
+                <section className="mt-7" aria-label="候选回归合同纠偏">
+                  <CorrectionContractRenderer
+                    view={correctionViewQuery.data}
+                    draft={correctionDraft}
+                    onChange={(nodeKey, patch) => setCorrectionDraft((current) => updateCorrectionDraft(current ?? {}, nodeKey, patch))}
+                    onSubmit={() => submitCorrection.mutate()}
+                    pending={submitCorrection.isPending}
+                    submitDisabled={correctionViewQuery.isLoading || correctionViewQuery.isError}
+                  />
+                </section>
+              )}
 
               <section className="mt-7 border-y border-[var(--line-strong)] bg-white p-5">
                 <div className="flex items-start gap-3">
