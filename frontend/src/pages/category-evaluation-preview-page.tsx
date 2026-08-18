@@ -11,7 +11,7 @@ import { api, ApiError } from "@/lib/api"
 /**
  * ADR-0033 类目评测底座预览页（只读 + dry-run）。
  *
- * 展示已装配的「灵感图」v3 合同（红线 / 子类目赛道 / 共性+特有维度 / 分类映射），
+ * 展示已装配的「灵感图」等级规则（红线 / 子类目赛道 / 共性+特有维度 / 分类映射），
  * 并提供一个纯 dry-run 面板：给定一张图的调用A事实（分类/媒介/reason）与模拟的
  * 调用B维度 grade，走完整确定性链（红线→分类器→维度组合→聚合器）看最终等级与分数。
  * 全程只读、不写库、不入队、不发布，仅用于配置预览与联调。
@@ -127,10 +127,10 @@ export function CategoryEvaluationPreviewPage() {
       <PageHeader
         index="A.6"
         title="类目评测底座预览"
-        description="只读查看「灵感图」类目的 v3 评测合同（红线 / 子类目 / 共性+特有维度 / 分类映射），并以 dry-run 方式跑通红线→分类器→维度→聚合器全链。此页不写库、不入队、不发布，仅用于配置预览与联调。"
+        description="只读查看「灵感图」类目的等级规则（红线 / 子类目 / 共性+特有维度 / 分类映射），并以 dry-run 方式跑通红线→分类器→维度→等级撮合器全链。此页不写库、不入队、不发布，仅用于配置预览与联调。"
         actions={
           <Button variant="secondary" onClick={() => contractQuery.refetch()}>
-            <ArrowClockwise />刷新合同
+            <ArrowClockwise />刷新等级规则
           </Button>
         }
       />
@@ -147,10 +147,10 @@ export function CategoryEvaluationPreviewPage() {
         </div>
 
         <div className="mt-6 grid gap-6 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
-          {/* 左：合同只读展示 */}
+          {/* 左：等级规则只读展示 */}
           <section className="border border-[var(--line)] bg-white">
             <div className="flex items-center justify-between border-b border-[var(--line)] px-4 py-3">
-              <h2 className="text-sm font-bold">灵感图 v3 合同（只读）</h2>
+              <h2 className="text-sm font-bold">灵感图等级规则（只读）</h2>
               {contractQuery.data && (
                 <Badge tone="neutral">{contractQuery.data.seed_version}</Badge>
               )}
@@ -158,7 +158,7 @@ export function CategoryEvaluationPreviewPage() {
             {contractQuery.isLoading ? (
               <p className="px-4 py-8 text-center text-xs text-[var(--muted)]">加载中…</p>
             ) : contractQuery.isError ? (
-              <p className="px-4 py-8 text-center text-xs text-[#8d2924]">合同加载失败，请刷新。</p>
+              <p className="px-4 py-8 text-center text-xs text-[#8d2924]">等级规则加载失败，请刷新。</p>
             ) : (
               <div className="space-y-4 px-4 py-4 text-xs leading-5">
                 <div>

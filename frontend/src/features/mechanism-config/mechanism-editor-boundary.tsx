@@ -44,7 +44,7 @@ export class MechanismEditorBoundary extends Component<Props, State> {
         <div>
           <UnknownMechanismSummary
             detail={this.props.detail}
-            reason="机制编辑插件渲染失败，已切换为只读安全降级。可刷新后重试，合同工件未被修改。"
+            reason="机制编辑插件渲染失败，已切换为只读安全降级。可刷新后重试，等级规则工件未被修改。"
           />
           <button type="button" className="mt-3 text-xs font-bold underline" onClick={this.retry}>重新加载编辑器</button>
         </div>

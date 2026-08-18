@@ -15,6 +15,7 @@
     "contract:model-registry": "node --experimental-strip-types scripts/check-model-registry-contract.ts",
     "contract:information-architecture": "node --experimental-strip-types scripts/check-information-architecture-contract.ts && node --experimental-strip-types scripts/check-workspace-components.ts",
     "contract:mechanism-editor": "node --experimental-strip-types scripts/check-mechanism-editor-contract.ts",
+    "contract:level-rules-naming": "node --experimental-strip-types scripts/check-level-rules-naming.ts",
     "contract:dual-workspaces": "node --experimental-strip-types scripts/check-dual-workspaces-contract.ts",
     "contract:baseline-correction": "node --experimental-strip-types scripts/check-baseline-correction-workbench.ts",
     "contract:tag-demand": "node --experimental-strip-types scripts/check-tag-demand-contract.ts",

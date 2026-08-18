@@ -152,7 +152,7 @@ export function AppShell({ user }: { user: User }) {
     <div className="min-h-[100dvh] bg-background text-foreground">
       <header className="sticky top-0 z-30 flex h-16 items-center justify-between border-b border-[var(--line)] bg-white/96 px-4 backdrop-blur-sm lg:hidden">
         <div className="flex items-baseline gap-2">
-          <span className="font-editorial text-2xl font-bold">TPENG</span>
+          <span className="font-editorial text-2xl font-bold">特鹏</span>
           <span className="text-sm font-semibold">标签实验台</span>
         </div>
         <Button variant="ghost" size="icon" aria-label="打开导航" onClick={() => setOpen(true)}>
@@ -186,7 +186,7 @@ export function AppShell({ user }: { user: User }) {
           <div className="mt-7 h-px w-7 bg-black/25" />
           <div className="mt-5 font-data text-2xl font-semibold">{active?.index ?? "01"}</div>
           <div className="mt-4 [writing-mode:vertical-rl] text-[0.65rem] font-semibold tracking-[0.16em]">
-            TPENG LABEL LAB
+            特鹏 LABEL LAB
           </div>
           <div className="mt-auto grid gap-2 pb-1" aria-hidden="true">
             {Array.from({ length: 5 }, (_, index) => (
@@ -197,7 +197,7 @@ export function AppShell({ user }: { user: User }) {
 
         <div className="flex min-w-0 flex-col">
           <div className="border-b border-[var(--line)] px-5 py-6">
-            <p className="font-editorial text-[1.45rem] font-bold leading-tight">TPENG 标签实验台</p>
+            <p className="font-editorial text-[1.45rem] font-bold leading-tight">特鹏标签实验台</p>
             <p className="mt-2 text-xs text-[var(--muted)]">LabelLab · 标签与内容中台底座</p>
           </div>
           <nav className="min-h-0 flex-1 overflow-y-auto py-3" aria-label="主导航">

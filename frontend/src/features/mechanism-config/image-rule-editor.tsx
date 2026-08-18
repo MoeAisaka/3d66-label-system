@@ -112,14 +112,14 @@ function V3ConfigEditor({
       {/* 工具条 */}
       <div className="flex flex-wrap items-center justify-between gap-3 border border-[var(--line)] bg-white px-4 py-3">
         <div className="flex flex-wrap items-center gap-3 text-xs">
-          <span className="font-bold">{isNew ? "新建 v3 配置" : `编辑 ${draft.category_key}`}</span>
+            <span className="font-bold">{isNew ? "新建等级规则" : `编辑 ${draft.category_key}`}</span>
         </div>
         <div className="flex items-center gap-2">
           <Button variant="secondary" size="sm" onClick={onValidate} disabled={busy}>
             <Check />校验
           </Button>
           <Button size="sm" onClick={onSave} disabled={busy}>
-            <FloppyDisk />创建候选版本
+            <FloppyDisk />创建候选等级规则版本
           </Button>
         </div>
       </div>
@@ -297,7 +297,7 @@ function LevelScaleEditor({
         <div className="min-h-8 text-xs text-[#8d2924]">
           {validationErrors.map((message) => <p key={message}>{message}</p>)}
         </div>
-        <p className="text-xs text-[var(--muted)]">等级档位会随整份合同创建候选版本。</p>
+        <p className="text-xs text-[var(--muted)]">等级档位会随整份等级规则创建候选版本。</p>
       </div>
     </FieldCard>
   )

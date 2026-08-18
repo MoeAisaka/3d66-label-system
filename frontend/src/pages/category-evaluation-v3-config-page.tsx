@@ -296,7 +296,7 @@ export function CategoryEvaluationV3ConfigPage() {
         )
         setSelectedRevisionId(created.id)
         setDraft(revisionToEditable(created))
-        setBanner(`候选 revision ${created.revision} 已创建，未发布且未改变现役合同。`)
+        setBanner(`候选等级规则版本 rev ${created.revision} 已创建，未发布且未改变现役等级规则。`)
       }
       await Promise.all([
         listQuery.refetch(),
@@ -321,7 +321,7 @@ export function CategoryEvaluationV3ConfigPage() {
   if (listQuery.isError) {
     return (
       <RouteErrorState
-        title="类目评测合同列表加载失败"
+        title="类目评测等级规则列表加载失败"
         message={errMessage(listQuery.error)}
         onRetry={() => void listQuery.refetch()}
         backTo="/workflow/system"
@@ -338,8 +338,8 @@ export function CategoryEvaluationV3ConfigPage() {
     <>
       <PageHeader
         index="A.7"
-        title="类目评测 v3 合同配置"
-        description="运行时投影只读；结构化编辑始终追加候选 revision，候选不会自动发布、重跑或写入正式标签事实。"
+        title="类目评测等级规则配置"
+        description="运行时投影只读；结构化编辑始终追加候选等级规则版本，候选不会自动发布、重跑或写入正式标签事实。"
         actions={
           <Button variant="secondary" onClick={refreshSelected} disabled={busy}>
             <ArrowClockwise />刷新
@@ -356,7 +356,7 @@ export function CategoryEvaluationV3ConfigPage() {
         <div className="grid gap-6 lg:grid-cols-[320px_minmax(0,1fr)]">
           <aside className="border border-[var(--line)] bg-white">
             <div className="flex items-center justify-between border-b border-[var(--line)] px-4 py-3">
-              <h2 className="text-sm font-bold">v3 配置</h2>
+              <h2 className="text-sm font-bold">等级规则配置</h2>
               <Button size="sm" onClick={startNew} disabled={busy}><Plus />新建</Button>
             </div>
             {listQuery.isLoading ? (
@@ -391,12 +391,12 @@ export function CategoryEvaluationV3ConfigPage() {
           <main className="min-w-0">
             {selectedLoadError ? (
               <RouteErrorState
-                title="合同版本加载失败"
+                title="等级规则版本加载失败"
                 message={errMessage(selectedLoadError)}
                 onRetry={refreshSelected}
               />
             ) : selectedLoading ? (
-              <div className="border-y border-[var(--line)] bg-white px-5 py-12 text-center text-sm text-[var(--muted)]">加载合同与 revision 历史…</div>
+              <div className="border-y border-[var(--line)] bg-white px-5 py-12 text-center text-sm text-[var(--muted)]">加载等级规则与 revision 历史…</div>
             ) : !draft ? (
               <div className="border border-dashed border-[var(--line-strong)] bg-white px-5 py-12 text-center text-sm text-[var(--muted)]">选择一份配置，或创建新的图像机制配置。</div>
             ) : (
