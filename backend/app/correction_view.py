@@ -173,9 +173,14 @@ def build_correction_nodes(
         node["metadata"] = _safe_metadata(node.get("metadata"))
         for key in _EXECUTABLE_METADATA_KEYS:
             node.pop(key, None)
-        node["model_value"] = deepcopy(model_values.get(node_key))
+        metadata_editable = node["metadata"].get("editable", True) is not False
+        frozen_value = node["metadata"].get("frozen_value")
+        model_value = model_values.get(node_key)
+        if model_value is None and not metadata_editable and "frozen_value" in node["metadata"]:
+            model_value = frozen_value
+        node["model_value"] = deepcopy(model_value)
         node["current_value"] = deepcopy(
-            current_values.get(node_key, model_values.get(node_key))
+            current_values.get(node_key, model_value)
         )
         previous = previous_values.get(node_key)
         inherited = inherit_correction_node(
@@ -187,7 +192,13 @@ def build_correction_nodes(
             inherited.update(_human_entry(current_human))
             inherited["inheritance"] = {"status": "current"}
         inherited["steps"] = _node_steps(node)
-        inherited["editable"] = True
+        inherited["editable"] = metadata_editable
+        if not metadata_editable:
+            inherited["read_only"] = True
+            inherited["read_only_reason"] = str(
+                node["metadata"].get("read_only_reason")
+                or "本节点属于冻结规则，只能查看"
+            )
         result.append(inherited)
     return result
 
@@ -696,6 +707,14 @@ def submit_correction_nodes(
             )
         seen.add(node_key)
         contract_node = by_key[node_key]
+        metadata = contract_node.get("metadata")
+        if isinstance(metadata, Mapping) and metadata.get("editable") is False:
+            raise CorrectionViewError(
+                422,
+                "CORRECTION_NODE_READ_ONLY",
+                f"节点 {node_key} 属于冻结规则，只能查看，不能直接修改",
+                fields=[node_key],
+            )
         value_type = str(contract_node.get("type") or "").lower()
         if (
             value_type not in SUPPORTED_CORRECTION_NODE_TYPES

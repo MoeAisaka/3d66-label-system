@@ -71,6 +71,7 @@ from .correction_view import (
     build_correction_view,
     submit_correction_nodes,
 )
+from .adaptive_correction import wrap_evaluation_item
 from .production_dimension_contract import (
     ProductionDimensionContractError,
     resolve_published_dimension_contract,
@@ -101,6 +102,7 @@ from .models import (
     EvaluationControl,
     EvaluationPackage,
     EvaluationJob,
+    EvaluationProductionRun,
     EvaluationResult,
     HumanReview,
     MaterialPackage,
@@ -11389,6 +11391,252 @@ def submit_baseline_item_corrections(
         )
     db.commit()
     return response
+
+
+def _lane_result_snapshot(
+    result: EvaluationResult,
+    *,
+    archived_json: str | None = None,
+) -> str:
+    archived = json.loads(archived_json or "{}")
+    frozen = archived.get("correction_result_snapshot")
+    if isinstance(frozen, dict):
+        return baseline_canonical_json(frozen)
+    precheck = json.loads(result.precheck_json or "{}")
+    aesthetic = json.loads(result.aesthetic_json or "{}")
+    scoring = json.loads(result.scoring_json or "{}")
+    return baseline_canonical_json(
+        {
+            "schema_version": "lane-correction-result-v1",
+            "evaluation_id": result.id,
+            "job_id": result.job_id,
+            "category_key": (
+                result.job.category_key
+                if result.job is not None
+                else result.asset.category_key
+            ),
+            "predicted_level": result.level,
+            "authoritative_score": result.score,
+            "stage_a": precheck if isinstance(precheck, dict) else {},
+            "stage_b": aesthetic if isinstance(aesthetic, dict) else {},
+            "scoring": scoring if isinstance(scoring, dict) else {},
+            "confidence": result.confidence,
+            "needs_review": result.needs_review,
+        }
+    )
+
+
+def _production_correction_item(
+    db: Session,
+    *,
+    run_id: int,
+    evaluation_id: int,
+) -> tuple[EvaluationProductionRun, Any]:
+    run = db.get(EvaluationProductionRun, run_id)
+    if run is None:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "code": "PRODUCTION_RUN_NOT_FOUND",
+                "message": "评测生产记录不存在",
+            },
+        )
+    result = db.get(EvaluationResult, evaluation_id)
+    job_ids = {
+        int(value)
+        for value in json.loads(run.job_ids_json or "[]")
+        if isinstance(value, int)
+    }
+    job = db.get(EvaluationJob, result.job_id) if result is not None else None
+    belongs_to_run = bool(
+        result is not None
+        and job is not None
+        and (
+            job.id in job_ids
+            or job.root_job_id in job_ids
+            or job.batch_key == run.batch_key
+        )
+    )
+    if not belongs_to_run or result is None:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "code": "PRODUCTION_EVALUATION_NOT_FOUND",
+                "message": "该生产运行中不存在此评测结果",
+            },
+        )
+    return run, wrap_evaluation_item(
+        run,
+        result,
+        item_id=result.id,
+        result_snapshot_json=_lane_result_snapshot(result),
+    )
+
+
+def _candidate_correction_item(
+    db: Session,
+    *,
+    run_id: int,
+    item_id: int,
+) -> tuple[PromptRegressionRun, Any]:
+    run = db.get(PromptRegressionRun, run_id)
+    item = db.scalar(
+        select(PromptRegressionItem).where(
+            PromptRegressionItem.id == item_id,
+            PromptRegressionItem.run_id == run_id,
+        )
+    )
+    if run is None or item is None:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "code": "CANDIDATE_REGRESSION_ITEM_NOT_FOUND",
+                "message": "候选回归条目不存在",
+            },
+        )
+    result = item.candidate_evaluation or item.evaluation
+    if result is None:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "CANDIDATE_EVALUATION_UNAVAILABLE",
+                "message": "候选回归条目尚无评测结果",
+            },
+        )
+    return run, wrap_evaluation_item(
+        run,
+        result,
+        item_id=item.id,
+        result_snapshot_json=_lane_result_snapshot(
+            result,
+            archived_json=item.candidate_result_json,
+        ),
+    )
+
+
+def _submit_lane_corrections(
+    db: Session,
+    *,
+    run: Any,
+    item: Any,
+    lane: Literal["incremental", "candidate"],
+    payload: BaselineCorrectionSubmitRequest,
+    user: User,
+) -> dict[str, Any]:
+    try:
+        response = submit_correction_nodes(
+            db,
+            run=run,
+            item=item,
+            contract_hash=payload.contract_hash,
+            nodes=[node.model_dump(mode="json") for node in payload.nodes],
+            review_revision=payload.review_revision,
+            idempotency_key=payload.idempotency_key,
+            actor=user.username,
+        )
+    except CorrectionViewError as exc:
+        _raise_correction_view_http(exc)
+    response["lane"] = lane
+    if not response.get("idempotent_replay"):
+        append_audit_event(
+            db,
+            category="adaptive_correction",
+            action="contract_correction_submitted",
+            subject_type=f"{lane}_evaluation",
+            subject_id=item.evaluation_id,
+            actor=user.username,
+            payload={
+                "run_id": run.id,
+                "item_id": item.id,
+                "contract_hash": payload.contract_hash,
+                "node_keys": [node.node_key for node in payload.nodes],
+                "review_revision": response["review_revision"],
+            },
+            event_key=(
+                f"{lane}:{run.id}:{item.id}:contract-correction:"
+                f"{payload.idempotency_key}"
+            ),
+        )
+    db.commit()
+    return response
+
+
+@app.get(
+    "/api/evaluation-production-runs/{run_id}/evaluations/"
+    "{evaluation_id}/correction-view"
+)
+def get_incremental_correction_view(
+    run_id: int,
+    evaluation_id: int,
+    _user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    run, item = _production_correction_item(
+        db, run_id=run_id, evaluation_id=evaluation_id
+    )
+    response = build_correction_view(db, run=run, item=item)
+    response["lane"] = "incremental"
+    return response
+
+
+@app.post(
+    "/api/evaluation-production-runs/{run_id}/evaluations/"
+    "{evaluation_id}/corrections"
+)
+def submit_incremental_corrections(
+    run_id: int,
+    evaluation_id: int,
+    payload: BaselineCorrectionSubmitRequest,
+    user: User = Depends(_permission_user("reviews:write")),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    run, item = _production_correction_item(
+        db, run_id=run_id, evaluation_id=evaluation_id
+    )
+    return _submit_lane_corrections(
+        db,
+        run=run,
+        item=item,
+        lane="incremental",
+        payload=payload,
+        user=user,
+    )
+
+
+@app.get(
+    "/api/prompt-regressions/{run_id}/items/{item_id}/correction-view"
+)
+def get_candidate_correction_view(
+    run_id: int,
+    item_id: int,
+    _user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    run, item = _candidate_correction_item(db, run_id=run_id, item_id=item_id)
+    response = build_correction_view(db, run=run, item=item)
+    response["lane"] = "candidate"
+    return response
+
+
+@app.post(
+    "/api/prompt-regressions/{run_id}/items/{item_id}/corrections"
+)
+def submit_candidate_corrections(
+    run_id: int,
+    item_id: int,
+    payload: BaselineCorrectionSubmitRequest,
+    user: User = Depends(_permission_user("reviews:write")),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    run, item = _candidate_correction_item(db, run_id=run_id, item_id=item_id)
+    return _submit_lane_corrections(
+        db,
+        run=run,
+        item=item,
+        lane="candidate",
+        payload=payload,
+        user=user,
+    )
 
 
 @app.post("/api/baseline-regressions/{run_id}/auto-corrections")

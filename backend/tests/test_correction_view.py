@@ -151,6 +151,58 @@ def test_build_nodes_inherits_only_compatible_values_and_omits_deleted_nodes() -
     }
 
 
+def test_read_only_nodes_use_frozen_value_and_cannot_be_submitted() -> None:
+    threshold_node = _node(
+        "v3.level_thresholds",
+        layer="V3",
+        path="scoring.level_thresholds",
+        node_type="list",
+    )
+    threshold_node["metadata"] = {
+        "editable": False,
+        "frozen_value": [
+            {"min_score": 90, "level": "L1"},
+            {"min_score": 75, "level": "L2"},
+        ],
+    }
+    contract = _contract(threshold_node)
+    nodes = build_correction_nodes(
+        contract,
+        model_values={},
+        current_values={},
+        human_values={},
+        previous_values={},
+    )
+
+    assert nodes[0]["model_value"] == threshold_node["metadata"]["frozen_value"]
+    assert nodes[0]["current_value"] == threshold_node["metadata"]["frozen_value"]
+    assert nodes[0]["editable"] is False
+
+    db, run, item, _ = _submission_fixture()
+    run.correction_contract_json = json.dumps(contract, ensure_ascii=False)
+    run.correction_contract_hash = contract["contract_hash"]
+    with pytest.raises(CorrectionViewError) as exc_info:
+        submit_correction_nodes(
+            db,
+            run=run,
+            item=item,
+            contract_hash=contract["contract_hash"],
+            nodes=[
+                {
+                    "node_key": "v3.level_thresholds",
+                    "human_value": threshold_node["metadata"]["frozen_value"],
+                    "reason": "阈值需要修改",
+                    "evidence": [{"text": "人工判断"}],
+                }
+            ],
+            review_revision=3,
+            idempotency_key="read-only-threshold-0001",
+            actor="运营乙",
+        )
+    assert exc_info.value.code == "CORRECTION_NODE_READ_ONLY"
+    db.close()
+
+
 def test_build_view_reads_only_the_run_frozen_contract() -> None:
     old_node = _node("call_a.title", path="call_a.title")
     old_contract = _contract(old_node, version="1")

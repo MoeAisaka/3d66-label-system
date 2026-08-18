@@ -386,6 +386,378 @@ def _source_nodes(
     return result
 
 
+_PRODUCTION_FIELD_SPECS: dict[str, dict[str, Any]] = {
+    "title": {
+        "label": "素材标题",
+        "description": "用于检索与推荐的素材标题",
+        "type": "text",
+        "required": True,
+    },
+    "seotitle": {
+        "label": "搜索标题",
+        "description": "用于搜索召回的标准化标题",
+        "type": "text",
+        "required": True,
+    },
+    "category": {
+        "label": "素材类目",
+        "description": "素材所属的业务类目",
+        "type": "text",
+        "required": True,
+    },
+    "style": {
+        "label": "素材风格",
+        "description": "素材呈现的主要风格与视觉方向",
+        "type": "text",
+        "required": True,
+    },
+    "tags": {
+        "label": "素材标签",
+        "description": "用于检索与推荐的素材标签列表",
+        "type": "list",
+        "required": True,
+    },
+    "cons": {
+        "label": "素材缺点",
+        "description": "素材需要降权或人工关注的缺点",
+        "type": "text",
+        "required": True,
+    },
+    "design": {
+        "label": "设计说明",
+        "description": "素材的设计意图与表现说明",
+        "type": "text",
+        "required": True,
+    },
+    "score": {
+        "label": "素材分数",
+        "description": "调用 A 输出的标准化素材分数",
+        "type": "integer",
+        "min": 0,
+        "max": 100,
+        "required": True,
+    },
+    "reason": {
+        "label": "过滤原因",
+        "description": "触发过滤或降权判断的原因列表",
+        "type": "list",
+        "required": True,
+        "options": [
+            "是截图",
+            "有大面积文字说明",
+            "是多拼图",
+            "有二维码",
+            "是随手拍",
+            "是颠倒图",
+        ],
+    },
+    "image_defects": {
+        "label": "图片缺陷",
+        "description": "图片是否存在水印等明确缺陷",
+        "type": "enum",
+        "options": ["", "有水印"],
+        "required": True,
+    },
+    "trait": {
+        "label": "素材媒介",
+        "description": "素材属于实拍、三维效果图、人工智能图或其它媒介",
+        "type": "enum",
+        "options": ["AI图", "实景照片", "3D数字效果图", "其它"],
+        "required": True,
+    },
+}
+
+
+def _chinese_text(value: Any, fallback: str) -> str:
+    text = str(value or "").strip()
+    return text if text and _has_chinese(text) else fallback
+
+
+def _node_evidence(label: str, *, required: bool = False) -> dict[str, Any]:
+    return {
+        "description": f"请提供{label}的图片或人工判断证据",
+        "required": required,
+    }
+
+
+def _production_field_nodes(source: Mapping[str, Any] | None) -> list[dict[str, Any]]:
+    """Build call-A nodes from an explicit or compatibility production contract."""
+
+    raw_items: list[Any] = []
+    if isinstance(source, Mapping):
+        candidate = source.get("fields")
+        if not isinstance(candidate, list):
+            candidate = source.get("nodes")
+        if isinstance(candidate, list):
+            raw_items = candidate
+    if not raw_items:
+        raw_items = [
+            {"key": key, **deepcopy(spec)}
+            for key, spec in _PRODUCTION_FIELD_SPECS.items()
+        ]
+
+    nodes: list[dict[str, Any]] = []
+    for index, raw in enumerate(raw_items):
+        if not isinstance(raw, Mapping):
+            continue
+        key = str(raw.get("key") or raw.get("field_key") or "").strip()
+        raw_node_key = str(raw.get("node_key") or "").strip()
+        if raw_node_key.startswith("call_a."):
+            node_key = raw_node_key
+            field_key = raw_node_key.split(".", 1)[1]
+        elif key:
+            field_key = key.removeprefix("call_a.")
+            node_key = f"call_a.{field_key}"
+        else:
+            continue
+        fallback = _PRODUCTION_FIELD_SPECS.get(field_key, {})
+        label = _chinese_text(
+            raw.get("label") or raw.get("name") or fallback.get("label"),
+            f"生产字段 {field_key}",
+        )
+        node: dict[str, Any] = {
+            **deepcopy(dict(raw)),
+            "node_key": node_key,
+            "layer": "A",
+            "path": str(raw.get("path") or node_key),
+            "order": index,
+            "label": label,
+            "description": _chinese_text(
+                raw.get("description") or fallback.get("description"),
+                f"冻结{label}的人工判断",
+            ),
+            "type": str(
+                raw.get("type")
+                or raw.get("value_type")
+                or fallback.get("type")
+                or "text"
+            ),
+            "semantic_version": str(raw.get("semantic_version") or "1"),
+            "compatibility_key": str(
+                raw.get("compatibility_key") or f"production-field:{field_key}"
+            ),
+            "required": bool(raw.get("required", fallback.get("required", False))),
+            "evidence": (
+                deepcopy(raw["evidence"])
+                if isinstance(raw.get("evidence"), Mapping)
+                else _node_evidence(label)
+            ),
+            "metadata": {
+                "node_type": "call_a_field",
+                "field_key": field_key,
+                **(
+                    deepcopy(dict(raw.get("metadata")))
+                    if isinstance(raw.get("metadata"), Mapping)
+                    else {}
+                ),
+            },
+        }
+        for bound in ("options", "allowed_values", "values", "min", "max", "minimum", "maximum"):
+            if bound not in node and bound in fallback:
+                node[bound] = deepcopy(fallback[bound])
+        nodes.append(node)
+    return nodes
+
+
+def _dimension_rule_nodes(
+    dimension_definition: Mapping[str, Any] | None,
+    v3_bundle: Mapping[str, Any] | None,
+    *,
+    selected_keys: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    """Flatten frozen dimension and subcategory rule definitions into B nodes."""
+
+    definitions: list[tuple[Mapping[str, Any], bool]] = []
+
+    def add_dimensions(value: Any, *, respect_selection: bool) -> None:
+        if not isinstance(value, list):
+            return
+        for item in value:
+            if isinstance(item, Mapping):
+                definitions.append((item, respect_selection))
+
+    if isinstance(dimension_definition, Mapping):
+        add_dimensions(
+            dimension_definition.get("dimensions"),
+            respect_selection=True,
+        )
+
+    if isinstance(v3_bundle, Mapping):
+        subcategories = v3_bundle.get("subcategory_dimensions")
+        if isinstance(subcategories, Mapping):
+            for config in subcategories.values():
+                if not isinstance(config, Mapping):
+                    continue
+                for group_name in ("common_group", "specific_group"):
+                    group = config.get(group_name)
+                    schema = group.get("schema_definition") if isinstance(group, Mapping) else None
+                    if isinstance(schema, Mapping):
+                        add_dimensions(
+                            schema.get("dimensions"),
+                            respect_selection=False,
+                        )
+
+    selected = set(selected_keys or [])
+    seen: set[tuple[str, str, str]] = set()
+    nodes: list[dict[str, Any]] = []
+    for dimension, respect_selection in definitions:
+        dimension_key = str(dimension.get("key") or "").strip()
+        if (
+            not dimension_key
+            or (respect_selection and selected and dimension_key not in selected)
+        ):
+            continue
+        dimension_label = _chinese_text(
+            dimension.get("label") or dimension.get("name"),
+            f"维度 {dimension_key}",
+        )
+        for rule_kind, source_key, path_key in (
+            ("deduction", "deduction_rules", "hit_rules"),
+            ("bonus", "bonus_rules", "hit_bonus_rules"),
+        ):
+            rules = dimension.get(source_key)
+            if not isinstance(rules, list):
+                continue
+            for index, raw_rule in enumerate(rules):
+                if not isinstance(raw_rule, Mapping):
+                    continue
+                rule_id = str(raw_rule.get("rule_id") or raw_rule.get("key") or "").strip()
+                if not rule_id:
+                    continue
+                identity = (dimension_key, rule_kind, rule_id)
+                if identity in seen:
+                    continue
+                seen.add(identity)
+                description = _chinese_text(
+                    raw_rule.get("description"),
+                    f"{dimension_label}的{rule_id}规则判断",
+                )
+                label = f"{dimension_label}：{description}"
+                nodes.append(
+                    {
+                        "node_key": f"call_b.{dimension_key}.{rule_id}",
+                        "layer": "B",
+                        "path": f"dimension.{dimension_key}.{path_key}.{rule_id}",
+                        "order": len(nodes),
+                        "label": label,
+                        "description": description,
+                        "type": "rule_hit",
+                        "semantic_version": str(
+                            raw_rule.get("semantic_version")
+                            or dimension.get("semantic_version")
+                            or "1"
+                        ),
+                        "compatibility_key": f"dimension-rule:{dimension_key}:{rule_kind}:{rule_id}",
+                        "required": False,
+                        "evidence": _node_evidence(label, required=True),
+                        "metadata": {
+                            "node_type": "dimension_rule",
+                            "dimension_key": dimension_key,
+                            "rule_id": rule_id,
+                            "rule_kind": rule_kind,
+                            "editable": True,
+                        },
+                    }
+                )
+    return nodes
+
+
+def _v3_nodes(v3_bundle: Mapping[str, Any] | None) -> list[dict[str, Any]]:
+    """Expose readable V3 decision nodes while keeping rule execution server-side."""
+
+    if not isinstance(v3_bundle, Mapping):
+        return []
+    contract = v3_bundle.get("contract")
+    if not isinstance(contract, Mapping):
+        return []
+    nodes: list[dict[str, Any]] = []
+    track_block = contract.get("track_classification")
+    tracks = track_block.get("tracks") if isinstance(track_block, Mapping) else None
+    track_options = [
+        str(item.get("key"))
+        for item in tracks or []
+        if isinstance(item, Mapping) and item.get("key")
+    ]
+    track_labels = {
+        str(item.get("key")): str(item.get("label"))
+        for item in tracks or []
+        if isinstance(item, Mapping) and item.get("key")
+    }
+    if track_options:
+        nodes.append(
+            {
+                "node_key": "v3.track_key",
+                "layer": "V3",
+                "path": "scoring.track_key",
+                "order": len(nodes),
+                "label": "等级撮合赛道",
+                "description": "根据冻结分类合同确定图片所属赛道",
+                "type": "enum",
+                "options": track_options,
+                "semantic_version": str(contract.get("spec_version") or "1"),
+                "compatibility_key": "v3-track-classification",
+                "required": True,
+                "evidence": _node_evidence("等级撮合赛道", required=True),
+                "metadata": {"node_type": "track", "option_labels": track_labels},
+                "recompute_ref": "evaluation_v3_pipeline.recompute_qualified_v3",
+            }
+        )
+
+    thresholds = contract.get("level_thresholds")
+    if isinstance(thresholds, (list, Mapping)) and thresholds:
+        threshold_value = deepcopy(thresholds)
+        threshold_type = "list" if isinstance(thresholds, list) else "object"
+        nodes.append(
+            {
+                "node_key": "v3.level_thresholds",
+                "layer": "V3",
+                "path": "scoring.level_thresholds",
+                "order": len(nodes),
+                "label": "等级分数阈值",
+                "description": "本轮冻结的分数到等级映射阈值，仅供查看",
+                "type": threshold_type,
+                "semantic_version": str(contract.get("spec_version") or "1"),
+                "compatibility_key": "v3-level-thresholds",
+                "required": True,
+                "evidence": _node_evidence("等级分数阈值"),
+                "metadata": {
+                    "node_type": "v3_thresholds",
+                    "editable": False,
+                    "frozen_value": threshold_value,
+                    "read_only_reason": "等级阈值属于冻结规则，只能通过候选机制版本修改",
+                },
+                "recompute_ref": "evaluation_v3_pipeline.recompute_qualified_v3",
+            }
+        )
+        levels = [
+            str(item.get("level"))
+            for item in thresholds
+            if isinstance(item, Mapping) and item.get("level")
+        ] if isinstance(thresholds, list) else [
+            str(key) for key in thresholds if str(key) in {"L1", "L2", "L3", "L4", "L5"}
+        ]
+        if levels:
+            nodes.append(
+                {
+                    "node_key": "v3.final_level",
+                    "layer": "V3",
+                    "path": "scoring.level",
+                    "order": len(nodes),
+                    "label": "最终等级",
+                    "description": "由服务端权威评分引擎根据冻结规则计算最终等级",
+                    "type": "enum",
+                    "options": list(dict.fromkeys(levels)),
+                    "semantic_version": str(contract.get("spec_version") or "1"),
+                    "compatibility_key": "v3-final-level",
+                    "required": True,
+                    "evidence": _node_evidence("最终等级", required=True),
+                    "metadata": {"node_type": "final_level"},
+                    "recompute_ref": "evaluation_v3_pipeline.recompute_qualified_v3",
+                }
+            )
+    return nodes
+
+
 def freeze_correction_contract(
     *,
     category_key: str,
@@ -458,7 +830,20 @@ def correction_contract_from_run_snapshot(
 def freeze_contract_from_execution_snapshot(
     *, category_key: str, execution_snapshot: Mapping[str, Any]
 ) -> dict[str, Any]:
-    """Build a contract from a frozen category execution snapshot."""
+    """Build a contract from a frozen category execution snapshot.
+
+    The execution snapshot is the only source of truth here.  An explicitly
+    embedded contract wins; otherwise the adapter derives the form nodes from
+    the frozen production-field, dimension, and V3 blocks.  No active database
+    configuration is consulted as a compatibility shortcut.
+    """
+
+    explicit = execution_snapshot.get("correction_contract")
+    if isinstance(explicit, Mapping) and isinstance(explicit.get("nodes"), list):
+        normalized = normalize_correction_contract(explicit, category_key=category_key)
+        normalized["contract_hash"] = correction_contract_hash(normalized)
+        return normalized
+
     pipeline = execution_snapshot.get("pipeline_config")
     if not isinstance(pipeline, Mapping):
         pipeline = {}
@@ -472,19 +857,43 @@ def freeze_contract_from_execution_snapshot(
         dimension_definition = {}
     production_fields = pipeline.get("production_fields")
     if not isinstance(production_fields, Mapping):
-        production_fields = {"fields": []}
+        production_fields = {}
     v3 = execution_snapshot.get("v3_authoritative_bundle")
     if not isinstance(v3, Mapping):
         v3 = {}
+    selection = execution_snapshot.get("dimension_selection")
+    selected_keys = None
+    if isinstance(selection, Mapping) and selection.get("mode") != "none":
+        effective_keys = selection.get("effective_keys")
+        if isinstance(effective_keys, list):
+            selected_keys = [str(item) for item in effective_keys if str(item)]
+
+    production_nodes = _production_field_nodes(production_fields)
+    dimension_nodes = _dimension_rule_nodes(
+        dimension_definition,
+        v3,
+        selected_keys=selected_keys,
+    )
+    v3_nodes = _v3_nodes(v3)
     prompt_snapshot = {
         "stage": "A",
         "version": execution_snapshot.get("rubric_version") or "frozen",
         "nodes": [],
     }
-    return freeze_correction_contract(
+    contract = freeze_correction_contract(
         category_key=category_key,
         prompt_snapshot=prompt_snapshot,
-        dimension_snapshot=dimension_definition,
-        production_field_snapshot=production_fields,
-        v3_snapshot=v3,
+        dimension_snapshot={"nodes": dimension_nodes},
+        production_field_snapshot={"nodes": production_nodes},
+        v3_snapshot={"nodes": v3_nodes},
     )
+    # Keep the complete frozen source payload for audit/debugging while the
+    # browser receives only normalized, executable-safe nodes.
+    contract["sources"] = {
+        "prompt": deepcopy(dict(prompt_snapshot)),
+        "dimensions": deepcopy(dict(dimension_contract)),
+        "production_fields": deepcopy(dict(production_fields)),
+        "v3": deepcopy(dict(v3)),
+    }
+    contract["contract_hash"] = correction_contract_hash(contract)
+    return contract
