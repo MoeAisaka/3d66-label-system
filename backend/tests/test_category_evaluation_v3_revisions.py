@@ -15,6 +15,7 @@ from app.category_evaluation_v3_config_api import (
     build_category_evaluation_v3_config_router,
 )
 from app.category_evaluation_contract import canonical_contract_hash
+from app.correction_contract import ContractValidationError
 from app.category_evaluation_v3_revisions import (
     RevisionArtifacts,
     activate_candidate_revision,
@@ -230,6 +231,65 @@ def test_activate_candidate_copies_frozen_provenance_to_runtime_projection(
 
         assert projected.created_by == candidate.created_by
         assert ensure_projected_revision(db, projected).id == candidate.id
+
+
+def test_activate_candidate_rejects_incomplete_correction_contract_without_mutating_status(
+    sessions: sessionmaker[Session],
+) -> None:
+    with sessions() as db:
+        projected, _stale = _stale_projection_pair(
+            category_key="incomplete_correction_contract",
+        )
+        db.add(projected)
+        db.flush()
+        current = ensure_projected_revision(db, projected)
+        body = _valid_body("incomplete_correction_contract")
+        body["contract"]["correction_contract"] = {
+            "contract_version": "1",
+            "category_key": "incomplete_correction_contract",
+            "nodes": [
+                {
+                    "node_key": "v3.final",
+                    "layer": "V3",
+                    "path": "final",
+                    "order": 1,
+                    "label": "最终等级",
+                    "description": "根据规则确定最终等级",
+                    "type": "enum",
+                    "options": ["L1", "L2"],
+                    "semantic_version": "1",
+                    "compatibility_key": "final-level",
+                    "required": True,
+                    "evidence": {"description": "需要边界证据"},
+                }
+            ],
+        }
+        candidate, _created = create_candidate_revision(
+            db,
+            projected,
+            parent_revision_id=current.id,
+            artifacts=RevisionArtifacts(
+                display_name="不完整候选合同",
+                contract=body["contract"],
+                classification_map=body["classification_map"],
+                subcategory_dimensions=body["subcategory_dimensions"],
+            ),
+            expected_projected_revision=projected.revision,
+            expected_projected_hash=projected.contract_hash,
+            actor="candidate:author",
+        )
+        before = (current.status, candidate.status, projected.projected_revision_id)
+
+        with pytest.raises(ContractValidationError) as exc_info:
+            activate_candidate_revision(
+                db,
+                projected,
+                candidate,
+                actor="release:approver",
+            )
+
+        assert exc_info.value.code == "CORRECTION_CONTRACT_INCOMPLETE"
+        assert (current.status, candidate.status, projected.projected_revision_id) == before
 
 
 def test_create_candidate_is_append_only_and_runtime_projection_is_unchanged(

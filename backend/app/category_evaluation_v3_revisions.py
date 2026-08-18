@@ -10,6 +10,10 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from .category_evaluation_contract import canonical_contract_hash
+from .correction_contract import (
+    ContractValidationError,
+    assert_correction_contract_complete,
+)
 from .dimension_schema_registry import canonical_json
 from .mechanism_profiles import (
     extract_profile_rule_mirror,
@@ -27,10 +31,14 @@ class RevisionArtifacts:
     subcategory_dimensions: dict[str, Any]
 
 
-class CategoryEvaluationV3RevisionError(ValueError):
-    def __init__(self, code: str, message: str) -> None:
-        super().__init__(message)
-        self.code = code
+class CategoryEvaluationV3RevisionError(ContractValidationError):
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        fields: list[str] | None = None,
+    ) -> None:
+        super().__init__(code, message, fields)
 
 
 def _canonical_artifacts(
@@ -442,6 +450,19 @@ def activate_candidate_revision(
             "candidate_artifact_conflict",
             "候选 revision 的冻结产物校验失败",
         )
+
+    correction_contract = artifacts.contract.get("correction_contract")
+    if correction_contract is None and "nodes" in artifacts.contract:
+        correction_contract = artifacts.contract
+    if correction_contract is not None:
+        try:
+            assert_correction_contract_complete(correction_contract)
+        except ContractValidationError as exc:
+            raise CategoryEvaluationV3RevisionError(
+                exc.code,
+                str(exc),
+                exc.fields,
+            ) from exc
 
     current.status = "retired"
     candidate.status = "active"
