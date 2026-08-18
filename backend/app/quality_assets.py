@@ -32,7 +32,7 @@ QUALITY_ASSET_COLUMNS = (
 )
 
 FIELD_DEFINITIONS = {
-    "asset_id": "LabelLab 内部稳定素材标识",
+    "asset_id": "Label System 内部稳定素材标识",
     "asset_name": "素材原始文件名",
     "category_key": "业务类目键",
     "expected_level": "人工确认的目标等级",

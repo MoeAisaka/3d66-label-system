@@ -129,8 +129,8 @@ function findButton(name: string) {
 createRoot(document.getElementById("root")!).render(<Harness />)
 
 setTimeout(() => {
-  expectText("特鹏标签实验台")
-  expectText("LabelLab")
+  expectText("特鹏标签中台")
+  expectText("Label System")
 
   const drawerTrigger = document.querySelector<HTMLButtonElement>('[data-testid="open-drawer"]')
   if (!drawerTrigger) fail("缺少抽屉入口")

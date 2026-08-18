@@ -1019,7 +1019,7 @@ class RegisteredTuningMechanismGenerator:
         routing_constraints = _candidate_routing_constraints(report)
         response = asyncio.run(
             client.chat_json(
-                "你是标签实验台的评测机制调优器。人工真值优先。根据纠偏报告生成一个完整、"
+                "你是特鹏标签中台的评测机制调优器。人工真值优先。根据纠偏报告生成一个完整、"
                 "可校验、可回归的统一机制候选。必须同时返回 prompt 与 revision；revision 必须"
                 "包含完整 contract、classification_map、subcategory_dimensions，不得只返回差异，"
                 "不得发布或启用。候选提示词阶段必须遵守 routing_constraints 中的允许阶段，"

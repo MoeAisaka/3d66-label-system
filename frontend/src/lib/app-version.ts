@@ -5,7 +5,7 @@ export const BUILD_SHA = typeof __LABEL_LAB_BUILD_SHA__ === "string" ? __LABEL_L
 
 export function formatAppVersion(version = APP_VERSION, sha = BUILD_SHA) {
   const build = sha.trim() ? sha.trim().slice(0, 7) : "dev"
-  return `LabelLab v${version} · build ${build}`
+  return `Label System v${version} · build ${build}`
 }
 
 export function AppVersion() {
