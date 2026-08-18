@@ -2,6 +2,7 @@ import type { ReactNode } from "react"
 import { ArrowLeft, ArrowRight } from "@phosphor-icons/react"
 
 import { Button } from "@/components/ui/button"
+import { ImagePreviewButton } from "@/components/image-lightbox"
 import { NodeCorrectionEditor } from "@/pages/node-correction-editor"
 import type { BaselineRegressionItem, Evaluation } from "@/lib/types"
 
@@ -36,7 +37,14 @@ export function CorrectionWorkbench({
     <div className="grid gap-0 xl:grid-cols-[minmax(0,1fr)_420px]">
       <div className="min-w-0 px-5 py-5 md:px-7">
         <div className="sticky top-4 overflow-hidden border border-[var(--line-strong)] bg-[#fafbf8]">
-          <img src={item.image_url} alt={item.asset.name} className="max-h-[72vh] w-full object-contain" />
+          <div className="flex min-h-56 items-center justify-center p-4 sm:min-h-64">
+            <ImagePreviewButton
+              src={item.image_url}
+              alt={item.asset.name}
+              imageClassName="size-48 max-w-full rounded-[4px] bg-[#eef0eb] object-cover sm:size-56"
+              onPreview={onPreview}
+            />
+          </div>
           <div className="flex items-center justify-between gap-3 border-t border-[var(--line)] px-4 py-3">
             <p className="truncate text-xs text-[var(--muted)]">{item.asset.name}</p>
             <Button variant="ghost" size="sm" onClick={() => onPreview({ src: item.image_url, alt: item.asset.name })}>查看原图</Button>
