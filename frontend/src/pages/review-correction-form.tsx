@@ -91,6 +91,7 @@ export function ReviewCorrectionForm({
   pending,
   editable = true,
   initialCorrections = EMPTY_CORRECTIONS,
+  initialNote = "",
   onSubmit,
 }: {
   dimensions: Record<string, any>
@@ -100,6 +101,7 @@ export function ReviewCorrectionForm({
   pending: boolean
   editable?: boolean
   initialCorrections?: ReviewCorrection[]
+  initialNote?: string
   onSubmit: (payload: { note: string; corrections: ReviewCorrection[] }) => void
 }) {
   const dimensionKeys = useMemo(
@@ -149,17 +151,41 @@ export function ReviewCorrectionForm({
     }
     setDrafts(nextDimensions)
     setKeyFieldDrafts(nextKeyFields)
-    setOverallNote("")
+    setOverallNote(initialNote)
     setError("")
-  }, [dimensionKeys, initialCorrectionsKey])
+  }, [dimensionKeys, initialCorrectionsKey, initialNote])
+
+  const initialDimensionCorrections = useMemo(
+    () => new Map(
+      initialCorrections
+        .filter((correction) => correction.target_type === "dimension")
+        .map((correction) => [correction.field_key, correction]),
+    ),
+    [initialCorrectionsKey],
+  )
+  const initialKeyFieldCorrections = useMemo(
+    () => new Map(
+      initialCorrections
+        .filter((correction) => correction.target_type === "key_field")
+        .map((correction) => [correction.field_key, correction]),
+    ),
+    [initialCorrectionsKey],
+  )
 
   const changedKeys = useMemo(
     () =>
       dimensionKeys.filter((key) => {
         const draft = drafts[key]
-        return draft && draft.humanGrade !== Number(dimensions[key]?.grade || 0)
+        const initial = initialDimensionCorrections.get(key)
+        const valueChanged = draft && draft.humanGrade !== Number(dimensions[key]?.grade || 0)
+        const correctionChanged = draft && initial && (
+          draft.humanGrade !== Number(initial.human_value)
+          || JSON.stringify(draft.reasons) !== JSON.stringify(initial.reason_codes ?? [])
+          || draft.note.trim() !== String(initial.note ?? "").trim()
+        )
+        return draft && (valueChanged || correctionChanged)
       }),
-    [dimensionKeys, drafts, dimensions],
+    [dimensionKeys, drafts, dimensions, initialDimensionCorrections],
   )
   const availableKeyFields = useMemo(
     () => keyFieldConfigs.filter((config) => valueAtPath(precheck, config.path) !== undefined),
@@ -168,12 +194,19 @@ export function ReviewCorrectionForm({
   const changedKeyFields = useMemo(
     () => availableKeyFields.filter((config) => {
       const draft = keyFieldDrafts[config.path]
-      return draft && draft.rawValue !== editableValue(
+      const initial = initialKeyFieldCorrections.get(config.path)
+      const valueChanged = draft && draft.rawValue !== editableValue(
         valueAtPath(precheck, config.path),
         config.kind,
       )
+      const correctionChanged = draft && initial && (
+        draft.rawValue !== editableValue(initial.human_value, config.kind)
+        || JSON.stringify(draft.reasons) !== JSON.stringify(initial.reason_codes ?? [])
+        || draft.note.trim() !== String(initial.note ?? "").trim()
+      )
+      return draft && (valueChanged || correctionChanged)
     }),
-    [availableKeyFields, keyFieldDrafts, precheck],
+    [availableKeyFields, keyFieldDrafts, precheck, initialKeyFieldCorrections],
   )
   const v3LevelThresholds = useMemo<LevelThresholds | null>(() => {
     const thresholds = scoring?.v3_context?.contract?.aesthetic_foundation?.score_thresholds

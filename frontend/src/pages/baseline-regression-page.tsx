@@ -1324,7 +1324,10 @@ function RegressionResults({
   )
   const [activeView, setActiveView] = useState<"results" | "correction">("results")
   const [reviewNotes, setReviewNotes] = useState<Record<number, string>>({})
-  const [reopenSeeds, setReopenSeeds] = useState<Record<number, ReviewCorrection[]>>({})
+  const [reopenSeeds, setReopenSeeds] = useState<Record<number, {
+    corrections: ReviewCorrection[]
+    note: string
+  }>>({})
 
   useEffect(() => {
     setSelectedDeviationIds(new Set(availableDeviationIds))
@@ -1399,7 +1402,13 @@ function RegressionResults({
     mutationFn: ({ item }: { item: BaselineRegressionItem }) => {
       if (!item.evaluation) throw new Error("该回归结果没有可重开的评测记录")
       const corrections = item.evaluation.human_review?.corrections ?? []
-      setReopenSeeds((current) => ({ ...current, [item.id]: corrections }))
+      setReopenSeeds((current) => ({
+        ...current,
+        [item.id]: {
+          corrections,
+          note: item.evaluation?.human_review?.note ?? "",
+        },
+      }))
       return baselineRegressionApi.reopenReview(
         item.evaluation.id,
         item.evaluation.review_revision,
@@ -1507,7 +1516,8 @@ function RegressionResults({
                     scoring={correctionItem.evaluation.scoring ?? {}}
                     pending={reviewResult.isPending}
                     editable={correctionItem.evaluation.review_stage !== "completed"}
-                    initialCorrections={reopenSeeds[correctionItem.id] ?? correctionItem.evaluation.human_review?.corrections ?? []}
+                    initialCorrections={reopenSeeds[correctionItem.id]?.corrections ?? correctionItem.evaluation.human_review?.corrections ?? []}
+                    initialNote={reopenSeeds[correctionItem.id]?.note ?? correctionItem.evaluation.human_review?.note ?? ""}
                     onSubmit={({ note, corrections }) => reviewResult.mutate({
                       item: correctionItem,
                       decision: "corrected",

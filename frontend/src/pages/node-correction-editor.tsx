@@ -183,7 +183,7 @@ export function NodeCorrectionEditor({
           </div>
         )}
         <div className="grid min-h-[560px] xl:grid-cols-[420px_minmax(0,1fr)]">
-          <nav className="border-b border-[var(--line-strong)] xl:border-b-0 xl:border-r" aria-label="判断路径节点">
+          <nav data-testid="node-correction-node-list" className="border-b border-[var(--line-strong)] xl:max-h-[calc(100dvh-12rem)] xl:overflow-y-auto xl:border-b-0 xl:border-r" aria-label="判断路径节点">
             {NODE_STAGE_META.map((stage) => {
               const stageNodes = nodes.filter((node) => node.stage === stage.stage)
               return <div key={stage.stage} className="border-b border-[var(--line)] last:border-b-0">
@@ -213,7 +213,7 @@ export function NodeCorrectionEditor({
             })}
           </nav>
 
-          <div className="min-w-0">
+          <div data-testid="node-correction-detail" className="min-w-0 xl:sticky xl:top-4 xl:max-h-[calc(100dvh-12rem)] xl:overflow-y-auto">
             {selected ? (
               <div className="px-5 py-5 md:px-7 md:py-6">
                 <div className="flex flex-wrap items-start justify-between gap-3 border-b border-[var(--line)] pb-4">
