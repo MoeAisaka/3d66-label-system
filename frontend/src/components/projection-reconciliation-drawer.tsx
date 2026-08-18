@@ -32,7 +32,7 @@ export function ProjectionReconciliationDrawer({
       open={open}
       onOpenChange={onOpenChange}
       title={contract ? `${targetLabel(contract.target_role)} · v${contract.version}` : "投影对账"}
-      description="仅操作 LabelLab 本地模拟表；不会写公司真实业务数据库，也不会修改 Canonical 正式标签事实。"
+      description="仅操作 Label System 本地模拟表；不会写公司真实业务数据库，也不会修改 Canonical 正式标签事实。"
       footer={contract && <Button onClick={() => reconcile.mutate()} disabled={reconcile.isPending}><ArrowsClockwise />{reconcile.isPending ? "正在重建并对账" : "重建本地投影并对账"}</Button>}
     >
       {contract && <div className="space-y-6 text-sm">

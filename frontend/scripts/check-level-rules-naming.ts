@@ -36,7 +36,7 @@ assert.match(systemManagement, /类目评测等级规则配置/)
 assert.doesNotMatch(systemManagement, /类目评测 v3 合同配置/)
 
 const appShell = source("components/app-shell.tsx")
-assert.match(appShell, /特鹏标签实验台/)
+assert.match(appShell, /特鹏标签中台/)
 assert.doesNotMatch(appShell, />TPENG 标签实验台</)
 
 const baselinePage = source("pages/baseline-regression-page.tsx")
