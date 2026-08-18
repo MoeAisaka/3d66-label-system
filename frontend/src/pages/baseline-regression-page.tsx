@@ -53,7 +53,10 @@ import {
 } from "@/features/baseline-regression/baseline-regression-contract"
 import { BaselineSetDialog } from "@/features/baseline-regression/baseline-set-dialog"
 import { CorrectionWorkbench } from "@/features/baseline-regression/correction-workbench"
-import { nextPendingCorrectionId } from "@/features/baseline-regression/correction-navigation"
+import {
+  nextPendingCorrectionId,
+  previousCorrectionId,
+} from "@/features/baseline-regression/correction-navigation"
 import { LevelPerformanceSummary } from "@/features/baseline-regression/level-performance-summary"
 import { MetricsDrawer } from "@/features/baseline-regression/metrics-drawer"
 import { RunConfigDrawer } from "@/features/baseline-regression/run-config-drawer"
@@ -1375,7 +1378,6 @@ function RegressionResults({
       })
     },
     onSuccess: async (_result, variables) => {
-      const nextId = nextPendingCorrectionId(items, variables.item.id)
       await queryClient.invalidateQueries({
         queryKey: ["baseline-regression", run.id],
       })
@@ -1386,8 +1388,6 @@ function RegressionResults({
         queryClient.invalidateQueries({ queryKey: ["optimization-cases"] }),
       ])
       setReviewNotes((current) => ({ ...current, [variables.item.id]: "" }))
-      if (nextId) onOpenCorrection(nextId)
-      else onCloseCorrection()
       toast.success(
         variables.decision === "corrected"
           ? "人工纠偏与最终等级已保存"
@@ -1431,6 +1431,11 @@ function RegressionResults({
         item={correctionItem}
         onBack={onCloseCorrection}
         corrector={me.data?.username ?? ""}
+        onPrevious={() => {
+          const previousId = previousCorrectionId(items, correctionItem.id)
+          if (previousId) onOpenCorrection(previousId)
+        }}
+        hasPrevious={Boolean(previousCorrectionId(items, correctionItem.id))}
         onNext={() => {
           const nextId = nextPendingCorrectionId(items, correctionItem.id)
           if (nextId) onOpenCorrection(nextId)
@@ -1450,7 +1455,7 @@ function RegressionResults({
           <LevelExplanation item={correctionItem} />
           <div className="space-y-3">
             <p className="text-sm font-semibold">人工决策</p>
-            <p className="text-xs leading-5 text-[var(--muted)]">确认或纠偏完成后自动进入下一条待处理素材，也可以手动点击“下一个”。</p>
+            <p className="text-xs leading-5 text-[var(--muted)]">提交后会停留在当前素材；可使用页面右上角的“上一条”和“下一条”手动切换。</p>
             {correctionItem.evaluation && (
               <div className="space-y-4 border-t border-[var(--line)] pt-4">
                 <label>
