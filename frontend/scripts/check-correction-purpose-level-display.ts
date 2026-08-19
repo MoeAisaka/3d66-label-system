@@ -90,7 +90,8 @@ assert.deepEqual(
 
 const pageSource = readFileSync("src/pages/baseline-regression-page.tsx", "utf8")
 const apiSource = readFileSync("src/lib/api.ts", "utf8")
-assert.match(pageSource, /找补用途：将模型与基准不一致的样本加入统一优化案例队列/)
+assert.match(pageSource, /全局优化案例池用途（可选）：把偏差样本沉淀到后续自动组批和长期机制优化流程/)
+assert.match(pageSource, /不影响当前纠偏分析/)
 assert.match(pageSource, /correctionLevelDisplay\(item\)/)
 assert.match(apiSource, /purpose: string/)
 

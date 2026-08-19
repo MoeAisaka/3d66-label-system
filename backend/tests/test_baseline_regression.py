@@ -734,8 +734,8 @@ def test_baseline_api_freezes_truth_reports_and_enqueues_idempotently() -> None:
         case_payload = json.loads(case.case_json)
         assert case_payload["expected_level"] == "L1"
         assert case_payload["purpose"] == (
-            "将模型与冻结基准不一致的样本送入统一优化案例队列，"
-            "供人工证据与 AI 候选机制分析；不修改本轮真值，也不自动启用候选。"
+            "把偏差样本沉淀到全局优化案例池，供后续自动组批和长期机制优化使用；"
+            "不影响当前纠偏分析，不修改本轮真值，也不自动启用候选。"
         )
         assert first.json()["purpose"] == case_payload["purpose"]
         historical_snapshot = json.loads(item.result_snapshot_json)

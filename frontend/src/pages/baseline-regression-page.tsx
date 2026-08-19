@@ -1365,8 +1365,8 @@ function RegressionResults({
       setSelectedDeviationIds(new Set())
       toast.success(
         result.created
-          ? `已将 ${result.created} 张偏差样本加入找补队列`
-          : "所选偏差样本已在找补队列中",
+          ? `已将 ${result.created} 张偏差样本加入全局优化池`
+          : "所选偏差样本已在全局优化池中",
       )
     },
     onError: (error) => toast.error(error.message),
@@ -1705,7 +1705,7 @@ function RegressionResults({
               <h3 className="font-editorial text-2xl font-bold">逐张预测对照</h3>
               <p className="mt-1 text-xs text-[var(--muted)]">每张展示冻结评测理由，并可原位确认、纠偏或退回。</p>
               <p className="mt-2 max-w-3xl text-xs leading-5 text-[var(--muted)]">
-                找补用途：将模型与基准不一致的样本加入统一优化案例队列，供人工证据与 AI 候选机制分析；不修改本轮真值，也不自动启用候选。
+                全局优化案例池用途（可选）：把偏差样本沉淀到后续自动组批和长期机制优化流程；不影响当前纠偏分析，不修改本轮真值，也不自动启用候选。
               </p>
             </div>
             <div className="flex flex-wrap items-center gap-2">
@@ -1749,8 +1749,8 @@ function RegressionResults({
                     onClick={() => enqueueDeviations.mutate()}
                   >
                     {enqueueDeviations.isPending
-                      ? "正在加入找补"
-                      : `加入找补队列 (${selectedDeviationIds.size})`}
+                      ? "正在加入全局优化池"
+                      : `加入全局优化池（可选） · ${selectedDeviationIds.size}`}
                   </Button>
                 </>
               )}
@@ -1792,7 +1792,7 @@ function RegressionResults({
                         <div className="flex flex-wrap items-center gap-2 sm:max-w-72 sm:justify-end">
                           {fallback && <Badge tone="warning">fallback 分级</Badge>}
                           {item.optimization_case_id !== null && (
-                            <Badge tone="success">已入找补队列</Badge>
+                            <Badge tone="success">已入全局优化池</Badge>
                           )}
                           {humanStatus && (
                             <Badge tone={humanStatus.tone}>{humanStatus.label}</Badge>
@@ -1805,8 +1805,8 @@ function RegressionResults({
                               className="flex size-8 items-center justify-center rounded-[4px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
                               aria-label={`${
                                 selectedDeviationIds.has(item.id)
-                                  ? "取消找补"
-                                  : "选择找补"
+                                  ? "取消加入全局优化池"
+                                  : "选择加入全局优化池"
                               }${item.asset.name}`}
                               onClick={() => {
                                 setSelectedDeviationIds((current) => {
