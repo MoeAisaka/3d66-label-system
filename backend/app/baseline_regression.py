@@ -19,6 +19,7 @@ from .models import (
     EvaluationResult,
     SampleSet,
     SampleSetItem,
+    SampleTruthRevision,
 )
 from .category_pipeline import dimension_selection_from_job_snapshot
 
@@ -149,6 +150,124 @@ def filename_level_suggestion(filename: str) -> dict[str, Any]:
         "suggested_level": unique_levels[0] if status == "matched" else None,
         "matches": matches,
     }
+
+
+def latest_locked_golden_levels(
+    db: Session,
+    *,
+    category_key: str,
+    asset_ids: Iterable[int],
+) -> dict[int, str]:
+    """Return the latest human truth for assets already in a locked golden set."""
+
+    requested = {int(asset_id) for asset_id in asset_ids}
+    if not requested:
+        return {}
+    rows = db.scalars(
+        select(SampleSetItem)
+        .join(SampleSet, SampleSet.id == SampleSetItem.sample_set_id)
+        .where(
+            SampleSet.category_key == category_key,
+            SampleSet.kind == "golden",
+            SampleSet.status == "locked",
+            SampleSetItem.asset_id.in_(requested),
+        )
+        .order_by(
+            SampleSetItem.asset_id.asc(),
+            SampleSetItem.truth_revision.desc(),
+            SampleSetItem.id.desc(),
+        )
+    ).all()
+    levels: dict[int, str] = {}
+    for row in rows:
+        if row.asset_id in levels or row.expected_level not in LEVELS:
+            continue
+        levels[row.asset_id] = row.expected_level
+    return levels
+
+
+def persist_human_level_truth(
+    db: Session,
+    *,
+    category_key: str,
+    asset_id: int,
+    source_result_id: int,
+    level: str,
+    actor: str,
+    reason: str,
+) -> SampleSetItem:
+    """Upsert a human final level while retaining every prior truth revision."""
+
+    if level not in LEVELS:
+        raise ValueError("人工等级必须是 L1-L5")
+    sample_set = db.scalar(
+        select(SampleSet).where(
+            SampleSet.category_key == category_key,
+            SampleSet.kind == "golden",
+            SampleSet.name == f"系统黄金集·{category_key}",
+        )
+    )
+    if sample_set is None:
+        sample_set = SampleSet(
+            name=f"系统黄金集·{category_key}",
+            description="由最终人工纠偏自动沉淀；按类目隔离维护。",
+            kind="golden",
+            status="locked",
+            category_key=category_key,
+            created_by="automation",
+        )
+        db.add(sample_set)
+        db.flush()
+    item = db.scalar(
+        select(SampleSetItem).where(
+            SampleSetItem.sample_set_id == sample_set.id,
+            SampleSetItem.asset_id == asset_id,
+        )
+    )
+    truth = _json_object(item.truth_json) if item is not None else {}
+    truth.update(
+        {
+            "schema_version": "baseline-human-level-truth-v1",
+            "level": level,
+            "corrected_level": level,
+            "source": "baseline_correction",
+            "reason": reason,
+        }
+    )
+    truth_json = canonical_json(truth)
+    now = datetime.now(timezone.utc)
+    if item is None:
+        item = SampleSetItem(
+            sample_set_id=sample_set.id,
+            asset_id=asset_id,
+            source_result_id=source_result_id,
+            expected_level=level,
+            expected_category="无法判断",
+            truth_json=truth_json,
+            truth_revision=1,
+            truth_updated_by=actor,
+            truth_updated_at=now,
+            added_by=actor,
+        )
+        db.add(item)
+        db.flush()
+    else:
+        item.source_result_id = source_result_id
+        item.expected_level = level
+        item.truth_json = truth_json
+        item.truth_revision += 1
+        item.truth_updated_by = actor
+        item.truth_updated_at = now
+    db.add(
+        SampleTruthRevision(
+            sample_item_id=item.id,
+            revision=item.truth_revision,
+            truth_json=truth_json,
+            reason=reason or "人工纠偏更新等级真值",
+            reviewer_name=actor,
+        )
+    )
+    return item
 
 
 def _dimension_reason_items(aesthetic: Mapping[str, Any]) -> list[dict[str, Any]]:

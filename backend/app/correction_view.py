@@ -18,6 +18,7 @@ from .correction_contract import (
     validate_node_value,
 )
 from .node_correction_api import CorrectNodeRequest, apply_node_correction
+from .baseline_regression import persist_human_level_truth
 
 
 _EXECUTABLE_METADATA_KEYS = {
@@ -1051,6 +1052,26 @@ def submit_correction_nodes(
             evaluation.correction_history_json = json.dumps(
                 history, ensure_ascii=False
             )
+            if (
+                _node_runtime_type(contract_node) == "final_level"
+                and getattr(run, "baseline_set_id", None) is not None
+            ):
+                category_key = (
+                    getattr(run, "category_key", None)
+                    or
+                    getattr(getattr(evaluation, "job", None), "category_key", None)
+                    or getattr(getattr(evaluation, "asset", None), "category_key", None)
+                )
+                if isinstance(category_key, str) and category_key:
+                    persist_human_level_truth(
+                        db,
+                        category_key=category_key,
+                        asset_id=int(evaluation.asset_id),
+                        source_result_id=int(evaluation.id),
+                        level=str(request_node.get("human_value")),
+                        actor=actor,
+                        reason=str(request_node.get("reason") or "人工纠偏更新最终等级"),
+                    )
         evaluation.review_revision = review_revision + 1
         db.flush()
         savepoint.commit()

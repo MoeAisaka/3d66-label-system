@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
@@ -30,6 +30,8 @@ from app.models import (
     BaselineRegressionItem,
     BaselineRegressionRun,
     EvaluationResult,
+    SampleSet,
+    SampleSetItem,
 )
 from app.worker_v3_authoritative import build_v3_authoritative_scoring
 
@@ -498,6 +500,61 @@ def test_valid_submission_appends_history_preserves_raw_response_and_is_idempote
 
     assert replay["idempotent_replay"] is True
     assert len(json.loads(item.evaluation.correction_history_json)) == 2
+    db.close()
+
+
+def test_baseline_final_level_correction_becomes_next_run_human_truth() -> None:
+    db, run, item, _contract_value = _submission_fixture()
+    final_node = _node(
+        "v3.final_level",
+        layer="V3",
+        path="scoring.level",
+        node_type="enum",
+        required_evidence=True,
+    )
+    final_node["metadata"] = {"node_type": "final_level"}
+    contract = _contract(final_node)
+    run.baseline_set_id = 88
+    run.correction_contract_json = json.dumps(contract, ensure_ascii=False)
+    run.correction_contract_hash = contract["contract_hash"]
+    item.evaluation.scoring_json = json.dumps(
+        {"score": 70, "level": "L2", "v3_context": {}},
+        ensure_ascii=False,
+    )
+
+    submit_correction_nodes(
+        db,
+        run=run,
+        item=item,
+        contract_hash=contract["contract_hash"],
+        nodes=[
+            {
+                "node_key": "v3.final_level",
+                "human_value": "L1",
+                "reason": "人工确认应升档",
+                "evidence": [{"text": "整体完成度达到推荐档"}],
+            }
+        ],
+        review_revision=3,
+        idempotency_key="baseline-final-level-0001",
+        actor="运营乙",
+    )
+
+    golden = db.scalar(
+        select(SampleSet).where(
+            SampleSet.name == "系统黄金集·inspiration_image"
+        )
+    )
+    assert golden is not None
+    truth = db.scalar(
+        select(SampleSetItem).where(
+            SampleSetItem.sample_set_id == golden.id,
+            SampleSetItem.asset_id == item.asset_id,
+        )
+    )
+    assert truth is not None
+    assert truth.expected_level == "L1"
+    assert json.loads(truth.truth_json)["corrected_level"] == "L1"
     db.close()
 
 
