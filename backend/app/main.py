@@ -195,6 +195,7 @@ from .shadow_projection import (
 )
 from .quality_assets import build_quality_asset_export
 from .baseline_regression import (
+    BASELINE_OPTIMIZATION_CASE_PURPOSE,
     LEVELS as BASELINE_LEVELS,
     TERMINAL_RUN_STATUSES as BASELINE_TERMINAL_STATUSES,
     baseline_set_fingerprint,
@@ -12094,6 +12095,7 @@ def enqueue_baseline_optimization_cases(
         case_payload = {
             "schema_version": "optimization-case-v1",
             "source": "baseline_regression",
+            "purpose": BASELINE_OPTIMIZATION_CASE_PURPOSE,
             "expected_level": item.expected_level,
             "actual_level": actual,
             "baseline_set_id": run.baseline_set_id,
@@ -12157,6 +12159,7 @@ def enqueue_baseline_optimization_cases(
         "case_ids": case_ids,
         "created": created_count,
         "idempotent": created_count == 0,
+        "purpose": BASELINE_OPTIMIZATION_CASE_PURPOSE,
     }
 
 

@@ -66,6 +66,7 @@ import {
 } from "@/features/baseline-regression/correction-navigation"
 import { candidateRefreshPlan } from "@/features/correction-contract/candidate-refresh"
 import { LevelPerformanceSummary } from "@/features/baseline-regression/level-performance-summary"
+import { correctionLevelDisplay } from "@/features/baseline-regression/correction-level-display"
 import { MetricsDrawer } from "@/features/baseline-regression/metrics-drawer"
 import { RunConfigDrawer } from "@/features/baseline-regression/run-config-drawer"
 import { RunHistoryDrawer } from "@/features/baseline-regression/run-history-drawer"
@@ -1364,8 +1365,8 @@ function RegressionResults({
       setSelectedDeviationIds(new Set())
       toast.success(
         result.created
-          ? `已将 ${result.created} 张偏差样本加入找补队列`
-          : "所选偏差样本已在找补队列中",
+          ? `已将 ${result.created} 张偏差样本加入全局优化池`
+          : "所选偏差样本已在全局优化池中",
       )
     },
     onError: (error) => toast.error(error.message),
@@ -1703,6 +1704,9 @@ function RegressionResults({
             <div>
               <h3 className="font-editorial text-2xl font-bold">逐张预测对照</h3>
               <p className="mt-1 text-xs text-[var(--muted)]">每张展示冻结评测理由，并可原位确认、纠偏或退回。</p>
+              <p className="mt-2 max-w-3xl text-xs leading-5 text-[var(--muted)]">
+                全局优化案例池用途（可选）：把偏差样本沉淀到后续自动组批和长期机制优化流程；不影响当前纠偏分析，不修改本轮真值，也不自动启用候选。
+              </p>
             </div>
             <div className="flex flex-wrap items-center gap-2">
               <Badge>第 {page + 1}/{pageCount} 页 · 共 {pagination.total} 张</Badge>
@@ -1745,8 +1749,8 @@ function RegressionResults({
                     onClick={() => enqueueDeviations.mutate()}
                   >
                     {enqueueDeviations.isPending
-                      ? "正在加入找补"
-                      : `加入找补队列 (${selectedDeviationIds.size})`}
+                      ? "正在加入全局优化池"
+                      : `加入全局优化池（可选） · ${selectedDeviationIds.size}`}
                   </Button>
                 </>
               )}
@@ -1788,7 +1792,7 @@ function RegressionResults({
                         <div className="flex flex-wrap items-center gap-2 sm:max-w-72 sm:justify-end">
                           {fallback && <Badge tone="warning">fallback 分级</Badge>}
                           {item.optimization_case_id !== null && (
-                            <Badge tone="success">已入找补队列</Badge>
+                            <Badge tone="success">已入全局优化池</Badge>
                           )}
                           {humanStatus && (
                             <Badge tone={humanStatus.tone}>{humanStatus.label}</Badge>
@@ -1801,8 +1805,8 @@ function RegressionResults({
                               className="flex size-8 items-center justify-center rounded-[4px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
                               aria-label={`${
                                 selectedDeviationIds.has(item.id)
-                                  ? "取消找补"
-                                  : "选择找补"
+                                  ? "取消加入全局优化池"
+                                  : "选择加入全局优化池"
                               }${item.asset.name}`}
                               onClick={() => {
                                 setSelectedDeviationIds((current) => {
@@ -2058,7 +2062,9 @@ function CorrectionAnalysisPanel({
               <div className="h-64 animate-pulse bg-white" />
             ) : deviations.length ? (
               <div className="divide-y divide-[var(--line)]">
-                {deviations.map((item) => (
+                {deviations.map((item) => {
+                  const levelDisplay = correctionLevelDisplay(item)
+                  return (
                   <div key={item.id} className="grid grid-cols-[auto_52px_minmax(0,1fr)] gap-3 px-4 py-3 hover:bg-[#fafbf8]">
                     <input
                       type="checkbox"
@@ -2082,12 +2088,26 @@ function CorrectionAnalysisPanel({
                     <div className="min-w-0">
                       <div className="flex flex-wrap items-center gap-2">
                         <p className="file-name min-w-0 truncate text-sm">{item.asset.name}</p>
-                        <Badge tone="danger">{item.expected_level} → {item.predicted_level ?? "—"}</Badge>
+                        <Badge tone="danger">{levelDisplay.level} → {item.predicted_level ?? "—"}</Badge>
+                        <Badge tone={levelDisplay.source === "human_correction" ? "warning" : "neutral"}>
+                          {levelDisplay.source === "human_correction" ? "人工纠偏等级" : "冻结预期等级"}
+                        </Badge>
                       </div>
+                      {levelDisplay.source === "human_correction" && (
+                        <p className="mt-1 text-[0.68rem] leading-4 text-[#7d4308]">
+                          原冻结预期 {item.expected_level} · 当前展示以已完成人工纠偏为准
+                        </p>
+                      )}
+                      {levelDisplay.source === "frozen_expected" && (
+                        <p className="mt-1 text-[0.68rem] leading-4 text-[var(--muted)]">
+                          尚未保存人工纠偏等级 · 当前仅用于筛选偏差样本
+                        </p>
+                      )}
                       <p className="mt-1 line-clamp-2 text-xs leading-5 text-[var(--muted)]">{levelExplanationSummary(item)}</p>
                     </div>
                   </div>
-                ))}
+                  )
+                })}
               </div>
             ) : (
               <p className="px-5 py-12 text-center text-sm text-[var(--muted)]">

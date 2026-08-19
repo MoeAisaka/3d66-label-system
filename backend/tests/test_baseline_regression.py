@@ -731,7 +731,13 @@ def test_baseline_api_freezes_truth_reports_and_enqueues_idempotently() -> None:
         assert first.json()["created"] == 1 and second.json()["created"] == 0
         case = db.query(OptimizationCaseQueue).one()
         assert case.source_type == "baseline_regression"
-        assert json.loads(case.case_json)["expected_level"] == "L1"
+        case_payload = json.loads(case.case_json)
+        assert case_payload["expected_level"] == "L1"
+        assert case_payload["purpose"] == (
+            "把偏差样本沉淀到全局优化案例池，供后续自动组批和长期机制优化使用；"
+            "不影响当前纠偏分析，不修改本轮真值，也不自动启用候选。"
+        )
+        assert first.json()["purpose"] == case_payload["purpose"]
         historical_snapshot = json.loads(item.result_snapshot_json)
         historical_snapshot.pop("level_explanation")
         item.result_snapshot_json = json.dumps(historical_snapshot)
