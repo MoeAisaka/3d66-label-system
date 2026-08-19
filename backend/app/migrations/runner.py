@@ -8334,7 +8334,6 @@ def _migration_075_add_correction_contract_snapshots(
             f"CREATE INDEX IF NOT EXISTS ix_{table}_correction_contract_hash "
             f"ON {table}(correction_contract_hash)"
         )
-
     baseline = table_columns("baseline_regression_runs")
     if {
         "baseline_set_id",
@@ -8421,6 +8420,54 @@ def _migration_075_add_correction_contract_snapshots(
                 created_by, created_at
             ON prompt_regression_runs
             BEGIN SELECT RAISE(ABORT, 'PromptRegressionRun snapshot is immutable'); END"""
+        )
+
+
+def _migration_076_add_nas_asset_source_references(connection: Connection) -> None:
+    """Add immutable storage/source metadata without moving existing assets."""
+
+    def columns(table: str) -> set[str]:
+        exists = connection.exec_driver_sql(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+            (table,),
+        ).scalar_one_or_none()
+        if exists is None:
+            return set()
+        return {
+            row[1]
+            for row in connection.exec_driver_sql(f"PRAGMA table_info({table})")
+        }
+
+    asset_columns = columns("assets")
+    if asset_columns:
+        if "storage_backend" not in asset_columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE assets ADD COLUMN storage_backend VARCHAR(30) "
+                "NOT NULL DEFAULT 'local'"
+            )
+        if "source_uri" not in asset_columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE assets ADD COLUMN source_uri VARCHAR(1000)"
+            )
+        connection.exec_driver_sql(
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_assets_source_uri "
+            "ON assets(source_uri) WHERE source_uri IS NOT NULL"
+        )
+
+    version_columns = columns("asset_versions")
+    if version_columns:
+        if "storage_backend" not in version_columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE asset_versions ADD COLUMN storage_backend VARCHAR(30) "
+                "NOT NULL DEFAULT 'local'"
+            )
+        if "source_uri" not in version_columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE asset_versions ADD COLUMN source_uri VARCHAR(1000)"
+            )
+        connection.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_asset_versions_source_uri "
+            "ON asset_versions(source_uri)"
         )
 
 
@@ -8755,6 +8802,11 @@ MIGRATIONS = [
         75,
         "add_correction_contract_snapshots",
         _migration_075_add_correction_contract_snapshots,
+    ),
+    Migration(
+        76,
+        "add_nas_asset_source_references",
+        _migration_076_add_nas_asset_source_references,
     ),
 ]
 

@@ -78,6 +78,7 @@ from .models import (
     SamplingPolicy,
     StrategyBundle,
 )
+from .nas_storage import NasStorageError, resolve_asset_path
 from .queue_scheduler import (
     QUEUE_CLASSES,
     DeterministicQueueScheduler,
@@ -299,6 +300,8 @@ def resolve_frozen_anchor_assets(
             stored_name=row.stored_name,
             mime_type=row.mime_type,
             sha256=row.sha256,
+            storage_backend=getattr(row, "storage_backend", "local") or "local",
+            source_uri=getattr(row, "source_uri", None),
         )
         for row in anchor_rows
     }
@@ -1378,8 +1381,11 @@ async def evaluate_job(job_id: int) -> None:
             raise RuntimeError("任务冻结类目 rubric 与 Prompt 不一致")
         # New runs are v3-only. DimensionSchema is retained solely for
         # historical result rendering and is never consulted for execution.
-    image_path = settings.upload_dir / asset.stored_name
-    if not image_path.exists():
+    try:
+        image_path = resolve_asset_path(asset, settings)
+    except NasStorageError as exc:
+        raise RuntimeError(f"原始素材不可用：{exc}") from exc
+    if not image_path.is_file():
         raise RuntimeError("原始素材文件不存在")
     document_context: dict[str, object] | None = None
     proposal_pdf_input = None
@@ -1839,6 +1845,9 @@ async def evaluate_job(job_id: int) -> None:
                     model_image_path,
                     model_mime_type,
                     assets_by_id=frozen_anchor_assets,
+                    asset_path_resolver=lambda anchor_asset: resolve_asset_path(
+                        anchor_asset, settings
+                    ),
                 )
                 response_b = await client.chat_json_images(
                     prompt_b.system_prompt,

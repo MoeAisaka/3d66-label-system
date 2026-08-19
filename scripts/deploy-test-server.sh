@@ -80,6 +80,14 @@ git_as_deploy_user cat-file -e "${target_commit}^{commit}" || fail "bundle does 
 printf 'Deploying %s (previous %s)...\n' "$target_commit" "$previous_commit"
 git_as_deploy_user reset --hard "$target_commit" || fail "cannot switch server worktree to requested commit"
 
+# NAS-backed assets are fail-closed: verify the newly checked-out helper before
+# Compose can create a replacement directory for a missing bind source.
+if [ ! -x "$PROJECT_DIR/scripts/verify-nas-test-server.sh" ] || \
+  ! "$PROJECT_DIR/scripts/verify-nas-test-server.sh"; then
+  git_as_deploy_user reset --hard "$previous_commit" || true
+  fail "NAS read-only mount verification failed; previous version was restored"
+fi
+
 if ! compose_up || ! wait_for_health; then
   printf 'Deployment failed after updating code.\n' >&2
   if rollback "$previous_commit"; then

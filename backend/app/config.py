@@ -64,12 +64,21 @@ def _integration_token(
     return token or None
 
 
+def _optional_path(environment_name: str) -> Path | None:
+    """Read an optional mounted path without creating or probing it."""
+    value = os.getenv(environment_name, "").strip()
+    if not value:
+        return None
+    return Path(value).expanduser().resolve()
+
+
 @dataclass(frozen=True)
 class Settings:
     project_root: Path
     data_dir: Path
     database_path: Path
     upload_dir: Path
+    nas_maps_root: Path | None
     log_dir: Path
     prompt_source: Path
     frontend_dist: Path
@@ -93,6 +102,7 @@ def get_settings() -> Settings:
         data_dir=data_dir,
         database_path=data_dir / "database" / "app.db",
         upload_dir=data_dir / "images",
+        nas_maps_root=_optional_path("NAS_MAPS_ROOT"),
         log_dir=data_dir / "logs",
         prompt_source=PROJECT_ROOT / "prompts" / "3d66-aesthetic-v2.1.md",
         frontend_dist=frontend_dist,

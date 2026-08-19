@@ -90,7 +90,85 @@ MIGRATION_NAMES = [
     "add_global_automation_lanes",
     "add_review_rounds",
     "add_correction_contract_snapshots",
+    "add_nas_asset_source_references",
 ]
+
+
+def test_migration_76_adds_nas_source_fields_without_rewriting_local_assets(
+    tmp_path,
+) -> None:
+    engine = create_engine(f"sqlite:///{tmp_path / 'legacy-assets-v75.db'}")
+    try:
+        with engine.begin() as connection:
+            connection.exec_driver_sql(
+                """
+                CREATE TABLE assets (
+                    id INTEGER PRIMARY KEY,
+                    original_name VARCHAR(500) NOT NULL,
+                    stored_name VARCHAR(200) NOT NULL UNIQUE,
+                    mime_type VARCHAR(120) NOT NULL,
+                    size_bytes INTEGER NOT NULL,
+                    width INTEGER,
+                    height INTEGER,
+                    sha256 VARCHAR(64) NOT NULL,
+                    category_key VARCHAR(40) NOT NULL DEFAULT 'space_image',
+                    status VARCHAR(30) NOT NULL DEFAULT 'uploaded',
+                    created_at DATETIME NOT NULL
+                )
+                """
+            )
+            connection.exec_driver_sql(
+                """
+                CREATE TABLE asset_versions (
+                    id INTEGER PRIMARY KEY,
+                    asset_id INTEGER NOT NULL,
+                    version INTEGER NOT NULL,
+                    asset_sha256 VARCHAR(64) NOT NULL,
+                    source_version VARCHAR(120) NOT NULL,
+                    snapshot_kind VARCHAR(20) NOT NULL DEFAULT 'materialized',
+                    created_by VARCHAR(80) NOT NULL DEFAULT 'system',
+                    created_at DATETIME NOT NULL
+                )
+                """
+            )
+            connection.exec_driver_sql(
+                """
+                INSERT INTO assets (
+                    id, original_name, stored_name, mime_type, size_bytes,
+                    sha256, category_key, status, created_at
+                ) VALUES (
+                    1, 'legacy.jpg', 'stored.jpg', 'image/jpeg', 7,
+                    :sha256, 'space_image', 'uploaded', CURRENT_TIMESTAMP
+                )
+                """,
+                {"sha256": "a" * 64},
+            )
+            connection.exec_driver_sql(
+                """
+                INSERT INTO asset_versions (
+                    id, asset_id, version, asset_sha256, source_version,
+                    snapshot_kind, created_by, created_at
+                ) VALUES (
+                    1, 1, 1, :sha256, 'legacy-v1',
+                    'materialized', 'system', CURRENT_TIMESTAMP
+                )
+                """,
+                {"sha256": "a" * 64},
+            )
+            MIGRATIONS[-1].up(connection)
+
+            asset = connection.exec_driver_sql(
+                "SELECT storage_backend, source_uri FROM assets WHERE id = 1"
+            ).one()
+            version = connection.exec_driver_sql(
+                "SELECT storage_backend, source_uri FROM asset_versions WHERE id = 1"
+            ).one()
+            assert asset.storage_backend == "local"
+            assert asset.source_uri is None
+            assert version.storage_backend == "local"
+            assert version.source_uri is None
+    finally:
+        engine.dispose()
 
 
 def test_migration_70_upgrades_legacy_content_identity_without_backfill(tmp_path) -> None:

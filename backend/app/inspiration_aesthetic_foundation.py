@@ -6,7 +6,7 @@ import hashlib
 import json
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .category_evaluation_aggregator import (
     _apply_v2_hard_defect_policy,
@@ -232,12 +232,27 @@ def anchor_samples(
     *,
     anchors: Any,
     assets_by_id: Mapping[int, object] | None = None,
+    asset_path_resolver: Callable[[object], Path] | None = None,
 ) -> list[tuple[str, Path, str | None]]:
     """Load exactly the anchors recorded in a task's frozen contract."""
     samples: list[tuple[str, Path, str | None]] = []
     for anchor in validate_anchor_contract(anchors):
         stored_name, mime_type = _resolve_anchor_asset(anchor, assets_by_id)
-        path = upload_dir / stored_name
+        asset = (
+            assets_by_id.get(int(anchor["asset_id"]))
+            if assets_by_id is not None
+            else None
+        )
+        try:
+            path = (
+                asset_path_resolver(asset)
+                if asset is not None and asset_path_resolver is not None
+                else upload_dir / stored_name
+            )
+        except Exception as exc:
+            raise AestheticFoundationError(
+                "anchor_source_unavailable", f"锚图asset {anchor['asset_id']}来源不可用"
+            ) from exc
         if not path.is_file():
             raise AestheticFoundationError("anchor_missing", f"锚图asset {anchor['asset_id']}不存在")
         digest = hashlib.sha256(path.read_bytes()).hexdigest()
@@ -260,6 +275,7 @@ def anchor_request_from_contract(
     target_mime: str | None,
     *,
     assets_by_id: Mapping[int, object] | None = None,
+    asset_path_resolver: Callable[[object], Path] | None = None,
 ) -> tuple[list[tuple[str, Path, str | None]], int]:
     """Build the provider request strictly from the frozen V3 contract."""
     if not isinstance(contract, dict):
@@ -275,6 +291,7 @@ def anchor_request_from_contract(
             target_mime,
             anchors=anchors,
             assets_by_id=assets_by_id,
+            asset_path_resolver=asset_path_resolver,
         ),
         len(anchors) + 1,
     )

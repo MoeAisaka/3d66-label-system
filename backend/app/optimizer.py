@@ -15,6 +15,7 @@ from .database import SessionLocal
 from .dimension_schema_registry import canonical_hash
 from .doubao import DoubaoClient, DoubaoError, DoubaoResponse
 from .models import ModelNodeBinding, OptimizerConfig, PromptOptimizationRun
+from .nas_storage import NasStorageError, resolve_asset_path
 from .regression import (
     dimension_contract_for_result,
     latest_review_for_result,
@@ -401,6 +402,8 @@ def _select_records(items: list[Any]) -> tuple[list[tuple[Any, dict[str, Any]]],
 def _bounded_diagnostic_records(
     selected: list[tuple[Any, dict[str, Any]]],
     upload_dir: Any,
+    *,
+    asset_path_resolver: Any | None = None,
 ) -> tuple[list[tuple[Any, dict[str, Any], Any]], int, int]:
     """Choose a deterministic role-stratified request under metadata limits."""
     candidates: dict[str, list[tuple[Any, dict[str, Any], Any, int]]] = {
@@ -409,10 +412,14 @@ def _bounded_diagnostic_records(
     }
     omitted_count = 0
     for item, record in selected:
-        image_path = upload_dir / item.asset.stored_name
         try:
+            image_path = (
+                asset_path_resolver(item.asset)
+                if asset_path_resolver is not None
+                else upload_dir / item.asset.stored_name
+            )
             image_bytes = image_path.stat().st_size
-        except OSError:
+        except (OSError, NasStorageError):
             omitted_count += 1
             continue
         if not 0 < image_bytes <= MAX_DIAGNOSTIC_SINGLE_IMAGE_BYTES:
@@ -515,9 +522,20 @@ async def run_prompt_optimization(run_id: int) -> None:
             "只输出合法JSON，字段为 summary、cases、patterns、prompt_risks。"
         )
         settings = get_settings()
-        bounded_records, diagnostic_image_bytes, omitted_image_count = (
-            _bounded_diagnostic_records(selected, settings.upload_dir)
-        )
+        if hasattr(settings, "nas_maps_root"):
+            bounded_records, diagnostic_image_bytes, omitted_image_count = (
+                _bounded_diagnostic_records(
+                    selected,
+                    settings.upload_dir,
+                    asset_path_resolver=lambda asset: resolve_asset_path(asset, settings),
+                )
+            )
+        else:
+            # Keep lightweight optimizer test doubles and older integrations
+            # compatible with the pre-NAS settings shape.
+            bounded_records, diagnostic_image_bytes, omitted_image_count = (
+                _bounded_diagnostic_records(selected, settings.upload_dir)
+            )
         selected = [(item, record) for item, record, _ in bounded_records]
         corrected_count = sum(
             1 for _, record in selected if record["decision"] == "corrected"
