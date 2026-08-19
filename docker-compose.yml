@@ -14,10 +14,12 @@ services:
       APP_PORT: 8080
       DATA_DIR: /data
       DATABASE_URL: sqlite:////data/database/app.db
+      NAS_MAPS_ROOT: /mnt/label-nas/maps
       API_KEY_MASTER_KEY_FILE: /data/secrets/master.key
       SESSION_DAYS: 7
     volumes:
       - 3d66-label-system-data:/data
+      - /mnt/label-nas/maps:/mnt/label-nas/maps:ro
     restart: unless-stopped
     healthcheck:
       test:

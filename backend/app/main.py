@@ -156,6 +156,15 @@ from .field_demand_contracts import (
     asset_version_payload,
     create_field_demand_contract,
     field_demand_contract_payload,
+    record_asset_version,
+)
+from .nas_storage import (
+    NasStorageError,
+    inspect_nas_file,
+    nas_relative_path,
+    normalize_nas_uri,
+    resolve_asset_path,
+    resolve_nas_uri,
 )
 from .readonly_sources import (
     ReadOnlySourceError,
@@ -846,6 +855,13 @@ class MaterialPackageCreateRequest(BaseModel):
         if len(self.asset_ids) != len(set(self.asset_ids)):
             raise ValueError("素材包不能包含重复素材")
         return self
+
+
+class NasAssetImportRequest(BaseModel):
+    source_uri: str = Field(min_length=1, max_length=1000)
+    package_name: str | None = Field(default=None, max_length=200)
+    category_key: str = Field(default="space_image", pattern=r"^[a-z][a-z0-9_]{2,39}$")
+    max_files: int = Field(default=10_000, ge=1, le=10_000)
 
 
 class AssetCategoryUpdateRequest(BaseModel):
@@ -1686,6 +1702,8 @@ def _asset_payload(
         "id": asset.id,
         "name": name,
         "mime_type": asset.mime_type,
+        "storage_backend": getattr(asset, "storage_backend", "local") or "local",
+        "source_uri": getattr(asset, "source_uri", None),
         "category_key": asset.category_key,
         "size_bytes": asset.size_bytes,
         "width": asset.width,
@@ -3933,6 +3951,213 @@ async def upload_assets(
     )
 
 
+def _nas_directory_candidates(source_uri: str, root: Path, max_files: int) -> list[str]:
+    """Expand one NAS file/directory into normalized, revalidated URIs."""
+    normalized = normalize_nas_uri(source_uri)
+    base_path = resolve_nas_uri(normalized, root)
+    if base_path.is_file():
+        return [normalized]
+    if not base_path.is_dir():
+        raise NasStorageError("NAS_FILE_MISSING", "NAS 文件或目录不存在")
+    base_parts = nas_relative_path(normalized).parts
+    candidates: list[str] = []
+    for path in base_path.rglob("*"):
+        if path.is_symlink() or not path.is_file():
+            continue
+        relative_parts = base_parts + path.relative_to(base_path).parts
+        candidates.append("nas://maps/" + "/".join(relative_parts))
+        if len(candidates) > max_files:
+            raise NasStorageError(
+                "NAS_IMPORT_LIMIT_EXCEEDED",
+                f"NAS 目录超过单次导入上限 {max_files} 个文件",
+            )
+    return candidates
+
+
+def _nas_storage_http_error(exc: NasStorageError) -> HTTPException:
+    status = 503 if exc.code in {"NAS_MOUNT_UNAVAILABLE", "NAS_MOUNT_INVALID"} else 400
+    return HTTPException(
+        status_code=status,
+        detail={"code": exc.code, "message": str(exc)},
+    )
+
+
+@app.post("/api/assets/import-nas")
+def import_nas_assets(
+    payload: NasAssetImportRequest,
+    user: User = Depends(_permission_user("assets:write")),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    profile = _category_profile(db, payload.category_key, require_active=True)
+    pipeline = _profile_pipeline(profile, db)
+    allowed_mimes = set(json.loads(profile.allowed_mime_types_json or "[]"))
+    root = settings.nas_maps_root
+    if root is None:
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "NAS_MOUNT_UNAVAILABLE", "message": "NAS 只读挂载未配置"},
+        )
+    try:
+        candidates = _nas_directory_candidates(
+            payload.source_uri,
+            Path(root),
+            payload.max_files,
+        )
+    except NasStorageError as exc:
+        raise _nas_storage_http_error(exc) from exc
+    if not candidates:
+        raise HTTPException(status_code=400, detail="NAS 目录中没有可导入文件")
+
+    package = MaterialPackage(
+        package_key=f"nas:{uuid.uuid4().hex}",
+        name=_upload_package_name(
+            payload.package_name,
+            fallback=nas_relative_path(candidates[0]).parts[0]
+            if len(candidates) == 1
+            else f"NAS 素材包 {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')}",
+        ),
+        # The database CHECK constraint intentionally stays backward compatible;
+        # audit input_mode identifies the NAS reference without adding a second
+        # package-source enum that older deployments cannot read.
+        source="production_import",
+        category_key=payload.category_key,
+        created_by=user.username,
+    )
+    db.add(package)
+    db.flush()
+    uploaded: list[dict[str, Any]] = []
+    skipped_files: list[dict[str, str]] = []
+    failed_files: list[dict[str, str]] = []
+    try:
+        for source_uri in candidates:
+            display_name = source_uri.rsplit("/", 1)[-1]
+            suffix = Path(display_name).suffix.lower()
+            if suffix not in set(pipeline["allowed_suffixes"]):
+                skipped_files.append(_upload_issue(display_name, "当前类目不支持该文件格式"))
+                continue
+            try:
+                info = inspect_nas_file(source_uri, Path(root))
+                if info.mime_type not in allowed_mimes:
+                    skipped_files.append(
+                        _upload_issue(display_name, "文件 MIME 类型与当前评测类目不匹配")
+                    )
+                    continue
+                existing = db.scalar(
+                    select(Asset).where(Asset.source_uri == info.uri)
+                )
+                if existing is not None:
+                    if existing.category_key != payload.category_key:
+                        failed_files.append(
+                            _upload_issue(display_name, "同一 NAS 来源已归属其他评测类目")
+                        )
+                        continue
+                    if existing.sha256 != info.sha256:
+                        failed_files.append(
+                            _upload_issue(display_name, "NAS 文件哈希已变化，未覆盖原素材")
+                        )
+                        continue
+                    restored = existing.status == "deleted"
+                    if restored:
+                        existing.status = "uploaded"
+                    db.add(
+                        MaterialPackageItem(
+                            package_id=package.id,
+                            asset_id=existing.id,
+                            original_name=info.original_name,
+                            duplicate=True,
+                            position=len(uploaded) + 1,
+                        )
+                    )
+                    uploaded.append(
+                        {
+                            **_asset_payload(existing, display_name=info.original_name),
+                            "duplicate": True,
+                            "restored": restored,
+                        }
+                    )
+                    continue
+
+                extension = mimetypes.guess_extension(info.mime_type) or suffix or ".bin"
+                uri_key = hashlib.sha256(info.uri.encode("utf-8")).hexdigest()[:8]
+                asset = Asset(
+                    original_name=info.original_name,
+                    stored_name=f"nas-{info.sha256[:32]}-{uri_key}{extension.lower()}",
+                    storage_backend="nas_maps",
+                    source_uri=info.uri,
+                    mime_type=info.mime_type,
+                    size_bytes=info.size_bytes,
+                    width=info.width,
+                    height=info.height,
+                    sha256=info.sha256,
+                    category_key=payload.category_key,
+                )
+                db.add(asset)
+                db.flush()
+                record_asset_version(
+                    db,
+                    source_system="nas_maps",
+                    source_content_id=info.uri,
+                    source_version=f"sha256:{info.sha256}",
+                    asset=asset,
+                    occurred_at=datetime.now(timezone.utc),
+                )
+                db.add(
+                    MaterialPackageItem(
+                        package_id=package.id,
+                        asset_id=asset.id,
+                        original_name=info.original_name,
+                        duplicate=False,
+                        position=len(uploaded) + 1,
+                    )
+                )
+                uploaded.append(
+                    {
+                        **_asset_payload(asset, display_name=info.original_name),
+                        "duplicate": False,
+                        "restored": False,
+                    }
+                )
+            except NasStorageError as exc:
+                failed_files.append(_upload_issue(display_name, f"{exc.code}: {exc}"))
+        if not uploaded:
+            db.rollback()
+            raise _no_valid_upload_error(
+                skipped_files=skipped_files,
+                failed_files=failed_files,
+            )
+        append_audit_event(
+            db,
+            category="materials",
+            action="material_package_imported",
+            subject_type="material_package",
+            subject_id=package.id,
+            actor=user.username,
+            payload={
+                "item_count": len(uploaded),
+                "duplicate_count": sum(1 for item in uploaded if item["duplicate"]),
+                "skipped_count": len(skipped_files),
+                "failed_count": len(failed_files),
+                "input_mode": "nas_reference",
+                "source_uri": normalize_nas_uri(payload.source_uri),
+                "storage_backend": "nas_maps",
+            },
+            event_key=f"material-package:{package.id}:nas-imported",
+        )
+        db.commit()
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception:
+        db.rollback()
+        raise
+    return _upload_result(
+        package,
+        uploaded,
+        skipped_files=skipped_files,
+        failed_files=failed_files,
+    )
+
+
 @app.post("/api/material-packages/import-archive")
 async def import_material_package_archive(
     archive: UploadFile = File(...),
@@ -4410,8 +4635,13 @@ def asset_file(
     asset = db.get(Asset, asset_id)
     if not asset:
         raise HTTPException(status_code=404, detail="图片不存在")
-    path = settings.upload_dir / asset.stored_name
-    if not path.exists():
+    try:
+        path = resolve_asset_path(asset, settings)
+    except NasStorageError as exc:
+        if exc.code == "NAS_FILE_MISSING":
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise _nas_storage_http_error(exc) from exc
+    if not path.is_file():
         raise HTTPException(status_code=404, detail="图片文件缺失")
     return FileResponse(path, media_type=asset.mime_type, filename=asset.original_name)
 
@@ -9340,7 +9570,10 @@ def create_model_benchmark(
             )
             sample_snapshots = []
             for asset in sorted(assets, key=lambda item: item.id):
-                image_path = settings.upload_dir / asset.stored_name
+                try:
+                    image_path = resolve_asset_path(asset, settings)
+                except NasStorageError as exc:
+                    raise ValueError(str(exc)) from exc
                 if not image_path.is_file() or _sha256_file(image_path) != asset.sha256:
                     raise ValueError(f"素材 #{asset.id} 文件与冻结哈希不匹配")
                 sample_snapshots.append(
@@ -9695,7 +9928,10 @@ def run_model_benchmark_real(
         asset = db.get(Asset, int(sample["asset_id"]))
         if asset is None or asset.sha256 != sample["asset_sha256"]:
             raise HTTPException(status_code=409, detail="横评冻结素材已发生变化")
-        path = settings.upload_dir / asset.stored_name
+        try:
+            path = resolve_asset_path(asset, settings)
+        except NasStorageError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         if not path.is_file() or _sha256_file(path) != sample["asset_sha256"]:
             raise HTTPException(status_code=409, detail="横评冻结图片哈希不匹配")
         asset_paths[asset.id] = path

@@ -366,6 +366,12 @@ class Asset(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     original_name: Mapped[str] = mapped_column(String(500))
     stored_name: Mapped[str] = mapped_column(String(200), unique=True)
+    storage_backend: Mapped[str] = mapped_column(
+        String(30), default="local", server_default="local", index=True
+    )
+    source_uri: Mapped[str | None] = mapped_column(
+        String(1000), nullable=True, unique=True
+    )
     mime_type: Mapped[str] = mapped_column(String(120))
     size_bytes: Mapped[int] = mapped_column(Integer)
     width: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -407,6 +413,12 @@ class AssetVersion(Base):
     version: Mapped[int] = mapped_column(Integer)
     asset_sha256: Mapped[str] = mapped_column(String(64), index=True)
     source_version: Mapped[str] = mapped_column(String(120))
+    storage_backend: Mapped[str] = mapped_column(
+        String(30), default="local", server_default="local"
+    )
+    source_uri: Mapped[str | None] = mapped_column(
+        String(1000), nullable=True
+    )
     source_system: Mapped[str | None] = mapped_column(
         String(120), nullable=True, index=True
     )

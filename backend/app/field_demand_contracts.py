@@ -226,6 +226,8 @@ def record_asset_version(
         asset_id=asset.id,
         version=int(latest_version or 0) + 1,
         asset_sha256=asset.sha256,
+        storage_backend=getattr(asset, "storage_backend", "local") or "local",
+        source_uri=getattr(asset, "source_uri", None),
         mime_type=asset.mime_type,
         size_bytes=asset.size_bytes,
         occurred_at=normalized_time,

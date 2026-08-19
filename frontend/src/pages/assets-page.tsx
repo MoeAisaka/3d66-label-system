@@ -99,6 +99,8 @@ export function AssetsPage() {
   const [uploadedTo, setUploadedTo] = useState("")
   const [categoryKey, setCategoryKey] = useState<CategoryKey>("space_image")
   const [uploadFeedback, setUploadFeedback] = useState<UploadFeedback | null>(null)
+  const [nasSourceUri, setNasSourceUri] = useState("")
+  const [nasPackageName, setNasPackageName] = useState("")
   const queryClient = useQueryClient()
   const categories = useQuery({
     queryKey: ["evaluation-categories"],
@@ -219,6 +221,30 @@ export function AssetsPage() {
     },
   })
 
+  const nasImport = useMutation({
+    mutationFn: () => api<MaterialUploadResult>("/api/assets/import-nas", {
+      method: "POST",
+      ...jsonBody({
+        source_uri: nasSourceUri.trim(),
+        package_name: nasPackageName.trim() || undefined,
+        category_key: categoryKey,
+      }),
+    }),
+    onSuccess: async (data) => {
+      setNasSourceUri("")
+      setNasPackageName("")
+      await refreshMaterials()
+      setUploadFeedback({
+        source: data.package.name,
+        successful: data.successful_files,
+        skipped: data.skipped_files,
+        failed: data.failed_files,
+      })
+      toast.success(`已只读引用 NAS 素材 ${data.items.length} 张`)
+    },
+    onError: (error) => toast.error(error.message),
+  })
+
   const createPackage = useMutation({
     mutationFn: () => api<MaterialPackage>("/api/material-packages", {
       method: "POST",
@@ -296,7 +322,7 @@ export function AssetsPage() {
       && Boolean(assets.data?.items.every((item) => selected.has(item.id))),
     [assets.data?.items, selected],
   )
-  const uploadBusy = upload.isPending || archiveUpload.isPending
+  const uploadBusy = upload.isPending || archiveUpload.isPending || nasImport.isPending
 
   function choosePackage(nextPackageId: number | null) {
     setPackageId(nextPackageId)
@@ -412,6 +438,38 @@ export function AssetsPage() {
                 <FileZip />ZIP 压缩包
               </Button>
             </div>
+          </div>
+          <div className="border-t border-[var(--line)] bg-[#f7faf2] p-5">
+            <div className="grid gap-4 lg:grid-cols-[minmax(280px,1fr)_minmax(220px,0.7fr)_auto] lg:items-end">
+              <label>
+                <span className="mb-2 block text-xs font-semibold">NAS 只读引用路径</span>
+                <Input
+                  value={nasSourceUri}
+                  maxLength={1000}
+                  placeholder="例如 nas://maps/采集任务交付文件/灵感图"
+                  onChange={(event) => setNasSourceUri(event.target.value)}
+                />
+              </label>
+              <label>
+                <span className="mb-2 block text-xs font-semibold">NAS 素材包名称（可选）</span>
+                <Input
+                  value={nasPackageName}
+                  maxLength={200}
+                  placeholder="留空自动命名"
+                  onChange={(event) => setNasPackageName(event.target.value)}
+                />
+              </label>
+              <Button
+                variant="secondary"
+                disabled={!nasSourceUri.trim() || uploadBusy}
+                onClick={() => nasImport.mutate()}
+              >
+                <FolderOpen />只读引用 NAS
+              </Button>
+            </div>
+            <p className="mt-3 text-xs leading-5 text-[var(--muted)]">
+              只保存规范化来源，不复制原图；测试服必须已挂载 //192.168.1.51/maps 的只读目录。不要在这里填写账号或密码。
+            </p>
           </div>
           <button
             type="button"
@@ -585,7 +643,7 @@ export function AssetsPage() {
                             <img src={asset.image_url} alt="" className="size-14 border border-[var(--line)] object-cover" loading="lazy" />
                             <div className="min-w-0">
                               <p className="file-name max-w-[360px] truncate">{asset.name}</p>
-                              <p className="font-data mt-1 text-xs text-[var(--muted)]">#{asset.id.toString().padStart(5, "0")}</p>
+                              <p className="font-data mt-1 text-xs text-[var(--muted)]">#{asset.id.toString().padStart(5, "0")}{asset.storage_backend === "nas_maps" ? " · NAS 只读引用" : ""}</p>
                             </div>
                           </div>
                         </td>

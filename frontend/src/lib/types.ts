@@ -407,6 +407,8 @@ export type Asset = {
   id: number
   name: string
   mime_type: string
+  storage_backend?: "local" | "nas_maps" | string
+  source_uri?: string | null
   category_key: string
   size_bytes: number
   width: number | null
