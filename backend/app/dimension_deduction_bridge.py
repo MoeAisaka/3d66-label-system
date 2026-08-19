@@ -96,6 +96,8 @@ def has_deduction_rules(config: Any) -> bool:
 def rule_scoring_mode(config: Any) -> str:
     """Return the validated raw-field mode without mutating the contract."""
     dimensions = dimension_definitions(config)
+    if isinstance(config, dict) and isinstance(config.get("grade_output_contract"), dict):
+        return "grade_fallback"
     if not dimensions:
         return "grade_fallback"
     modes = {dimension_rule_mode(dimension) for dimension in dimensions}

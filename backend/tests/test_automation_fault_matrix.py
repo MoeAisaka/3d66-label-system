@@ -50,6 +50,55 @@ def _load_module(path: Path, name: str):
     return module
 
 
+def test_e2e_seed_refuses_existing_unowned_database(tmp_path: Path) -> None:
+    seed = _load_module(
+        REPO_ROOT / "scripts/integration/automation_e2e_seed.py",
+        "automation_e2e_seed_unowned_database",
+    )
+    database_dir = tmp_path / "database"
+    database_dir.mkdir()
+    database_path = database_dir / "app.db"
+    database_path.write_bytes(b"production-like-data")
+
+    with pytest.raises(RuntimeError, match="unowned_existing_database"):
+        seed._prepare_isolated_data_dir(tmp_path, repo_root=REPO_ROOT)
+
+    assert database_path.read_bytes() == b"production-like-data"
+    assert not (tmp_path / seed.E2E_DATA_MARKER).exists()
+
+
+def test_e2e_seed_marks_empty_directory_and_allows_owned_rerun(
+    tmp_path: Path,
+) -> None:
+    seed = _load_module(
+        REPO_ROOT / "scripts/integration/automation_e2e_seed.py",
+        "automation_e2e_seed_owned_directory",
+    )
+
+    prepared = seed._prepare_isolated_data_dir(tmp_path, repo_root=REPO_ROOT)
+    assert prepared == tmp_path.resolve()
+    marker = tmp_path / seed.E2E_DATA_MARKER
+    assert marker.read_text(encoding="utf-8") == "automation-e2e-owned-v1\n"
+
+    database_dir = tmp_path / "database"
+    database_dir.mkdir()
+    (database_dir / "app.db").write_bytes(b"owned-test-data")
+    assert (
+        seed._prepare_isolated_data_dir(tmp_path, repo_root=REPO_ROOT)
+        == tmp_path.resolve()
+    )
+
+
+def test_e2e_seed_always_refuses_live_data_root() -> None:
+    seed = _load_module(
+        REPO_ROOT / "scripts/integration/automation_e2e_seed.py",
+        "automation_e2e_seed_live_data_root",
+    )
+
+    with pytest.raises(RuntimeError, match="forbidden_data_directory"):
+        seed._prepare_isolated_data_dir(Path("/data"), repo_root=REPO_ROOT)
+
+
 @contextmanager
 def _isolated_backend_imports() -> Iterator[None]:
     """Reload backend globals for this test, then restore the pytest host."""
