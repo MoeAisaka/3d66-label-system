@@ -351,12 +351,14 @@ export function BaselineRegressionPage() {
   }, [baselineSets.data?.items, selectedSetId])
 
   useEffect(() => {
+    const runFromUrl = Number(searchParams.get("run") || 0)
     const nextRunId = baselineRunIdAfterSetLoad(
       selectedRunId,
       selectedSet.data?.runs ?? null,
+      runFromUrl,
     )
     if (nextRunId !== selectedRunId) setSelectedRunId(nextRunId)
-  }, [selectedRunId, selectedSet.data?.runs])
+  }, [searchParams, selectedRunId, selectedSet.data?.runs])
 
   useEffect(() => {
     if (runDetail.data?.summary.status !== "running") {
