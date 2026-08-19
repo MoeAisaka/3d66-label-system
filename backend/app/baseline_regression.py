@@ -32,6 +32,10 @@ LEVEL_LABELS = {
     "L4": "极差",
     "L5": "过滤",
 }
+BASELINE_OPTIMIZATION_CASE_PURPOSE = (
+    "将模型与冻结基准不一致的样本送入统一优化案例队列，"
+    "供人工证据与 AI 候选机制分析；不修改本轮真值，也不自动启用候选。"
+)
 _LEVEL_BY_LABEL = {label: level for level, label in LEVEL_LABELS.items()}
 _QUALITY_SEVERITY_LABELS = {
     "none": "无明显问题",

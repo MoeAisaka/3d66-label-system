@@ -66,6 +66,7 @@ import {
 } from "@/features/baseline-regression/correction-navigation"
 import { candidateRefreshPlan } from "@/features/correction-contract/candidate-refresh"
 import { LevelPerformanceSummary } from "@/features/baseline-regression/level-performance-summary"
+import { correctionLevelDisplay } from "@/features/baseline-regression/correction-level-display"
 import { MetricsDrawer } from "@/features/baseline-regression/metrics-drawer"
 import { RunConfigDrawer } from "@/features/baseline-regression/run-config-drawer"
 import { RunHistoryDrawer } from "@/features/baseline-regression/run-history-drawer"
@@ -1703,6 +1704,9 @@ function RegressionResults({
             <div>
               <h3 className="font-editorial text-2xl font-bold">逐张预测对照</h3>
               <p className="mt-1 text-xs text-[var(--muted)]">每张展示冻结评测理由，并可原位确认、纠偏或退回。</p>
+              <p className="mt-2 max-w-3xl text-xs leading-5 text-[var(--muted)]">
+                找补用途：将模型与基准不一致的样本加入统一优化案例队列，供人工证据与 AI 候选机制分析；不修改本轮真值，也不自动启用候选。
+              </p>
             </div>
             <div className="flex flex-wrap items-center gap-2">
               <Badge>第 {page + 1}/{pageCount} 页 · 共 {pagination.total} 张</Badge>
@@ -2058,7 +2062,9 @@ function CorrectionAnalysisPanel({
               <div className="h-64 animate-pulse bg-white" />
             ) : deviations.length ? (
               <div className="divide-y divide-[var(--line)]">
-                {deviations.map((item) => (
+                {deviations.map((item) => {
+                  const levelDisplay = correctionLevelDisplay(item)
+                  return (
                   <div key={item.id} className="grid grid-cols-[auto_52px_minmax(0,1fr)] gap-3 px-4 py-3 hover:bg-[#fafbf8]">
                     <input
                       type="checkbox"
@@ -2082,12 +2088,21 @@ function CorrectionAnalysisPanel({
                     <div className="min-w-0">
                       <div className="flex flex-wrap items-center gap-2">
                         <p className="file-name min-w-0 truncate text-sm">{item.asset.name}</p>
-                        <Badge tone="danger">{item.expected_level} → {item.predicted_level ?? "—"}</Badge>
+                        <Badge tone="danger">{levelDisplay.level} → {item.predicted_level ?? "—"}</Badge>
+                        {levelDisplay.source === "human_correction" && (
+                          <Badge tone="warning">人工纠偏等级</Badge>
+                        )}
                       </div>
+                      {levelDisplay.source === "human_correction" && (
+                        <p className="mt-1 text-[0.68rem] leading-4 text-[#7d4308]">
+                          原冻结预期 {item.expected_level} · 当前展示以已完成人工纠偏为准
+                        </p>
+                      )}
                       <p className="mt-1 line-clamp-2 text-xs leading-5 text-[var(--muted)]">{levelExplanationSummary(item)}</p>
                     </div>
                   </div>
-                ))}
+                  )
+                })}
               </div>
             ) : (
               <p className="px-5 py-12 text-center text-sm text-[var(--muted)]">
