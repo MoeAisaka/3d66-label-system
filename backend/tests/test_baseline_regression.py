@@ -20,6 +20,8 @@ from app.baseline_regression import (
     fail_baseline_item,
     filename_level_suggestion,
     level_explanation,
+    latest_locked_golden_levels,
+    persist_human_level_truth,
 )
 from app.baseline_correction_orchestration import (
     CorrectionOrchestrationError,
@@ -60,6 +62,9 @@ from app.models import (
     ModelConfig,
     OptimizationCaseQueue,
     PromptVersion,
+    SampleSet,
+    SampleSetItem,
+    SampleTruthRevision,
     User,
 )
 from tests.v3_contract_fixtures import add_active_v3_contract
@@ -527,6 +532,74 @@ def test_filename_level_suggestion_is_advisory_and_conflict_safe() -> None:
     conflict = filename_level_suggestion("客厅_L1_过滤.jpg")
     assert conflict["status"] == "conflict"
     assert conflict["suggested_level"] is None
+
+
+def test_latest_human_golden_level_overrides_filename_truth_for_next_run() -> None:
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    db = Session(engine, expire_on_commit=False)
+    golden = SampleSet(
+        name="系统黄金集·inspiration_image",
+        description="test",
+        kind="golden",
+        status="locked",
+        category_key="inspiration_image",
+        created_by="test",
+    )
+    db.add(golden)
+    db.flush()
+    item = SampleSetItem(
+        sample_set_id=golden.id,
+        asset_id=17,
+        source_result_id=101,
+        expected_level="L2",
+        expected_category="建筑设计",
+        truth_json=json.dumps({"level": "L2"}),
+        truth_revision=1,
+        truth_updated_by="test",
+    )
+    db.add(item)
+    db.flush()
+    db.add(
+        SampleTruthRevision(
+            sample_item_id=item.id,
+            revision=1,
+            truth_json=item.truth_json,
+            reason="初始真值",
+            reviewer_name="test",
+        )
+    )
+    db.commit()
+
+    persist_human_level_truth(
+        db,
+        category_key="inspiration_image",
+        asset_id=17,
+        source_result_id=102,
+        level="L1",
+        actor="运营甲",
+        reason="人工纠偏确认应升档",
+    )
+    db.commit()
+
+    assert latest_locked_golden_levels(
+        db,
+        category_key="inspiration_image",
+        asset_ids=[17],
+    ) == {17: "L1"}
+    revisions = db.scalars(
+        select(SampleTruthRevision).where(
+            SampleTruthRevision.sample_item_id == item.id
+        )
+    ).all()
+    assert len(revisions) == 2
+    assert json.loads(item.truth_json)["level"] == "L1"
+    db.close()
+    engine.dispose()
 
 
 def test_level_metrics_cover_boundaries_failures_and_stable_matrix() -> None:

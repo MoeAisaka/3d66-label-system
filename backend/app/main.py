@@ -216,6 +216,7 @@ from .baseline_regression import (
     fail_correction_run,
     fail_baseline_item,
     filename_level_suggestion,
+    latest_locked_golden_levels,
     run_comparison,
 )
 from .baseline_correction_orchestration import (
@@ -11089,6 +11090,26 @@ def create_baseline_run(
         ),
         v3_authoritative_bundle=frozen_v3_bundle,
     )
+    human_truth_levels = latest_locked_golden_levels(
+        db,
+        category_key=baseline_set.category_key,
+        asset_ids=[item.asset_id for item in frozen_items],
+    )
+    effective_expected_levels = {
+        item.asset_id: human_truth_levels.get(item.asset_id, item.expected_level)
+        for item in frozen_items
+    }
+    effective_fingerprint = baseline_set_fingerprint(
+        (
+            {
+                "asset_id": item.asset_id,
+                "asset_sha256": item.asset.sha256,
+                "expected_level": effective_expected_levels[item.asset_id],
+            }
+            for item in frozen_items
+        ),
+        category_key=baseline_set.category_key,
+    )
     execution_payload = json.loads(execution_snapshot)
     execution_payload["execution_mode"] = request.execution_mode
     execution_payload["selection_explicit"] = request.baseline_item_ids is not None
@@ -11098,6 +11119,10 @@ def create_baseline_run(
         category_key=baseline_set.category_key,
         asset_ids=[item.asset_id for item in frozen_items],
     )
+    execution_payload["human_truth_level_overrides"] = {
+        str(asset_id): level
+        for asset_id, level in sorted(human_truth_levels.items())
+    }
     active_semantic_contract = db.scalar(
         select(TagDemandContract)
         .where(
@@ -11148,7 +11173,7 @@ def create_baseline_run(
     initial_metrics = compute_level_metrics(
         {
             "status": "queued",
-            "expected_level": item.expected_level,
+            "expected_level": effective_expected_levels[item.asset.id],
             "predicted_level": None,
         }
         for item in frozen_items
@@ -11163,7 +11188,7 @@ def create_baseline_run(
         execution_snapshot_json=execution_snapshot,
         correction_contract_json=baseline_canonical_json(correction_contract),
         correction_contract_hash=correction_contract_hash(correction_contract),
-        baseline_set_fingerprint=baseline_set.fingerprint,
+        baseline_set_fingerprint=effective_fingerprint,
         status="running",
         total=len(frozen_items),
         metrics_json=baseline_canonical_json(initial_metrics),
@@ -11177,7 +11202,7 @@ def create_baseline_run(
             run_id=run.id,
             baseline_set_item_id=frozen_item.id,
             asset_id=frozen_item.asset_id,
-            expected_level=frozen_item.expected_level,
+            expected_level=effective_expected_levels[frozen_item.asset_id],
             status="queued",
         )
         for frozen_item in frozen_items
