@@ -105,6 +105,18 @@
 - 前端 `npm --prefix frontend run lint` 和 `LABEL_LAB_BUILD_SHA=9943b8c npm --prefix frontend run build` 通过；构建只保留既有主 chunk 大于 500 kB 提示。
 - 隔离分支为 `codex/model-3d-su-grade-fix-20260817`，基线 `origin/main@9943b8c`。本批未提交、未推送、未创建或合并 MR、未部署、未写生产数据、未调用真实模型、未重跑 Run #27 或其他真实回归。
 
+## 最新实施：3D/SU 纠偏重试与详细扣分合同修复（2026-08-19）
+
+- 自动纠偏候选重试现在只合并前一轮类型正确且非空的字段；首次生成的有效 `system_prompt` 会与后续修复的 `user_prompt` 合并，错误数组不会被继承，生成 trace 仍记录每次尝试。
+- 3D/SU 五个维度恢复 `minor_defect=20`、`obvious_defect=50`、`severe_defect=80` 的具体中文扣分描述，同时保留 `grade_points` 和严格静态 B 等级评分。含 `grade_output_contract` 的赛道固定走 `grade_fallback`，不会再次进入动态扣分 prompt。
+- 现役合同/提示词/系统 owner 升级为 `model-3d-su-v3-grade-contract-details-20260819`、`model-3d-su-rubric-v3` 与 v3 A/B 身份；v1/v2 历史身份仍被识别，历史快照不改写。
+
+当前验证：
+
+- 纠偏与 3D/SU seed：`28 passed`；3D/SU worker 静态 B：`16 passed`；扣分桥、维度组合和聚合器：`56 passed`。
+- 后端全量：`1628 passed, 2 skipped, 4 failed`；失败集中在既有 automation fault-matrix 的共享临时数据库/环境隔离问题（唯一键冲突及连锁断言），不涉及本次变更。
+- 本批仅在本地隔离仓库和测试容器验证；未修改生产数据库、未重跑历史回归、未部署本次修复。
+
 ## 最新实施：受控脚本注册与工作流运行时 dry-run 底座（2026-08-15）
 
 - 新增 `ScriptDefinition/ScriptVersion`、`WorkflowDefinition/WorkflowVersion`、`ProductionRun/ProductionStepAttempt`、运行分发和追加式审计模型；migration 71 为增量、幂等迁移，不回填或改写历史评测事实。

@@ -48,21 +48,29 @@ MODEL_3D_SU_V1_CALL_A_VERSION = "model-3d-su-a-v1-20260814"
 MODEL_3D_SU_V1_CALL_B_VERSION = "model-3d-su-b-v1-20260814"
 MODEL_3D_SU_V1_CREATED_BY = "system:model-3d-su-v1"
 
-MODEL_3D_SU_SPEC_VERSION = "model-3d-su-v2-grade-scoring-20260817"
-MODEL_3D_SU_RUBRIC_VERSION = "model-3d-su-rubric-v2"
-MODEL_3D_SU_CALL_A_VERSION = "model-3d-su-a-v2-20260817"
-MODEL_3D_SU_CALL_B_VERSION = "model-3d-su-b-v2-20260817"
-MODEL_3D_SU_CREATED_BY = "system:model-3d-su-v2"
+MODEL_3D_SU_V2_SPEC_VERSION = "model-3d-su-v2-grade-scoring-20260817"
+MODEL_3D_SU_V2_RUBRIC_VERSION = "model-3d-su-rubric-v2"
+MODEL_3D_SU_V2_CALL_A_VERSION = "model-3d-su-a-v2-20260817"
+MODEL_3D_SU_V2_CALL_B_VERSION = "model-3d-su-b-v2-20260817"
+MODEL_3D_SU_V2_CREATED_BY = "system:model-3d-su-v2"
+
+MODEL_3D_SU_SPEC_VERSION = "model-3d-su-v3-grade-contract-details-20260819"
+MODEL_3D_SU_RUBRIC_VERSION = "model-3d-su-rubric-v3"
+MODEL_3D_SU_CALL_A_VERSION = "model-3d-su-a-v3-20260819"
+MODEL_3D_SU_CALL_B_VERSION = "model-3d-su-b-v3-20260819"
+MODEL_3D_SU_CREATED_BY = "system:model-3d-su-v3"
 MODEL_3D_SU_SCHEMA_KEY = "model_3d_su_aesthetic"
-MODEL_3D_SU_SCHEMA_VERSION = "v2"
+MODEL_3D_SU_SCHEMA_VERSION = "v3"
 MODEL_3D_SU_SEMANTIC_CONTRACT_KEY = "semantic-platform"
 
 _MODEL_3D_SU_SYSTEM_OWNERS = {
     MODEL_3D_SU_V1_CREATED_BY,
+    MODEL_3D_SU_V2_CREATED_BY,
     MODEL_3D_SU_CREATED_BY,
 }
 _MODEL_3D_SU_RUBRIC_VERSIONS = {
     MODEL_3D_SU_V1_RUBRIC_VERSION,
+    MODEL_3D_SU_V2_RUBRIC_VERSION,
     MODEL_3D_SU_RUBRIC_VERSION,
 }
 _LINEAR_GRADE_POINTS = {
@@ -219,16 +227,34 @@ def _seed_model_3d_su_semantic_contract(db: Session) -> TagDemandContract:
     return row
 
 
+def _rule(rule_id: str, description: str, deduction: int) -> dict[str, Any]:
+    return {
+        "rule_id": rule_id,
+        "description": description,
+        "deduction": deduction,
+        "tags": ["模型美感"],
+    }
+
+
 def _dimension(
     key: str,
     label: str,
     weight: float,
+    *,
+    minor: str,
+    obvious: str,
+    severe: str,
 ) -> dict[str, Any]:
     return {
         "key": key,
         "label": label,
         "weight": weight,
         "grade_points": dict(_LINEAR_GRADE_POINTS),
+        "deduction_rules": [
+            _rule("minor_defect", f"微瑕：{minor}", 20),
+            _rule("obvious_defect", f"明显缺陷：{obvious}", 50),
+            _rule("severe_defect", f"严重硬伤：{severe}", 80),
+        ],
     }
 
 
@@ -237,26 +263,41 @@ def _track_dimensions(track_key: str, weights: list[float]) -> dict[str, Any]:
         "model_detail",
         "模型细节",
         weights[0],
+        minor="少量边缘倒角、接缝、螺丝或褶皱实体化不足",
+        obvious="核心棱角无倒角，缝线/卡扣/沟槽主要依赖平面贴图",
+        severe="主体比例畸形，大量结构细节缺失或软质材料呈硬质平板",
     )
     material = _dimension(
         "material_rendering",
         "质感渲染",
         weights[1],
+        minor="粗糙度或微观印痕略有偏差",
+        obvious="材质属性混淆、纹理重复或高光过曝",
+        severe="贴图模糊/UV 拉伸，反光参数混乱且材质与现实属性脱节",
     )
     lighting = _dimension(
         "lighting",
         "光感表现",
         weights[2],
+        minor="暗部细节略欠缺或局部补光略突兀",
+        obvious="阴影单薄、边缘生硬、无来源亮光或接触阴影缺失",
+        severe="光线违背物理衰减，出现大面积过曝/死黑或多光源冲突",
     )
     design = _dimension(
         "design_trend",
         "设计感及流行度",
         weights[3],
+        minor="风格混搭生硬、设计平庸，或功能比例略别扭",
+        obvious="整体过时、造型同质化，或功能布局明显不合理",
+        severe="造型严重违背审美/制造/使用逻辑，形成虚假功能设计",
     )
     composition = _dimension(
         "visual_composition",
         "视觉构图",
         weights[4],
+        minor="主体重心略偏或边缘有少量无关物件",
+        obvious="构图过满/过空，主体裁切或被遮挡超过约 30%",
+        severe="无视觉重心、元素堆砌，主体被杂乱背景淹没",
     )
     dimensions = [details, material, lighting, design, composition]
     if abs(sum(item["weight"] for item in dimensions) - 1.0) > 1e-9:
@@ -501,11 +542,22 @@ def _seed_prompt(
 ) -> PromptVersion:
     existing = db.scalar(select(PromptVersion).where(PromptVersion.version == version))
     if existing is not None:
-        if (
-            existing.category_key != MODEL_3D_SU_CATEGORY_KEY
-            or existing.stage != stage
-            or existing.system_prompt != system_prompt
-            or existing.rubric_version != MODEL_3D_SU_RUBRIC_VERSION
+        expected_identity = {
+            "stage": stage,
+            "category_key": MODEL_3D_SU_CATEGORY_KEY,
+            "pipeline_scope": "shared",
+            "name": name,
+            "system_prompt": system_prompt,
+            "user_prompt": "",
+            "rubric_version": MODEL_3D_SU_RUBRIC_VERSION,
+            "status": "published",
+            "source": "imported",
+            "change_note": change_note,
+            "created_by": MODEL_3D_SU_CREATED_BY,
+        }
+        if any(
+            getattr(existing, field_name) != expected_value
+            for field_name, expected_value in expected_identity.items()
         ):
             raise RuntimeError(f"冻结提示词 {version} 已存在但内容或身份不匹配")
         return existing
@@ -543,16 +595,16 @@ def seed_model_3d_su(db: Session, settings: Any) -> None:
         stage="A",
         version=MODEL_3D_SU_CALL_A_VERSION,
         name="3D/SU 模型分类与字段预检",
-        system_prompt=_read_prompt(settings, "model_3d_su_call_a_v2.txt"),
-        change_note="2026-08-17 3D/SU 五维 grade 评分机制 v2 调用 A；输出平台通用字段与类目标记。",
+        system_prompt=_read_prompt(settings, "model_3d_su_call_a_v3.txt"),
+        change_note="2026-08-19 3D/SU 五维 grade 与详细扣分合同 v3 调用 A；输出平台通用字段与类目标记。",
     )
     prompt_b = _seed_prompt(
         db,
         stage="B",
         version=MODEL_3D_SU_CALL_B_VERSION,
         name="3D/SU 模型五维美感评审",
-        system_prompt=_read_prompt(settings, "model_3d_su_call_b_v2.txt"),
-        change_note="2026-08-17 3D/SU 五维 grade 评分机制 v2 调用 B；输出严格五维等级与证据，不输出最终等级。",
+        system_prompt=_read_prompt(settings, "model_3d_su_call_b_v3.txt"),
+        change_note="2026-08-19 3D/SU 五维 grade 与详细扣分合同 v3 调用 B；输出严格五维等级与证据，不输出最终等级。",
     )
 
     pipeline = model_3d_su_pipeline()
@@ -563,7 +615,7 @@ def seed_model_3d_su(db: Session, settings: Any) -> None:
     )
     profile_values = {
         "display_name": "3D & SU 模型",
-        "description": "model-3d-su-v2：三赛道五维美感评测，SU 未渲染和风险字段只做标记。",
+        "description": "model-3d-su-v3：三赛道五维美感评测，保留详细扣分镜像但由静态 grade 合同评分，SU 未渲染和风险字段只做标记。",
         "status": "active",
         "allowed_mime_types_json": canonical_json(
             ["image/jpeg", "image/png", "image/webp", "image/gif"]
@@ -633,6 +685,16 @@ def seed_model_3d_su(db: Session, settings: Any) -> None:
     except (json.JSONDecodeError, TypeError):
         existing_contract = {}
     if existing_contract.get("spec_version") == MODEL_3D_SU_SPEC_VERSION:
+        mismatched_fields = [
+            field_name
+            for field_name, expected_value in config_values.items()
+            if getattr(row, field_name) != expected_value
+        ]
+        if mismatched_fields:
+            raise RuntimeError(
+                "model_3d_su v3 冻结合同内容或身份不匹配："
+                + "、".join(mismatched_fields)
+            )
         ensure_projected_revision(db, row)
         return
     sync_projected_revision(

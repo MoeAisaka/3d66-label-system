@@ -15,6 +15,7 @@ from app.category_evaluation_v3_revisions import ensure_projected_revision
 from app.category_pipeline import default_pipeline
 from app.database import Base
 from app.dimension_deduction_bridge import extract_dimension_deduction_rules
+from app.dimension_deduction_bridge import rule_scoring_mode
 from app.dimension_schema_registry import canonical_json
 from app.dimension_composition import validate_subcategory_dimensions
 from app.models import (
@@ -101,17 +102,32 @@ def test_model_3d_su_has_three_tracks_and_document_weights() -> None:
             expected_weights[track_key]
         )
         assert sum(row["weight"] for row in rows) == pytest.approx(1.0)
-        assert all("deduction_rules" not in row for row in rows)
         assert all(
             row["grade_points"]
             == {"1": 0.0, "2": 25.0, "3": 50.0, "4": 75.0, "5": 100.0}
             for row in rows
+        )
+        assert {
+            rule["deduction"]
+            for row in rows
+            for rule in row["deduction_rules"]
+        } == {20, 50, 80}
+        assert {
+            rule["rule_id"]
+            for row in rows
+            for rule in row["deduction_rules"]
+        } == {"minor_defect", "obvious_defect", "severe_defect"}
+        assert all(
+            len(rule["description"]) >= 12
+            for row in rows
+            for rule in row["deduction_rules"]
         )
         assert config["grade_output_contract"] == {
             "format_version": "dimension-grade-output-v1",
             "require_exact_keys": True,
             "evidence_required": True,
         }
+        assert rule_scoring_mode(config) == "grade_fallback"
 
 
 def test_model_3d_su_is_registered_as_an_image_category() -> None:
@@ -202,6 +218,55 @@ def test_model_3d_su_seed_repairs_missing_same_spec_projection() -> None:
         revision = db.get(CategoryEvaluationV3Revision, config.projected_revision_id)
         assert revision is not None
         assert revision.category_key == MODEL_3D_SU_CATEGORY_KEY
+
+
+def test_model_3d_su_seed_rejects_same_version_prompt_identity_collision() -> None:
+    engine = _engine()
+    with Session(engine) as db:
+        db.add(ModelConfig(active=True))
+        prompt = PromptVersion(
+            stage="A",
+            category_key=MODEL_3D_SU_CATEGORY_KEY,
+            pipeline_scope="shared",
+            name="3D/SU 模型分类与字段预检",
+            version=MODEL_3D_SU_CALL_A_VERSION,
+            system_prompt=(
+                PROJECT_ROOT / "backend/prompts/model_3d_su_call_a_v3.txt"
+            ).read_text(encoding="utf-8").strip(),
+            user_prompt="operator poison",
+            rubric_version=MODEL_3D_SU_RUBRIC_VERSION,
+            status="draft",
+            source="manual",
+            change_note="operator collision",
+            created_by="operator:prompt-owner",
+        )
+        db.add(prompt)
+        db.commit()
+
+        with pytest.raises(RuntimeError, match="内容或身份不匹配"):
+            seed_model_3d_su(db, SimpleNamespace(project_root=PROJECT_ROOT))
+
+
+def test_model_3d_su_seed_rejects_same_spec_content_drift() -> None:
+    engine = _engine()
+    with Session(engine) as db:
+        db.add(ModelConfig(active=True))
+        db.commit()
+        settings = SimpleNamespace(project_root=PROJECT_ROOT)
+        seed_model_3d_su(db, settings)
+        db.commit()
+        config = db.scalar(
+            select(CategoryEvaluationV3Config).where(
+                CategoryEvaluationV3Config.category_key == MODEL_3D_SU_CATEGORY_KEY
+            )
+        )
+        assert config is not None
+        config.subcategory_dimensions_json = "{}"
+        config.projected_revision_id = None
+        db.commit()
+
+        with pytest.raises(RuntimeError, match="冻结合同.*不匹配"):
+            seed_model_3d_su(db, settings)
 
 
 def test_model_3d_su_seed_rejects_operator_owned_same_spec_projection_repair() -> None:
@@ -428,8 +493,8 @@ def test_model_3d_su_seed_upgrades_known_v1_rows_once_without_rewriting_history(
                 PromptVersion.category_key == MODEL_3D_SU_CATEGORY_KEY
             )
         ).all()
-        assert MODEL_3D_SU_CALL_A_VERSION == "model-3d-su-a-v2-20260817"
-        assert MODEL_3D_SU_CALL_B_VERSION == "model-3d-su-b-v2-20260817"
+        assert MODEL_3D_SU_CALL_A_VERSION == "model-3d-su-a-v3-20260819"
+        assert MODEL_3D_SU_CALL_B_VERSION == "model-3d-su-b-v3-20260819"
         assert {prompt.version for prompt in prompts} == {
             prompt_a_v1.version,
             prompt_b_v1.version,
