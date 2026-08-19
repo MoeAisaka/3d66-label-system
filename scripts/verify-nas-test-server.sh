@@ -16,6 +16,8 @@ mountpoint -q "$MOUNT_ROOT" || fail "NAS mount is not active: $MOUNT_ROOT"
   fail "NAS mount source is not $NAS_SHARE"
 options=$(findmnt -n -o OPTIONS --target "$MOUNT_ROOT" || true)
 printf '%s\n' ",$options," | grep -Eq ',ro,' || fail "NAS mount is writable"
+printf '%s\n' ",$options," | grep -Eq ',vers=(2\.0|2\.1|3\.0|3\.1\.1),' || \
+  fail "NAS mount uses an unsupported or insecure SMB dialect"
 
 required=(
   "采集任务交付文件/国圣坤/已处理样本3d&SU"

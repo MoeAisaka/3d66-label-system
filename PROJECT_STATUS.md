@@ -7,8 +7,9 @@
 - 新增第 76 版迁移，为 `assets` / `asset_versions` 增加 `storage_backend` 和规范化 `source_uri`；旧本地素材保持 `local`、不复制、不迁移、不删除。
 - 新增 `nas://maps/<相对路径>` 解析、路径穿越/符号链接拒绝、挂载缺失与哈希漂移失败关闭；`POST /api/assets/import-nas` 只读导入元数据并建立素材包引用。
 - 素材图片接口、评测工作线程、优化诊断、灵感图锚图和真实横评统一使用来源解析；前端素材页提供 NAS 只读引用入口，Compose 与测试服部署脚本要求 `//192.168.1.51/maps` 只读挂载。
-- 本地验证：后端 `1619 passed, 1 skipped, 6 warnings`；NAS/迁移/API 专项通过；前端 NAS 合同、TypeScript 检查和生产构建通过。当前机器无 Docker CLI，未执行容器启动验收。
-- 当前仍未推送、未合并、未部署测试服；部署前必须在 `192.168.1.35` 安装/确认 `cifs-utils`、配置受保护凭据文件、挂载四个运营目录并验证 `ro`。新增的纠偏分析“找补用途”和人工等级展示需求未混入本批 NAS 变更。
+- 新增历史素材受控迁移工具，按 `plan -> apply -> verify -> cleanup` 四步执行；只有数据库、本地原图和 NAS 原图 SHA-256 一致且来源唯一的素材才切换为 NAS 引用并新增不可变来源版本，清理前再次验证，未匹配、歧义、漂移和仍被引用的文件全部保留。
+- 测试服已安装 `cifs-utils`，实测 NAS 与 CentOS 7 内核共同支持 SMB 2.0；`//192.168.1.51/maps` 已使用 guest 只读挂载到 `/mnt/label-nas/maps`，未保存密码，四个运营目录均可读，验证脚本通过。部署前数据库快照为 `/data/database/predeploy-snapshots/app-pre-nas-history-20260819.db`，SHA-256 `79c37ee5908bff277d2b09bfa80e596d238dcfe37117447798f4b3ac1d788113`，完整性 `ok`、外键错误 0。
+- 本地后端全量 `1632 passed, 1 skipped, 6 warnings`，NAS/迁移/API 专项 `63 passed`；前端 NAS 合同、TypeScript 检查和生产构建通过。当前代码仍未推送、未合并、未部署，历史素材尚未切换引用，`/data/images` 尚未删除任何原图。
 
 ## 最新实施：版本化自适应纠偏合同与三链路动态面板（2026-08-18，本地待发布）
 

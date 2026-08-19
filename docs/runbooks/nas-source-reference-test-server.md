@@ -8,11 +8,11 @@
 
 ## 配置
 
-1. 在测试服安全目录创建仅 root 可读的 SMB 凭据文件，权限必须为 `600`，内容由运维按公司凭据规范提供；不要把内容写入命令行、仓库、数据库、日志或聊天。
-2. 确认服务器已安装 `cifs-utils`，执行：
+1. 当前 `maps` 共享允许受限 guest 只读访问，不创建或保存密码。若后续 NAS 关闭 guest，再在测试服安全目录创建仅 root 可读、权限为 `600` 的 SMB 凭据文件；不要把内容写入命令行、仓库、数据库、日志或聊天。
+2. 确认服务器已安装 `cifs-utils`。测试服 CentOS 7 内核与 NAS 实测共同支持 SMB 2.0，执行：
 
    ```bash
-   sudo scripts/configure-nas-test-server.sh /root/.config/label-nas/maps.credentials
+   sudo NAS_SMB_VERSION=2.0 scripts/configure-nas-test-server.sh --guest
    sudo scripts/verify-nas-test-server.sh
    ```
 
@@ -31,5 +31,10 @@ Compose 将主机挂载以 `:ro` 映射到容器，并设置 `NAS_MAPS_ROOT=/mnt
 - NAS 导入素材的 `source_uri` 为 `nas://maps/...`，图片接口读取成功且哈希与导入时一致；
 - 修改 NAS 文件或卸载挂载后，接口和评测任务明确失败，不回退到本地猜测路径；
 - 本地旧素材仍可读，未删除或迁移任何旧文件。
+
+历史素材切换使用 `scripts/migrate-nas-history.py`，严格依次执行
+`plan -> apply -> verify -> cleanup`。`apply` 和 `cleanup` 都必须传入计划输出的完整
+`plan_hash`；清理只删除验证报告 `cleanup_stored_names` 中的文件，未匹配、路径歧义、
+本地/NAS 哈希不一致或版本记录缺失的原图全部保留。
 
 回退时先停止新版本，再卸载 NAS 挂载并恢复上一版本代码；不要删除 `/data/images` 或数据库历史记录。

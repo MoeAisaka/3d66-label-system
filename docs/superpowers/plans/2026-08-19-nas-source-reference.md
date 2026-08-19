@@ -16,6 +16,7 @@
 - 不保存凭据，不把 UNC 绝对路径写入数据库，不删除现有本地图片。
 - NAS 挂载与容器映射必须只读；挂载缺失时部署 fail-closed。
 - 既有本地素材、评测、模型、提示词和并行工作树行为不变。
+- 仅在历史素材逐条通过来源可读、SHA-256 一致、API/评测路径可用且数据库无现行引用后，清理 `/data/images` 中对应的本地原图；异常文件保留。
 
 ### Task 1: NAS URI 与文件解析器
 
@@ -93,3 +94,16 @@
 - [ ] 后端全量测试、前端合同测试、类型检查、构建和 `git diff --check`。
 - [ ] 测试服验收：挂载只读、容器健康、`/api/health/ready`、NAS 文件接口和 SHA-256 一致。
 - [ ] 记录回退命令、未删除本地文件和剩余风险。
+
+### Task 7: 验收后的本地原图清理
+
+**Files:**
+- Create: `backend/app/nas_history_migration.py`
+- Create: `backend/tests/test_nas_history_migration.py`
+- Create: `scripts/migrate-nas-history.py`
+- Modify: `docs/runbooks/nas-source-reference-test-server.md`
+
+- [ ] 生成待清理清单：只包含已规范化为 `nas://maps/...`、NAS 文件存在且 SHA-256 与数据库记录一致、并且数据库没有任何现行本地路径引用的 `/data/images` 文件。
+- [ ] 在删除前保存清单、计数、总字节数和 SHA-256 汇总到服务器受保护目录；清单为空或校验失败时停止。
+- [ ] 按清单逐个删除并立即复核文件不存在；任何不满足条件的文件都保留，不使用递归清空目录。
+- [ ] 记录清理结果和回退限制：数据库记录不删除，NAS 文件不修改，异常文件留在本地等待人工处理。
