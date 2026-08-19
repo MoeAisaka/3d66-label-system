@@ -11,10 +11,13 @@ from app.baseline_regression import (
     deterministic_correction_report,
 )
 from app.baseline_correction_orchestration import (
+    CorrectionCandidateGenerationError,
     CorrectionOrchestrationError,
     RegisteredTuningMechanismGenerator,
+    _normalize_generated_candidate,
     generate_correction_candidate,
 )
+from app.main import _record_baseline_correction_failure
 
 
 def _completed_run() -> SimpleNamespace:
@@ -350,6 +353,11 @@ def test_registered_tuner_receives_human_evidence_and_routing_constraints(
             "subcategory_dimensions": {},
         },
     )
+    monkeypatch.setattr(
+        orchestration_module,
+        "validate_mechanism_artifacts",
+        lambda *_args, **_kwargs: "image-rule-deduction-v1",
+    )
     entry = SimpleNamespace(
         id=7,
         role="tuning",
@@ -401,9 +409,250 @@ def test_registered_tuner_receives_human_evidence_and_routing_constraints(
 
     generator_input = json.loads(str(captured["user_prompt"]))
     assert generator_input["schema_version"] == (
-        "baseline-correction-generator-input-v2"
+        "baseline-correction-generator-input-v3"
     )
     assert generator_input["correction_report"] == report
     assert generator_input["routing_constraints"] == report[
         "candidate_routing"
     ]
+
+
+def _active_candidate_inputs() -> tuple[SimpleNamespace, dict[str, SimpleNamespace]]:
+    revision = SimpleNamespace(
+        display_name="现役等级规则",
+        category_key="inspiration_image",
+        revision=7,
+        contract_hash="a" * 64,
+        contract_json=json.dumps(
+            {
+                "category_key": "inspiration_image",
+                "spec_version": "active-v1",
+                "levels": {"L1": 80, "L2": 60},
+            }
+        ),
+        classification_map_json=json.dumps(
+            {"format_version": "classification-map-v1", "routes": {"住宅": "space"}}
+        ),
+        subcategory_dimensions_json=json.dumps(
+            {"space": {"label": "空间", "dimensions": ["composition"]}}
+        ),
+        dimension_deduction_rules_json="{}",
+        media_penalty_enabled=False,
+    )
+    prompts = {
+        "A": SimpleNamespace(
+            stage="A",
+            name="现役 A",
+            version="A1",
+            system_prompt="active system prompt",
+            user_prompt="active user prompt",
+            rubric_version="R1",
+        )
+    }
+    return revision, prompts
+
+
+def test_partial_candidate_inherits_unchanged_active_revision_and_prompt() -> None:
+    active_revision, active_prompts = _active_candidate_inputs()
+
+    candidate = _normalize_generated_candidate(
+        {
+            "prompt": {
+                "stage": "A",
+                "system_prompt": "candidate system prompt",
+                "change_note": "只调整调用 A 的判定说明",
+            },
+            "revision": {
+                "display_name": "自动纠偏候选",
+                "contract": {"spec_version": "candidate-v2"},
+            },
+        },
+        active_revision=active_revision,
+        active_prompts=active_prompts,
+    )
+
+    assert candidate.prompt.system_prompt == "candidate system prompt"
+    assert candidate.prompt.user_prompt == "active user prompt"
+    assert candidate.revision.contract == {
+        "category_key": "inspiration_image",
+        "spec_version": "candidate-v2",
+        "levels": {"L1": 80, "L2": 60},
+    }
+    assert candidate.revision.classification_map == {
+        "format_version": "classification-map-v1",
+        "routes": {"住宅": "space"},
+    }
+    assert candidate.revision.subcategory_dimensions == {
+        "space": {"label": "空间", "dimensions": ["composition"]}
+    }
+
+
+def test_partial_candidate_rejects_explicit_invalid_active_artifact_replacement() -> None:
+    active_revision, active_prompts = _active_candidate_inputs()
+
+    with pytest.raises(CorrectionOrchestrationError) as exc_info:
+        _normalize_generated_candidate(
+            {
+                "prompt": {
+                    "stage": "A",
+                    "change_note": "错误类型必须受控失败",
+                },
+                "revision": {"classification_map": []},
+            },
+            active_revision=active_revision,
+            active_prompts=active_prompts,
+        )
+
+    assert exc_info.value.code == "CORRECTION_GENERATOR_OUTPUT_INVALID"
+    assert "revision.classification_map" in str(exc_info.value)
+
+
+def test_registered_tuner_repairs_invalid_candidate_once_and_records_trace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    active_revision, active_prompts = _active_candidate_inputs()
+    responses = [
+        SimpleNamespace(
+            parsed={
+                "prompt": {"stage": "A", "change_note": "first invalid"},
+                "revision": {"classification_map": []},
+            },
+            raw_text='{"revision":{"classification_map":[]}}',
+            request_correlation_id="request-invalid",
+            attempt_count=1,
+            input_tokens=120,
+            output_tokens=60,
+            total_tokens=180,
+        ),
+        SimpleNamespace(
+            parsed={
+                "prompt": {
+                    "stage": "A",
+                    "system_prompt": "repaired system prompt",
+                    "change_note": "repair invalid structure",
+                },
+                "revision": {
+                    "display_name": "自动修复候选",
+                    "contract": {"spec_version": "candidate-repaired"},
+                },
+            },
+            raw_text='{"revision":{"display_name":"自动修复候选"}}',
+            request_correlation_id="request-repaired",
+            attempt_count=1,
+            input_tokens=140,
+            output_tokens=70,
+            total_tokens=210,
+        ),
+    ]
+    calls: list[dict[str, object]] = []
+
+    class RepairingClient:
+        def __init__(self, _config: object) -> None:
+            pass
+
+        async def chat_json(
+            self,
+            system_prompt: str,
+            user_prompt: str,
+            **kwargs: object,
+        ) -> SimpleNamespace:
+            calls.append(
+                {
+                    "system_prompt": system_prompt,
+                    "user_prompt": user_prompt,
+                    "kwargs": kwargs,
+                }
+            )
+            return responses[len(calls) - 1]
+
+    from app import baseline_correction_orchestration as orchestration_module
+
+    monkeypatch.setattr(orchestration_module, "DoubaoClient", RepairingClient)
+    monkeypatch.setattr(
+        orchestration_module,
+        "validate_mechanism_artifacts",
+        lambda *_args, **_kwargs: "image-rule-deduction-v1",
+    )
+    entry = SimpleNamespace(
+        id=7,
+        role="tuning",
+        provider="doubao",
+        protocol="responses",
+        model_id="tuning-model",
+        thinking_mode="disabled",
+        level="advanced",
+        max_tokens=4096,
+    )
+
+    candidate = RegisteredTuningMechanismGenerator(
+        entry, SimpleNamespace(encrypted_api_key="protected")
+    ).generate(
+        db=SimpleNamespace(),
+        correction=SimpleNamespace(category_key="inspiration_image"),
+        active_revision=active_revision,
+        active_prompts=active_prompts,
+        report={
+            "candidate_routing": {
+                "affected_layers": ["A"],
+                "allowed_prompt_stages": ["A"],
+                "required_prompt_stage": "A",
+            }
+        },
+    )
+
+    assert len(calls) == 2
+    assert "revision.classification_map" in str(calls[1]["user_prompt"])
+    assert candidate.revision.contract["spec_version"] == "candidate-repaired"
+    assert [entry["status"] for entry in candidate.generation_trace] == [
+        "invalid",
+        "valid",
+    ]
+    assert candidate.generation_trace[0]["request_correlation_id"] == (
+        "request-invalid"
+    )
+    assert candidate.generation_trace[1]["request_correlation_id"] == (
+        "request-repaired"
+    )
+
+
+def test_terminal_candidate_generation_failure_persists_bounded_trace() -> None:
+    row = SimpleNamespace(
+        stage="candidate_generation",
+        attempt_count=1,
+        orchestration_json=json.dumps({"base_projection": {"revision": 7}}),
+        status="processing",
+        progress=35,
+        blockers_json="[]",
+        error_code="",
+        error_message="",
+        finished_at=None,
+    )
+    error = CorrectionCandidateGenerationError(
+        "CORRECTION_GENERATOR_OUTPUT_INVALID",
+        "revision.classification_map 类型无效",
+        generation_trace=[
+            {
+                "attempt": 1,
+                "status": "invalid",
+                "raw_text": "first raw output",
+                "error_code": "CORRECTION_GENERATOR_OUTPUT_INVALID",
+            },
+            {
+                "attempt": 2,
+                "status": "invalid",
+                "raw_text": "second raw output",
+                "error_code": "CORRECTION_GENERATOR_OUTPUT_INVALID",
+            },
+        ],
+    )
+
+    _record_baseline_correction_failure(SimpleNamespace(), row, error)
+
+    orchestration = json.loads(row.orchestration_json)
+    assert orchestration["base_projection"] == {"revision": 7}
+    assert [entry["raw_text"] for entry in orchestration["generation_trace"]] == [
+        "first raw output",
+        "second raw output",
+    ]
+    assert row.status == "failed"
+    assert row.error_code == "CORRECTION_GENERATOR_OUTPUT_INVALID"
