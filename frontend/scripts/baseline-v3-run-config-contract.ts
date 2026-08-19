@@ -48,8 +48,17 @@ assert.deepEqual(
     promptMode: "manual",
     promptAId: 2,
     promptBId: 3,
+    categoryKey: "inspiration_image",
   }),
-  { candidate_revision_id: candidate.id, prompt_a_id: 2, prompt_b_id: 3 },
+  {
+    candidate_revision_id: candidate.id,
+    prompt_a_id: 2,
+    prompt_b_id: 3,
+    category_context: {
+      source: "baseline_set",
+      category_key: "inspiration_image",
+    },
+  },
 )
 
 console.log("baseline v3 run config contract: ok")

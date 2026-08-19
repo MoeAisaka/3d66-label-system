@@ -61,6 +61,7 @@ export function buildBaselineRunPayload(selection: {
   promptAId?: number | null
   promptBId?: number | null
   executionMode?: "freeform" | "structured"
+  categoryKey?: string | null
 }): Record<string, unknown> {
   const payload: Record<string, unknown> = {}
   if (selection.promptMode === "single" && selection.promptAId) {
@@ -72,6 +73,12 @@ export function buildBaselineRunPayload(selection: {
   if (selection.executionMode) payload.execution_mode = selection.executionMode
   if (selection.mode === "candidate" && selection.candidateRevisionId) {
     payload.candidate_revision_id = selection.candidateRevisionId
+  }
+  if (selection.categoryKey) {
+    payload.category_context = {
+      source: "baseline_set",
+      category_key: selection.categoryKey,
+    }
   }
   return payload
 }

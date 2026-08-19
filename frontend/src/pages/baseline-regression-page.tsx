@@ -484,6 +484,7 @@ export function BaselineRegressionPage() {
         promptAId: effectivePromptAId,
         promptBId: effectivePromptBId,
         executionMode,
+        categoryKey: selectedSet.data?.summary.category_key,
       })
       return baselineRegressionApi.createRun(selectedSetId, {
         ...promptPayload,

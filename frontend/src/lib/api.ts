@@ -222,6 +222,10 @@ export const baselineRegressionApi = {
     prompt_b_id?: number
     execution_mode?: "freeform" | "structured"
     candidate_revision_id?: number
+    category_context?: {
+      source: "baseline_set"
+      category_key: string
+    }
   } = {}) => api<BaselineRegressionRun & { job_ids: number[] }>(
     `/api/baseline-sets/${setId}/runs`,
     { method: "POST", ...jsonBody(payload) },
