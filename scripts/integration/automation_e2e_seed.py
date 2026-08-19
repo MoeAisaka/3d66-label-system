@@ -22,6 +22,31 @@ DIMENSION_KEYS = (
     "inspiration_reference",
     "presentation_integrity",
 )
+E2E_DATA_MARKER = ".automation-e2e-owned"
+
+
+def _prepare_isolated_data_dir(
+    data_dir: Path,
+    *,
+    repo_root: Path,
+) -> Path:
+    """Claim an isolated E2E directory without risking an existing database."""
+    resolved = data_dir.resolve()
+    forbidden = {Path("/"), Path("/data"), repo_root.resolve()}
+    if resolved in forbidden:
+        raise RuntimeError(f"seed_forbidden_data_directory:{resolved}")
+
+    marker = resolved / E2E_DATA_MARKER
+    database_path = resolved / "database" / "app.db"
+    if database_path.exists() and not marker.is_file():
+        raise RuntimeError(f"seed_unowned_existing_database:{database_path}")
+    if marker.exists() and not marker.is_file():
+        raise RuntimeError(f"seed_invalid_ownership_marker:{marker}")
+
+    resolved.mkdir(parents=True, exist_ok=True)
+    if not marker.exists():
+        marker.write_text("automation-e2e-owned-v1\n", encoding="utf-8")
+    return resolved
 
 
 def _bind_profile_baseline_contract(
@@ -130,7 +155,10 @@ def main() -> None:
     args = parser.parse_args()
 
     repo_root = Path(__file__).resolve().parents[2]
-    data_dir = args.data_dir.resolve()
+    data_dir = _prepare_isolated_data_dir(
+        args.data_dir,
+        repo_root=repo_root,
+    )
     os.environ["DATA_DIR"] = str(data_dir)
     os.environ["API_KEY_MASTER_KEY_FILE"] = str(data_dir / "secrets" / "master.key")
     sys.path.insert(0, str(repo_root / "backend"))
