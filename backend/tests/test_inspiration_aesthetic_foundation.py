@@ -474,6 +474,32 @@ def test_strict_validator_accepts_exact_eight_dimensions() -> None:
     assert tuple(normalized["dimensions"]) == DIMENSION_KEYS
 
 
+def test_validator_normalizes_v2_candidate_contract_without_polluting_foundation() -> None:
+    payload = valid_payload()
+    payload["contract_version"] = "inspiration-aesthetic-foundation-v2"
+    payload["overall_aesthetic"] = {
+        "grade": 4,
+        "evidence": ["整体可见证据"],
+        "shortcomings": [],
+    }
+
+    normalized = validate_aesthetic_output(payload)
+
+    assert normalized["contract_version"] == "inspiration-aesthetic-foundation-v1"
+    assert "overall_aesthetic" not in normalized
+
+
+@pytest.mark.parametrize("version", [None, [], {}])
+def test_validator_rejects_non_string_contract_version(version: object) -> None:
+    payload = valid_payload()
+    payload["contract_version"] = version
+
+    with pytest.raises(AestheticFoundationError, match="合同版本不匹配") as exc_info:
+        validate_aesthetic_output(payload)
+
+    assert exc_info.value.code == "contract_version_invalid"
+
+
 def test_call_b_prompt_contains_a_complete_auditable_json_instance() -> None:
     prompt = build_prompt()
     assert AESTHETIC_CALL_B_VERSION == (
