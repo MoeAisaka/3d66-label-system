@@ -11719,6 +11719,18 @@ def _record_baseline_correction_failure(
         ),
         error_message=str(exc),
     )
+    generation_trace = getattr(exc, "generation_trace", None)
+    if isinstance(generation_trace, list):
+        try:
+            orchestration = json.loads(row.orchestration_json or "{}")
+        except json.JSONDecodeError:
+            orchestration = {}
+        if not isinstance(orchestration, dict):
+            orchestration = {}
+        orchestration["generation_trace"] = [
+            dict(entry) for entry in generation_trace if isinstance(entry, dict)
+        ]
+        row.orchestration_json = canonical_json(orchestration)
     row.finished_at = datetime.now(timezone.utc)
 
 
