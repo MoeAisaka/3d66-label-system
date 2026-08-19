@@ -144,6 +144,54 @@ def _merge_json_patch(base: Any, patch: Any) -> Any:
     return result
 
 
+def _salvage_candidate_delta(value: Any) -> dict[str, Any]:
+    """Keep only valid, independently reusable fields from a failed attempt."""
+    if not isinstance(value, Mapping):
+        return {}
+    payload: Mapping[str, Any] = value
+    if not isinstance(payload.get("prompt"), Mapping) or not isinstance(
+        payload.get("revision"), Mapping
+    ):
+        for wrapper in ("candidate", "mechanism_candidate", "unified_candidate"):
+            nested = payload.get(wrapper)
+            if isinstance(nested, Mapping):
+                merged = dict(nested)
+                if "summary" not in merged and "summary" in payload:
+                    merged["summary"] = payload["summary"]
+                payload = merged
+                break
+
+    salvaged: dict[str, Any] = {}
+    prompt = payload.get("prompt")
+    if isinstance(prompt, Mapping):
+        prompt_delta: dict[str, Any] = {}
+        stage = prompt.get("stage")
+        if isinstance(stage, str) and stage.strip().upper() in {"A", "B"}:
+            prompt_delta["stage"] = stage.strip().upper()
+        for field_name in ("system_prompt", "user_prompt", "change_note"):
+            field_value = prompt.get(field_name)
+            if isinstance(field_value, str) and field_value.strip():
+                prompt_delta[field_name] = field_value
+        salvaged["prompt"] = prompt_delta
+
+    revision = payload.get("revision")
+    if isinstance(revision, Mapping):
+        revision_delta: dict[str, Any] = {}
+        display_name = revision.get("display_name")
+        if isinstance(display_name, str) and display_name.strip():
+            revision_delta["display_name"] = display_name
+        for field_name in ("contract", "classification_map", "subcategory_dimensions"):
+            field_value = revision.get(field_name)
+            if isinstance(field_value, Mapping):
+                revision_delta[field_name] = deepcopy(dict(field_value))
+        salvaged["revision"] = revision_delta
+
+    summary = payload.get("summary")
+    if isinstance(summary, Mapping):
+        salvaged["summary"] = deepcopy(dict(summary))
+    return salvaged
+
+
 def _normalize_generated_candidate(
     value: GeneratedMechanismCandidate | Mapping[str, Any],
     *,
@@ -1139,6 +1187,7 @@ class RegisteredTuningMechanismGenerator:
         user_prompt = json.dumps(generator_input, ensure_ascii=False)
         generation_trace: list[dict[str, Any]] = []
         last_error: CorrectionOrchestrationError | None = None
+        preserved_delta: dict[str, Any] = {}
         for attempt in range(1, 3):
             response = asyncio.run(
                 client.chat_json(
@@ -1175,7 +1224,16 @@ class RegisteredTuningMechanismGenerator:
                         "CORRECTION_GENERATOR_OUTPUT_INVALID",
                         "调优模型未返回 JSON 对象",
                     )
-                candidate_payload = dict(parsed)
+                current_delta = _salvage_candidate_delta(parsed)
+                candidate_payload = _merge_json_patch(preserved_delta, parsed)
+                candidate_payload = _merge_json_patch(
+                    candidate_payload, preserved_delta
+                )
+                candidate_payload = _merge_json_patch(
+                    candidate_payload, current_delta
+                )
+                if "summary" in current_delta:
+                    candidate_payload["summary"] = deepcopy(current_delta["summary"])
                 candidate_payload["model_snapshot"] = model_snapshot
                 candidate = _normalize_generated_candidate(
                     candidate_payload,
@@ -1211,6 +1269,10 @@ class RegisteredTuningMechanismGenerator:
                         str(exc),
                         generation_trace=generation_trace,
                     ) from exc
+                preserved_delta = _merge_json_patch(
+                    preserved_delta,
+                    _salvage_candidate_delta(parsed),
+                )
                 user_prompt = json.dumps(
                     {
                         "schema_version": "baseline-correction-generator-repair-v1",

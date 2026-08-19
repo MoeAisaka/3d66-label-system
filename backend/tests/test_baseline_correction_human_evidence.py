@@ -615,6 +615,109 @@ def test_registered_tuner_repairs_invalid_candidate_once_and_records_trace(
     )
 
 
+def test_registered_tuner_retry_preserves_valid_fields_from_previous_attempt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    active_revision, active_prompts = _active_candidate_inputs()
+    active_prompts["A"].user_prompt = ""
+    responses = [
+        SimpleNamespace(
+            parsed={
+                "prompt": {
+                    "stage": "A",
+                    "system_prompt": "expanded system prompt with correction evidence",
+                    "change_note": "tighten the system rules",
+                },
+                "revision": {},
+                "summary": {"change_codes": ["tighten_system_rules"]},
+            },
+            raw_text='{"prompt":{"stage":"A","system_prompt":"expanded"}}',
+            request_correlation_id="request-system",
+            attempt_count=1,
+            input_tokens=120,
+            output_tokens=60,
+            total_tokens=180,
+        ),
+        SimpleNamespace(
+            parsed={
+                "prompt": {
+                    "stage": "A",
+                    "system_prompt": [],
+                    "user_prompt": "repaired user prompt",
+                    "change_note": "supply the missing user prompt",
+                },
+                "revision": {},
+                "summary": {"change_codes": ["repair_missing_user_prompt"]},
+            },
+            raw_text='{"prompt":{"stage":"A","user_prompt":"repaired"}}',
+            request_correlation_id="request-user",
+            attempt_count=1,
+            input_tokens=140,
+            output_tokens=70,
+            total_tokens=210,
+        ),
+    ]
+
+    class RepairingClient:
+        def __init__(self, _config: object) -> None:
+            pass
+
+        async def chat_json(
+            self,
+            system_prompt: str,
+            user_prompt: str,
+            **kwargs: object,
+        ) -> SimpleNamespace:
+            del system_prompt, user_prompt, kwargs
+            return responses.pop(0)
+
+    from app import baseline_correction_orchestration as orchestration_module
+
+    monkeypatch.setattr(orchestration_module, "DoubaoClient", RepairingClient)
+    monkeypatch.setattr(
+        orchestration_module,
+        "validate_mechanism_artifacts",
+        lambda *_args, **_kwargs: "image-rule-deduction-v1",
+    )
+    entry = SimpleNamespace(
+        id=7,
+        role="tuning",
+        provider="doubao",
+        protocol="responses",
+        model_id="tuning-model",
+        thinking_mode="disabled",
+        level="advanced",
+        max_tokens=4096,
+    )
+
+    candidate = RegisteredTuningMechanismGenerator(
+        entry, SimpleNamespace(encrypted_api_key="protected")
+    ).generate(
+        db=SimpleNamespace(),
+        correction=SimpleNamespace(category_key="inspiration_image"),
+        active_revision=active_revision,
+        active_prompts=active_prompts,
+        report={
+            "candidate_routing": {
+                "affected_layers": ["A"],
+                "allowed_prompt_stages": ["A"],
+                "required_prompt_stage": "A",
+            }
+        },
+    )
+
+    assert candidate.prompt.system_prompt == (
+        "expanded system prompt with correction evidence"
+    )
+    assert candidate.prompt.user_prompt == "repaired user prompt"
+    assert candidate.prompt.change_note == "supply the missing user prompt"
+    assert candidate.summary == {"change_codes": ["repair_missing_user_prompt"]}
+    assert [entry["status"] for entry in candidate.generation_trace] == [
+        "invalid",
+        "valid",
+    ]
+
+
 def test_terminal_candidate_generation_failure_persists_bounded_trace() -> None:
     row = SimpleNamespace(
         stage="candidate_generation",
