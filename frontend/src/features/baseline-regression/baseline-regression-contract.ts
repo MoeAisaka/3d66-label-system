@@ -79,7 +79,9 @@ export function buildBaselineRunPayload(selection: {
 export function baselineRunIdAfterSetLoad(
   currentRunId: number,
   runs: Array<{ id: number }> | null,
+  pinnedRunId = 0,
 ): number {
+  if (pinnedRunId > 0) return pinnedRunId
   if (runs === null) return currentRunId
   if (runs.some((run) => run.id === currentRunId)) return currentRunId
   return runs[0]?.id ?? 0

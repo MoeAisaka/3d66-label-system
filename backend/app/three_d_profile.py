@@ -46,7 +46,9 @@ def _declared_paths(field_contract: FieldDemandContract) -> set[str]:
 def validate_three_d_profile_contract(
     db: Session | None,
     contract: Mapping[str, Any],
-) -> FieldDemandContract:
+    *,
+    require_database: bool = True,
+) -> FieldDemandContract | None:
     if contract.get("schema_version") != "evaluation-category-profile-v3":
         raise ThreeDProfileError(
             "three_d_contract_schema_invalid",
@@ -76,25 +78,28 @@ def validate_three_d_profile_contract(
             "3D 机制必须绑定正整数的现役字段需求合同 ID",
             target="contract.field_demand_contract_id",
         )
+    field_contract: FieldDemandContract | None = None
     if db is None:
-        raise ThreeDProfileError(
-            "three_d_field_contract_inactive",
-            "3D 机制校验需要读取现役字段需求合同",
-            target="contract.field_demand_contract_id",
-        )
-    field_contract = db.get(FieldDemandContract, field_contract_id)
-    if field_contract is None or field_contract.status != "active":
-        raise ThreeDProfileError(
-            "three_d_field_contract_inactive",
-            "3D 机制绑定的字段需求合同不存在或未启用",
-            target="contract.field_demand_contract_id",
-        )
-    if field_contract.category_key != category_key:
-        raise ThreeDProfileError(
-            "three_d_field_contract_mismatch",
-            "3D 机制与字段需求合同类目不一致",
-            target="contract.field_demand_contract_id",
-        )
+        if require_database:
+            raise ThreeDProfileError(
+                "three_d_field_contract_inactive",
+                "3D 机制校验需要读取现役字段需求合同",
+                target="contract.field_demand_contract_id",
+            )
+    else:
+        field_contract = db.get(FieldDemandContract, field_contract_id)
+        if field_contract is None or field_contract.status != "active":
+            raise ThreeDProfileError(
+                "three_d_field_contract_inactive",
+                "3D 机制绑定的字段需求合同不存在或未启用",
+                target="contract.field_demand_contract_id",
+            )
+        if field_contract.category_key != category_key:
+            raise ThreeDProfileError(
+                "three_d_field_contract_mismatch",
+                "3D 机制与字段需求合同类目不一致",
+                target="contract.field_demand_contract_id",
+            )
     fingerprint = contract.get("source_schema_fingerprint")
     if not isinstance(fingerprint, str) or not _SHA256.fullmatch(fingerprint.lower()):
         raise ThreeDProfileError(
@@ -118,12 +123,13 @@ def validate_three_d_profile_contract(
             "3D 机制必须声明非空的 A 阶段质量字段和 B 阶段美感字段",
             target="contract.stage_fields",
         )
-    contract_paths = _declared_paths(field_contract)
-    undeclared = sorted((set(a_fields) | set(b_fields)) - contract_paths)
-    if undeclared:
-        raise ThreeDProfileError(
-            "three_d_stage_field_not_in_contract",
-            f"3D 阶段字段未出现在字段需求合同：{', '.join(undeclared)}",
-            target="contract.stage_fields",
-        )
+    if field_contract is not None:
+        contract_paths = _declared_paths(field_contract)
+        undeclared = sorted((set(a_fields) | set(b_fields)) - contract_paths)
+        if undeclared:
+            raise ThreeDProfileError(
+                "three_d_stage_field_not_in_contract",
+                f"3D 阶段字段未出现在字段需求合同：{', '.join(undeclared)}",
+                target="contract.stage_fields",
+            )
     return field_contract

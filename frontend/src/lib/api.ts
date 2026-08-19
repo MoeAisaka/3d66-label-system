@@ -253,6 +253,7 @@ export const baselineRegressionApi = {
     case_ids: number[]
     created: number
     idempotent: boolean
+    purpose: string
   }>(`/api/baseline-regressions/${runId}/optimization-cases`, {
     method: "POST",
     ...jsonBody({ item_ids: itemIds }),

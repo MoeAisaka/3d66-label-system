@@ -204,6 +204,7 @@ from .shadow_projection import (
 )
 from .quality_assets import build_quality_asset_export
 from .baseline_regression import (
+    BASELINE_OPTIMIZATION_CASE_PURPOSE,
     LEVELS as BASELINE_LEVELS,
     TERMINAL_RUN_STATUSES as BASELINE_TERMINAL_STATUSES,
     baseline_set_fingerprint,
@@ -11954,6 +11955,18 @@ def _record_baseline_correction_failure(
         ),
         error_message=str(exc),
     )
+    generation_trace = getattr(exc, "generation_trace", None)
+    if isinstance(generation_trace, list):
+        try:
+            orchestration = json.loads(row.orchestration_json or "{}")
+        except json.JSONDecodeError:
+            orchestration = {}
+        if not isinstance(orchestration, dict):
+            orchestration = {}
+        orchestration["generation_trace"] = [
+            dict(entry) for entry in generation_trace if isinstance(entry, dict)
+        ]
+        row.orchestration_json = canonical_json(orchestration)
     row.finished_at = datetime.now(timezone.utc)
 
 
@@ -12330,6 +12343,7 @@ def enqueue_baseline_optimization_cases(
         case_payload = {
             "schema_version": "optimization-case-v1",
             "source": "baseline_regression",
+            "purpose": BASELINE_OPTIMIZATION_CASE_PURPOSE,
             "expected_level": item.expected_level,
             "actual_level": actual,
             "baseline_set_id": run.baseline_set_id,
@@ -12393,6 +12407,7 @@ def enqueue_baseline_optimization_cases(
         "case_ids": case_ids,
         "created": created_count,
         "idempotent": created_count == 0,
+        "purpose": BASELINE_OPTIMIZATION_CASE_PURPOSE,
     }
 
 

@@ -5,7 +5,8 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
-from dataclasses import dataclass
+from copy import deepcopy
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any, Mapping, Protocol
@@ -50,6 +51,7 @@ from .models import (
     PromptVersion,
     SamplingPolicy,
 )
+from .mechanism_profiles import MechanismProfileError, validate_mechanism_artifacts
 from .risk_review import RISK_REVIEW_VERSION
 from .scoring import ENGINE_VERSION
 from .strategy_bundle import build_strategy_snapshot, get_or_create_bundle
@@ -69,6 +71,7 @@ class GeneratedMechanismCandidate:
     revision: RevisionArtifacts
     summary: dict[str, Any]
     model_snapshot: dict[str, Any]
+    generation_trace: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -100,6 +103,18 @@ class CorrectionOrchestrationError(ValueError):
         self.code = code
 
 
+class CorrectionCandidateGenerationError(CorrectionOrchestrationError):
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        generation_trace: list[dict[str, Any]],
+    ) -> None:
+        super().__init__(code, message)
+        self.generation_trace = generation_trace
+
+
 def _json_object(value: str | None, *, label: str) -> dict[str, Any]:
     try:
         payload = json.loads(value or "{}")
@@ -116,8 +131,24 @@ def _json_object(value: str | None, *, label: str) -> dict[str, Any]:
     return payload
 
 
+def _merge_json_patch(base: Any, patch: Any) -> Any:
+    """Apply RFC 7396 merge-patch semantics to a detached JSON value."""
+    if not isinstance(patch, Mapping):
+        return deepcopy(patch)
+    result = deepcopy(dict(base)) if isinstance(base, Mapping) else {}
+    for key, patch_value in patch.items():
+        if patch_value is None:
+            result.pop(str(key), None)
+            continue
+        result[str(key)] = _merge_json_patch(result.get(str(key)), patch_value)
+    return result
+
+
 def _normalize_generated_candidate(
     value: GeneratedMechanismCandidate | Mapping[str, Any],
+    *,
+    active_revision: CategoryEvaluationV3Revision | None = None,
+    active_prompts: Mapping[str, PromptVersion] | None = None,
 ) -> GeneratedMechanismCandidate:
     if isinstance(value, GeneratedMechanismCandidate):
         return value
@@ -134,7 +165,7 @@ def _normalize_generated_candidate(
             nested = payload.get(wrapper)
             if isinstance(nested, Mapping):
                 merged = dict(nested)
-                for key in ("summary", "model_snapshot"):
+                for key in ("summary", "model_snapshot", "generation_trace"):
                     if key not in merged and key in payload:
                         merged[key] = payload[key]
                 payload = merged
@@ -153,13 +184,34 @@ def _normalize_generated_candidate(
             + "、".join(invalid_fields),
         )
     stage = str(prompt.get("stage") or "").strip().upper()
-    system_prompt = str(prompt.get("system_prompt") or "").strip()
-    user_prompt = str(prompt.get("user_prompt") or "").strip()
+    base_prompt = (active_prompts or {}).get(stage)
+    system_prompt = str(
+        prompt.get("system_prompt")
+        if "system_prompt" in prompt
+        else getattr(base_prompt, "system_prompt", "")
+    ).strip()
+    user_prompt = str(
+        prompt.get("user_prompt")
+        if "user_prompt" in prompt
+        else getattr(base_prompt, "user_prompt", "")
+    ).strip()
     change_note = str(prompt.get("change_note") or "").strip()
-    display_name = str(revision.get("display_name") or "").strip()
-    contract = revision.get("contract")
-    classification_map = revision.get("classification_map")
-    subcategory_dimensions = revision.get("subcategory_dimensions")
+    active_bundle = revision_bundle(active_revision) if active_revision is not None else {}
+    display_name = str(
+        revision.get("display_name")
+        if "display_name" in revision
+        else getattr(active_revision, "display_name", "")
+    ).strip()
+
+    def composed_revision_field(field_name: str) -> Any:
+        base = active_bundle.get(field_name)
+        if field_name not in revision:
+            return deepcopy(base)
+        return _merge_json_patch(base, revision[field_name])
+
+    contract = composed_revision_field("contract")
+    classification_map = composed_revision_field("classification_map")
+    subcategory_dimensions = composed_revision_field("subcategory_dimensions")
     if stage not in {"A", "B"}:
         invalid_fields.append("prompt.stage")
     if not system_prompt:
@@ -184,6 +236,7 @@ def _normalize_generated_candidate(
         )
     summary = payload.get("summary")
     model_snapshot = payload.get("model_snapshot")
+    generation_trace = payload.get("generation_trace")
     return GeneratedMechanismCandidate(
         prompt=GeneratedPromptCandidate(
             stage=stage,
@@ -200,6 +253,11 @@ def _normalize_generated_candidate(
         summary=dict(summary) if isinstance(summary, Mapping) else {},
         model_snapshot=(
             dict(model_snapshot) if isinstance(model_snapshot, Mapping) else {}
+        ),
+        generation_trace=(
+            [dict(item) for item in generation_trace if isinstance(item, Mapping)]
+            if isinstance(generation_trace, list)
+            else []
         ),
     )
 
@@ -334,6 +392,7 @@ def _generator_payload(
         },
         "summary": candidate.summary,
         "model_snapshot": candidate.model_snapshot,
+        "generation_trace": candidate.generation_trace,
     }
 
 
@@ -1028,64 +1087,7 @@ class RegisteredTuningMechanismGenerator:
         del db
         client = DoubaoClient(self.config)
         routing_constraints = _candidate_routing_constraints(report)
-        response = asyncio.run(
-            client.chat_json(
-                "你是特鹏标签中台的评测机制调优器。人工真值优先。根据纠偏报告生成一个完整、"
-                "可校验、可回归的统一机制候选。必须同时返回 prompt 与 revision；revision 必须"
-                "包含完整 contract、classification_map、subcategory_dimensions，不得只返回差异，"
-                "不得发布或启用。候选提示词阶段必须遵守 routing_constraints 中的允许阶段，"
-                "自动纠偏记录不能冒充人工证据。只输出合法 JSON。",
-                json.dumps(
-                    {
-                        "schema_version": "baseline-correction-generator-input-v2",
-                        "category_key": correction.category_key,
-                        "correction_report": report,
-                        "routing_constraints": routing_constraints,
-                        "active_revision": revision_bundle(active_revision),
-                        "active_prompts": {
-                            stage: {
-                                "stage": prompt.stage,
-                                "name": prompt.name,
-                                "version": prompt.version,
-                                "system_prompt": prompt.system_prompt,
-                                "user_prompt": prompt.user_prompt,
-                                "rubric_version": prompt.rubric_version,
-                            }
-                            for stage, prompt in active_prompts.items()
-                        },
-                        "required_output": {
-                            "prompt": {
-                                "stage": "A or B",
-                                "system_prompt": "full text",
-                                "user_prompt": "full text",
-                                "change_note": "summary",
-                            },
-                            "revision": {
-                                "display_name": "candidate name",
-                                "contract": "full object",
-                                "classification_map": "full object",
-                                "subcategory_dimensions": "full object",
-                            },
-                            "summary": {"change_codes": ["code"]},
-                        },
-                    },
-                    ensure_ascii=False,
-                ),
-                output_budget=min(max(1, int(self.entry.max_tokens)), 12000),
-                reasoning_effort=(
-                    "high" if self.entry.level in {"advanced", "expert"} else "medium"
-                ),
-                structured_output=True,
-            )
-        )
-        parsed = response.parsed
-        if not isinstance(parsed, dict):
-            raise CorrectionOrchestrationError(
-                "CORRECTION_GENERATOR_OUTPUT_INVALID",
-                "调优模型未返回 JSON 对象",
-            )
-        parsed = dict(parsed)
-        parsed["model_snapshot"] = {
+        model_snapshot = {
             "registry_entry_id": self.entry.id,
             "role": self.entry.role,
             "provider": self.entry.provider,
@@ -1094,7 +1096,147 @@ class RegisteredTuningMechanismGenerator:
             "thinking_mode": self.entry.thinking_mode,
             "level": self.entry.level,
         }
-        return _normalize_generated_candidate(parsed)
+        generator_input = {
+            "schema_version": "baseline-correction-generator-input-v3",
+            "category_key": correction.category_key,
+            "correction_report": report,
+            "routing_constraints": routing_constraints,
+            "active_revision": revision_bundle(active_revision),
+            "active_prompts": {
+                stage: {
+                    "stage": prompt.stage,
+                    "name": prompt.name,
+                    "version": prompt.version,
+                    "system_prompt": prompt.system_prompt,
+                    "user_prompt": prompt.user_prompt,
+                    "rubric_version": prompt.rubric_version,
+                }
+                for stage, prompt in active_prompts.items()
+            },
+            "required_output": {
+                "prompt": {
+                    "stage": "A or B",
+                    "system_prompt": "changed full text; omit to inherit",
+                    "user_prompt": "changed full text; omit to inherit",
+                    "change_note": "required summary",
+                },
+                "revision": {
+                    "display_name": "optional candidate name",
+                    "contract": "optional JSON merge patch",
+                    "classification_map": "optional JSON merge patch",
+                    "subcategory_dimensions": "optional JSON merge patch",
+                },
+                "summary": {"change_codes": ["code"]},
+            },
+        }
+        system_prompt = (
+            "你是特鹏标签中台的评测机制调优器。人工真值优先。根据纠偏报告只返回需要修改的"
+            "提示词和等级规则差异；平台会从冻结现役机制继承未返回字段，并在服务端合成、严格"
+            "校验和回归。必须同时返回 prompt 与 revision 对象，revision 可为空对象；不得发布"
+            "或启用。候选提示词阶段必须遵守 routing_constraints，自动纠偏记录不能冒充人工"
+            "证据。JSON 对象中的 null 表示删除字段。只输出合法 JSON。"
+        )
+        user_prompt = json.dumps(generator_input, ensure_ascii=False)
+        generation_trace: list[dict[str, Any]] = []
+        last_error: CorrectionOrchestrationError | None = None
+        for attempt in range(1, 3):
+            response = asyncio.run(
+                client.chat_json(
+                    system_prompt,
+                    user_prompt,
+                    output_budget=min(max(1, int(self.entry.max_tokens)), 12000),
+                    reasoning_effort=(
+                        "high"
+                        if self.entry.level in {"advanced", "expert"}
+                        else "medium"
+                    ),
+                    structured_output=True,
+                )
+            )
+            raw_text = str(getattr(response, "raw_text", ""))
+            trace_entry: dict[str, Any] = {
+                "attempt": attempt,
+                "request_correlation_id": getattr(
+                    response, "request_correlation_id", None
+                ),
+                "provider_attempt_count": getattr(response, "attempt_count", None),
+                "usage": {
+                    "input_tokens": getattr(response, "input_tokens", None),
+                    "output_tokens": getattr(response, "output_tokens", None),
+                    "total_tokens": getattr(response, "total_tokens", None),
+                },
+                "raw_text": raw_text[:65536],
+                "raw_text_truncated": len(raw_text) > 65536,
+            }
+            parsed = getattr(response, "parsed", None)
+            try:
+                if not isinstance(parsed, dict):
+                    raise CorrectionOrchestrationError(
+                        "CORRECTION_GENERATOR_OUTPUT_INVALID",
+                        "调优模型未返回 JSON 对象",
+                    )
+                candidate_payload = dict(parsed)
+                candidate_payload["model_snapshot"] = model_snapshot
+                candidate = _normalize_generated_candidate(
+                    candidate_payload,
+                    active_revision=active_revision,
+                    active_prompts=active_prompts,
+                )
+                _validate_candidate_routing(candidate, report)
+                try:
+                    validate_mechanism_artifacts(
+                        candidate.revision.contract,
+                        candidate.revision.classification_map,
+                        candidate.revision.subcategory_dimensions,
+                        require_database=False,
+                    )
+                except MechanismProfileError as exc:
+                    raise CorrectionOrchestrationError(
+                        "CORRECTION_GENERATOR_OUTPUT_INVALID",
+                        f"{exc.target} 校验失败：{exc}",
+                    ) from exc
+            except CorrectionOrchestrationError as exc:
+                last_error = exc
+                trace_entry.update(
+                    {
+                        "status": "invalid",
+                        "error_code": exc.code,
+                        "error_message": str(exc),
+                    }
+                )
+                generation_trace.append(trace_entry)
+                if attempt == 2:
+                    raise CorrectionCandidateGenerationError(
+                        exc.code,
+                        str(exc),
+                        generation_trace=generation_trace,
+                    ) from exc
+                user_prompt = json.dumps(
+                    {
+                        "schema_version": "baseline-correction-generator-repair-v1",
+                        "original_input": generator_input,
+                        "invalid_output": parsed,
+                        "validation_error": {
+                            "code": exc.code,
+                            "message": str(exc),
+                        },
+                        "instruction": (
+                            "修复结构错误后重新输出候选 JSON。只修改需要修复的字段；"
+                            "未修改字段继续由平台继承。"
+                        ),
+                    },
+                    ensure_ascii=False,
+                )
+                continue
+            trace_entry["status"] = "valid"
+            generation_trace.append(trace_entry)
+            return replace(candidate, generation_trace=generation_trace)
+        assert last_error is not None
+        raise CorrectionCandidateGenerationError(
+            last_error.code,
+            str(last_error),
+            generation_trace=generation_trace,
+        )
 
 
 def configured_correction_generator(

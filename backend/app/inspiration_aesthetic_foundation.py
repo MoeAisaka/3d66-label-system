@@ -23,6 +23,7 @@ from .inspiration_anchor_contract import (
 
 AESTHETIC_CALL_B_VERSION = "inspiration-b-v5-anchor-calibration-evidence-20260807"
 FOUNDATION_VERSION = "inspiration-aesthetic-foundation-v1"
+CANDIDATE_FOUNDATION_VERSION = "inspiration-aesthetic-foundation-v2"
 DIMENSION_KEYS = (
     "composition_viewpoint",
     "lighting_atmosphere",
@@ -57,7 +58,12 @@ def _is_int(value: Any) -> bool:
 
 
 def validate_aesthetic_output(payload: Any) -> dict[str, Any]:
-    """严格校验调用B；任何缺失、额外维度或0值均 fail-closed。"""
+    """严格校验调用B，并兼容已生成的候选 v2 输出合同。
+
+    Candidate v2 adds an ``overall_aesthetic`` evidence block.  It is useful
+    for auditing the candidate prompt, but the canonical foundation remains
+    the v1 shape consumed by the deterministic scoring rules.
+    """
     if not isinstance(payload, dict):
         raise AestheticFoundationError("payload_not_object", "调用B输出必须是JSON对象")
     forbidden = FORBIDDEN_FINAL_FIELDS.intersection(payload)
@@ -65,11 +71,46 @@ def validate_aesthetic_output(payload: Any) -> dict[str, Any]:
         raise AestheticFoundationError(
             "forbidden_final_fields", f"调用B不得输出最终等级/发布字段：{sorted(forbidden)}"
         )
-    allowed = {"contract_version", "aesthetic_score", "dimensions", "overall_evidence", "confidence"}
+    version = payload.get("contract_version")
+    allowed = {
+        "contract_version",
+        "aesthetic_score",
+        "dimensions",
+        "overall_evidence",
+        "confidence",
+    }
+    if version == CANDIDATE_FOUNDATION_VERSION:
+        allowed = allowed | {"overall_aesthetic"}
     if set(payload) != allowed:
         raise AestheticFoundationError("top_level_shape_invalid", "调用B顶层字段不符合冻结合同")
-    if payload.get("contract_version") != FOUNDATION_VERSION:
+    if not isinstance(version, str) or version not in {
+        FOUNDATION_VERSION,
+        CANDIDATE_FOUNDATION_VERSION,
+    }:
         raise AestheticFoundationError("contract_version_invalid", "调用B合同版本不匹配")
+    if version == CANDIDATE_FOUNDATION_VERSION:
+        overall_aesthetic = payload["overall_aesthetic"]
+        if (
+            not isinstance(overall_aesthetic, dict)
+            or set(overall_aesthetic) != {"grade", "evidence", "shortcomings"}
+            or not _is_int(overall_aesthetic.get("grade"))
+            or not 1 <= overall_aesthetic["grade"] <= 5
+            or not isinstance(overall_aesthetic.get("evidence"), list)
+            or not overall_aesthetic["evidence"]
+            or not all(
+                isinstance(value, str) and value.strip()
+                for value in overall_aesthetic["evidence"]
+            )
+            or not isinstance(overall_aesthetic.get("shortcomings"), list)
+            or not all(
+                isinstance(value, str) and value.strip()
+                for value in overall_aesthetic["shortcomings"]
+            )
+        ):
+            raise AestheticFoundationError(
+                "overall_aesthetic_invalid",
+                "候选v2的overall_aesthetic字段不符合合同",
+            )
     score = payload.get("aesthetic_score")
     if not _is_int(score) or not 0 <= score <= 100:
         raise AestheticFoundationError("aesthetic_score_invalid", "aesthetic_score必须是0至100整数")
