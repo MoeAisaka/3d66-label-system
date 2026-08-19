@@ -1188,6 +1188,7 @@ class RegisteredTuningMechanismGenerator:
                         candidate.revision.contract,
                         candidate.revision.classification_map,
                         candidate.revision.subcategory_dimensions,
+                        require_database=False,
                     )
                 except MechanismProfileError as exc:
                     raise CorrectionOrchestrationError(

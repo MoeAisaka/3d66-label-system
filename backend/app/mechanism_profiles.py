@@ -376,6 +376,7 @@ def validate_mechanism_artifacts(
     subcategory_dimensions: Any,
     *,
     db: Session | None = None,
+    require_database: bool = True,
 ) -> str:
     """Validate one supported mechanism bundle and return its profile type."""
     resolution = describe_mechanism_profile(contract)
@@ -420,7 +421,11 @@ def validate_mechanism_artifacts(
             subcategory_dimensions,
         )
         try:
-            validate_three_d_profile_contract(db, contract)
+            validate_three_d_profile_contract(
+                db,
+                contract,
+                require_database=require_database,
+            )
         except ThreeDProfileError as exc:
             raise MechanismProfileError(
                 exc.code,

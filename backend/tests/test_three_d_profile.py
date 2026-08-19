@@ -141,3 +141,29 @@ def test_three_d_profile_accepts_valid_contract(db: Session) -> None:
         == "3d-asset-quality-v1"
     )
     assert json.dumps(contract, ensure_ascii=False)
+
+
+def test_three_d_profile_offline_validation_defers_only_database_reference(
+    db: Session,
+) -> None:
+    contract, classification, dimensions = _artifacts(db)
+
+    assert (
+        validate_mechanism_artifacts(
+            contract,
+            classification,
+            dimensions,
+            require_database=False,
+        )
+        == "3d-asset-quality-v1"
+    )
+
+    contract["source_schema_fingerprint"] = ""
+    with pytest.raises(MechanismProfileError) as invalid_structure:
+        validate_mechanism_artifacts(
+            contract,
+            classification,
+            dimensions,
+            require_database=False,
+        )
+    assert invalid_structure.value.code == "three_d_source_fingerprint_missing"
