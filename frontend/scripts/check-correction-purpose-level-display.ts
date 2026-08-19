@@ -93,6 +93,8 @@ const apiSource = readFileSync("src/lib/api.ts", "utf8")
 assert.match(pageSource, /全局优化案例池用途（可选）：把偏差样本沉淀到后续自动组批和长期机制优化流程/)
 assert.match(pageSource, /不影响当前纠偏分析/)
 assert.match(pageSource, /correctionLevelDisplay\(item\)/)
+assert.match(pageSource, /冻结预期等级/)
+assert.match(pageSource, /尚未保存人工纠偏等级/)
 assert.match(apiSource, /purpose: string/)
 
 console.log("correction purpose and human level display contract: passed")

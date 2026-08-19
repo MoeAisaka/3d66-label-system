@@ -2089,13 +2089,18 @@ function CorrectionAnalysisPanel({
                       <div className="flex flex-wrap items-center gap-2">
                         <p className="file-name min-w-0 truncate text-sm">{item.asset.name}</p>
                         <Badge tone="danger">{levelDisplay.level} → {item.predicted_level ?? "—"}</Badge>
-                        {levelDisplay.source === "human_correction" && (
-                          <Badge tone="warning">人工纠偏等级</Badge>
-                        )}
+                        <Badge tone={levelDisplay.source === "human_correction" ? "warning" : "neutral"}>
+                          {levelDisplay.source === "human_correction" ? "人工纠偏等级" : "冻结预期等级"}
+                        </Badge>
                       </div>
                       {levelDisplay.source === "human_correction" && (
                         <p className="mt-1 text-[0.68rem] leading-4 text-[#7d4308]">
                           原冻结预期 {item.expected_level} · 当前展示以已完成人工纠偏为准
+                        </p>
+                      )}
+                      {levelDisplay.source === "frozen_expected" && (
+                        <p className="mt-1 text-[0.68rem] leading-4 text-[var(--muted)]">
+                          尚未保存人工纠偏等级 · 当前仅用于筛选偏差样本
                         </p>
                       )}
                       <p className="mt-1 line-clamp-2 text-xs leading-5 text-[var(--muted)]">{levelExplanationSummary(item)}</p>
