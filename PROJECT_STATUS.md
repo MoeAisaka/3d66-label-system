@@ -2,13 +2,15 @@
 
 > 当前产品名称：特鹏标签中台（Label System）。仓库名、模块名、API 路径、数据库合同和历史记录中的稳定技术标识保持不变。
 
-## 最新实施：合同自有红线值与调用 A 前置 L5 过滤（2026-08-20，本地待合流）
+## 最新实施：合同自有红线值与调用 A 前置 L5 过滤（2026-08-20，已合流并部署测试服）
 
 - V3 `redline_policy.rules[*].match_any` 与调用 A `production_fields.reason` 的业务字符串改由每次冻结合同持有；平台只保留结构、类型、唯一性、信号源和执行能力校验，不再用旧六项 reason 枚举阻断运营合同。
 - 灵感图回归附加给调用 A 的权威前检说明、纠偏合同元数据及人工纠偏 reason 选项均从对应冻结 V3 合同派生；历史运行继续读取自己的冻结快照，不从现役合同补齐。
 - worker 在调用 A 后进行一次带证据的红线前置判断：规则值、对应布尔信号和非空证据同时成立时直接输出 L5/hard reject 并跳过调用 B；缺证据时正常进入 B，评分副本移除/禁用未确认命中，原始 A 和冻结合同保持不变。
 - 同次多条命中及共享 `match_any` 值均只把有证据规则写入最终 `hit_rules`；原始命中、未确认规则和路由决定保存在 `redline_prefilter` 审计中。
-- 当前代码仅位于本地隔离工作树，未提交、未推送、未合并、未部署，未连接测试服或数据库，未调用真实模型、未重跑历史回归。
+- 修复提交 `70a7dd5` 已通过 Codeup MR #34 合入 `main@242cd98c2f05d43f535d70d730be96f0b6f5e586`，并部署到测试服 `192.168.1.35:8081`；未调用真实模型、未重跑历史回归、未写入业务生产数据。
+- 部署后容器 `running/healthy`、restart count `0`，`/api/health` 为 `ok`、`/api/health/ready` 为 `ready`，8 个 worker 保持 `policy_disabled` 与 `dry_run`；数据库 integrity `ok`、外键错误 `0`、migration `76`，NAS `/mnt/label-nas/maps` 继续只读。
+- 部署前快照：`/data/database/predeploy-snapshots/app-predeploy-820771d4-before-242cd98c-20260820T102909Z.db`，SHA-256 `6108ec6b39737d6442c0fa048987c83745f7bf19752c93ba4d2f9c26c6ed02dc`。
 
 当前验证：
 
