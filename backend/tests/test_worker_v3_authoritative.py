@@ -27,6 +27,9 @@ from app.worker_v3_authoritative import (
     build_v3_authoritative_error_scoring,
     build_v3_authoritative_scoring,
     evaluate_v3_authoritative,
+    evaluate_v3_redline_prefilter,
+    precheck_for_v3_scoring,
+    v3_bundle_for_scoring,
     v3_authoritative_category,
     v3_authoritative_for_job,
 )
@@ -302,6 +305,174 @@ def _class_two_precheck(confidence: float = 0.95) -> dict[str, Any]:
         },
         "production_fields": {"reason": [], "trait": "实景照片"},
     }
+
+
+def _custom_redline_bundle() -> dict[str, Any]:
+    contract = build_inspiration_v3_contract()
+    contract["redline_policy"]["rules"] = [
+        {
+            "key": "transparent_checkerboard",
+            "signal": "production_fields.reason",
+            "match_any": ["透明棋盘格"],
+            "exemptions": [],
+            "enabled": True,
+        }
+    ]
+    return {
+        "contract": contract,
+        "classification_map": build_inspiration_classification_map(),
+        "subcategory_dimensions": build_inspiration_subcategory_dimensions(),
+    }
+
+
+def _custom_redline_precheck(*, evidence: list[str]) -> dict[str, Any]:
+    redline_reasons = (
+        []
+        if evidence
+        else ["missing_evidence:redline:transparent_checkerboard"]
+    )
+    return {
+        "redline_triggered": {"transparent_checkerboard": True},
+        "decisive_evidence": {
+            "redline_triggered": {"transparent_checkerboard": evidence},
+        },
+        "redline_signal_validation": {
+            "status": "valid" if evidence else "needs_review",
+            "reasons": redline_reasons,
+        },
+        "non_redline_signal_validation": {"status": "valid", "reasons": []},
+        "decisive_signal_validation": {
+            "status": "valid" if evidence else "needs_review",
+            "reasons": redline_reasons,
+        },
+        "classification": {
+            "scope_status": "in_scope",
+            "primary_confidence": 0.9,
+            "primary_category": "建筑设计",
+        },
+        "production_fields": {
+            "reason": ["透明棋盘格"],
+            "trait": "实景照片",
+        },
+    }
+
+
+def test_redline_prefilter_confirms_contract_rule_only_with_hit_evidence() -> None:
+    decision = evaluate_v3_redline_prefilter(
+        _custom_redline_bundle(),
+        _custom_redline_precheck(evidence=["主体外区域显示透明棋盘格"]),
+    )
+
+    assert decision["hit"] is True
+    assert decision["hit_rules"] == ["transparent_checkerboard"]
+    assert decision["raw_hit"] is True
+    assert decision["unconfirmed_hit_rules"] == []
+
+
+def test_unconfirmed_redline_is_removed_only_from_scoring_copy() -> None:
+    bundle = _custom_redline_bundle()
+    precheck = _custom_redline_precheck(evidence=[])
+    decision = evaluate_v3_redline_prefilter(bundle, precheck)
+
+    assert decision["hit"] is False
+    assert decision["raw_hit"] is True
+    assert decision["unconfirmed_hit_rules"] == ["transparent_checkerboard"]
+
+    scoring_precheck = precheck_for_v3_scoring(
+        precheck,
+        v3_bundle=bundle,
+        redline_prefilter=decision,
+    )
+    assert scoring_precheck["production_fields"]["reason"] == []
+    assert scoring_precheck["decisive_signal_validation"] == {
+        "status": "valid",
+        "reasons": [],
+    }
+    assert precheck["production_fields"]["reason"] == ["透明棋盘格"]
+
+
+def test_mixed_redline_evidence_keeps_only_confirmed_rules_for_scoring() -> None:
+    bundle = _custom_redline_bundle()
+    bundle["contract"]["redline_policy"]["rules"].append(
+        {
+            "key": "hand_drawn_draft",
+            "signal": "production_fields.reason",
+            "match_any": ["手绘草稿"],
+            "exemptions": [],
+            "enabled": True,
+        }
+    )
+    precheck = _custom_redline_precheck(
+        evidence=["主体外区域显示透明棋盘格"]
+    )
+    precheck["redline_triggered"]["hand_drawn_draft"] = True
+    precheck["decisive_evidence"]["redline_triggered"]["hand_drawn_draft"] = []
+    precheck["production_fields"]["reason"].append("手绘草稿")
+    precheck["redline_signal_validation"] = {
+        "status": "needs_review",
+        "reasons": ["missing_evidence:redline:hand_drawn_draft"],
+    }
+    precheck["decisive_signal_validation"] = dict(
+        precheck["redline_signal_validation"]
+    )
+
+    decision = evaluate_v3_redline_prefilter(bundle, precheck)
+    scoring_precheck = precheck_for_v3_scoring(
+        precheck,
+        v3_bundle=bundle,
+        redline_prefilter=decision,
+    )
+
+    assert decision["hit"] is True
+    assert decision["hit_rules"] == ["transparent_checkerboard"]
+    assert decision["unconfirmed_hit_rules"] == ["hand_drawn_draft"]
+    assert scoring_precheck["production_fields"]["reason"] == ["透明棋盘格"]
+    assert scoring_precheck["decisive_signal_validation"] == {
+        "status": "valid",
+        "reasons": [],
+    }
+    assert precheck["production_fields"]["reason"] == ["透明棋盘格", "手绘草稿"]
+
+
+def test_shared_reason_value_does_not_restore_unconfirmed_rule() -> None:
+    bundle = _custom_redline_bundle()
+    bundle["contract"]["redline_policy"]["rules"].append(
+        {
+            "key": "checkerboard_without_evidence",
+            "signal": "production_fields.reason",
+            "match_any": ["透明棋盘格"],
+            "exemptions": [],
+            "enabled": True,
+        }
+    )
+    precheck = _custom_redline_precheck(
+        evidence=["主体外区域显示透明棋盘格"]
+    )
+    precheck["redline_triggered"]["checkerboard_without_evidence"] = True
+    precheck["decisive_evidence"]["redline_triggered"][
+        "checkerboard_without_evidence"
+    ] = []
+
+    decision = evaluate_v3_redline_prefilter(bundle, precheck)
+    scoring_precheck = precheck_for_v3_scoring(
+        precheck,
+        v3_bundle=bundle,
+        redline_prefilter=decision,
+    )
+    scoring_bundle = v3_bundle_for_scoring(
+        bundle,
+        redline_prefilter=decision,
+    )
+
+    assert decision["hit_rules"] == ["transparent_checkerboard"]
+    assert decision["unconfirmed_hit_rules"] == [
+        "checkerboard_without_evidence"
+    ]
+    assert scoring_precheck["production_fields"]["reason"] == ["透明棋盘格"]
+    scoring_rules = scoring_bundle["contract"]["redline_policy"]["rules"]
+    assert scoring_rules[0]["enabled"] is True
+    assert scoring_rules[1]["enabled"] is False
+    assert bundle["contract"]["redline_policy"]["rules"][1]["enabled"] is True
 
 
 # --------------------------------------------------------------------------- #

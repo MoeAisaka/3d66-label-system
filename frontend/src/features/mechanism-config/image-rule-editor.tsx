@@ -394,7 +394,7 @@ function RedlineEditor({
         <Plus />新增红线规则
       </Button>
       <p className="mt-2 text-[0.68rem] text-[var(--muted)]">
-        信号源固定为 production_fields.reason（调用A 事实字段）；match_any 必须是允许的 reason 枚举，否则校验会拦下。
+        信号源固定为 production_fields.reason（调用A 事实字段）；match_any 业务值由当前版本合同声明，平台只校验其结构。
       </p>
     </FieldCard>
   )

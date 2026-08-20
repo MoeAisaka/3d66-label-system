@@ -480,7 +480,30 @@ def _node_evidence(label: str, *, required: bool = False) -> dict[str, Any]:
     }
 
 
-def _production_field_nodes(source: Mapping[str, Any] | None) -> list[dict[str, Any]]:
+def _redline_reason_options(
+    v3_bundle: Mapping[str, Any] | None,
+) -> list[str] | None:
+    if not isinstance(v3_bundle, Mapping):
+        return None
+    contract = v3_bundle.get("contract")
+    policy = contract.get("redline_policy") if isinstance(contract, Mapping) else None
+    if not isinstance(policy, Mapping):
+        return None
+    options: list[str] = []
+    for rule in policy.get("rules") or []:
+        if not isinstance(rule, Mapping):
+            continue
+        for value in rule.get("match_any") or []:
+            if isinstance(value, str) and value.strip() and value.strip() not in options:
+                options.append(value.strip())
+    return options
+
+
+def _production_field_nodes(
+    source: Mapping[str, Any] | None,
+    *,
+    v3_bundle: Mapping[str, Any] | None = None,
+) -> list[dict[str, Any]]:
     """Build call-A nodes from an explicit or compatibility production contract."""
 
     raw_items: list[Any] = []
@@ -497,6 +520,7 @@ def _production_field_nodes(source: Mapping[str, Any] | None) -> list[dict[str, 
         ]
 
     nodes: list[dict[str, Any]] = []
+    frozen_reason_options = _redline_reason_options(v3_bundle)
     for index, raw in enumerate(raw_items):
         if not isinstance(raw, Mapping):
             continue
@@ -555,6 +579,8 @@ def _production_field_nodes(source: Mapping[str, Any] | None) -> list[dict[str, 
         for bound in ("options", "allowed_values", "values", "min", "max", "minimum", "maximum"):
             if bound not in node and bound in fallback:
                 node[bound] = deepcopy(fallback[bound])
+        if field_key == "reason" and frozen_reason_options is not None:
+            node["options"] = list(frozen_reason_options)
         nodes.append(node)
     return nodes
 
@@ -868,7 +894,10 @@ def freeze_contract_from_execution_snapshot(
         if isinstance(effective_keys, list):
             selected_keys = [str(item) for item in effective_keys if str(item)]
 
-    production_nodes = _production_field_nodes(production_fields)
+    production_nodes = _production_field_nodes(
+        production_fields,
+        v3_bundle=v3,
+    )
     dimension_nodes = _dimension_rule_nodes(
         dimension_definition,
         v3,

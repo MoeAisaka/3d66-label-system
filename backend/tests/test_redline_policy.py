@@ -213,9 +213,20 @@ def test_duplicate_rule_key_fails_closed() -> None:
     assert excinfo.value.code == "rule_key_duplicate"
 
 
-def test_invalid_reason_enum_in_match_any_fails_closed() -> None:
+def test_contract_owned_reason_value_is_not_blocked_by_platform_enum() -> None:
     policy = _inspiration_policy()
-    policy["rules"][0]["match_any"] = ["不存在的枚举"]
+    policy["rules"][0]["match_any"] = ["透明棋盘格"]
+
+    assert validate_redline_policy(policy) is None
+    result = evaluate_redlines(_precheck(["透明棋盘格"]), policy=policy)
+    assert result["hit"] is True
+    assert result["hit_rules"] == ["screenshot"]
+
+
+@pytest.mark.parametrize("value", [None, 3, True, ""])
+def test_malformed_reason_value_in_match_any_fails_closed(value: object) -> None:
+    policy = _inspiration_policy()
+    policy["rules"][0]["match_any"] = [value]
     with pytest.raises(RedlinePolicyError) as excinfo:
         validate_redline_policy(policy)
     assert excinfo.value.code == "match_value_invalid"
