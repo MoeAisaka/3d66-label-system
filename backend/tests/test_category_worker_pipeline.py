@@ -281,6 +281,9 @@ def test_confirmed_call_a_redline_returns_l5_without_call_b(
     assert outcome["level"] == "L5"
     assert outcome["scoring"]["hard_reject"] is True
     assert outcome["scoring"]["hit_rules"] == ["transparent_checkerboard"]
+    assert outcome["scoring"]["scoring_capabilities"]["format_version"] == (
+        "scoring-capabilities-v1"
+    )
 
 
 def test_unconfirmed_call_a_redline_continues_to_b_and_is_not_reapplied(
@@ -296,6 +299,9 @@ def test_unconfirmed_call_a_redline_continues_to_b_and_is_not_reapplied(
     assert outcome["scoring"]["redline_prefilter"]["raw_hit"] is True
     assert outcome["scoring"]["redline_prefilter"]["hit"] is False
     assert outcome["precheck"]["production_fields"]["reason"] == ["透明棋盘格"]
+    assert outcome["scoring"]["scoring_capabilities"]["format_version"] == (
+        "scoring-capabilities-v1"
+    )
 
 
 def _combined_payload() -> dict[str, object]:
@@ -497,19 +503,19 @@ def _run_model_3d_su_worker(
 
 
 @pytest.mark.parametrize(
-    ("grade", "expected_score", "expected_level"),
+    ("rule_profile", "expected_score", "expected_level"),
     [
-        (1, 0, "L4"),
-        (2, 25, "L4"),
-        (3, 50, "L3"),
-        (4, 75, "L2"),
-        (5, 100, "L1"),
+        (("severe_defect", "minor_defect"), 0, "L4"),
+        (("severe_defect",), 20, "L4"),
+        (("obvious_defect",), 50, "L3"),
+        (("minor_defect",), 80, "L1"),
+        ((), 100, "L1"),
     ],
 )
-def test_model_3d_su_worker_uses_static_b_and_maps_grade_anchors(
+def test_model_3d_su_worker_uses_rule_hits_and_preserves_evidence(
     monkeypatch,
     tmp_path,
-    grade,
+    rule_profile,
     expected_score,
     expected_level,
 ) -> None:
@@ -517,7 +523,16 @@ def test_model_3d_su_worker_uses_static_b_and_maps_grade_anchors(
         monkeypatch,
         tmp_path,
         dimensions={
-            key: {"grade": grade, "evidence": [f"{key} 可见表现符合 {grade} 档"]}
+            key: {
+                "hit_rules": [
+                    {
+                        "rule_id": rule_id,
+                        "confidence": "high",
+                        "evidence": f"{key} 命中 {rule_id}",
+                    }
+                    for rule_id in rule_profile
+                ]
+            }
             for key in MODEL_3D_SU_DIMENSION_KEYS
         },
     )
@@ -525,40 +540,57 @@ def test_model_3d_su_worker_uses_static_b_and_maps_grade_anchors(
     calls = outcome["calls"]
     assert outcome["job_status"] == "completed"
     assert len(calls) == 2
-    assert calls[1][0] == outcome["prompt_b_system"]
-    assert "hit_rules" not in calls[1][0]
-    assert "hit_rules" not in calls[1][1]
+    assert "规则命中判断" in calls[1][0]
+    assert "hit_rules" in calls[1][1]
+    assert "grade" not in calls[1][1]
     assert outcome["score"] == expected_score
     assert outcome["level"] == expected_level
     assert outcome["needs_review"] is False
     assert outcome["prompt_b_version"] == MODEL_3D_SU_CALL_B_VERSION
-    assert outcome["scoring"]["dimension_scoring_mode"] == "grade_fallback"
+    assert outcome["scoring"]["dimension_scoring_mode"] == "rule_deduction"
+    assert outcome["scoring"]["dimension_deduction_output"]["dimensions"][
+        MODEL_3D_SU_DIMENSION_KEYS[0]
+    ]["hit_rules"] == [
+        {
+            "rule_id": rule_id,
+            "confidence": "high",
+            "evidence": f"{MODEL_3D_SU_DIMENSION_KEYS[0]} 命中 {rule_id}",
+        }
+        for rule_id in rule_profile
+    ]
 
 
 @pytest.mark.parametrize(
     "malformation",
-    ["missing_dimension", "extra_dimension", "grade_out_of_range", "empty_evidence"],
+    ["missing_dimension", "extra_dimension", "unknown_rule", "empty_evidence"],
 )
-def test_model_3d_su_worker_sends_invalid_static_b_to_manual_review(
+def test_model_3d_su_worker_safe_fallbacks_on_invalid_rule_output(
     monkeypatch,
     tmp_path,
     malformation,
 ) -> None:
     dimensions = {
-        key: {"grade": 3, "evidence": [f"{key} 可见表现处于一般水平"]}
+        key: {"hit_rules": []}
         for key in MODEL_3D_SU_DIMENSION_KEYS
     }
     if malformation == "missing_dimension":
         dimensions.pop(MODEL_3D_SU_DIMENSION_KEYS[-1])
     elif malformation == "extra_dimension":
         dimensions["unexpected_dimension"] = {
-            "grade": 3,
-            "evidence": ["合同之外的多余维度"],
+            "hit_rules": [],
         }
-    elif malformation == "grade_out_of_range":
-        dimensions[MODEL_3D_SU_DIMENSION_KEYS[0]]["grade"] = 6
+    elif malformation == "unknown_rule":
+        dimensions[MODEL_3D_SU_DIMENSION_KEYS[0]]["hit_rules"] = [
+            {
+                "rule_id": "not_configured",
+                "confidence": "high",
+                "evidence": "合同之外的规则",
+            }
+        ]
     else:
-        dimensions[MODEL_3D_SU_DIMENSION_KEYS[0]]["evidence"] = []
+        dimensions[MODEL_3D_SU_DIMENSION_KEYS[0]]["hit_rules"] = [
+            {"rule_id": "minor_defect", "confidence": "high", "evidence": ""}
+        ]
     outcome = _run_model_3d_su_worker(
         monkeypatch,
         tmp_path,
@@ -566,11 +598,11 @@ def test_model_3d_su_worker_sends_invalid_static_b_to_manual_review(
     )
 
     assert outcome["job_status"] == "completed"
-    assert outcome["score"] is None
-    assert outcome["level"] is None
+    assert outcome["score"] == 100
+    assert outcome["level"] == "L1"
     assert outcome["needs_review"] is True
-    assert outcome["scoring"]["scoring_mode"] == "v3_authoritative_failed"
-    assert outcome["scoring"]["v3_error_code"] == "grade_output_invalid"
+    assert outcome["scoring"]["scoring_mode"] == "v3_authoritative"
+    assert "调用B失败" in "；".join(outcome["scoring"]["review_reasons"])
 
 
 def test_material_prompt_context_is_explicit_and_can_be_disabled() -> None:

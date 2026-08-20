@@ -20,9 +20,6 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from .schema_adapter import INSPIRATION_HARD_DEFECT_VALUES
-
-
 REDLINE_POLICY_FORMAT_VERSION = "redline-policy-v1"
 
 _RULE_KEY_PATTERN = re.compile(r"^[a-z][a-z0-9_]{2,39}$")
@@ -133,13 +130,13 @@ def validate_redline_policy(policy: Any) -> None:
             or len(required_defects) != len(set(required_defects))
             or any(
                 not isinstance(item, str)
-                or item not in INSPIRATION_HARD_DEFECT_VALUES
+                or not item.strip()
                 for item in required_defects
             )
         ):
             raise RedlinePolicyError(
                 "requires_any_hard_defect_invalid",
-                "红线规则 requires_any_hard_defect 必须是非空、去重且已冻结的硬伤枚举",
+                "红线规则 requires_any_hard_defect 必须是非空且去重的业务值字符串数组",
             )
 
 

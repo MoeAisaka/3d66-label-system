@@ -1,4 +1,4 @@
-import type { NodeCorrectionHistoryItem } from "@/lib/node-correction"
+import type { NodeCorrectionHistoryItem } from "./node-correction.ts"
 
 export type User = {
   id: number

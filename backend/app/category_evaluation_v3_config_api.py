@@ -554,7 +554,7 @@ def build_category_evaluation_v3_config_router(
             ),
             dimension_deduction_rules_json=canonical_json(
                 extract_profile_rule_mirror(
-                    profile_type, payload.subcategory_dimensions
+                    profile_type, payload.subcategory_dimensions, payload.contract
                 )
             ),
             media_penalty_enabled=profile_media_penalty_enabled(

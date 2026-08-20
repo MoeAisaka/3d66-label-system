@@ -346,6 +346,66 @@ def test_create_candidate_is_append_only_and_runtime_projection_is_unchanged(
         }
 
 
+def test_create_candidate_accepts_contract_owned_business_values(
+    client: TestClient,
+) -> None:
+    runtime = _create_runtime(client)
+    body = _valid_body()
+    body["display_name"] = "灵感图无旧白名单候选"
+    body["contract"]["redline_policy"]["rules"] = [
+        {
+            "key": "transparent_checkerboard",
+            "signal": "production_fields.reason",
+            "match_any": ["有透明棋盘格"],
+        },
+        {
+            "key": "unfinished_sketch",
+            "signal": "production_fields.reason",
+            "match_any": ["是未完成手绘草稿"],
+        },
+        {
+            "key": "low_value_plan",
+            "signal": "production_fields.reason",
+            "match_any": ["是低价值平面图或简笔图"],
+        },
+    ]
+    body["contract"]["common_modifiers"] = {
+        "format_version": "common-modifiers-v2",
+        "media_type_penalty": {
+            "enabled": True,
+            "baseline": "摄影成片",
+            "fallback": "其它媒介",
+            "aliases": {
+                "实景照片": "摄影成片",
+                "3D数字效果图": "模型渲染",
+            },
+            "penalties": {
+                "摄影成片": 0,
+                "模型渲染": -6,
+                "其它媒介": -2,
+            },
+        },
+        "high_score_veto": {"enabled": False},
+        "hard_defect_penalty": {
+            "enabled": True,
+            "per_hit": 10,
+            "source": "hard_defects",
+        },
+    }
+
+    response = client.post(
+        f"{_BASE}/inspiration_image/revisions",
+        json=_candidate_payload(runtime, body=body),
+    )
+
+    assert response.status_code == 201, response.text
+    candidate = response.json()
+    assert candidate["status"] == "candidate"
+    assert candidate["contract"]["common_modifiers"] == body["contract"][
+        "common_modifiers"
+    ]
+
+
 def test_revision_history_detail_and_child_candidate_are_ordered(
     client: TestClient,
 ) -> None:

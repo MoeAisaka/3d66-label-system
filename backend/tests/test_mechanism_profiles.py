@@ -112,6 +112,35 @@ def test_image_profile_reuses_existing_validation_and_derivation() -> None:
     )
 
 
+def test_contract_bound_rule_mirror_keeps_bonus_rules_and_dimension_caps() -> None:
+    contract = build_inspiration_v3_contract()
+    dimensions = build_inspiration_subcategory_dimensions()
+    for config in dimensions.values():
+        for dimension in config["common_group"]["schema_definition"]["dimensions"]:
+            dimension["dimension_score_cap"] = 92
+            dimension["bonus_rules"] = [
+                {
+                    "rule_id": "composition_clear",
+                    "description": "表现清晰完整且有充分证据",
+                    "bonus": 5,
+                    "tags": ["正向"],
+                }
+            ]
+
+    mirror = extract_profile_rule_mirror(
+        "image-rule-deduction-v1", dimensions, contract
+    )
+    assert mirror["format_version"] == "scoring-rule-mirror-v1"
+    first = mirror["dimensions"]["class_one"]["common_group"][
+        "visual_structure"
+    ]
+    assert first["dimension_score_cap"] == 92
+    assert first["bonus_rules"][0]["rule_id"] == "composition_clear"
+    assert first["deduction_rules"]
+    assert mirror["track_adjustments"] == contract.get("track_adjustments", {})
+    assert mirror["capabilities"]["execution_mode"] == "bonus_cap_v2"
+
+
 def test_proposal_profile_validates_markers_without_image_derivation() -> None:
     contract = proposal_contract()
     classification_map = proposal_classification_map()

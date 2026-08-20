@@ -40,9 +40,16 @@ COMMON_MODIFIERS_FORMAT_VERSION = "common-modifiers-v1"
 COMMON_MODIFIERS_V2_FORMAT_VERSION = "common-modifiers-v2"
 
 _TRACK_KEY_PATTERN = re.compile(r"^[a-z][a-z0-9_]{2,39}$")
-_MEDIA_PENALTY_KEYS = frozenset({"real_photo", "render_3d", "ai_image", "other"})
 _RULE_ID_PATTERN = re.compile(r"^[a-z][a-z0-9_-]{0,39}$")
 _HAN_PATTERN = re.compile(r"[\u3400-\u9fff]")
+
+
+def _is_finite_number(value: Any) -> bool:
+    return (
+        not isinstance(value, bool)
+        and isinstance(value, (int, float))
+        and math.isfinite(float(value))
+    )
 
 
 class DeductionRule(BaseModel):
@@ -343,6 +350,66 @@ def _validate_track_classification(block: Any) -> None:
         )
 
 
+def _validate_track_adjustments(value: Any, *, track_keys: set[str]) -> None:
+    """Validate optional operator-authored fixed track score adjustments."""
+    if value is None:
+        return
+    if not isinstance(value, dict):
+        raise CategoryEvaluationContractError(
+            "track_adjustments_not_object", "track_adjustments 必须是对象"
+        )
+    for track_key, adjustment in value.items():
+        if track_key not in track_keys:
+            raise CategoryEvaluationContractError(
+                "track_adjustment_track_unknown",
+                f"track_adjustments 包含未知赛道：{track_key}",
+            )
+        if not isinstance(adjustment, dict):
+            raise CategoryEvaluationContractError(
+                "track_adjustment_invalid",
+                f"赛道 {track_key} 的固定调整必须是对象",
+            )
+        keys = set(adjustment)
+        if not keys or not keys <= {"deduction", "bonus"}:
+            raise CategoryEvaluationContractError(
+                "track_adjustment_invalid",
+                f"赛道 {track_key} 的固定调整只能声明 deduction/bonus",
+            )
+        for name in keys:
+            amount = adjustment[name]
+            if not _is_finite_number(amount) or not 0 <= float(amount) <= 100:
+                raise CategoryEvaluationContractError(
+                    "track_adjustment_value_invalid",
+                    f"赛道 {track_key} 的 {name} 必须是 0 至 100 的有限数值",
+                )
+
+
+def _validate_hard_defect_penalty(value: Any) -> None:
+    if value is None:
+        return
+    if not isinstance(value, dict):
+        raise CategoryEvaluationContractError(
+            "hard_defect_penalty_not_object", "hard_defect_penalty 必须是对象"
+        )
+    if not isinstance(value.get("enabled", True), bool):
+        raise CategoryEvaluationContractError(
+            "hard_defect_penalty_enabled",
+            "hard_defect_penalty.enabled 必须是布尔值",
+        )
+    per_hit = value.get("per_hit")
+    if not _is_finite_number(per_hit) or not 0 <= float(per_hit) <= 100:
+        raise CategoryEvaluationContractError(
+            "hard_defect_penalty_value",
+            "hard_defect_penalty.per_hit 必须是 0 至 100 的有限数值",
+        )
+    source = value.get("source", "hard_defects")
+    if source not in {"hard_defects", "image_defects", "both"}:
+        raise CategoryEvaluationContractError(
+            "hard_defect_penalty_source",
+            "hard_defect_penalty.source 必须是 hard_defects、image_defects 或 both",
+        )
+
+
 def _validate_common_modifiers(block: Any) -> None:
     if not isinstance(block, dict):
         raise CategoryEvaluationContractError(
@@ -356,47 +423,86 @@ def _validate_common_modifiers(block: Any) -> None:
         )
 
     media = block.get("media_type_penalty")
-    if not isinstance(media, dict):
+    if media is not None and not isinstance(media, dict):
         raise CategoryEvaluationContractError(
             "media_penalty_not_object", "media_type_penalty 必须是对象"
         )
-    enabled = media.get("enabled", True)
-    if not isinstance(enabled, bool):
-        raise CategoryEvaluationContractError(
-            "media_penalty_enabled", "media_type_penalty.enabled 必须是布尔值"
-        )
-    penalties = media.get("penalties")
-    if not isinstance(penalties, dict) or set(penalties) != _MEDIA_PENALTY_KEYS:
-        raise CategoryEvaluationContractError(
-            "media_penalty_keys",
-            "media_type_penalty.penalties 必须且只能包含四个媒介键",
-        )
-    for name, value in penalties.items():
-        if not _is_int(value) or value > 0:
+    if isinstance(media, dict):
+        enabled = media.get("enabled", True)
+        if not isinstance(enabled, bool):
             raise CategoryEvaluationContractError(
-                "media_penalty_value",
-                f"media_type_penalty.penalties.{name} 必须是 <=0 的整数",
+                "media_penalty_enabled", "media_type_penalty.enabled 必须是布尔值"
             )
-    baseline = media.get("baseline")
-    if baseline not in _MEDIA_PENALTY_KEYS:
-        raise CategoryEvaluationContractError(
-            "media_penalty_baseline", "media_type_penalty.baseline 必须是允许的媒介键"
-        )
-    if penalties[baseline] != 0:
-        raise CategoryEvaluationContractError(
-            "media_penalty_baseline_nonzero", "基准媒介的降权必须为 0"
-        )
+        penalties = media.get("penalties")
+        if enabled and (not isinstance(penalties, dict) or not penalties):
+            raise CategoryEvaluationContractError(
+                "media_penalty_keys",
+                "启用的 media_type_penalty.penalties 必须是非空对象",
+            )
+        if penalties is not None and not isinstance(penalties, dict):
+            raise CategoryEvaluationContractError(
+                "media_penalty_keys", "media_type_penalty.penalties 必须是对象"
+            )
+        penalties = penalties or {}
+        for name, value in penalties.items():
+            if not isinstance(name, str) or not name.strip():
+                raise CategoryEvaluationContractError(
+                    "media_penalty_key_invalid", "媒介降权 key 必须是非空字符串"
+                )
+            if not _is_finite_number(value) or not -100 <= float(value) <= 0:
+                raise CategoryEvaluationContractError(
+                    "media_penalty_value",
+                    f"media_type_penalty.penalties.{name} 必须是 -100 至 0 的有限数值",
+                )
+        baseline = media.get("baseline")
+        if enabled and baseline not in penalties:
+            raise CategoryEvaluationContractError(
+                "media_penalty_baseline", "启用的媒介降权 baseline 必须引用 penalties 中的 key"
+            )
+        if baseline in penalties and penalties[baseline] != 0:
+            raise CategoryEvaluationContractError(
+                "media_penalty_baseline_nonzero", "基准媒介的降权必须为 0"
+            )
+        for field in ("fallback",):
+            value = media.get(field)
+            if value is not None and value not in penalties:
+                raise CategoryEvaluationContractError(
+                    "media_penalty_reference_unknown",
+                    f"media_type_penalty.{field} 必须引用 penalties 中的 key",
+                )
+        aliases = media.get("aliases", {})
+        if not isinstance(aliases, dict):
+            raise CategoryEvaluationContractError(
+                "media_penalty_aliases", "media_type_penalty.aliases 必须是对象"
+            )
+        for alias, target in aliases.items():
+            if (
+                not isinstance(alias, str)
+                or not alias.strip()
+                or not isinstance(target, str)
+                or target not in penalties
+            ):
+                raise CategoryEvaluationContractError(
+                    "media_penalty_aliases",
+                    "media_type_penalty.aliases 必须把非空字符串映射到 penalties key",
+                )
 
     veto = block.get("high_score_veto")
-    if not isinstance(veto, dict):
+    if veto is not None and not isinstance(veto, dict):
         raise CategoryEvaluationContractError(
             "veto_not_object", "high_score_veto 必须是对象"
         )
+    if veto is None:
+        return
     veto_enabled = veto.get("enabled", True)
     if not isinstance(veto_enabled, bool):
         raise CategoryEvaluationContractError(
             "veto_enabled", "high_score_veto.enabled 必须是布尔值"
         )
+    # Disabled optional primitives carry no execution requirements. This lets a
+    # new contract choose per-hit penalties without manufacturing a legacy cap.
+    if not veto_enabled:
+        return
     if format_version == COMMON_MODIFIERS_V2_FORMAT_VERSION:
         policy_version = veto.get("policy_version")
         if not isinstance(policy_version, str) or not policy_version.strip():
@@ -404,34 +510,37 @@ def _validate_common_modifiers(block: Any) -> None:
                 "veto_policy_version", "high_score_veto.policy_version 必须是非空字符串"
             )
         tiers = veto.get("tiers")
-        if not isinstance(tiers, dict) or set(tiers) != {"A", "B", "record_only"}:
+        if not isinstance(tiers, dict) or not tiers:
             raise CategoryEvaluationContractError(
-                "veto_tiers_invalid", "high_score_veto.tiers 必须定义 A、B、record_only"
+                "veto_tiers_invalid", "启用的 high_score_veto.tiers 必须是非空对象"
             )
         for tier_key, tier in tiers.items():
-            if not isinstance(tier, dict):
+            if not isinstance(tier_key, str) or not tier_key.strip() or not isinstance(tier, dict):
                 raise CategoryEvaluationContractError(
-                    "veto_tier_invalid", f"硬伤 tier {tier_key} 必须是对象"
+                    "veto_tier_invalid", "硬伤 tier key 必须是非空字符串且 tier 必须是对象"
                 )
             action = tier.get("action")
             cap_to = tier.get("cap_to")
-            if tier_key == "record_only":
-                if action != "record_only" or cap_to is not None:
+            if action == "record_only":
+                if cap_to is not None:
                     raise CategoryEvaluationContractError(
-                        "veto_tier_invalid", "record_only 必须只记录且不得配置 cap_to"
+                        "veto_tier_invalid", f"硬伤 tier {tier_key} 为 record_only 时不得配置 cap_to"
                     )
             elif action != "cap" or not _is_int(cap_to) or not 0 <= cap_to <= 100:
                 raise CategoryEvaluationContractError(
-                    "veto_tier_invalid", f"硬伤 tier {tier_key} 必须配置 0 至 100 的 cap_to"
+                    "veto_tier_invalid", f"硬伤 tier {tier_key} 必须声明 cap 或 record_only 动作"
                 )
-            if not isinstance(tier.get("target_band"), str) or not tier["target_band"].strip():
+            target_band = tier.get("target_band")
+            if target_band is not None and (
+                not isinstance(target_band, str) or not target_band.strip()
+            ):
                 raise CategoryEvaluationContractError(
                     "veto_tier_invalid", f"硬伤 tier {tier_key}.target_band 必须是非空字符串"
                 )
         rules = veto.get("rules")
-        if not isinstance(rules, list) or not rules:
+        if not isinstance(rules, list):
             raise CategoryEvaluationContractError(
-                "veto_rules_invalid", "high_score_veto.rules 必须是非空数组"
+                "veto_rules_invalid", "high_score_veto.rules 必须是数组"
             )
         seen_keys: set[str] = set()
         for rule in rules:
@@ -466,7 +575,7 @@ def _validate_common_modifiers(block: Any) -> None:
                     "veto_rule_invalid", f"硬伤 {key} 缺少说明"
                 )
         escalation = veto.get("escalation")
-        if (
+        if escalation is not None and (
             not isinstance(escalation, dict)
             or escalation.get("source_tier") not in tiers
             or escalation.get("target_tier") not in tiers
@@ -666,6 +775,17 @@ def validate_category_evaluation_contract(contract: Any) -> None:
 
     _validate_track_classification(contract["track_classification"])
     _validate_common_modifiers(contract["common_modifiers"])
+    track_keys = {
+        track["key"]
+        for track in contract["track_classification"]["tracks"]
+        if isinstance(track, dict) and isinstance(track.get("key"), str)
+    }
+    _validate_track_adjustments(
+        contract.get("track_adjustments"), track_keys=track_keys
+    )
+    _validate_hard_defect_penalty(
+        contract["common_modifiers"].get("hard_defect_penalty")
+    )
 
     try:
         level_scale = resolve_level_scale(contract)
@@ -708,3 +828,66 @@ def canonical_contract_hash(contract: dict[str, Any]) -> str:
 def canonical_contract_json(contract: dict[str, Any]) -> str:
     """Canonical JSON string of a contract (key-order independent)."""
     return _canonical_json(contract)
+
+
+def resolve_scoring_capabilities(
+    contract: dict[str, Any],
+    subcategory_dimensions: dict[str, Any],
+) -> dict[str, Any]:
+    """Resolve declared scoring primitives into one auditable execution plan."""
+    if not isinstance(contract, dict) or not isinstance(subcategory_dimensions, dict):
+        raise CategoryEvaluationContractError(
+            "scoring_capabilities_invalid", "评分能力解析需要合同和赛道维度对象"
+        )
+    from .dimension_composition import validate_subcategory_dimensions
+    from .dimension_deduction_bridge import rule_scoring_mode
+
+    track_modes: dict[str, str] = {}
+    for track_key, config in subcategory_dimensions.items():
+        if not isinstance(config, dict):
+            raise CategoryEvaluationContractError(
+                "scoring_capabilities_invalid",
+                f"赛道 {track_key} 的维度配置必须是对象",
+            )
+        validate_subcategory_dimensions(config)
+        try:
+            raw_mode = rule_scoring_mode(config)
+        except Exception as exc:
+            raise CategoryEvaluationContractError(
+                "scoring_capability_mode_mixed",
+                f"赛道 {track_key} 的维度规则模式不一致：{exc}",
+            ) from exc
+        track_modes[track_key] = (
+            "rule_deduction"
+            if raw_mode == "deduction_v1"
+            else "bonus_cap_v2"
+            if raw_mode == "bonus_cap_v2"
+            else "grade_fallback"
+        )
+    modes = set(track_modes.values())
+    mode = next(iter(modes), "grade_fallback") if len(modes) == 1 else "per_track"
+    primitives = ["redline"]
+    if contract.get("track_adjustments"):
+        primitives.append("track_adjustment")
+    if "rule_deduction" in modes:
+        primitives.append("dimension_rule_deduction")
+    if "bonus_cap_v2" in modes:
+        primitives.append("dimension_rule_bonus_cap")
+    media = (contract.get("common_modifiers") or {}).get("media_type_penalty")
+    if isinstance(media, dict) and media.get("enabled", True):
+        primitives.append("media_penalty")
+    hard_penalty = (contract.get("common_modifiers") or {}).get(
+        "hard_defect_penalty"
+    )
+    if isinstance(hard_penalty, dict) and hard_penalty.get("enabled", True):
+        primitives.append("hard_defect_penalty")
+    veto = (contract.get("common_modifiers") or {}).get("high_score_veto")
+    if isinstance(veto, dict) and veto.get("enabled", True):
+        primitives.append("hard_defect_veto")
+    primitives.append("level_scale")
+    return {
+        "format_version": "scoring-capabilities-v1",
+        "execution_mode": mode,
+        "track_modes": track_modes,
+        "primitives": primitives,
+    }

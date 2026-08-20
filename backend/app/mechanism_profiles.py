@@ -13,9 +13,12 @@ from typing import Any, Literal
 
 from sqlalchemy.orm import Session
 
-from .category_evaluation_contract import validate_category_evaluation_contract
+from .category_evaluation_contract import (
+    resolve_scoring_capabilities,
+    validate_category_evaluation_contract,
+)
 from .dimension_composition import validate_subcategory_dimensions
-from .dimension_deduction_bridge import extract_dimension_deduction_rules
+from .dimension_deduction_bridge import extract_dimension_scoring_rules
 from .proposal_text_contract import validate_proposal_text_contract
 from .redline_policy import evaluate_redlines
 from .subcategory_resolver import validate_classification_map
@@ -334,6 +337,14 @@ def _validate_image_artifacts(
                 f"赛道 {track_key} 的 sub_category_key 不匹配",
                 target=f"subcategory_dimensions.{track_key}",
             )
+    try:
+        resolve_scoring_capabilities(contract, subcategory_dimensions)
+    except ValueError as exc:
+        _raise_wrapped(
+            exc,
+            target="scoring_capabilities",
+            fallback_code="scoring_capabilities_invalid",
+        )
 
 
 def _validate_proposal_artifacts(
@@ -443,9 +454,37 @@ def validate_mechanism_artifacts(
 def extract_profile_rule_mirror(
     profile_type: str,
     subcategory_dimensions: dict[str, Any],
+    contract: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if profile_type in {IMAGE_PROFILE, THREE_D_PROFILE}:
-        return extract_dimension_deduction_rules(subcategory_dimensions)
+        dimensions = extract_dimension_scoring_rules(subcategory_dimensions)
+        if not isinstance(contract, dict):
+            return dimensions
+        capabilities = resolve_scoring_capabilities(contract, subcategory_dimensions)
+        common_modifiers = contract.get("common_modifiers")
+        return {
+            "format_version": "scoring-rule-mirror-v1",
+            "dimensions": dimensions,
+            "track_adjustments": contract.get("track_adjustments", {}),
+            "common_modifiers": {
+                "media_type_penalty": (
+                    common_modifiers.get("media_type_penalty", {})
+                    if isinstance(common_modifiers, dict)
+                    else {}
+                ),
+                "high_score_veto": (
+                    common_modifiers.get("high_score_veto", {})
+                    if isinstance(common_modifiers, dict)
+                    else {}
+                ),
+                "hard_defect_penalty": (
+                    common_modifiers.get("hard_defect_penalty", {})
+                    if isinstance(common_modifiers, dict)
+                    else {}
+                ),
+            },
+            "capabilities": capabilities,
+        }
     if profile_type == PROPOSAL_PROFILE:
         return {}
     raise MechanismProfileError(

@@ -60,6 +60,7 @@ def _canonical_artifacts(
         extract_profile_rule_mirror(
             profile_type,
             artifacts.subcategory_dimensions,
+            artifacts.contract,
         )
     )
     return (

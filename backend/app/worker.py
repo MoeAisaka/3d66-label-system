@@ -261,8 +261,8 @@ def _inspiration_authoritative_precheck_prompt_contract(
 灵感图权威前检合同（只返回可审计事实，不评分）：
 - redline_triggered：必须按本次冻结合同完整返回布尔值；键与可用 reason 的精确映射为 {redline_schema_json}。
 - reason：必须返回字符串数组，只能使用上方本次冻结合同声明的 match_any 值，并与对应布尔值双向一致；未命中返回[]。
-- hard_defects：必须返回枚举数组，不得省略或用 known_real_photo_defect 单独代替具体硬伤。
-- image_defects：必须返回数组，只能选 corner_small_watermark、subject_obscuring_watermark、large_area_watermark；未命中返回[]。
+- hard_defects：必须返回本次冻结合同声明的非空业务值字符串数组；未命中返回[]。
+- image_defects：必须返回本次冻结合同声明的非空业务值字符串数组；未命中返回[]。
 - decisive_evidence：必须分别返回 redline_triggered（与上方布尔值完全同键的证据数组）、hard_defects（key/evidence 对象数组）、image_defects（key/evidence 对象数组）。
 - decision_status：只能为 complete 或 uncertain；uncertain_fields 必须为字符串数组。
 - 任一决定性字段缺失、不确定或与证据冲突都会进入人工复核，禁止把缺失默认为 false/[]。
@@ -2306,6 +2306,7 @@ async def evaluate_job(job_id: int) -> None:
                 "subcategory_dimensions"
             ),
             "config_revision": v3_bundle.get("config_revision"),
+            "scoring_capabilities": scoring.get("scoring_capabilities"),
         }
         _v3_level_semantics = (
             scoring.get("level_semantics_version") or UNIFIED_LEVEL_SEMANTICS_VERSION

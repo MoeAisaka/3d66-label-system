@@ -204,3 +204,32 @@ def test_custom_redline_missing_evidence_is_separate_from_non_redline_validity()
         "missing_evidence:redline:transparent_checkerboard"
         in adapted["redline_signal_validation"]["reasons"]
     )
+
+
+def test_contract_owned_defect_values_are_not_rejected_by_adapter() -> None:
+    raw = _valid_decisive_payload()
+    raw["redline_triggered"] = {"transparent_checkerboard": False}
+    raw["reason"] = []
+    raw["hard_defects"] = ["自定义硬伤"]
+    raw["image_defects"] = ["自定义图像瑕疵"]
+    raw["decisive_evidence"]["redline_triggered"] = {
+        "transparent_checkerboard": [],
+    }
+    raw["decisive_evidence"]["hard_defects"] = [
+        {"key": "自定义硬伤", "evidence": "合同定义的可见证据"}
+    ]
+    raw["decisive_evidence"]["image_defects"] = [
+        {"key": "自定义图像瑕疵", "evidence": "合同定义的图像证据"}
+    ]
+
+    adapted = adapt_inspiration_call_a_precheck(
+        raw,
+        redline_policy=_custom_redline_policy(),
+    )
+
+    assert adapted["hard_defects"] == ["自定义硬伤"]
+    assert adapted["image_defects"] == ["自定义图像瑕疵"]
+    assert adapted["non_redline_signal_validation"] == {
+        "status": "valid",
+        "reasons": [],
+    }

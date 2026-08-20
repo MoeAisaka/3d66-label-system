@@ -4,8 +4,8 @@ import type {
   DimensionSchemaRegistryItem,
   EvaluationDimensionSchema,
   SampleTruth,
-} from "@/lib/types"
-import { levelForMinimumScore, type LevelThresholds } from "@/lib/level-thresholds"
+} from "./types.ts"
+import { levelForMinimumScore, type LevelThresholds } from "./level-thresholds.ts"
 
 type ScoreCap = { cap?: unknown }
 

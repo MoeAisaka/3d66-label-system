@@ -540,9 +540,9 @@ def apply_aesthetic_v3_rules(
     if final_score != score:
         caps.append({"rule": "track_cap", "cap_to": int(track["track_cap"])})
     modifiers = contract["common_modifiers"]
-    media = modifiers["media_type_penalty"]
-    if media.get("enabled"):
-        media_key, uncertain = _trait_to_media_key(precheck)
+    media = modifiers.get("media_type_penalty")
+    if isinstance(media, dict) and media.get("enabled"):
+        media_key, uncertain = _trait_to_media_key(precheck, media)
         penalty = int(media["penalties"].get(media_key, 0))
         final_score = max(0, final_score + penalty)
         if penalty:
@@ -582,8 +582,8 @@ def apply_aesthetic_v3_rules(
                         "resolved_cap_to": escalation_cap_to,
                     })
                 final_score = escalated
-    veto = modifiers["high_score_veto"]
-    if "tiers" in veto:
+    veto = modifiers.get("high_score_veto")
+    if isinstance(veto, dict) and veto.get("enabled", True) and "tiers" in veto:
         policy_precheck, applied_exemptions = _precheck_after_narrow_exemptions(
             precheck, normalized, exemptions
         )

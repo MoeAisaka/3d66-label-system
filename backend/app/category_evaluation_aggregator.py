@@ -55,8 +55,13 @@ _TRAIT_TO_MEDIA_KEY: dict[str, str] = {
     "3D数字效果图": "render_3d",
     "3D效果图": "render_3d",
     "AI图": "ai_image",
+    "ai_generated": "ai_image",
+    "AI生成": "ai_image",
     "其它": "other",
     "其他": "other",
+    "other": "other",
+    "3d_render": "render_3d",
+    "3D render": "render_3d",
 }
 _MEDIA_FALLBACK_KEY = "other"
 
@@ -121,7 +126,9 @@ def _resolve_track(contract: dict[str, Any], track_key: Any) -> dict[str, Any]:
     return tracks[resolved_key]
 
 
-def _trait_to_media_key(precheck: dict[str, Any]) -> tuple[str, bool]:
+def _trait_to_media_key(
+    precheck: dict[str, Any], media_config: dict[str, Any]
+) -> tuple[str, bool]:
     """Map ``precheck.production_fields.trait`` to a media-penalty key.
 
     Returns ``(media_key, uncertain)``.  A missing/unknown trait safely falls
@@ -129,11 +136,30 @@ def _trait_to_media_key(precheck: dict[str, Any]) -> tuple[str, bool]:
     """
     production_fields = precheck.get("production_fields")
     trait = production_fields.get("trait") if isinstance(production_fields, dict) else None
+    penalties = media_config.get("penalties")
+    if not isinstance(penalties, dict) or not penalties:
+        return "", True
     if isinstance(trait, str):
-        key = _TRAIT_TO_MEDIA_KEY.get(trait.strip())
-        if key is not None:
-            return key, False
-    return _MEDIA_FALLBACK_KEY, True
+        trait = trait.strip()
+        if trait in penalties:
+            return trait, False
+        aliases = media_config.get("aliases")
+        if isinstance(aliases, dict):
+            alias_target = aliases.get(trait)
+            if isinstance(alias_target, str) and alias_target in penalties:
+                return alias_target, False
+        legacy_key = _TRAIT_TO_MEDIA_KEY.get(trait)
+        if legacy_key in penalties:
+            return legacy_key, False
+    fallback = media_config.get("fallback")
+    if isinstance(fallback, str) and fallback in penalties:
+        return fallback, True
+    if _MEDIA_FALLBACK_KEY in penalties:
+        return _MEDIA_FALLBACK_KEY, True
+    baseline = media_config.get("baseline")
+    if isinstance(baseline, str) and baseline in penalties:
+        return baseline, True
+    return next(iter(penalties)), True
 
 
 def _apply_dimension_deductions(
@@ -201,6 +227,65 @@ def _apply_dimension_deductions(
     return score_after, evidence
 
 
+def _track_score_adjustment(
+    contract: dict[str, Any], track_key: str
+) -> tuple[float, dict[str, float], dict[str, Any]]:
+    raw = contract.get("track_adjustments")
+    adjustment = raw.get(track_key) if isinstance(raw, dict) else None
+    if not isinstance(adjustment, dict):
+        return 0.0, {"deduction": 0.0, "bonus": 0.0}, {
+            "primitive": "track_adjustment",
+            "track_key": track_key,
+            "deduction": 0.0,
+            "bonus": 0.0,
+            "applied": False,
+        }
+    deduction = float(adjustment.get("deduction", 0.0))
+    bonus = float(adjustment.get("bonus", 0.0))
+    return bonus - deduction, {"deduction": deduction, "bonus": bonus}, {
+        "primitive": "track_adjustment",
+        "track_key": track_key,
+        "deduction": deduction,
+        "bonus": bonus,
+        "applied": bool(deduction or bonus),
+    }
+
+
+def _apply_hard_defect_penalty(
+    precheck: dict[str, Any],
+    contract: dict[str, Any],
+) -> tuple[float, dict[str, Any]]:
+    policy = (contract.get("common_modifiers") or {}).get("hard_defect_penalty")
+    if not isinstance(policy, dict) or not policy.get("enabled", True):
+        return 0.0, {
+            "primitive": "hard_defect_penalty",
+            "enabled": False,
+            "hit_count": 0,
+            "per_hit": 0.0,
+            "deduction": 0.0,
+        }
+    source = policy.get("source", "hard_defects")
+    sources = ["hard_defects"] if source == "hard_defects" else (
+        ["image_defects"] if source == "image_defects" else ["hard_defects", "image_defects"]
+    )
+    hits: list[str] = []
+    for source_key in sources:
+        values = precheck.get(source_key)
+        if isinstance(values, list):
+            hits.extend(item for item in values if isinstance(item, str) and item.strip())
+    per_hit = float(policy["per_hit"])
+    deduction = per_hit * len(hits)
+    return -deduction, {
+        "primitive": "hard_defect_penalty",
+        "enabled": True,
+        "source": source,
+        "hit_count": len(hits),
+        "hits": hits,
+        "per_hit": per_hit,
+        "deduction": deduction,
+    }
+
+
 def _apply_v2_hard_defect_policy(
     *,
     precheck: dict[str, Any],
@@ -236,9 +321,10 @@ def _apply_v2_hard_defect_policy(
         tier = rule["severity"]
         tier_counts[tier] = tier_counts.get(tier, 0) + 1
 
-    escalation = veto["escalation"]
-    escalated = (
-        tier_counts.get(escalation["source_tier"], 0)
+    escalation = veto.get("escalation")
+    escalated = bool(
+        isinstance(escalation, dict)
+        and tier_counts.get(escalation["source_tier"], 0)
         >= escalation["minimum_distinct_hits"]
     )
     resolved_tier: str | None = None
@@ -256,7 +342,9 @@ def _apply_v2_hard_defect_policy(
                 key=lambda tier: tiers[tier]["cap_to"],
             )
         elif matched:
-            resolved_tier = "record_only"
+            # A contract may name its record-only tier freely. Preserve the
+            # policy's first matching severity instead of assuming a legacy key.
+            resolved_tier = matched[0]["severity"]
 
     cap_to = (
         tiers[resolved_tier]["cap_to"]
@@ -266,7 +354,7 @@ def _apply_v2_hard_defect_policy(
     )
     modifier_applied = bool(modifiers and matched)
     action = {
-        "policy_version": veto["policy_version"],
+        "policy_version": veto.get("policy_version"),
         "matched_rules": [
             {
                 "key": rule["key"],
@@ -394,14 +482,36 @@ def aggregate_category_evaluation(
         dimension_note,
     ))
 
+    common_modifier_evidence: list[dict[str, Any]] = []
+    track_adjustment_delta, track_adjustment, track_adjustment_evidence = (
+        _track_score_adjustment(contract, resolved_track_key)
+    )
+    score_after_track_adjustment = score_after_dimensions + track_adjustment_delta
+    if track_adjustment_evidence["applied"]:
+        steps.append(_step(
+            "track_adjustment",
+            score_after_track_adjustment,
+            f"赛道固定调整：加 {track_adjustment['bonus']}，扣 {track_adjustment['deduction']}",
+        ))
+        common_modifier_evidence.append(track_adjustment_evidence)
+    else:
+        steps.append(_step(
+            "track_adjustment_skipped",
+            score_after_track_adjustment,
+            "赛道未声明固定调整",
+        ))
+
     # Step 5 — fixed media-type penalty (common modifier).
-    media_config = contract["common_modifiers"]["media_type_penalty"]
+    common_modifiers = contract.get("common_modifiers") or {}
+    media_config = common_modifiers.get("media_type_penalty")
+    if not isinstance(media_config, dict):
+        media_config = {"enabled": False}
     media_enabled = media_config.get("enabled", True)
     if media_enabled:
-        media_key, media_uncertain = _trait_to_media_key(precheck)
+        media_key, media_uncertain = _trait_to_media_key(precheck, media_config)
         penalties = media_config["penalties"]
         media_penalty = penalties[media_key]
-        score_after_media = score_after_dimensions + float(media_penalty)
+        score_after_media = score_after_track_adjustment + float(media_penalty)
         media_note = f"媒介类型 {media_key}，固定扣分 {media_penalty}"
         if media_uncertain:
             media_note += "（trait 缺失/未知，安全落 other 并记不确定性）"
@@ -409,19 +519,45 @@ def aggregate_category_evaluation(
     else:
         media_key = None
         media_penalty = 0
-        score_after_media = score_after_dimensions
+        score_after_media = score_after_track_adjustment
         steps.append(_step("media_skipped", score_after_media, "媒介降权已关闭，节点 penalty=0"))
 
+    if media_enabled:
+        common_modifier_evidence.append({
+            "primitive": "media_penalty",
+            "enabled": True,
+            "media_key": media_key,
+            "penalty": float(media_penalty),
+        })
+
+    hard_defect_delta, hard_defect_evidence = _apply_hard_defect_penalty(
+        precheck, contract
+    )
+    score_after_hard_defect = score_after_media + hard_defect_delta
+    if hard_defect_evidence["enabled"]:
+        steps.append(_step(
+            "hard_defect_penalty",
+            score_after_hard_defect,
+            f"硬伤逐条扣分：命中 {hard_defect_evidence['hit_count']} 条，每条扣 {hard_defect_evidence['per_hit']}",
+        ))
+        common_modifier_evidence.append(hard_defect_evidence)
+
     # Step 6 — hard-defect policy. v1 is replay-only; v2 is monotonic.
-    veto = contract["common_modifiers"]["high_score_veto"]
+    veto = common_modifiers.get("high_score_veto")
+    if not isinstance(veto, dict):
+        veto = {"enabled": False}
     hard_defect_action: dict[str, Any] | None = None
     if contract["common_modifiers"]["format_version"] == COMMON_MODIFIERS_V2_FORMAT_VERSION:
-        score_after_veto, hard_defect_action = _apply_v2_hard_defect_policy(
-            precheck=precheck,
-            veto=veto,
-            score=score_after_media,
-        )
-        if hard_defect_action["cap_to"] is not None:
+        if veto.get("enabled", True):
+            score_after_veto, hard_defect_action = _apply_v2_hard_defect_policy(
+                precheck=precheck,
+                veto=veto,
+                score=score_after_hard_defect,
+            )
+        else:
+            score_after_veto = score_after_hard_defect
+            steps.append(_step("veto_skipped", score_after_veto, "高分硬伤封顶已关闭"))
+        if hard_defect_action is not None and hard_defect_action["cap_to"] is not None:
             caps.append({
                 "cap": "hard_defect_severity",
                 "reason": (
@@ -436,9 +572,9 @@ def aggregate_category_evaluation(
                 f"硬伤 tier {hard_defect_action['resolved_tier']}："
                 f"封顶至 {hard_defect_action['cap_to']}",
             ))
-        elif hard_defect_action["resolved_tier"] == "record_only":
+        elif hard_defect_action is not None and hard_defect_action["resolved_tier"] is not None:
             steps.append(_step("veto", score_after_veto, "仅命中记录型缺陷，不压分"))
-        else:
+        elif hard_defect_action is not None:
             steps.append(_step("veto", score_after_veto, "无配置内硬伤信号"))
     else:
         veto_enabled = veto.get("enabled", True)
@@ -456,12 +592,12 @@ def aggregate_category_evaluation(
             and (configured_hard_defects is None or item in configured_hard_defects)
             for item in hard_defects
         )
-        score_after_veto = score_after_media
-        if veto_enabled and score_after_media >= veto_threshold and has_hard_defects:
-            score_after_veto = min(score_after_media, float(veto_cap_to))
+        score_after_veto = score_after_hard_defect
+        if veto_enabled and score_after_hard_defect >= veto_threshold and has_hard_defects:
+            score_after_veto = min(score_after_hard_defect, float(veto_cap_to))
             caps.append({
                 "cap": "high_score_veto",
-                "reason": f"分数 {score_after_media} 达到 {veto_threshold} 且命中硬伤"
+                "reason": f"分数 {score_after_hard_defect} 达到 {veto_threshold} 且命中硬伤"
                 f" {hard_defects}，强制压至 {veto_cap_to}",
             })
             steps.append(_step(
@@ -487,7 +623,7 @@ def aggregate_category_evaluation(
     steps.append(_step("track_cap", score, f"赛道封顶至 {track_cap} 后取整"))
 
     # Step 8 — score → L level (doc-l5-worst).  raw_level ignores the veto cap.
-    raw_score = _clamp_score(min(score_after_media, float(track_cap)))
+    raw_score = _clamp_score(min(score_after_hard_defect, float(track_cap)))
     raw_level = _score_to_level(raw_score, thresholds)
     level = _score_to_level(score, thresholds)
     steps.append(_step(
@@ -509,6 +645,9 @@ def aggregate_category_evaluation(
         "level": level,
         "raw_level": raw_level,
         "hard_defect_action": hard_defect_action,
+        "track_adjustment": track_adjustment,
+        "hard_defect_penalty": -hard_defect_delta,
+        "common_modifier_evidence": common_modifier_evidence,
         "hit_rules": list(redline["hit_rules"]),
         "dimension_evidence": dim_evidence,
         "media_penalty_enabled": bool(media_enabled),

@@ -127,7 +127,7 @@ def test_model_3d_su_has_three_tracks_and_document_weights() -> None:
             "require_exact_keys": True,
             "evidence_required": True,
         }
-        assert rule_scoring_mode(config) == "grade_fallback"
+        assert rule_scoring_mode(config) == "deduction_v1"
 
 
 def test_model_3d_su_is_registered_as_an_image_category() -> None:

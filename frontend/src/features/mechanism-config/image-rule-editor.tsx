@@ -463,7 +463,7 @@ function TrackEditor({
   )
 }
 
-const MEDIA_LABELS: Record<string, string> = {
+const LEGACY_MEDIA_LABELS: Record<string, string> = {
   real_photo: "实拍照片",
   render_3d: "3D 效果图",
   ai_image: "AI 图片",
@@ -480,6 +480,7 @@ function MediaPenaltyEditor({
   const config = draft.contract?.common_modifiers?.media_type_penalty ?? {}
   const enabled = config.enabled !== false
   const penalties = config.penalties ?? {}
+  const mediaEntries = Object.entries(penalties)
   return (
     <FieldCard title="媒介降权（可独立关闭）">
       <label className="mb-3 flex items-center gap-2 text-xs font-semibold">
@@ -493,21 +494,71 @@ function MediaPenaltyEditor({
         启用媒介降权
       </label>
       <div className={`grid gap-2 sm:grid-cols-2 lg:grid-cols-4 ${enabled ? "" : "opacity-45"}`}>
-        {Object.entries(MEDIA_LABELS).map(([key, label]) => (
-          <label key={key} className="grid gap-1 text-xs">
-            <span className="font-semibold">{label}扣分值</span>
+        {mediaEntries.map(([key, value]) => (
+          <div key={key} className="grid gap-1 border border-[var(--line)] p-2 text-xs">
+            <div className="flex items-center gap-2">
+              <input
+                className={`${inputClass} min-w-0 flex-1`}
+                disabled={!enabled}
+                aria-label={`${key}媒介名称`}
+                value={key}
+                onChange={(event) => onPatch((next) => {
+                  const media = next.contract.common_modifiers.media_type_penalty
+                  const nextKey = event.target.value.trim()
+                  if (!nextKey || nextKey === key || Object.prototype.hasOwnProperty.call(media.penalties ?? {}, nextKey)) return
+                  const nextPenalties = { ...(media.penalties ?? {}) }
+                  delete nextPenalties[key]
+                  nextPenalties[nextKey] = value
+                  media.penalties = nextPenalties
+                  if (media.baseline === key) media.baseline = nextKey
+                  if (media.fallback === key) media.fallback = nextKey
+                  if (media.aliases && typeof media.aliases === "object") {
+                    for (const alias of Object.keys(media.aliases)) {
+                      if (media.aliases[alias] === key) media.aliases[alias] = nextKey
+                    }
+                  }
+                })}
+              />
+              <IconButton
+                danger
+                title={`删除媒介 ${key}`}
+                onClick={() => onPatch((next) => {
+                  const media = next.contract.common_modifiers.media_type_penalty
+                  if (media.penalties) delete media.penalties[key]
+                  if (media.baseline === key) media.baseline = Object.keys(media.penalties ?? {})[0] ?? ""
+                  if (media.fallback === key) media.fallback = undefined
+                  if (media.aliases && typeof media.aliases === "object") {
+                    for (const alias of Object.keys(media.aliases)) {
+                      if (media.aliases[alias] === key) delete media.aliases[alias]
+                    }
+                  }
+                })}
+              />
+            </div>
+            <span className="font-semibold">{LEGACY_MEDIA_LABELS[key] ?? "媒介扣分值"}</span>
             <input
               type="number"
               className={numberClass}
               disabled={!enabled}
-              value={penalties[key] ?? 0}
+              value={Number(value ?? 0)}
               onChange={(event) => onPatch((next) => {
                 next.contract.common_modifiers.media_type_penalty.penalties[key] = Number(event.target.value)
               })}
             />
-          </label>
+          </div>
         ))}
       </div>
+      <Button
+        variant="secondary"
+        size="sm"
+        onClick={() => onPatch((next) => {
+          const media = next.contract.common_modifiers.media_type_penalty
+          media.penalties = { ...(media.penalties ?? {}), 新媒介: 0 }
+          if (!media.baseline) media.baseline = "新媒介"
+        })}
+      >
+        <Plus />新增媒介
+      </Button>
       {!enabled && <p className="mt-2 text-[0.68rem] text-[var(--muted)]">关闭后聚合器跳过此节点，媒介扣分固定为 0。</p>}
     </FieldCard>
   )

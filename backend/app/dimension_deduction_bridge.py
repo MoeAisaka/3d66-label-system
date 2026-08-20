@@ -96,8 +96,6 @@ def has_deduction_rules(config: Any) -> bool:
 def rule_scoring_mode(config: Any) -> str:
     """Return the validated raw-field mode without mutating the contract."""
     dimensions = dimension_definitions(config)
-    if isinstance(config, dict) and isinstance(config.get("grade_output_contract"), dict):
-        return "grade_fallback"
     if not dimensions:
         return "grade_fallback"
     modes = {dimension_rule_mode(dimension) for dimension in dimensions}
@@ -620,5 +618,40 @@ def extract_dimension_deduction_rules(
                 dimension["key"]: list(dimension.get("deduction_rules") or [])
                 for dimension in dimensions
             }
+        extracted[track_key] = track
+    return extracted
+
+
+def extract_dimension_scoring_rules(
+    subcategory_dimensions: dict[str, Any],
+) -> dict[str, Any]:
+    """Build a complete executable rule mirror for a frozen contract.
+
+    The historical ``extract_dimension_deduction_rules`` shape intentionally
+    remains a rule-id-to-list mapping for old migrations and seed rows.  New
+    contract-bound revisions use this richer shape so positive rules and
+    per-dimension caps cannot disappear between candidate creation and replay.
+    """
+    extracted: dict[str, Any] = {}
+    for track_key, config in subcategory_dimensions.items():
+        track: dict[str, Any] = {}
+        for group_name in ("common_group", "specific_group"):
+            group = config.get(group_name) if isinstance(config, dict) else None
+            schema = group.get("schema_definition") if isinstance(group, dict) else None
+            dimensions = schema.get("dimensions") if isinstance(schema, dict) else None
+            if not isinstance(dimensions, list):
+                continue
+            track[group_name] = {}
+            for dimension in dimensions:
+                if not isinstance(dimension, dict):
+                    continue
+                rule_set: dict[str, Any] = {
+                    "deduction_rules": list(dimension.get("deduction_rules") or [])
+                }
+                if "bonus_rules" in dimension:
+                    rule_set["bonus_rules"] = list(dimension.get("bonus_rules") or [])
+                if "dimension_score_cap" in dimension:
+                    rule_set["dimension_score_cap"] = dimension["dimension_score_cap"]
+                track[group_name][dimension["key"]] = rule_set
         extracted[track_key] = track
     return extracted

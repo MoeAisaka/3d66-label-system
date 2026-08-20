@@ -207,7 +207,7 @@ def test_empty_tracks_fails_closed() -> None:
 
 def test_media_penalty_missing_key_fails_closed() -> None:
     contract = _contract()
-    del contract["common_modifiers"]["media_type_penalty"]["penalties"]["other"]
+    contract["common_modifiers"]["media_type_penalty"]["penalties"] = {}
     with pytest.raises(CategoryEvaluationContractError) as excinfo:
         validate_category_evaluation_contract(contract)
     assert excinfo.value.code == "media_penalty_keys"

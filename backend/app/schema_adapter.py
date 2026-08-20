@@ -206,10 +206,7 @@ def adapt_inspiration_call_a_precheck(
             redline_review_reasons.append(f"redline_reason_conflict:{key}")
 
     hard_defects = precheck.get("hard_defects")
-    if not isinstance(hard_defects, list) or any(
-        not isinstance(item, str) or item not in _INSPIRATION_HARD_DEFECT_VALUES
-        for item in hard_defects
-    ):
+    if not _is_business_value_list(hard_defects):
         if "hard_defects" in precheck:
             non_redline_review_reasons.append("invalid:hard_defects")
         hard_hits: set[str] = set()
@@ -221,10 +218,7 @@ def adapt_inspiration_call_a_precheck(
             )
 
     image_defects = precheck.get("image_defects")
-    if not isinstance(image_defects, list) or any(
-        not isinstance(item, str) or item not in _INSPIRATION_IMAGE_DEFECT_VALUES
-        for item in image_defects
-    ):
+    if not _is_business_value_list(image_defects):
         if "image_defects" in precheck:
             non_redline_review_reasons.append("invalid:image_defects")
         image_hits: set[str] = set()

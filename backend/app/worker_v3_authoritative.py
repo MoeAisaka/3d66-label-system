@@ -22,6 +22,7 @@ from .level_semantics import UNIFIED_LEVEL_SEMANTICS_VERSION
 # 复用影子模块已有的只读加载与 grade 映射机件（不另造）。
 from .mechanism_profiles import (
     MechanismProfileError,
+    resolve_scoring_capabilities,
     validate_mechanism_artifacts,
 )
 
@@ -514,6 +515,15 @@ async def evaluate_v3_authoritative(
             raise V3AuthoritativeError(
                 "proposal_text_engine_failed", f"PDF方案文本权威定级失败：{exc}"
             ) from exc
+    try:
+        scoring_capabilities = resolve_scoring_capabilities(
+            contract, subcategory_dimensions
+        )
+    except Exception as exc:  # noqa: BLE001 - execution plan must fail closed
+        raise V3AuthoritativeError(
+            "scoring_capabilities_invalid",
+            f"v3 评分能力清单无效：{exc}",
+        ) from exc
     authoritative_precheck = contract.get("authoritative_precheck_contract")
     if (
         contract.get("category_key") == "inspiration_image"
@@ -541,10 +551,12 @@ async def evaluate_v3_authoritative(
             AestheticFoundationError, apply_aesthetic_v3_rules,
         )
         try:
-            return apply_aesthetic_v3_rules(
+            result = apply_aesthetic_v3_rules(
                 contract=contract, classification_map=classification_map,
                 precheck=precheck_obj, foundation=aesthetic,
             )
+            result["scoring_capabilities"] = scoring_capabilities
+            return result
         except AestheticFoundationError as exc:
             raise V3AuthoritativeError(exc.code, str(exc)) from exc
 
@@ -619,6 +631,7 @@ async def evaluate_v3_authoritative(
                 )
                 result["dimension_deduction_output"] = rule_dimension_output
                 result["dimension_scoring_mode"] = public_scoring_mode
+                result["scoring_capabilities"] = scoring_capabilities
                 return result
             except Exception as exc:  # noqa: BLE001 - deterministic contract fault
                 raise V3AuthoritativeError(
@@ -692,6 +705,7 @@ async def evaluate_v3_authoritative(
 
     outcome["result"]["dimension_scoring_mode"] = "grade_fallback"
     outcome["result"]["resolved_track_key"] = resolved_track_key
+    outcome["result"]["scoring_capabilities"] = scoring_capabilities
     return outcome["result"]
 
 
@@ -809,12 +823,16 @@ def build_v3_authoritative_scoring(v3_result: dict, *, precheck: Any) -> dict:
         "track_key": v3_result.get("track_key"),
         "steps": v3_result.get("steps") or [],
         "dimension_scoring_mode": v3_result.get("dimension_scoring_mode"),
+        "scoring_capabilities": v3_result.get("scoring_capabilities"),
         "dimension_deduction_output": public_dimension_output,
         # Worker consumes then removes this transport-only field before
         # persisting scoring_json.  The provider payload belongs exclusively in
         # raw_response_b and must not be duplicated into the decision graph.
         "_dimension_deduction_raw_payload": raw_dimension_payload,
         "dimension_evidence": v3_result.get("dimension_evidence"),
+        "track_adjustment": v3_result.get("track_adjustment"),
+        "hard_defect_penalty": v3_result.get("hard_defect_penalty"),
+        "common_modifier_evidence": v3_result.get("common_modifier_evidence") or [],
         "media_penalty_enabled": v3_result.get("media_penalty_enabled"),
         "media_key": v3_result.get("media_key"),
         "media_penalty": v3_result.get("media_penalty"),
