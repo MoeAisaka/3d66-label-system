@@ -17,6 +17,10 @@ from app.database import Base
 from app.doubao import DoubaoResponse
 from app.main import _category_execution_snapshot
 from app.media import PdfPreprocessResult
+from app.inspiration_aesthetic_foundation import (
+    DIMENSION_KEYS as INSPIRATION_DIMENSION_KEYS,
+    FOUNDATION_VERSION,
+)
 from app.model_3d_su_category_seed import (
     MODEL_3D_SU_CALL_B_VERSION,
     MODEL_3D_SU_CATEGORY_KEY,
@@ -24,6 +28,7 @@ from app.model_3d_su_category_seed import (
 )
 from app.models import (
     Asset,
+    CategoryEvaluationV3Config,
     EvaluationCategoryProfile,
     EvaluationJob,
     EvaluationResult,
@@ -41,6 +46,256 @@ MODEL_3D_SU_DIMENSION_KEYS = (
     "design_trend",
     "visual_composition",
 )
+
+
+def _inspiration_call_a_payload(*, evidence: list[str]) -> dict[str, object]:
+    return {
+        "redline_triggered": {"transparent_checkerboard": True},
+        "reason": ["透明棋盘格"],
+        "hard_defects": [],
+        "image_defects": [],
+        "decisive_evidence": {
+            "redline_triggered": {"transparent_checkerboard": evidence},
+            "hard_defects": [],
+            "image_defects": [],
+        },
+        "decision_status": "complete",
+        "uncertain_fields": [],
+        "track_classification": "class_one",
+        "track_confidence": 0.95,
+        "media_type": "real_photo",
+        "media_confidence": 0.9,
+        "trait": "实景照片",
+        "primary_category": "建筑设计",
+        "secondary_category": "商业建筑",
+        "classification_confidence": 0.9,
+    }
+
+
+def _inspiration_foundation_payload(score: int = 80) -> dict[str, object]:
+    return {
+        "contract_version": FOUNDATION_VERSION,
+        "aesthetic_score": score,
+        "dimensions": {
+            key: {
+                "grade": 3,
+                "evidence": [f"{key} 可见证据"],
+                "shortcomings": [f"{key} 可见不足"],
+            }
+            for key in INSPIRATION_DIMENSION_KEYS
+        },
+        "overall_evidence": ["整体构图与材质表现可见"],
+        "confidence": 0.82,
+    }
+
+
+def _run_inspiration_redline_worker(
+    monkeypatch,
+    tmp_path,
+    *,
+    evidence: list[str],
+) -> dict[str, object]:
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    db = Session(engine, expire_on_commit=False)
+    source_path = tmp_path / ("confirmed.jpg" if evidence else "unconfirmed.jpg")
+    source_path.write_bytes(b"jpeg")
+    asset = Asset(
+        original_name=source_path.name,
+        stored_name=source_path.name,
+        mime_type="image/jpeg",
+        size_bytes=source_path.stat().st_size,
+        sha256=("7" if evidence else "8") * 64,
+        category_key="inspiration_image",
+    )
+    model = ModelConfig(
+        provider="custom-compatible",
+        model_id="vision-inspiration-prefilter",
+        encrypted_api_key="credential-reference",
+        high_risk_review_enabled=False,
+        active=True,
+    )
+    db.add_all([asset, model])
+    db.flush()
+    v3_bundle = add_active_v3_contract(db, "inspiration_image")
+    v3_bundle["contract"]["redline_policy"]["rules"] = [
+        {
+            "key": "transparent_checkerboard",
+            "signal": "production_fields.reason",
+            "match_any": ["透明棋盘格"],
+            "exemptions": [],
+            "enabled": True,
+        }
+    ]
+    config = db.scalar(
+        select(CategoryEvaluationV3Config).where(
+            CategoryEvaluationV3Config.category_key == "inspiration_image"
+        )
+    )
+    config.contract_json = json.dumps(v3_bundle["contract"], ensure_ascii=False)
+    bindings = v3_bundle["contract"]["prompt_bindings"]
+    prompt_a = PromptVersion(
+        category_key="inspiration_image",
+        pipeline_scope="shared",
+        stage="A",
+        name="灵感图前检",
+        version=bindings["call_a_version"],
+        system_prompt="return inspiration precheck json",
+        user_prompt="evaluate {{image_metadata}}",
+        rubric_version="inspiration-rubric-v1",
+        status="published",
+    )
+    prompt_b = PromptVersion(
+        category_key="inspiration_image",
+        pipeline_scope="shared",
+        stage="B",
+        name="灵感图美感评测",
+        version=bindings["call_b_version"],
+        system_prompt="return inspiration aesthetic json",
+        user_prompt="evaluate {{precheck_json}}",
+        rubric_version="inspiration-rubric-v1",
+        status="published",
+    )
+    profile = EvaluationCategoryProfile(
+        category_key="inspiration_image",
+        display_name="灵感图",
+        model_config_id=model.id,
+        status="active",
+        allowed_mime_types_json='["image/jpeg"]',
+        preprocess_config_json='{"preprocess":"image"}',
+        pipeline_config_json=json.dumps(default_pipeline("space_image")),
+        rubric_version="inspiration-rubric-v1",
+    )
+    db.add_all([prompt_a, prompt_b, profile])
+    db.flush()
+    profile.prompt_a_id = prompt_a.id
+    profile.prompt_b_id = prompt_b.id
+    snapshot = _category_execution_snapshot(
+        profile,
+        prompt_a_id=prompt_a.id,
+        prompt_b_id=prompt_b.id,
+        model_config=model,
+        v3_authoritative_bundle=v3_bundle,
+    )
+    job = EvaluationJob(
+        asset_id=asset.id,
+        category_key="inspiration_image",
+        category_profile_snapshot_json=snapshot,
+        prompt_a_id=prompt_a.id,
+        prompt_b_id=prompt_b.id,
+        status="processing",
+    )
+    db.add(job)
+    db.commit()
+
+    @contextmanager
+    def test_scope():
+        try:
+            yield db
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+
+    calls: list[str] = []
+    call_a_user_prompts: list[str] = []
+
+    class FakeClient:
+        def __init__(self, _config) -> None:
+            pass
+
+        async def chat_json(self, _system_prompt, user_prompt, **_kwargs):
+            calls.append("A")
+            call_a_user_prompts.append(user_prompt)
+            parsed = _inspiration_call_a_payload(evidence=evidence)
+            return DoubaoResponse(
+                parsed=parsed,
+                raw_text=json.dumps(parsed, ensure_ascii=False),
+                raw_payload=parsed,
+            )
+
+        async def chat_json_images(self, _system_prompt, _samples, **_kwargs):
+            calls.append("B")
+            parsed = _inspiration_foundation_payload()
+            return DoubaoResponse(
+                parsed=parsed,
+                raw_text=json.dumps(parsed, ensure_ascii=False),
+                raw_payload=parsed,
+            )
+
+    monkeypatch.setattr(worker, "session_scope", test_scope)
+    monkeypatch.setattr(worker, "settings", SimpleNamespace(upload_dir=tmp_path))
+    monkeypatch.setattr(worker, "DoubaoClient", FakeClient)
+    monkeypatch.setattr(worker, "_is_inspiration_baseline_job", lambda _job: True)
+    monkeypatch.setattr(
+        worker,
+        "prepare_model_image",
+        lambda *_args, **_kwargs: (source_path, "image/jpeg"),
+    )
+    from app import inspiration_aesthetic_foundation
+
+    monkeypatch.setattr(
+        inspiration_aesthetic_foundation,
+        "anchor_request_from_contract",
+        lambda *_args, **_kwargs: (
+            [("待评图片", source_path, "image/jpeg")],
+            1,
+        ),
+    )
+    try:
+        asyncio.run(worker.evaluate_job(job.id))
+        db.expire_all()
+        result = db.query(EvaluationResult).filter_by(job_id=job.id).one()
+        return {
+            "calls": calls,
+            "call_a_user_prompts": call_a_user_prompts,
+            "level": result.level,
+            "score": result.score,
+            "needs_review": result.needs_review,
+            "scoring": json.loads(result.scoring_json),
+            "precheck": json.loads(result.precheck_json),
+        }
+    finally:
+        db.close()
+        engine.dispose()
+
+
+def test_confirmed_call_a_redline_returns_l5_without_call_b(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    outcome = _run_inspiration_redline_worker(
+        monkeypatch,
+        tmp_path,
+        evidence=["主体外区域显示透明棋盘格"],
+    )
+
+    assert outcome["calls"] == ["A"]
+    assert "transparent_checkerboard" in outcome["call_a_user_prompts"][0]
+    assert "透明棋盘格" in outcome["call_a_user_prompts"][0]
+    assert "只能选“是截图”" not in outcome["call_a_user_prompts"][0]
+    assert outcome["level"] == "L5"
+    assert outcome["scoring"]["hard_reject"] is True
+    assert outcome["scoring"]["hit_rules"] == ["transparent_checkerboard"]
+
+
+def test_unconfirmed_call_a_redline_continues_to_b_and_is_not_reapplied(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    outcome = _run_inspiration_redline_worker(monkeypatch, tmp_path, evidence=[])
+
+    assert outcome["calls"] == ["A", "B"]
+    assert outcome["level"] != "L5"
+    assert outcome["score"] == 80
+    assert outcome["scoring"]["hard_reject"] is False
+    assert outcome["scoring"]["redline_prefilter"]["raw_hit"] is True
+    assert outcome["scoring"]["redline_prefilter"]["hit"] is False
+    assert outcome["precheck"]["production_fields"]["reason"] == ["透明棋盘格"]
 
 
 def _combined_payload() -> dict[str, object]:

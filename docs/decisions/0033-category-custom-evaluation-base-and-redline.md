@@ -5,6 +5,7 @@
 - 关联：ADR-0028（可组合类目流水线）、ADR-0029（统一标签生产消费合同）、ADR-0031（类目维度管理与仅提示词模式）
 - 输入规则：钉钉《【灵感图】-prompt》（快照 `docs/reference/category-inspiration-image-rules-20260803.md`）
 - 讨论稿：`docs/discussion/category-evaluation-base-refactor-20260803.md`
+- 2026-08-20 补充：reason 业务值的合同权威来源与证据确认后的调用 A 前置短路见 ADR-0050。
 ## 2026-08-05 v3-only 迁移决定
 
 1. inspiration_image 的人工校准 active v3 合同是初版模板；space_image、

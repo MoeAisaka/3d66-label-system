@@ -115,6 +115,7 @@ from .scoring import (
 )
 from .schema_adapter import (
     adapt_combined_aesthetic_response,
+    inspiration_redline_signals,
     is_combined_aesthetic_response,
     normalize_precheck_business_rules,
     normalize_production_fields,
@@ -186,8 +187,11 @@ from .worker_v3_authoritative import (
     build_v3_authoritative_error_scoring,
     build_v3_authoritative_scoring,
     evaluate_v3_authoritative,
+    evaluate_v3_redline_prefilter,
+    precheck_for_v3_scoring,
     v3_authoritative_category,
     v3_authoritative_for_job,
+    v3_bundle_for_scoring,
     v3_uses_rule_deductions,
     v3_uses_static_grade_output,
 )
@@ -241,18 +245,36 @@ media_form 下每一项都必须包含 status（yes/no/uncertain）、confidence
 """
 
 
-INSPIRATION_AUTHORITATIVE_PRECHECK_PROMPT_CONTRACT = """
+def _inspiration_authoritative_precheck_prompt_contract(
+    redline_policy: object,
+) -> str:
+    redline_signals = inspiration_redline_signals(
+        redline_policy if isinstance(redline_policy, dict) else None
+    )
+    redline_schema = [
+        {"key": key, "match_any": reasons}
+        for key, reasons in redline_signals
+    ]
+    redline_schema_json = json.dumps(redline_schema, ensure_ascii=False)
+    return f"""
 
 灵感图权威前检合同（只返回可审计事实，不评分）：
-- redline_triggered：必须完整返回 screenshot、casual_photo、text_heavy、qr_code_heavy 四个布尔值。
-- reason：必须返回字符串数组，并与四个布尔值双向一致。
+- redline_triggered：必须按本次冻结合同完整返回布尔值；键与可用 reason 的精确映射为 {redline_schema_json}。
+- reason：必须返回字符串数组，只能使用上方本次冻结合同声明的 match_any 值，并与对应布尔值双向一致；未命中返回[]。
 - hard_defects：必须返回枚举数组，不得省略或用 known_real_photo_defect 单独代替具体硬伤。
 - image_defects：必须返回数组，只能选 corner_small_watermark、subject_obscuring_watermark、large_area_watermark；未命中返回[]。
-- decisive_evidence：必须分别返回 redline_triggered（四键证据数组）、hard_defects（key/evidence 对象数组）、image_defects（key/evidence 对象数组）。
+- decisive_evidence：必须分别返回 redline_triggered（与上方布尔值完全同键的证据数组）、hard_defects（key/evidence 对象数组）、image_defects（key/evidence 对象数组）。
 - decision_status：只能为 complete 或 uncertain；uncertain_fields 必须为字符串数组。
 - 任一决定性字段缺失、不确定或与证据冲突都会进入人工复核，禁止把缺失默认为 false/[]。
 - 仍须完整返回 track_classification、track_confidence、media_type、media_confidence、primary_category、secondary_category、classification_confidence。
 """
+
+
+# Backward-compatible import for calibration tooling and historical tests.
+# Runtime regression jobs call the function above with their frozen policy.
+INSPIRATION_AUTHORITATIVE_PRECHECK_PROMPT_CONTRACT = (
+    _inspiration_authoritative_precheck_prompt_contract(None)
+)
 
 
 def _is_inspiration_baseline_job(job: EvaluationJob) -> bool:
@@ -1589,7 +1611,16 @@ async def evaluate_job(job_id: int) -> None:
     ) + category_prompt_context
     inspiration_baseline_job = _is_inspiration_baseline_job(job)
     if inspiration_baseline_job and not freeform_mode:
-        user_a += INSPIRATION_AUTHORITATIVE_PRECHECK_PROMPT_CONTRACT
+        v3_contract = (
+            v3_bundle_for_job.get("contract")
+            if isinstance(v3_bundle_for_job, dict)
+            else None
+        )
+        user_a += _inspiration_authoritative_precheck_prompt_contract(
+            v3_contract.get("redline_policy")
+            if isinstance(v3_contract, dict)
+            else None
+        )
     elif (
         job.baseline_regression_item_id is not None
         and not freeform_mode
@@ -1720,7 +1751,19 @@ async def evaluate_job(job_id: int) -> None:
     if job.category_key == "inspiration_image":
         from .schema_adapter import adapt_inspiration_call_a_precheck
 
-        precheck = adapt_inspiration_call_a_precheck(precheck)
+        v3_contract = (
+            v3_bundle_for_job.get("contract")
+            if isinstance(v3_bundle_for_job, dict)
+            else None
+        )
+        precheck = adapt_inspiration_call_a_precheck(
+            precheck,
+            redline_policy=(
+                v3_contract.get("redline_policy")
+                if isinstance(v3_contract, dict)
+                else None
+            ),
+        )
     if not proposal_text_active:
         try:
             precheck = normalize_precheck_business_rules(precheck)
@@ -1742,6 +1785,18 @@ async def evaluate_job(job_id: int) -> None:
         if isinstance(classification, dict)
         else None
     )
+    v3_redline_prefilter = (
+        evaluate_v3_redline_prefilter(v3_bundle_for_job, precheck)
+        if not proposal_text_active
+        else {
+            "hit": False,
+            "hit_rules": [],
+            "raw_hit": False,
+            "raw_hit_rules": [],
+            "unconfirmed_hit_rules": [],
+            "hard_reject": False,
+        }
+    )
     v3_rule_deduction_active = proposal_text_active or v3_uses_rule_deductions(
         v3_bundle_for_job, precheck
     )
@@ -1752,6 +1807,7 @@ async def evaluate_job(job_id: int) -> None:
         v3_rule_deduction_active
         or v3_static_grade_active
         or aesthetic_foundation_active
+        or v3_redline_prefilter.get("hit") is True
     )
 
     response_b = None
@@ -1767,7 +1823,9 @@ async def evaluate_job(job_id: int) -> None:
             and not combined_response
             and scope_status == "in_scope"
         )
-    ) and (proposal_text_active or not v3_rule_deduction_active):
+    ) and (
+        proposal_text_active or not v3_rule_deduction_active
+    ) and not v3_redline_prefilter.get("hit"):
         if prompt_b is None:
             prompt_b = _prompt_for_job("B", prompt_b_id, job.category_key)
         _set_job(job_id, stage="aesthetic", progress=48)
@@ -2190,15 +2248,27 @@ async def evaluate_job(job_id: int) -> None:
             db, current_job.category_key
         )
         try:
+            v3_scoring_precheck = precheck_for_v3_scoring(
+                precheck,
+                v3_bundle=v3_bundle,
+                redline_prefilter=v3_redline_prefilter,
+            )
+            v3_scoring_bundle = v3_bundle_for_scoring(
+                v3_bundle,
+                redline_prefilter=v3_redline_prefilter,
+            )
             v3_result = await evaluate_v3_authoritative(
                 client,
                 model_image_path,
                 model_mime_type,
-                v3_bundle=v3_bundle,
-                precheck=precheck,
+                v3_bundle=v3_scoring_bundle,
+                precheck=v3_scoring_precheck,
                 aesthetic=aesthetic,
             )
-            scoring = build_v3_authoritative_scoring(v3_result, precheck=precheck)
+            scoring = build_v3_authoritative_scoring(
+                v3_result,
+                precheck=v3_scoring_precheck,
+            )
             dimension_output = scoring.get("dimension_deduction_output")
             if isinstance(dimension_output, dict):
                 raw_payload = scoring.pop(
@@ -2223,6 +2293,7 @@ async def evaluate_job(job_id: int) -> None:
                 exc,
             )
             scoring = build_v3_authoritative_error_scoring(exc)
+        scoring["redline_prefilter"] = v3_redline_prefilter
         scoring["dimension_mode"] = dimension_mode
         scoring["dimension_selection"] = dimension_selection
         scoring["v3_config_revision"] = v3_bundle.get("config_revision")

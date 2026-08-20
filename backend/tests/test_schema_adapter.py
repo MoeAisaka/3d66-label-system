@@ -6,6 +6,7 @@ from app.schema_adapter import (
     normalize_aesthetic_dimensions_for_schema,
     normalize_precheck_business_rules,
     normalize_production_fields,
+    validate_production_correction,
 )
 from app.dimension_schema_registry import space_schema_definition_for_scoring_profile
 from app.scoring import calculate_score
@@ -212,3 +213,16 @@ def test_production_fields_contract_rejects_missing_tags_and_invalid_media() -> 
 
     with pytest.raises(ValueError, match="至少包含 4 个"):
         normalize_production_fields(payload, required=True)
+
+
+def test_custom_reason_values_are_valid_business_strings() -> None:
+    validate_production_correction(
+        "production_fields.reason",
+        ["透明棋盘格", "手绘草稿", "平面图/简笔图"],
+    )
+
+
+@pytest.mark.parametrize("value", [[""], [3], "透明棋盘格", [None]])
+def test_malformed_reason_values_still_fail_closed(value: object) -> None:
+    with pytest.raises(ValueError, match="reason"):
+        validate_production_correction("production_fields.reason", value)

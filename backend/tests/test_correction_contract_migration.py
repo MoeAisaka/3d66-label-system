@@ -204,3 +204,40 @@ def test_execution_snapshot_uses_compatibility_fields_and_v3_rule_nodes() -> Non
         for node in contract["nodes"]
         if node["layer"] == "B"
     )
+
+
+def test_reason_correction_options_come_from_frozen_redline_contract() -> None:
+    v3_contract = build_inspiration_v3_contract()
+    v3_contract["redline_policy"]["rules"] = [
+        {
+            "key": "transparent_checkerboard",
+            "signal": "production_fields.reason",
+            "match_any": ["透明棋盘格", "透明棋盘格"],
+            "exemptions": [],
+            "enabled": True,
+        },
+        {
+            "key": "hand_drawn_draft",
+            "signal": "production_fields.reason",
+            "match_any": ["手绘草稿"],
+            "exemptions": [],
+            "enabled": False,
+        },
+    ]
+    snapshot = {
+        "pipeline_config": {},
+        "dimension_contract": {"definition": {"dimensions": []}},
+        "v3_authoritative_bundle": {
+            "contract": v3_contract,
+            "classification_map": {},
+            "subcategory_dimensions": build_inspiration_subcategory_dimensions(),
+        },
+    }
+
+    contract = freeze_contract_from_execution_snapshot(
+        category_key="inspiration_image",
+        execution_snapshot=snapshot,
+    )
+    by_key = {node["node_key"]: node for node in contract["nodes"]}
+
+    assert by_key["call_a.reason"]["options"] == ["透明棋盘格", "手绘草稿"]

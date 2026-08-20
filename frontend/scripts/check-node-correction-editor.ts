@@ -106,11 +106,30 @@ assert.equal(nodes.find((node) => node.id === "call-a:seotitle")?.maxLength, 28)
 assert.equal(nodes.find((node) => node.id === "call-a:category")?.editor, "category")
 assert.equal(nodes.find((node) => node.id === "call-a:tags")?.editor, "tags")
 assert.equal(nodes.find((node) => node.id === "call-a:cons")?.valueKind, "multiline")
-assert.equal(nodes.find((node) => node.id === "call-a:reason")?.options?.length, 6)
+assert.deepEqual(
+  nodes.find((node) => node.id === "call-a:reason")?.options?.map((option) => option.value),
+  ["是截图"],
+)
 assert.equal(nodes.find((node) => node.id === "call-a:image_defects")?.options?.length, 2)
 assert.equal(nodes.find((node) => node.id === "call-a:trait")?.label, "媒介类型")
 assert.equal(nodes.find((node) => node.id === "redline:screenshot")?.summary, "未命中")
 assert.equal(nodes.find((node) => node.id === "track:track_key")?.summary, "一类（建筑/室内/景观/规划）")
+
+const contractOwnedReasonEvaluation = structuredClone(evaluation)
+contractOwnedReasonEvaluation.scoring.v3_context.contract.redline_policy.rules = [
+  {
+    key: "transparent_checkerboard",
+    label: "透明棋盘格",
+    match_any: ["透明棋盘格", "手绘草稿"],
+    exemptions: [],
+  },
+]
+const contractOwnedReasonNode = buildCorrectionNodes(contractOwnedReasonEvaluation)
+  .find((node) => node.id === "call-a:reason")
+assert.deepEqual(
+  contractOwnedReasonNode?.options?.map((option) => option.value),
+  ["透明棋盘格", "手绘草稿"],
+)
 
 const dimension = nodes.find((node) => node.id === "dimension:visual_structure")
 assert(dimension)

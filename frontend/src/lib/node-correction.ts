@@ -343,6 +343,15 @@ export function buildCorrectionNodes(evaluation: EvaluationLike): CorrectionNode
   const scoring = isRecord(evaluation.scoring) ? evaluation.scoring : {}
   const context = isRecord(scoring.v3_context) ? scoring.v3_context : {}
   const contract = isRecord(context.contract) ? context.contract : {}
+  const redlinePolicy = isRecord(contract.redline_policy) ? contract.redline_policy : {}
+  const redlineRules = Array.isArray(redlinePolicy.rules) ? redlinePolicy.rules : []
+  const contractReasonOptions = [...new Set(redlineRules.flatMap((rawRule) => (
+    isRecord(rawRule) && Array.isArray(rawRule.match_any)
+      ? rawRule.match_any
+        .filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+        .map((item) => item.trim())
+      : []
+  )))].map((value) => ({ value, label: value }))
   const nodes: CorrectionNode[] = []
 
   const productionFields = isRecord(precheck.production_fields) ? precheck.production_fields : {}
@@ -372,7 +381,9 @@ export function buildCorrectionNodes(evaluation: EvaluationLike): CorrectionNode
       valueKind: field.valueKind,
       group: field.group,
       maxLength: field.maxLength,
-      options: field.options,
+      options: field.field === "reason" && contractReasonOptions.length
+        ? contractReasonOptions
+        : field.options,
       readOnly: missing,
       compatibilityMessage: missing
         ? "该旧评测未存储此调用A字段，当前仅显示为空；请使用当前配置重跑后再纠偏。"
@@ -398,8 +409,6 @@ export function buildCorrectionNodes(evaluation: EvaluationLike): CorrectionNode
     })
   }
 
-  const redlinePolicy = isRecord(contract.redline_policy) ? contract.redline_policy : {}
-  const redlineRules = Array.isArray(redlinePolicy.rules) ? redlinePolicy.rules : []
   const reasons = Array.isArray(getPath(precheck, "production_fields.reason"))
     ? (getPath(precheck, "production_fields.reason") as unknown[]).map((item) => String(item))
     : []

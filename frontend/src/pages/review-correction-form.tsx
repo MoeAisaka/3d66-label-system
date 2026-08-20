@@ -52,7 +52,7 @@ const keyFieldConfigs: Array<{
   { path: "production_fields.cons", label: "缺点点评", kind: "text", hint: "只依据可见证据" },
   { path: "production_fields.design", label: "设计理念", kind: "text", hint: "无法判断时不得编造" },
   { path: "production_fields.score", label: "调用A初步分", kind: "number", hint: "0-100整数，不是最终等级" },
-  { path: "production_fields.reason", label: "过滤原因", kind: "json", hint: "允许枚举的 JSON 数组" },
+  { path: "production_fields.reason", label: "过滤原因", kind: "json", hint: "当前合同业务值的 JSON 数组" },
   { path: "production_fields.image_defects", label: "图片缺陷", kind: "text", hint: "仅空字符串或“有水印”" },
   { path: "production_fields.trait", label: "素材特征", kind: "text", hint: "AI图/实景照片/3D数字效果图/其它" },
   { path: "image_quality.quality_severity", label: "画质严重度", kind: "text", hint: "normal/slight/moderate/severe/unusable/uncertain" },

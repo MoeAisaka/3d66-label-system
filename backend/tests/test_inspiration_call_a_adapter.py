@@ -1,6 +1,24 @@
 from app.schema_adapter import adapt_inspiration_call_a_precheck
 
 
+def _custom_redline_policy() -> dict:
+    return {
+        "format_version": "redline-policy-v1",
+        "enabled": True,
+        "hit_level": "L5",
+        "hit_score_cap": 20,
+        "rules": [
+            {
+                "key": "transparent_checkerboard",
+                "signal": "production_fields.reason",
+                "match_any": ["透明棋盘格"],
+                "exemptions": [],
+                "enabled": True,
+            }
+        ],
+    }
+
+
 def test_inspiration_call_a_is_projected_to_v3_facts_without_truth_or_score() -> None:
     raw = {
         "redline_triggered": {
@@ -134,3 +152,55 @@ def test_missing_redline_evidence_key_is_not_defaulted_safe() -> None:
     adapted = adapt_inspiration_call_a_precheck(raw)
     assert adapted["decisive_signal_validation"]["status"] == "needs_review"
     assert "invalid:evidence:redline:screenshot" in adapted["review_reasons"]
+
+
+def test_contract_declared_redline_key_is_audited_without_platform_code_change() -> None:
+    raw = _valid_decisive_payload()
+    raw["redline_triggered"] = {"transparent_checkerboard": True}
+    raw["reason"] = ["透明棋盘格"]
+    raw["decisive_evidence"]["redline_triggered"] = {
+        "transparent_checkerboard": ["主体外区域显示透明棋盘格"],
+    }
+
+    try:
+        adapted = adapt_inspiration_call_a_precheck(
+            raw,
+            redline_policy=_custom_redline_policy(),
+        )
+    except TypeError as exc:
+        raise AssertionError("调用 A 适配器必须读取冻结红线合同") from exc
+
+    assert adapted["production_fields"]["reason"] == ["透明棋盘格"]
+    assert adapted["redline_signal_validation"] == {"status": "valid", "reasons": []}
+    assert adapted["non_redline_signal_validation"] == {
+        "status": "valid",
+        "reasons": [],
+    }
+    assert adapted["decisive_signal_validation"] == {"status": "valid", "reasons": []}
+
+
+def test_custom_redline_missing_evidence_is_separate_from_non_redline_validity() -> None:
+    raw = _valid_decisive_payload()
+    raw["redline_triggered"] = {"transparent_checkerboard": True}
+    raw["reason"] = ["透明棋盘格"]
+    raw["decisive_evidence"]["redline_triggered"] = {
+        "transparent_checkerboard": [],
+    }
+
+    try:
+        adapted = adapt_inspiration_call_a_precheck(
+            raw,
+            redline_policy=_custom_redline_policy(),
+        )
+    except TypeError as exc:
+        raise AssertionError("调用 A 适配器必须读取冻结红线合同") from exc
+
+    assert adapted["redline_signal_validation"]["status"] == "needs_review"
+    assert adapted["non_redline_signal_validation"] == {
+        "status": "valid",
+        "reasons": [],
+    }
+    assert (
+        "missing_evidence:redline:transparent_checkerboard"
+        in adapted["redline_signal_validation"]["reasons"]
+    )

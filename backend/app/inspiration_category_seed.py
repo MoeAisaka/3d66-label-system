@@ -75,12 +75,12 @@ _MIN_CONFIDENCE = 0.6
 
 
 def _redline_policy(*, include_blurry_casual: bool = False) -> dict[str, Any]:
-    """Four inspiration-image redlines over the frozen 调用A ``reason`` enum.
+    """Four inspiration-image redlines over contract-owned Call-A reasons.
 
-    Signal is always ``production_fields.reason``; ``match_any`` values are drawn
-    from the real reason enum (``schema_adapter.PRODUCTION_REASON_VALUES``).  The
-    large-text rule carries documented exemptions (专业海报 / 轻量化效果图辅助文字);
-    the qr-code rule exempts a tiny corner code.
+    Signal is always ``production_fields.reason``; each frozen contract owns its
+    ``match_any`` business values. The large-text rule carries documented
+    exemptions (专业海报 / 轻量化效果图辅助文字); the qr-code rule exempts a tiny
+    corner code.
     """
     return {
         "format_version": REDLINE_POLICY_FORMAT_VERSION,

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import logging
+from copy import deepcopy
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -33,6 +34,13 @@ from .worker_v3_shadow import (
 )
 
 logger = logging.getLogger("3d66.worker.v3_authoritative")
+
+_LEGACY_REDLINE_EVIDENCE_KEYS = {
+    "screenshot": "screenshot",
+    "casual_snapshot": "casual_photo",
+    "large_text": "text_heavy",
+    "qr_code": "qr_code_heavy",
+}
 
 
 class V3AuthoritativeError(RuntimeError):
@@ -173,6 +181,176 @@ def v3_authoritative_for_job(db: Session, job: Any) -> dict:
     return v3_authoritative_category(db, getattr(job, "category_key", None))
 
 
+def _redline_rule_evidence_key(rule: dict[str, Any]) -> str:
+    explicit = rule.get("evidence_key")
+    if isinstance(explicit, str) and explicit.strip():
+        return explicit.strip()
+    key = str(rule.get("key") or "").strip()
+    return _LEGACY_REDLINE_EVIDENCE_KEYS.get(key, key)
+
+
+def evaluate_v3_redline_prefilter(v3_bundle: Any, precheck: Any) -> dict[str, Any]:
+    """Resolve the one terminal redline decision used before and after Call B."""
+    empty = {
+        "hit": False,
+        "hit_rules": [],
+        "raw_hit": False,
+        "raw_hit_rules": [],
+        "unconfirmed_hit_rules": [],
+        "hard_reject": False,
+    }
+    if not isinstance(v3_bundle, dict) or not isinstance(precheck, dict):
+        return empty
+    contract = v3_bundle.get("contract")
+    policy = contract.get("redline_policy") if isinstance(contract, dict) else None
+    if not isinstance(policy, dict):
+        return empty
+
+    from .redline_policy import evaluate_redlines
+
+    raw = evaluate_redlines(precheck, policy=policy)
+    raw_hit_rules = list(raw.get("hit_rules") or [])
+    if not raw.get("hit"):
+        return empty
+
+    evidence_required = isinstance(
+        contract.get("authoritative_precheck_contract"), dict
+    )
+    if not evidence_required:
+        return {
+            **raw,
+            "raw_hit": True,
+            "raw_hit_rules": raw_hit_rules,
+            "unconfirmed_hit_rules": [],
+        }
+
+    triggered = precheck.get("redline_triggered")
+    decisive = precheck.get("decisive_evidence")
+    evidence_by_key = (
+        decisive.get("redline_triggered")
+        if isinstance(decisive, dict)
+        else None
+    )
+    rules = {
+        str(rule.get("key")): rule
+        for rule in policy.get("rules") or []
+        if isinstance(rule, dict) and isinstance(rule.get("key"), str)
+    }
+    confirmed: list[str] = []
+    for rule_key in raw_hit_rules:
+        rule = rules.get(rule_key)
+        if rule is None:
+            continue
+        evidence_key = _redline_rule_evidence_key(rule)
+        entries = (
+            evidence_by_key.get(evidence_key)
+            if isinstance(evidence_by_key, dict)
+            else None
+        )
+        if (
+            isinstance(triggered, dict)
+            and triggered.get(evidence_key) is True
+            and isinstance(entries, list)
+            and bool(entries)
+            and all(isinstance(item, str) and item.strip() for item in entries)
+        ):
+            confirmed.append(rule_key)
+
+    if not confirmed:
+        return {
+            **empty,
+            "raw_hit": True,
+            "raw_hit_rules": raw_hit_rules,
+            "unconfirmed_hit_rules": raw_hit_rules,
+        }
+    unconfirmed = [key for key in raw_hit_rules if key not in confirmed]
+    return {
+        **raw,
+        "hit_rules": confirmed,
+        "raw_hit": True,
+        "raw_hit_rules": raw_hit_rules,
+        "unconfirmed_hit_rules": unconfirmed,
+    }
+
+
+def precheck_for_v3_scoring(
+    precheck: Any,
+    *,
+    v3_bundle: Any,
+    redline_prefilter: dict[str, Any],
+) -> Any:
+    """Remove unconfirmed terminal signals from a detached scoring input."""
+    scoring_precheck = deepcopy(precheck)
+    if (
+        not isinstance(scoring_precheck, dict)
+        or not redline_prefilter.get("raw_hit")
+        or not isinstance(v3_bundle, dict)
+    ):
+        return scoring_precheck
+
+    contract = v3_bundle.get("contract")
+    policy = contract.get("redline_policy") if isinstance(contract, dict) else None
+    unconfirmed = set(redline_prefilter.get("unconfirmed_hit_rules") or [])
+    confirmed = set(redline_prefilter.get("hit_rules") or [])
+    suppressed_values = {
+        value
+        for rule in (policy.get("rules") if isinstance(policy, dict) else []) or []
+        if isinstance(rule, dict) and rule.get("key") in unconfirmed
+        for value in rule.get("match_any") or []
+        if isinstance(value, str)
+    }
+    confirmed_values = {
+        value
+        for rule in (policy.get("rules") if isinstance(policy, dict) else []) or []
+        if isinstance(rule, dict) and rule.get("key") in confirmed
+        for value in rule.get("match_any") or []
+        if isinstance(value, str)
+    }
+    suppressed_values -= confirmed_values
+    production = scoring_precheck.get("production_fields")
+    reasons = production.get("reason") if isinstance(production, dict) else None
+    if isinstance(reasons, list):
+        production["reason"] = [
+            reason for reason in reasons if reason not in suppressed_values
+        ]
+
+    non_redline_validation = scoring_precheck.get(
+        "non_redline_signal_validation"
+    )
+    if redline_prefilter.get("hit") or (
+        isinstance(non_redline_validation, dict)
+        and non_redline_validation.get("status") == "valid"
+    ):
+        scoring_precheck["decisive_signal_validation"] = {
+            "status": "valid",
+            "reasons": [],
+        }
+    return scoring_precheck
+
+
+def v3_bundle_for_scoring(
+    v3_bundle: Any,
+    *,
+    redline_prefilter: dict[str, Any],
+) -> Any:
+    """Disable only evidence-unconfirmed redline rules in a detached bundle."""
+    scoring_bundle = deepcopy(v3_bundle)
+    if not isinstance(scoring_bundle, dict):
+        return scoring_bundle
+    unconfirmed = set(redline_prefilter.get("unconfirmed_hit_rules") or [])
+    if not unconfirmed:
+        return scoring_bundle
+    contract = scoring_bundle.get("contract")
+    policy = contract.get("redline_policy") if isinstance(contract, dict) else None
+    rules = policy.get("rules") if isinstance(policy, dict) else None
+    if not isinstance(rules, list):
+        return scoring_bundle
+    for rule in rules:
+        if isinstance(rule, dict) and rule.get("key") in unconfirmed:
+            rule["enabled"] = False
+    return scoring_bundle
+
+
 def v3_uses_rule_deductions(v3_bundle: Any, precheck: Any) -> bool:
     """Resolve whether this image's active track uses the new calling-B path."""
     if not isinstance(v3_bundle, dict) or not isinstance(precheck, dict):
@@ -187,11 +365,12 @@ def v3_uses_rule_deductions(v3_bundle: Any, precheck: Any) -> bool:
             contract.get("category_key") == "inspiration_image"
             and isinstance(contract.get("aesthetic_foundation"), dict)
         ):
-            # 美感前置合同：红线短路B；非红线必须进入新的锚图B。
-            return bool(evaluate_redlines(precheck, policy=contract["redline_policy"]).get("hit"))
+            # 美感前置合同的普通样本进入锚图 B；红线短路由独立的
+            # evidence-aware prefilter 决定，不再借用“规则扣分模式”探针。
+            return False
         if evaluate_redlines(precheck, policy=contract["redline_policy"]).get("hit"):
-            # Redlines terminate before B, but still need to bypass legacy B.
-            return True
+            # Worker 的独立 prefilter 负责短路；这里仅回答赛道是否采用规则 B。
+            return False
         resolved = resolve_subcategory(
             precheck,
             classification_map=v3_bundle["classification_map"],
@@ -208,12 +387,9 @@ def v3_uses_static_grade_output(v3_bundle: Any, precheck: Any) -> bool:
     if not isinstance(v3_bundle, dict) or not isinstance(precheck, dict):
         return False
     try:
-        from .redline_policy import evaluate_redlines
         from .subcategory_resolver import resolve_subcategory
 
         contract = v3_bundle["contract"]
-        if evaluate_redlines(precheck, policy=contract["redline_policy"]).get("hit"):
-            return False
         resolved = resolve_subcategory(
             precheck,
             classification_map=v3_bundle["classification_map"],

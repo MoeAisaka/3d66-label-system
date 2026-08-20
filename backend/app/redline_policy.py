@@ -20,10 +20,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from .schema_adapter import (
-    INSPIRATION_HARD_DEFECT_VALUES,
-    PRODUCTION_REASON_VALUES,
-)
+from .schema_adapter import INSPIRATION_HARD_DEFECT_VALUES
 
 
 REDLINE_POLICY_FORMAT_VERSION = "redline-policy-v1"
@@ -53,8 +50,8 @@ def validate_redline_policy(policy: Any) -> None:
     """Fail-closed structural/enum/uniqueness validation of a redline policy.
 
     Raises ``RedlinePolicyError`` (a ``ValueError`` subclass with ``.code``)
-    on any violation.  Reuses ``schema_adapter.PRODUCTION_REASON_VALUES`` for
-    ``match_any`` membership rather than re-declaring the enum.
+    on any violation. Business values are owned by the frozen versioned
+    contract; this validator only enforces their executable-safe shape.
     """
     if not isinstance(policy, dict):
         raise RedlinePolicyError("policy_not_object", "红线策略必须是对象")
@@ -116,9 +113,9 @@ def validate_redline_policy(policy: Any) -> None:
                 "match_any_empty", "红线规则 match_any 必须是非空数组"
             )
         for value in match_any:
-            if value not in PRODUCTION_REASON_VALUES:
+            if not isinstance(value, str) or not value.strip():
                 raise RedlinePolicyError(
-                    "match_value_invalid", "红线 match_any 含未允许的 reason 枚举"
+                    "match_value_invalid", "红线 match_any 必须是非空业务值字符串"
                 )
 
         exemptions = rule.get("exemptions", [])
