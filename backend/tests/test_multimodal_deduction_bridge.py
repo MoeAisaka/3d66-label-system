@@ -41,7 +41,15 @@ class Client:
                 rule = dimension["deduction_rules"][0]
                 hits = [{"rule_id": rule["rule_id"], "confidence": "high", "evidence": "图中主体偏移"}]
             dimensions.append({"dimension_key": dimension["key"], "hit_rules": hits})
-        return Response({"dimensions": dimensions, "overall_note": "已逐条核验"})
+        return Response(
+            {
+                "aesthetic_score": 88,
+                "aesthetic_evidence": ["整体画面基础美感可见"],
+                "aesthetic_confidence": 0.8,
+                "dimensions": dimensions,
+                "overall_note": "已逐条核验",
+            }
+        )
 
 
 def _bonus_cap_config() -> dict:
@@ -90,7 +98,15 @@ class BonusCapClient:
                     else []
                 ),
             }
-        return Response({"dimensions": dimensions, "overall_note": "已核验正负规则"})
+        return Response(
+            {
+                "aesthetic_score": 88,
+                "aesthetic_evidence": ["整体画面基础美感可见"],
+                "aesthetic_confidence": 0.8,
+                "dimensions": dimensions,
+                "overall_note": "已核验正负规则",
+            }
+        )
 
 
 def test_bridge_normalizes_rule_hits_and_uses_chinese_prompt() -> None:
@@ -104,7 +120,7 @@ def test_bridge_normalizes_rule_hits_and_uses_chinese_prompt() -> None:
     assert output["warning"] is None
     first = next(iter(output["dimensions"].values()))
     assert first["hit_rules"][0]["evidence"] == "图中主体偏移"
-    assert "不打1-5分" in client.system
+    assert "aesthetic_score" in client.system
     assert "扣" in client.user
     assert output["prompt_identity"] == {
         "template_version": DEDUCTION_PROMPT_TEMPLATE_VERSION,
@@ -165,6 +181,9 @@ def test_bonus_cap_bridge_rejects_duplicate_provider_hits() -> None:
     config = _bonus_cap_config()
     first = config["common_group"]["schema_definition"]["dimensions"][0]
     payload = {
+        "aesthetic_score": 88,
+        "aesthetic_evidence": ["整体画面基础美感可见"],
+        "aesthetic_confidence": 0.8,
         "dimensions": {
             dimension["key"]: {"hit_rules": [], "hit_bonus_rules": []}
             for dimension in config["common_group"]["schema_definition"]["dimensions"]

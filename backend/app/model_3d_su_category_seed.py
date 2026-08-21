@@ -54,11 +54,11 @@ MODEL_3D_SU_V2_CALL_A_VERSION = "model-3d-su-a-v2-20260817"
 MODEL_3D_SU_V2_CALL_B_VERSION = "model-3d-su-b-v2-20260817"
 MODEL_3D_SU_V2_CREATED_BY = "system:model-3d-su-v2"
 
-MODEL_3D_SU_SPEC_VERSION = "model-3d-su-v3-grade-contract-details-20260819"
-MODEL_3D_SU_RUBRIC_VERSION = "model-3d-su-rubric-v3"
-MODEL_3D_SU_CALL_A_VERSION = "model-3d-su-a-v3-20260819"
-MODEL_3D_SU_CALL_B_VERSION = "model-3d-su-b-v3-20260819"
-MODEL_3D_SU_CREATED_BY = "system:model-3d-su-v3"
+MODEL_3D_SU_SPEC_VERSION = "model-3d-su-v4-aesthetic-foundation-20260821"
+MODEL_3D_SU_RUBRIC_VERSION = "model-3d-su-rubric-v4"
+MODEL_3D_SU_CALL_A_VERSION = "model-3d-su-a-v4-20260821"
+MODEL_3D_SU_CALL_B_VERSION = "model-3d-su-b-v4-20260821"
+MODEL_3D_SU_CREATED_BY = "system:model-3d-su-v4"
 MODEL_3D_SU_SCHEMA_KEY = "model_3d_su_aesthetic"
 MODEL_3D_SU_SCHEMA_VERSION = "v3"
 MODEL_3D_SU_SEMANTIC_CONTRACT_KEY = "semantic-platform"
@@ -66,11 +66,13 @@ MODEL_3D_SU_SEMANTIC_CONTRACT_KEY = "semantic-platform"
 _MODEL_3D_SU_SYSTEM_OWNERS = {
     MODEL_3D_SU_V1_CREATED_BY,
     MODEL_3D_SU_V2_CREATED_BY,
+    "system:model-3d-su-v3",
     MODEL_3D_SU_CREATED_BY,
 }
 _MODEL_3D_SU_RUBRIC_VERSIONS = {
     MODEL_3D_SU_V1_RUBRIC_VERSION,
     MODEL_3D_SU_V2_RUBRIC_VERSION,
+    "model-3d-su-rubric-v3",
     MODEL_3D_SU_RUBRIC_VERSION,
 }
 _LINEAR_GRADE_POINTS = {
@@ -306,6 +308,12 @@ def _track_dimensions(track_key: str, weights: list[float]) -> dict[str, Any]:
         "format_version": SUBCATEGORY_DIMENSIONS_FORMAT_VERSION,
         "sub_category_key": track_key,
         "dimension_max": 100,
+        "b_aesthetic_foundation": {
+            "format_version": "b-aesthetic-foundation-v1",
+            "source": "call_b",
+            "score_range": [0, 100],
+            "evidence_required": True,
+        },
         "grade_output_contract": {
             "format_version": "dimension-grade-output-v1",
             "require_exact_keys": True,
@@ -359,6 +367,12 @@ def build_model_3d_su_contract() -> dict[str, Any]:
         "prompt_bindings": {
             "call_a_version": MODEL_3D_SU_CALL_A_VERSION,
             "call_b_version": MODEL_3D_SU_CALL_B_VERSION,
+        },
+        "b_aesthetic_foundation": {
+            "format_version": "b-aesthetic-foundation-v1",
+            "source": "call_b",
+            "score_range": [0, 100],
+            "evidence_required": True,
         },
         "output_contract": {
             "format_version": "model-3d-su-output-v1",
@@ -615,7 +629,7 @@ def seed_model_3d_su(db: Session, settings: Any) -> None:
     )
     profile_values = {
         "display_name": "3D & SU 模型",
-        "description": "model-3d-su-v3：三赛道五维美感评测，保留详细扣分镜像但由静态 grade 合同评分，SU 未渲染和风险字段只做标记。",
+        "description": "model-3d-su-v4：以调用B aesthetic_score为初始分，按三赛道五维合同执行命中扣分；SU未渲染和风险字段只做标记。",
         "status": "active",
         "allowed_mime_types_json": canonical_json(
             ["image/jpeg", "image/png", "image/webp", "image/gif"]

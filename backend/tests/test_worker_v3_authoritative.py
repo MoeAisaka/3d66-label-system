@@ -227,7 +227,7 @@ class _FakeClient:
             raise RuntimeError("调用B network exploded")
         if self.bad_payload:
             return _FakeResponse({"unexpected": "shape"})
-        if "规则命中判断" in system_prompt:
+        if "hit_rules" in user_prompt:
             configs = build_inspiration_subcategory_dimensions()
             all_dimensions = []
             seen: set[str] = set()
@@ -248,7 +248,15 @@ class _FakeClient:
                         all_dimensions.append(
                             {"dimension_key": dimension["key"], "hit_rules": hits}
                         )
-            return _FakeResponse({"dimensions": all_dimensions, "overall_note": ""})
+            return _FakeResponse(
+                {
+                    "aesthetic_score": 88,
+                    "aesthetic_evidence": ["主体结构、材质和光影均有可见证据"],
+                    "aesthetic_confidence": 0.9,
+                    "dimensions": all_dimensions,
+                    "overall_note": "",
+                }
+            )
         # Grade every key the prompt mentions.  The prompt lists the specific
         # dimension keys verbatim, so scan the user prompt for known keys.  方案 A
         # 后 inspiration_image 的 specific_group 已置空，此路径只由注入了合成特有维度
@@ -257,13 +265,35 @@ class _FakeClient:
         for key in _SYNTHETIC_SPECIFIC_KEYS:
             if key in user_prompt:
                 dims[key] = {"grade": self.specific_grade}
-        return _FakeResponse({"dimensions": dims})
+        return _FakeResponse(
+            {
+                "aesthetic_score": 88,
+                "overall_evidence": ["主体结构、材质和光影均有可见证据"],
+                "confidence": 0.9,
+                "dimensions": {
+                    key: {
+                        "grade": value["grade"],
+                        "evidence": [f"{key}有可见表现"],
+                    }
+                    for key, value in dims.items()
+                },
+            }
+        )
 
 
 def _aesthetic(common_grade: int) -> dict[str, Any]:
-    """A v1 aesthetic payload whose common-group keys carry ``common_grade``."""
+    """Aesthetic payload with the unified foundation and legacy grade fields."""
     return {
-        "dimensions": {key: {"grade": common_grade} for key in _COMMON_KEYS}
+        "aesthetic_score": 88,
+        "overall_evidence": ["主体结构、材质和光影均有可见证据"],
+        "confidence": 0.9,
+        "dimensions": {
+            key: {
+                "grade": common_grade,
+                "evidence": [f"{key}有可见表现"],
+            }
+            for key in _COMMON_KEYS
+        },
     }
 
 
@@ -729,28 +759,29 @@ def test_normal_in_scope_produces_score(sessions: sessionmaker[Session]) -> None
     assert "provider_payload" in scoring["_dimension_deduction_raw_payload"]
 
 
-def test_bonus_cap_provider_warning_keeps_score_and_requires_review(
+def test_bonus_cap_provider_failure_fails_closed_without_foundation(
     sessions: sessionmaker[Session],
 ) -> None:
     with sessions() as db:
         bundle = _bonus_cap_bundle(db)
     precheck = _class_one_precheck()
-    result = asyncio.run(
-        evaluate_v3_authoritative(
-            _FakeClient(raise_exc=True),
-            "img.jpg",
-            "image/jpeg",
-            v3_bundle=bundle,
-            precheck=precheck,
-            aesthetic=None,
+    with pytest.raises(V3AuthoritativeError) as excinfo:
+        asyncio.run(
+            evaluate_v3_authoritative(
+                _FakeClient(raise_exc=True),
+                "img.jpg",
+                "image/jpeg",
+                v3_bundle=bundle,
+                precheck=precheck,
+                aesthetic=None,
+            )
         )
-    )
-    assert result["score"] == 88
-    assert result["dimension_scoring_mode"] == "bonus_cap_v2"
-    scoring = build_v3_authoritative_scoring(result, precheck=precheck)
-    assert scoring["score"] == 88
+    assert excinfo.value.code == "v3_rule_engine_failed"
+    scoring = build_v3_authoritative_error_scoring(excinfo.value)
+    assert scoring["score"] is None
+    assert scoring["level"] is None
     assert scoring["needs_review"] is True
-    assert "调用B失败" in "；".join(scoring["review_reasons"])
+    assert scoring["interpretation_status"] == "manual_required"
 
 
 def test_common_grade_unavailable_raises(sessions: sessionmaker[Session]) -> None:

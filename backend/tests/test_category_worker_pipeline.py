@@ -373,14 +373,31 @@ def _precheck_payload() -> dict[str, object]:
 
 
 def _aesthetic_payload() -> dict[str, object]:
-    payload = _combined_payload()
+    dimensions = {
+        key: {"hit_rules": []}
+        for key in (
+            "subject_focus",
+            "mood_atmosphere",
+            "composition_lighting",
+            "reference_value",
+            "visual_impact",
+        )
+    }
     return {
-        "dimensions": payload["dimensions"],
+        "aesthetic_score": 100,
+        "aesthetic_evidence": ["整体画面清晰，主体与构图可见"],
+        "aesthetic_confidence": 0.9,
+        "overall_evidence": ["整体画面清晰，主体与构图可见"],
+        "dimensions": dimensions,
         "scoring_profile": "space_aesthetic_v1.3",
         "assessment_confidence": 0.9,
         "needs_review": False,
         "review_reasons": [],
-        "decision_rules": payload["decision_rules"],
+        "decision_rules": {
+            "hard_gate_triggered": False,
+            "level_cap": "none",
+            "manual_review_required": False,
+        },
     }
 
 
@@ -466,6 +483,10 @@ def _run_model_3d_su_worker(
                 parsed["classification"]["primary_category"] = "家装"
             else:
                 parsed = {
+                    "aesthetic_score": 100,
+                    "aesthetic_evidence": ["五维评测所依据的整体画面证据"],
+                    "overall_evidence": ["五维评测所依据的整体画面证据"],
+                    "aesthetic_confidence": 0.9,
                     "dimensions": dimensions,
                     "overall_note": "按五维锚点完成评审。",
                 }
@@ -540,7 +561,8 @@ def test_model_3d_su_worker_uses_rule_hits_and_preserves_evidence(
     calls = outcome["calls"]
     assert outcome["job_status"] == "completed"
     assert len(calls) == 2
-    assert "规则命中判断" in calls[1][0]
+    assert "aesthetic_score" in calls[1][0]
+    assert "合同规则命中" in calls[1][0]
     assert "hit_rules" in calls[1][1]
     assert "grade" not in calls[1][1]
     assert outcome["score"] == expected_score
@@ -598,11 +620,11 @@ def test_model_3d_su_worker_safe_fallbacks_on_invalid_rule_output(
     )
 
     assert outcome["job_status"] == "completed"
-    assert outcome["score"] == 100
-    assert outcome["level"] == "L1"
+    assert outcome["score"] is None
+    assert outcome["level"] is None
     assert outcome["needs_review"] is True
-    assert outcome["scoring"]["scoring_mode"] == "v3_authoritative"
-    assert "调用B失败" in "；".join(outcome["scoring"]["review_reasons"])
+    assert outcome["scoring"]["scoring_mode"] == "v3_authoritative_failed"
+    assert "调用B" in "；".join(outcome["scoring"]["review_reasons"])
 
 
 def test_material_prompt_context_is_explicit_and_can_be_disabled() -> None:
@@ -768,15 +790,20 @@ def test_pdf_worker_summarizes_before_single_prompt_evaluation(
                     raw_text="{}",
                     raw_payload={},
                 )
-            parsed = _precheck_payload()
-            parsed.update(
-                {
-                    "predicted_level": "L3",
-                    "predicted_score": 68,
-                    "confidence": 0.86,
-                    "reason": "方案正文与页图信息完整，整体达到普通可用水平。",
-                }
-            )
+            elif len(calls) == 2:
+                parsed = _precheck_payload()
+                parsed.update(
+                    {
+                        "aesthetic_score": 68,
+                        "aesthetic_evidence": ["方案正文与页图信息完整"],
+                        "predicted_level": "L3",
+                        "predicted_score": 68,
+                        "confidence": 0.86,
+                        "reason": "方案正文与页图信息完整，整体达到普通可用水平。",
+                    }
+                )
+            else:
+                parsed = _aesthetic_payload()
             return DoubaoResponse(
                 parsed=parsed,
                 raw_text="{}",

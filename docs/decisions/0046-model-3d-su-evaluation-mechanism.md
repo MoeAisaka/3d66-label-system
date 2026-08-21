@@ -45,6 +45,6 @@ Run #27 的 50 条 `model_3d_su` 回归全部输出 L1。运行证据显示，43
 
 本修订修复自动纠偏候选重试丢失前一轮有效 `system_prompt` 的问题，并恢复五维 20/50/80 扣分描述。扣分描述作为合同、审计和前端展示镜像保留；每条 3D/SU 赛道继续显式声明 `dimension-grade-output-v1`，服务端 `rule_scoring_mode` 对该合同固定返回 `grade_fallback`，不会调用动态 `dimension-deduction-prompt-v1`，从而避免再次出现全部 L1。
 
-1. 现役身份提升为 `model-3d-su-v3-grade-contract-details-20260819`、`model-3d-su-rubric-v3`、v3 A/B prompt 和 `system:model-3d-su-v3`；startup seed 追加新 projected revision，不改写 v1/v2 历史。
+1. 现役身份提升为 `model-3d-su-v4-aesthetic-foundation-20260821`、`model-3d-su-rubric-v4`、v4 B prompt 和 `system:model-3d-su-v4`；startup seed 追加新 projected revision，不改写 v1/v2/v3 历史。
 2. 五个维度均恢复 `minor_defect=20`、`obvious_defect=50`、`severe_defect=80` 及具体中文可见缺陷描述，同时保留线性 `grade_points` 和静态 B 的严格等级/证据校验。
 3. 自动纠偏重试只继承上一轮类型正确且非空的字段；无效值不会污染下一轮，当前修复输出优先，最新摘要和变更说明优先。

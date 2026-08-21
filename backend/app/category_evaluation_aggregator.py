@@ -385,6 +385,7 @@ def aggregate_category_evaluation(
     dimension_result: Any,
     *,
     track_key: Any = None,
+    initial_score: int | float | None = None,
 ) -> dict[str, Any]:
     """Deterministically aggregate a frozen v3 contract + precheck + dimensions.
 
@@ -448,23 +449,82 @@ def aggregate_category_evaluation(
 
     steps.append(_step("redline", None, "无红线命中，进入分数计算流程"))
 
+    if initial_score is not None and (
+        isinstance(initial_score, bool)
+        or not isinstance(initial_score, (int, float))
+        or not math.isfinite(float(initial_score))
+        or not 0 <= float(initial_score) <= 100
+    ):
+        raise CategoryEvaluationAggregatorError(
+            "initial_score_invalid", "调用B aesthetic_score 必须在 0-100 之间"
+        )
+
     # Step 3 — track resolution (node 1).
     track = _resolve_track(contract, track_key)
     resolved_track_key = track["key"]
     base_score = track["base_score"]
     dimension_max = track["dimension_max"]
     track_cap = track["track_cap"]
-    steps.append(_step(
-        "track",
-        base_score + dimension_max,
-        f"赛道 {resolved_track_key}：基准分 {base_score} + 维度满分 {dimension_max}"
-        f"，赛道上限 {track_cap}",
-    ))
+    if initial_score is None:
+        steps.append(_step(
+            "track",
+            base_score + dimension_max,
+            f"赛道 {resolved_track_key}：基准分 {base_score} + 维度满分 {dimension_max}"
+            f"，赛道上限 {track_cap}",
+        ))
+    else:
+        steps.append(_step(
+            "track",
+            float(initial_score),
+            f"赛道 {resolved_track_key}：调用B美感基础分 {initial_score}，赛道上限 {track_cap}",
+        ))
+        steps.append(_step(
+            "b_aesthetic_foundation",
+            float(initial_score),
+            "等级撮合器以调用B aesthetic_score 作为初始分",
+        ))
 
     # Step 4 — dimension deductions (node 2).
-    score_after_dimensions, dim_evidence = _apply_dimension_deductions(
-        dimension_result, base_score, dimension_max
-    )
+    if initial_score is None:
+        score_after_dimensions, dim_evidence = _apply_dimension_deductions(
+            dimension_result, base_score, dimension_max
+        )
+    else:
+        if not isinstance(dimension_result, dict):
+            raise CategoryEvaluationAggregatorError(
+                "dimension_result_invalid", "dimension_result 必须是对象"
+            )
+        deductions = dimension_result.get("deductions")
+        if not isinstance(deductions, dict):
+            raise CategoryEvaluationAggregatorError(
+                "dimension_deductions_invalid", "dimension_result.deductions 必须是对象"
+            )
+        raw_total = 0.0
+        applied_by_key: dict[str, float] = {}
+        for key, value in deductions.items():
+            if not isinstance(key, str) or not key:
+                raise CategoryEvaluationAggregatorError(
+                    "dimension_key_invalid", "维度扣分的 key 必须是非空字符串"
+                )
+            if not _is_number(value) or value < 0:
+                raise CategoryEvaluationAggregatorError(
+                    "dimension_deduction_negative",
+                    f"维度扣分 {key} 必须是 >=0 的数值",
+                )
+            raw_total += float(value)
+            applied_by_key[key] = float(value)
+        applied_total = min(raw_total, 100.0)
+        score_after_dimensions = max(0.0, float(initial_score) - applied_total)
+        dim_evidence = {
+            "initial_score": float(initial_score),
+            "raw_deduction_total": raw_total,
+            "applied_deduction_total": applied_total,
+            "clamped_to_dimension_max": raw_total > 100.0,
+            "deductions": applied_by_key,
+            "mode": "rule_deduction",
+        }
+        if isinstance(dimension_result.get("evidence"), (list, dict)):
+            dim_evidence["dimension_evidence"] = dimension_result["evidence"]
     rule_mode = dim_evidence["mode"] == "rule_deduction"
     dimension_note = (
         "维度扣分（规则命中）："
@@ -639,8 +699,9 @@ def aggregate_category_evaluation(
         "hard_reject": False,
         "terminated_at": None,
         "track_key": resolved_track_key,
-        "base_score": base_score,
+        "base_score": base_score if initial_score is None else None,
         "dimension_max": dimension_max,
+        "initial_score": initial_score,
         "score": score,
         "level": level,
         "raw_level": raw_level,

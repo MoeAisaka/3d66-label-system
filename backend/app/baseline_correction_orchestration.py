@@ -52,6 +52,10 @@ from .models import (
     SamplingPolicy,
 )
 from .mechanism_profiles import MechanismProfileError, validate_mechanism_artifacts
+from .mechanism_release_gate import (
+    CandidateReleaseGateError,
+    evaluate_candidate_release_gate,
+)
 from .risk_review import RISK_REVIEW_VERSION
 from .scoring import ENGINE_VERSION
 from .strategy_bundle import build_strategy_snapshot, get_or_create_bundle
@@ -1019,94 +1023,51 @@ def refresh_correction_run(
     baseline = correction.baseline_run
     if regression.status not in {"completed", "partial_failed", "failed"}:
         return correction
-    baseline_metrics = _json_object(
-        baseline.metrics_json,
-        label="基准回归指标",
-    )
-    candidate_metrics = _json_object(
-        regression.metrics_json,
-        label="候选回归指标",
-    )
-    comparable = bool(
-        regression.baseline_set_fingerprint
-        == baseline.baseline_set_fingerprint
-        and candidate_metrics.get("denominator", 0) > 0
-        and baseline_metrics.get("denominator", 0) > 0
-    )
-    exact_delta = (
-        float(candidate_metrics.get("exact_accuracy", 0.0))
-        - float(baseline_metrics.get("exact_accuracy", 0.0))
-        if comparable
-        else None
-    )
-    adjacent_delta = (
-        float(candidate_metrics.get("adjacent_accuracy", 0.0))
-        - float(baseline_metrics.get("adjacent_accuracy", 0.0))
-        if comparable
-        else None
-    )
-    regressions: list[dict[str, Any]] = []
-    if not comparable:
-        regressions.append(
-            {"code": "not_comparable", "message": "候选回归与基准不可比"}
-        )
-    if regression.status != "completed":
-        regressions.append(
-            {
-                "code": "candidate_run_incomplete",
-                "message": "候选回归存在失败条目",
-            }
-        )
-    if exact_delta is not None and exact_delta < 0:
-        regressions.append(
-            {
-                "code": "exact_accuracy_regressed",
-                "message": "Exact Accuracy 低于基准",
-                "delta": exact_delta,
-            }
-        )
-    if adjacent_delta is not None and adjacent_delta < 0:
-        regressions.append(
-            {
-                "code": "adjacent_accuracy_regressed",
-                "message": "Adjacent Accuracy 低于基准",
-                "delta": adjacent_delta,
-            }
-        )
-    if int(candidate_metrics.get("failed", 0)) > int(
-        baseline_metrics.get("failed", 0)
-    ):
-        regressions.append(
-            {
-                "code": "failed_count_regressed",
-                "message": "候选回归失败条目增加",
-            }
-        )
-    baseline_field_metrics = build_baseline_field_metrics(db, baseline)
-    candidate_field_metrics = build_baseline_field_metrics(db, regression)
-    regressions.extend(
-        field_metric_release_regressions(
-            baseline_field_metrics,
-            candidate_field_metrics,
+    candidate = db.get(CategoryEvaluationV3Revision, correction.candidate_revision_id)
+    projected = db.scalar(
+        select(CategoryEvaluationV3Config).where(
+            CategoryEvaluationV3Config.category_key == correction.category_key,
+            CategoryEvaluationV3Config.status == "active",
         )
     )
-    approval_allowed = comparable and not regressions
+    try:
+        release_report = evaluate_candidate_release_gate(
+            db,
+            category_key=correction.category_key,
+            projected=projected,
+            candidate=candidate,
+            regression_run=regression,
+            expected_projected_revision=(
+                int(_json_object(correction.orchestration_json, label="纠偏编排快照")
+                    .get("base_projection", {})
+                    .get("revision", -1))
+            ),
+            expected_projected_contract_hash=str(
+                _json_object(correction.orchestration_json, label="纠偏编排快照")
+                .get("base_projection", {})
+                .get("contract_hash", "")
+            ),
+        )
+    except CandidateReleaseGateError as exc:
+        baseline_metrics = _json_object(baseline.metrics_json, label="基准回归指标")
+        candidate_metrics = _json_object(regression.metrics_json, label="候选回归指标")
+        release_report = {
+            "schema_version": "baseline-correction-regression-v1",
+            "run_id": regression.id,
+            "status": regression.status,
+            "comparable": False,
+            "baseline_metrics": baseline_metrics,
+            "candidate_metrics": candidate_metrics,
+            "baseline_field_metrics": build_baseline_field_metrics(db, baseline),
+            "candidate_field_metrics": build_baseline_field_metrics(db, regression),
+            "exact_accuracy_delta": None,
+            "adjacent_accuracy_delta": None,
+            "regressions": [{"code": exc.code, "message": str(exc)}],
+            "recommendation": "reject",
+            "approval_allowed": False,
+        }
     report = _json_object(correction.report_json, label="纠偏分析报告")
-    report["candidate_regression"] = {
-        "schema_version": "baseline-correction-regression-v1",
-        "run_id": regression.id,
-        "status": regression.status,
-        "comparable": comparable,
-        "baseline_metrics": baseline_metrics,
-        "candidate_metrics": candidate_metrics,
-        "baseline_field_metrics": baseline_field_metrics,
-        "candidate_field_metrics": candidate_field_metrics,
-        "exact_accuracy_delta": exact_delta,
-        "adjacent_accuracy_delta": adjacent_delta,
-        "regressions": regressions,
-        "recommendation": "approve" if approval_allowed else "reject",
-        "approval_allowed": approval_allowed,
-    }
+    report["candidate_regression"] = release_report
     correction.report_json = canonical_json(report)
     correction.status = "awaiting_decision"
     correction.stage = "decision"

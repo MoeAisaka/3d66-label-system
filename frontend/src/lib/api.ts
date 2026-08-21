@@ -11,6 +11,7 @@ import type {
   BaselineSetDetail,
   BaselineSetSummary,
   BaselineV3RevisionList,
+  BaselineV3Revision,
   ContentIdentityRecord,
   MaterialPackage,
   PromptVersion,
@@ -215,6 +216,26 @@ export const baselineRegressionApi = {
   },
   listV3Revisions: (categoryKey: string) => api<BaselineV3RevisionList>(
     `/api/category-evaluation/v3-config/${encodeURIComponent(categoryKey)}/revisions`,
+  ),
+  activateV3Revision: (
+    categoryKey: string,
+    revision: number,
+    payload: {
+      regression_run_id: number
+      expected_projected_revision: number
+      expected_projected_contract_hash: string
+      note?: string
+    },
+  ) => api<{
+    category_key: string
+    activated_revision: BaselineV3Revision
+    regression_run_id: number
+    regression_evidence: Record<string, unknown>
+    mechanism_refresh: Record<string, unknown>
+    audit_event_key: string
+  }>(
+    `/api/category-evaluation/v3-config/${encodeURIComponent(categoryKey)}/revisions/${revision}/activate`,
+    { method: "POST", ...jsonBody(payload) },
   ),
   createRun: (setId: number, payload: {
     prompt_id?: number

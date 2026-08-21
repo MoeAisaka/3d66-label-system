@@ -37,9 +37,11 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from .category_evaluation_contract import canonical_contract_hash
+from .audit import append_audit_event
 from .category_evaluation_v3_revisions import (
     CategoryEvaluationV3RevisionError,
     RevisionArtifacts,
+    activate_candidate_revision,
     create_candidate_revision,
     ensure_projected_revision,
 )
@@ -55,7 +57,11 @@ from .mechanism_profiles import (
     validate_mechanism_artifacts,
 )
 from .models import CategoryEvaluationV3Config, CategoryEvaluationV3Revision
-from .models import TagDemandContract
+from .models import BaselineRegressionRun, TagDemandContract
+from .mechanism_release_gate import (
+    CandidateReleaseGateError,
+    evaluate_candidate_release_gate,
+)
 from .semantic_tag_contracts import (
     PLATFORM_SEMANTIC_CONTRACT_KEY,
     SemanticTagContractError,
@@ -186,6 +192,26 @@ class V3RevisionDetail(BaseModel):
     created_by: str
     created_at: Any
     updated_at: Any
+
+
+class V3RevisionActivationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    regression_run_id: int = Field(ge=1)
+    expected_projected_revision: int = Field(ge=1)
+    expected_projected_contract_hash: str = Field(min_length=64, max_length=64)
+    note: str = Field(default="", max_length=1000)
+
+
+class V3RevisionActivationResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    category_key: str
+    activated_revision: V3RevisionDetail
+    regression_run_id: int
+    regression_evidence: dict[str, Any]
+    mechanism_refresh: dict[str, Any]
+    audit_event_key: str
 
 
 # --------------------------------------------------------------------------- #
@@ -447,6 +473,7 @@ def _level_scale_response(row: CategoryEvaluationV3Config) -> LevelScaleResponse
 
 def build_category_evaluation_v3_config_router(
     require_user: Callable[..., Any],
+    require_admin: Callable[..., Any] | None = None,
 ) -> APIRouter:
     """Build the isolated v3-config CRUD + validation router.
 
@@ -455,6 +482,7 @@ def build_category_evaluation_v3_config_router(
     the standalone ``category_evaluation_v3_configs`` table; no queueing,
     publishing, model calls or worker interaction happens here.
     """
+    admin_dependency = require_admin or require_user
     router = APIRouter(
         prefix="/api/category-evaluation/v3-config",
         tags=["category-evaluation-v3-config"],
@@ -619,6 +647,117 @@ def build_category_evaluation_v3_config_router(
                 },
             )
         return _revision_detail(row)
+
+    @router.post(
+        "/{category_key}/revisions/{revision}/activate",
+        response_model=V3RevisionActivationResponse,
+    )
+    def activate_revision(
+        category_key: str,
+        revision: int,
+        payload: V3RevisionActivationRequest,
+        user: Any = Depends(admin_dependency),
+        db: Session = Depends(get_db),
+    ) -> V3RevisionActivationResponse:
+        """Atomically activate a candidate after a completed passing regression."""
+        projected = _load(db, category_key)
+        candidate = db.scalar(
+            select(CategoryEvaluationV3Revision).where(
+                CategoryEvaluationV3Revision.category_key == category_key,
+                CategoryEvaluationV3Revision.revision == revision,
+            )
+        )
+        if candidate is None:
+            raise HTTPException(
+                status_code=404,
+                detail={
+                    "code": "v3_revision_not_found",
+                    "message": f"未找到 {category_key} revision={revision}",
+                },
+            )
+        regression_run = db.get(BaselineRegressionRun, payload.regression_run_id)
+        try:
+            report = evaluate_candidate_release_gate(
+                db,
+                category_key=category_key,
+                projected=projected,
+                candidate=candidate,
+                regression_run=regression_run,
+                expected_projected_revision=payload.expected_projected_revision,
+                expected_projected_contract_hash=payload.expected_projected_contract_hash,
+            )
+        except CandidateReleaseGateError as exc:
+            db.rollback()
+            raise HTTPException(
+                status_code=409,
+                detail={"code": exc.code, "message": str(exc)},
+            ) from exc
+        if report.get("approval_allowed") is not True:
+            db.rollback()
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "candidate_quality_gate_failed",
+                    "message": "候选回归未通过质量门禁，不能启用",
+                    "regressions": report.get("regressions") or [],
+                    "report": report,
+                },
+            )
+
+        actor = getattr(user, "username", None) or "system"
+        try:
+            if not report.get("idempotent"):
+                activate_candidate_revision(
+                    db,
+                    projected,
+                    candidate,
+                    actor=actor,
+                )
+            mechanism_refresh = {
+                "category_key": category_key,
+                "v3_revision_id": candidate.id,
+                "revision": candidate.revision,
+                "contract_hash": candidate.contract_hash,
+                "regression_run_id": regression_run.id,
+            }
+            event = append_audit_event(
+                db,
+                category="category_evaluation_v3",
+                action="revision_activated",
+                subject_type="category_evaluation_v3_revision",
+                subject_id=candidate.id,
+                actor=actor,
+                payload={
+                    "category_key": category_key,
+                    "revision": candidate.revision,
+                    "regression_run_id": regression_run.id,
+                    "note": payload.note.strip(),
+                    "gate_report": report,
+                },
+                event_key=(
+                    f"category-evaluation-v3:{category_key}:revision:{candidate.revision}:"
+                    "activated"
+                ),
+            )
+            db.commit()
+            db.refresh(candidate)
+            return V3RevisionActivationResponse(
+                category_key=category_key,
+                activated_revision=_revision_detail(candidate),
+                regression_run_id=regression_run.id,
+                regression_evidence=report,
+                mechanism_refresh=mechanism_refresh,
+                audit_event_key=event.event_key,
+            )
+        except CategoryEvaluationV3RevisionError as exc:
+            db.rollback()
+            raise HTTPException(
+                status_code=409,
+                detail={"code": exc.code, "message": str(exc)},
+            ) from exc
+        except Exception:
+            db.rollback()
+            raise
 
     @router.post(
         "/{category_key}/revisions",

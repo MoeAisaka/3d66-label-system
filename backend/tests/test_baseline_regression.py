@@ -1,6 +1,7 @@
 import asyncio
 import json
 import importlib
+import re
 from copy import deepcopy
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -1450,6 +1451,22 @@ def test_baseline_run_can_freeze_manual_prompt_pair_and_reserves_dimension_choic
                     raw_payload={"provider_id": f"call-{len(calls)}"},
                 )
 
+            async def chat_json(self, _system_prompt, user_prompt, **_kwargs):
+                keys = re.findall(r"维度：.*?（([^）]+)）", user_prompt)
+                return DoubaoResponse(
+                    parsed={
+                        "aesthetic_score": 88,
+                        "aesthetic_evidence": ["主体结构、材质和光影均有可见证据"],
+                        "aesthetic_confidence": 0.9,
+                        "dimensions": {
+                            key: {"hit_rules": []} for key in dict.fromkeys(keys)
+                        },
+                        "overall_note": "",
+                    },
+                    raw_text="{}",
+                    raw_payload={"provider_id": "call-b"},
+                )
+
         @contextmanager
         def test_scope():
             try:
@@ -1490,7 +1507,7 @@ def test_baseline_run_can_freeze_manual_prompt_pair_and_reserves_dimension_choic
         )
         interpretation = detail.json()["items"][0]["interpretation"]
         assert interpretation["status"] == "scored"
-        assert "调用B失败" in interpretation["raw_text_b"]
+        assert '"aesthetic_score": 88' in interpretation["raw_text_b"]
         set_detail = client.get(f"/api/baseline-sets/{set_id}")
         assert (
             set_detail.json()["runs"][0]["selection"]["prompt_a"]["version"]

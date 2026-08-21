@@ -147,6 +147,10 @@ export function BaselineRegressionPage() {
     queryFn: () => baselineRegressionApi.listV3Revisions(selectedCategoryKey),
     enabled: Boolean(selectedCategoryKey),
   })
+  const me = useQuery({
+    queryKey: ["me"],
+    queryFn: () => api<User>("/api/auth/me"),
+  })
   const baselineSets = useQuery({
     queryKey: ["baseline-sets", selectedCategoryKey],
     queryFn: () => baselineRegressionApi.listSets(selectedCategoryKey),
@@ -284,11 +288,19 @@ export function BaselineRegressionPage() {
   useEffect(() => {
     const activeId = v3Revisions.data?.projected_revision_id ?? 0
     if (!activeId) return
+    const requestedCandidateId = Number(searchParams.get("candidate_revision_id") || 0)
+    if (requestedCandidateId > 0) {
+      if (v3Revisions.data?.items.some((item) => item.id === requestedCandidateId)) {
+        setSelectedV3RevisionId(requestedCandidateId)
+        setV3SelectionMode("candidate")
+      }
+      return
+    }
     if (!selectedV3RevisionId || !v3Revisions.data?.items.some((item) => item.id === selectedV3RevisionId)) {
       setSelectedV3RevisionId(activeId)
       setV3SelectionMode("active")
     }
-  }, [selectedCategoryKey, selectedV3RevisionId, v3Revisions.data])
+  }, [searchParams, selectedCategoryKey, selectedV3RevisionId, v3Revisions.data])
 
   useEffect(() => {
     if (v3SelectionMode !== "candidate" || !selectedV3Revision) return
@@ -304,6 +316,20 @@ export function BaselineRegressionPage() {
     }
     setPromptSelectionMode("manual")
   }, [promptAOptions, promptBOptions, selectedV3Revision, v3SelectionMode])
+
+  useEffect(() => {
+    const categoryFromUrl = searchParams.get("category_key")
+    if (categoryFromUrl && categoryFromUrl !== selectedCategoryKey) {
+      setSelectedCategoryKey(categoryFromUrl)
+      setSelectedSetId(0)
+      setSelectedRunId(0)
+    }
+    const candidateFromUrl = Number(searchParams.get("candidate_revision_id") || 0)
+    if (candidateFromUrl > 0 && candidateFromUrl !== selectedV3RevisionId) {
+      setSelectedV3RevisionId(candidateFromUrl)
+      setV3SelectionMode("candidate")
+    }
+  }, [searchParams, selectedCategoryKey, selectedV3RevisionId])
 
   useEffect(() => {
     const runFromUrl = Number(searchParams.get("run") || 0)
@@ -515,6 +541,39 @@ export function BaselineRegressionPage() {
   )
   const selectedRun = selectedSet.data?.runs.find((run) => run.id === selectedRunId)
   const summary = runDetail.data?.summary ?? selectedRun
+  const candidateRevisionFromRun = summary?.selection.dimension.v3_contract?.candidate_revision_id
+    ? v3Revisions.data?.items.find(
+      (revision) => revision.id === summary.selection.dimension.v3_contract?.candidate_revision_id,
+    )
+    : null
+  const activateCandidate = useMutation({
+    mutationFn: () => {
+      if (!summary || !candidateRevisionFromRun || !activeV3Revision) {
+        throw new Error("候选回归上下文尚未加载完整")
+      }
+      return baselineRegressionApi.activateV3Revision(
+        summary.category_key,
+        candidateRevisionFromRun.revision,
+        {
+          regression_run_id: summary.id,
+          expected_projected_revision: activeV3Revision.revision,
+          expected_projected_contract_hash: activeV3Revision.contract_hash,
+          note: "管理员确认候选回归通过后启用",
+        },
+      )
+    },
+    onSuccess: async () => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["category-evaluation-v3-config"] }),
+        queryClient.invalidateQueries({ queryKey: ["baseline-v3-revisions", summary?.category_key] }),
+        queryClient.invalidateQueries({ queryKey: ["baseline-sets"] }),
+        queryClient.invalidateQueries({ queryKey: ["baseline-set", selectedSetId] }),
+        queryClient.invalidateQueries({ queryKey: ["baseline-regression", selectedRunId] }),
+      ])
+      toast.success("候选机制已启用")
+    },
+    onError: (error) => toast.error(error.message),
+  })
   const correctionItemId = searchParams.get("mode") === "correction"
     ? Number(searchParams.get("item") || 0)
     : 0
@@ -1212,6 +1271,26 @@ export function BaselineRegressionPage() {
 
               {summary && (
                 <>
+                {candidateRevisionFromRun && summary.status === "completed" && me.data?.is_admin && (
+                  <div className="mt-5 flex flex-wrap items-center justify-between gap-3 border-l-2 border-primary bg-[#f8faed] px-4 py-4">
+                    <div>
+                      <p className="text-sm font-bold">候选回归已完成</p>
+                      <p className="mt-1 text-xs leading-5 text-[var(--muted)]">
+                        Revision {candidateRevisionFromRun.revision} 使用当前冻结基准集完成回归；通过后可切换运行时机制，标签事实发布保持独立。
+                      </p>
+                    </div>
+                    <Button
+                      disabled={activateCandidate.isPending || !summary.previous_run_id}
+                      onClick={() => {
+                        if (window.confirm("确认启用该候选机制？此操作会更新当前类目的运行时投影。")) {
+                          activateCandidate.mutate()
+                        }
+                      }}
+                    >
+                      <Check weight="bold" />{activateCandidate.isPending ? "正在启用" : "启用候选"}
+                    </Button>
+                  </div>
+                )}
                 <StatusSummaryStrip className="mt-5">
                   {(() => {
                     const acceptanceRows = acceptancePages.data?.flat() ?? []

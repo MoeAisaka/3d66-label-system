@@ -18,6 +18,10 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from .level_semantics import UNIFIED_LEVEL_SEMANTICS_VERSION
+from .b_aesthetic_foundation import (
+    BAestheticFoundationError,
+    normalize_b_aesthetic_foundation,
+)
 
 # 复用影子模块已有的只读加载与 grade 映射机件（不另造）。
 from .mechanism_profiles import (
@@ -564,6 +568,7 @@ async def evaluate_v3_authoritative(
     specific_grades_by_track: dict[str, dict[str, int]] = {}
     rule_dimension_output: dict[str, Any] | None = None
     resolved_track_key: str | None = None
+    foundation: dict[str, Any] | None = None
 
     try:
         redline = evaluate_redlines(precheck_obj, policy=contract["redline_policy"])
@@ -621,13 +626,18 @@ async def evaluate_v3_authoritative(
                 composed = compose_rule_deductions(
                     config=track_config,
                     dimension_output=rule_dimension_output,
+                    require_foundation=True,
                 )
                 from .category_evaluation_aggregator import (
                     aggregate_category_evaluation,
                 )
 
                 result = aggregate_category_evaluation(
-                    contract, precheck_obj, composed, track_key=track_key
+                    contract,
+                    precheck_obj,
+                    composed,
+                    track_key=track_key,
+                    initial_score=composed.get("aesthetic_score"),
                 )
                 result["dimension_deduction_output"] = rule_dimension_output
                 result["dimension_scoring_mode"] = public_scoring_mode
@@ -643,6 +653,11 @@ async def evaluate_v3_authoritative(
         common_keys = _dimension_keys(track_config.get("common_group"))
         specific_dims = _dimension_defs(track_config.get("specific_group"))
         specific_keys = [item["key"] for item in specific_dims]
+        if isinstance(contract.get("b_aesthetic_foundation"), dict):
+            try:
+                foundation = normalize_b_aesthetic_foundation(aesthetic)
+            except BAestheticFoundationError as exc:
+                raise V3AuthoritativeError(exc.code, str(exc)) from exc
         strict_grades = _strict_static_grades(
             aesthetic,
             track_config=track_config,
@@ -697,6 +712,7 @@ async def evaluate_v3_authoritative(
             precheck=precheck_obj,
             common_grades_by_track=common_grades_by_track,
             specific_grades_by_track=specific_grades_by_track,
+            initial_score=(foundation["aesthetic_score"] if foundation else None),
         )
     except Exception as exc:  # noqa: BLE001 — 引擎确定性异常，fail-closed 上抛，绝不降级
         raise V3AuthoritativeError(

@@ -121,6 +121,32 @@ def _make_client(
     return TestClient(app)
 
 
+def _make_activation_client(
+    sessions: sessionmaker[Session], *, admin: bool = True
+) -> TestClient:
+    app = FastAPI()
+
+    def require_user() -> Any:
+        return _Principal()
+
+    def require_admin() -> Any:
+        if not admin:
+            raise HTTPException(status_code=403, detail="需要管理员权限")
+        principal = _Principal()
+        principal.username = "v3-config-admin"
+        return principal
+
+    def test_db() -> Iterator[Session]:
+        with sessions() as db:
+            yield db
+
+    app.include_router(
+        build_category_evaluation_v3_config_router(require_user, require_admin)
+    )
+    app.dependency_overrides[get_db] = test_db
+    return TestClient(app)
+
+
 @pytest.fixture
 def client(sessions: sessionmaker[Session]) -> Iterator[TestClient]:
     with _make_client(sessions) as test_client:
@@ -531,6 +557,35 @@ def test_missing_config_returns_coded_404(client: TestClient) -> None:
     response = client.get(f"{_BASE}/does_not_exist")
     assert response.status_code == 404, response.text
     assert response.json()["detail"]["code"] == "v3_config_not_found"
+
+
+def test_candidate_activation_requires_admin_and_uses_stable_route(
+    sessions: sessionmaker[Session],
+) -> None:
+    with _make_activation_client(sessions, admin=False) as non_admin:
+        denied = non_admin.post(
+            f"{_BASE}/inspiration_image/revisions/2/activate",
+            json={
+                "regression_run_id": 1,
+                "expected_projected_revision": 1,
+                "expected_projected_contract_hash": "a" * 64,
+                "note": "人工确认",
+            },
+        )
+        assert denied.status_code == 403
+
+    with _make_activation_client(sessions) as admin:
+        missing = admin.post(
+            f"{_BASE}/inspiration_image/revisions/2/activate",
+            json={
+                "regression_run_id": 1,
+                "expected_projected_revision": 1,
+                "expected_projected_contract_hash": "a" * 64,
+                "note": "人工确认",
+            },
+        )
+        assert missing.status_code == 404
+        assert missing.json()["detail"]["code"] == "v3_config_not_found"
 
 
 # --------------------------------------------------------------------------- #

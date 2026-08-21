@@ -493,8 +493,8 @@ def test_model_3d_su_seed_upgrades_known_v1_rows_once_without_rewriting_history(
                 PromptVersion.category_key == MODEL_3D_SU_CATEGORY_KEY
             )
         ).all()
-        assert MODEL_3D_SU_CALL_A_VERSION == "model-3d-su-a-v3-20260819"
-        assert MODEL_3D_SU_CALL_B_VERSION == "model-3d-su-b-v3-20260819"
+        assert MODEL_3D_SU_CALL_A_VERSION == "model-3d-su-a-v4-20260821"
+        assert MODEL_3D_SU_CALL_B_VERSION == "model-3d-su-b-v4-20260821"
         assert {prompt.version for prompt in prompts} == {
             prompt_a_v1.version,
             prompt_b_v1.version,

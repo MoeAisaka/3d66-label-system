@@ -47,7 +47,7 @@ assert.match(baselinePage, /CorrectionWorkbench/)
 assert.match(baselinePage, /baselineAcceptanceProgressFromPages/)
 assert.equal(
   (baselinePage.match(/queryKey: \["baseline-acceptance", run\.id\]/g) ?? []).length,
-  2,
+  3,
 )
 assert.doesNotMatch(baselinePage, /function BaselineCorrectionPanel/)
 assert.doesNotMatch(baselinePage, /awaiting_confirmation/)

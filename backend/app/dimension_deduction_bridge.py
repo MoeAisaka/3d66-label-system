@@ -24,6 +24,7 @@ from .category_evaluation_contract import (
     DimensionDeductionOutput,
     dimension_rule_mode,
 )
+from .b_aesthetic_foundation import normalize_b_aesthetic_foundation
 from .dimension_composition import validate_subcategory_dimensions
 from .dimension_grade_bridge import (
     DimensionGradeBridgeError,
@@ -126,6 +127,9 @@ def empty_deduction_output(
             for dimension in dimension_definitions(config)
         },
         "overall_note": "",
+        "aesthetic_score": None,
+        "aesthetic_evidence": [],
+        "aesthetic_confidence": None,
         "warning": warning,
         "raw_payload": None,
     }
@@ -177,12 +181,26 @@ def _configured_rules(
 def normalize_dimension_deduction_output(
     payload: Any,
     config: dict[str, Any],
+    *,
+    require_foundation: bool | None = None,
 ) -> dict[str, Any]:
     """Validate provider JSON against the frozen configured dimensions/rules."""
     dimensions, rules_by_dimension, bonus_rules_by_dimension, mode = _configured_rules(config)
     if not isinstance(payload, dict):
         raise DimensionDeductionBridgeError(
             "response_not_object", "调用B响应必须是 JSON 对象"
+        )
+    foundation: dict[str, Any] | None = None
+    if require_foundation is None:
+        require_foundation = isinstance(config.get("b_aesthetic_foundation"), dict)
+    if require_foundation and isinstance(config.get("b_aesthetic_foundation"), dict):
+        foundation = normalize_b_aesthetic_foundation(
+            {
+                "aesthetic_score": payload.get("aesthetic_score"),
+                "overall_evidence": payload.get("aesthetic_evidence")
+                or ([payload.get("overall_note")] if payload.get("overall_note") else []),
+                "confidence": payload.get("aesthetic_confidence"),
+            }
         )
     raw_dimensions = payload.get("dimensions")
     if isinstance(raw_dimensions, dict):
@@ -281,6 +299,15 @@ def normalize_dimension_deduction_output(
             for key in expected_keys
         },
         "overall_note": str(payload.get("overall_note") or "").strip(),
+        **(
+            {
+                "aesthetic_score": foundation["aesthetic_score"],
+                "aesthetic_evidence": foundation["evidence"],
+                "aesthetic_confidence": foundation["confidence"],
+            }
+            if foundation is not None
+            else {}
+        ),
         "warning": None,
     }
 
@@ -291,8 +318,15 @@ def build_dimension_deduction_prompt(
     """Build the Chinese rule-by-rule calling-B prompt from frozen config."""
     dimensions, _, _, mode = _configured_rules(config)
     bonus_cap = mode == "bonus_cap_v2"
+    requires_foundation = isinstance(config.get("b_aesthetic_foundation"), dict)
     system = (
-        "你是灵感素材质量核验专家。你只做规则命中判断，不打1-5分、不输出总分或等级。"
+        "你是灵感素材质量核验专家。"
+        + (
+            "先输出0-100的 aesthetic_score 作为基础美感分，再逐条判断合同规则命中；"
+            "基础分不得输出最终等级。"
+            if requires_foundation
+            else "你只做规则命中判断，不打1-5分、不输出总分或等级。"
+        )
         + (
             "逐维度分别检查每条扣分规则与加分规则；只返回确有视觉证据的命中项。"
             if bonus_cap
@@ -318,6 +352,15 @@ def build_dimension_deduction_prompt(
             + rules_text
         )
     response_contract = {
+        **(
+            {
+                "aesthetic_score": 88,
+                "aesthetic_evidence": ["整体可见美感证据"],
+                "aesthetic_confidence": 0.8,
+            }
+            if requires_foundation
+            else {}
+        ),
         "dimensions": {
             dimension["key"]: {
                 "hit_rules": [
@@ -403,7 +446,9 @@ async def call_multimodal_for_dimension_deductions(
             mime_type=mime_type,
         )
         parsed = response.parsed if hasattr(response, "parsed") else response
-        normalized = normalize_dimension_deduction_output(parsed, contract)
+        normalized = normalize_dimension_deduction_output(
+            parsed, contract, require_foundation=True
+        )
         normalized["prompt_identity"] = prompt_identity
         normalized["raw_payload"] = getattr(response, "raw_payload", parsed)
         return normalized
@@ -417,6 +462,7 @@ def compose_rule_deductions(
     *,
     config: dict[str, Any],
     dimension_output: dict[str, Any],
+    require_foundation: bool = False,
 ) -> dict[str, Any]:
     """Convert rule hits into weighted point deductions for the aggregator.
 
@@ -426,10 +472,18 @@ def compose_rule_deductions(
     track/group weighting while replacing subjective grades with explicit rules.
     """
     if rule_scoring_mode(config) == "bonus_cap_v2":
-        return compose_rule_scores(config=config, dimension_output=dimension_output)
+        return compose_rule_scores(
+            config=config,
+            dimension_output=dimension_output,
+            require_foundation=require_foundation,
+        )
     validate_subcategory_dimensions(config)
     dimensions, rules_by_dimension, _, _ = _configured_rules(config)
-    normalized = normalize_dimension_deduction_output(dimension_output, config)
+    normalized = normalize_dimension_deduction_output(
+        dimension_output,
+        config,
+        require_foundation=require_foundation,
+    )
     hit_by_key = {
         key: value["hit_rules"]
         for key, value in normalized["dimensions"].items()
@@ -492,6 +546,9 @@ def compose_rule_deductions(
         "deductions": deductions,
         "evidence": evidence,
         "warning": dimension_output.get("warning"),
+        "aesthetic_score": normalized.get("aesthetic_score"),
+        "aesthetic_evidence": normalized.get("aesthetic_evidence") or [],
+        "aesthetic_confidence": normalized.get("aesthetic_confidence"),
         "overall_note": normalized.get("overall_note", ""),
         "prompt_identity": dimension_output.get("prompt_identity"),
     }
@@ -501,6 +558,7 @@ def compose_rule_scores(
     *,
     config: dict[str, Any],
     dimension_output: dict[str, Any],
+    require_foundation: bool = False,
 ) -> dict[str, Any]:
     """Compose explicit deduction/bonus hits into capped dimension scores."""
     validate_subcategory_dimensions(config)
@@ -514,7 +572,11 @@ def compose_rule_scores(
         raise DimensionDeductionBridgeError(
             "bonus_cap_mode_required", "compose_rule_scores 仅接受 bonus-cap-v2 合同"
         )
-    normalized = normalize_dimension_deduction_output(dimension_output, config)
+    normalized = normalize_dimension_deduction_output(
+        dimension_output,
+        config,
+        require_foundation=require_foundation,
+    )
 
     non_empty_groups: list[tuple[str, dict[str, Any]]] = []
     for group_name in ("common_group", "specific_group"):
@@ -596,6 +658,9 @@ def compose_rule_scores(
         "deductions": deductions,
         "evidence": evidence,
         "warning": dimension_output.get("warning"),
+        "aesthetic_score": normalized.get("aesthetic_score"),
+        "aesthetic_evidence": normalized.get("aesthetic_evidence") or [],
+        "aesthetic_confidence": normalized.get("aesthetic_confidence"),
         "overall_note": normalized.get("overall_note", ""),
         "prompt_identity": dimension_output.get("prompt_identity"),
     }

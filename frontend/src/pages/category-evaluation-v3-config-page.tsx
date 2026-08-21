@@ -350,7 +350,7 @@ export function CategoryEvaluationV3ConfigPage() {
         <div className="mb-4"><EvaluationBoundaryNote slot="dimension" /></div>
         <div className="mb-4 flex items-start gap-3 border-y border-[var(--line)] bg-[#fff6e9] px-4 py-3 text-xs leading-6 text-[#7d4308]">
           <WarningCircle className="mt-0.5 shrink-0" size={16} weight="fill" />
-          <p>机制发布轴与标签事实发布轴保持独立。这里创建的版本仅为候选，人工发布门禁尚未在本批绑定。</p>
+          <p>机制发布轴与标签事实发布轴保持独立。候选版本先进入冻结基准回归，只有通过质量门禁并由管理员确认后才会启用。</p>
         </div>
 
         <div className="grid gap-6 lg:grid-cols-[320px_minmax(0,1fr)]">
@@ -409,6 +409,15 @@ export function CategoryEvaluationV3ConfigPage() {
                       <span className="font-data text-[var(--muted)]">{selectedRevision.contract_hash.slice(0, 12)}…</span>
                       {selectedRevision.id === runtimeRevision?.id && <span className="font-semibold">运行时投影</span>}
                     </div>
+                    {selectedRevision.status === "candidate" && (
+                      <Button asChild size="sm" variant="secondary">
+                        <Link
+                          to={`/workflow/optimization/baseline-regression?category_key=${encodeURIComponent(selectedRevision.category_key)}&candidate_revision_id=${selectedRevision.id}`}
+                        >
+                          创建候选回归
+                        </Link>
+                      </Button>
+                    )}
                     <label className="flex items-center gap-2 font-semibold">
                       查看版本
                       <select

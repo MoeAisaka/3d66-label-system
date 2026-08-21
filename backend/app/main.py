@@ -1678,7 +1678,7 @@ def label_consumer_sender(
 
 app.include_router(build_canary_router(current_user))
 app.include_router(build_category_evaluation_preview_router(current_user))
-app.include_router(build_category_evaluation_v3_config_router(current_user))
+app.include_router(build_category_evaluation_v3_config_router(current_user, admin_user))
 app.include_router(build_node_correction_router(_permission_user("reviews:write")))
 app.include_router(build_script_registry_router(current_user))
 app.include_router(build_workflow_registry_router(current_user))

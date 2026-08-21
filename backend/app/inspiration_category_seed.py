@@ -302,6 +302,12 @@ def build_inspiration_v3_rev3_contract() -> dict[str, Any]:
             "call_a_version": INSPIRATION_REV3_CALL_A_VERSION,
             "call_b_version": INSPIRATION_CALL_B_VERSION,
         },
+        "b_aesthetic_foundation": {
+            "format_version": "b-aesthetic-foundation-v1",
+            "source": "call_b",
+            "score_range": [0, 100],
+            "evidence_required": True,
+        },
         "redline_policy": _redline_policy(),
         "track_classification": _track_classification(),
         "common_modifiers": _common_modifiers(),
@@ -665,6 +671,12 @@ def build_inspiration_subcategory_dimensions() -> dict[str, dict[str, Any]]:
             "format_version": SUBCATEGORY_DIMENSIONS_FORMAT_VERSION,
             "sub_category_key": track_key,
             "dimension_max": dimension_max,
+            "b_aesthetic_foundation": {
+                "format_version": "b-aesthetic-foundation-v1",
+                "source": "call_b",
+                "score_range": [0, 100],
+                "evidence_required": True,
+            },
             "common_group": _common_group(
                 dimensions=_dimensions_from_specs(specs, dimension_max)
             ),
@@ -681,6 +693,7 @@ def evaluate_one(
     precheck: dict,
     common_grades_by_track: dict[str, dict[str, int]],
     specific_grades_by_track: dict[str, dict[str, int]],
+    initial_score: int | float | None = None,
 ) -> dict[str, Any]:
     """End-to-end deterministic "score one image" orchestrator (pure function).
 
@@ -721,6 +734,10 @@ def evaluate_one(
         specific_grades=specific_grades_by_track.get(track_key),
     )
     result = aggregate_category_evaluation(
-        contract, precheck, composed, track_key=track_key
+        contract,
+        precheck,
+        composed,
+        track_key=track_key,
+        initial_score=initial_score,
     )
     return {"redline": redline, "resolved": resolved, "result": result}
