@@ -16,6 +16,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+from collections.abc import Mapping
 from typing import Any
 
 from .category_evaluation_contract import (
@@ -179,6 +180,60 @@ def _configured_rules(
     return dimensions, rules_by_dimension, bonus_rules_by_dimension, mode
 
 
+def declares_foundation(config: Any) -> bool:
+    """Whether the contract explicitly declares ``b_aesthetic_foundation``.
+
+    Declaring the block is an opt-in to strict, fail-closed behaviour: such a
+    contract must always carry a Call-B score, even when the Call-B request
+    itself failed.  Contracts that never declared it only inherit the engine
+    default and keep the historical provider-failure degradation.
+    """
+    return isinstance(config, Mapping) and isinstance(
+        config.get("b_aesthetic_foundation"), Mapping
+    )
+
+
+def foundation_required(config: Any) -> bool:
+    """Whether calling B must supply the graded matcher's starting score.
+
+    The Call-B aesthetic score is the engine default for every category, so a
+    contract no longer needs a ``b_aesthetic_foundation`` key to opt in. A
+    contract may still opt out explicitly with
+    ``b_aesthetic_foundation: {"enabled": false}``, which keeps this a
+    switchable compatibility layer rather than a one-way removal.
+    """
+    if not isinstance(config, Mapping):
+        return True
+    declared = config.get("b_aesthetic_foundation")
+    if isinstance(declared, Mapping) and declared.get("enabled") is False:
+        return False
+    if declared is False:
+        return False
+    return True
+
+
+def is_call_b_failure_fallback(payload: Any) -> bool:
+    """True when ``payload`` is this bridge's own Call-B-failure sentinel.
+
+    ``call_multimodal_for_dimension_deductions`` converts a failed Call-B
+    request into ``empty_deduction_output(..., warning=FALLBACK_WARNING)`` under
+    the approved fail-open policy for this subjective node.  That sentinel is
+    later re-validated by the worker, so it must stay distinguishable from a
+    provider that *did* answer but omitted the score -- the latter must still
+    fail closed, otherwise every dimension silently returns full marks.
+
+    Raw provider JSON cannot reach this state: ``raw_payload`` is attached by
+    the bridge only after validation succeeds.
+    """
+    if not isinstance(payload, Mapping):
+        return False
+    return (
+        payload.get("warning") == FALLBACK_WARNING
+        and payload.get("raw_payload") is None
+        and payload.get("aesthetic_score") is None
+    )
+
+
 def normalize_dimension_deduction_output(
     payload: Any,
     config: dict[str, Any],
@@ -193,8 +248,16 @@ def normalize_dimension_deduction_output(
         )
     foundation: dict[str, Any] | None = None
     if require_foundation is None:
-        require_foundation = isinstance(config.get("b_aesthetic_foundation"), dict)
-    if require_foundation and isinstance(config.get("b_aesthetic_foundation"), dict):
+        require_foundation = foundation_required(config)
+    if (
+        require_foundation
+        and not declares_foundation(config)
+        and is_call_b_failure_fallback(payload)
+    ):
+        # Call-B never answered.  Contracts that only inherit the engine default
+        # keep degrading here instead of failing the whole category.
+        require_foundation = False
+    if require_foundation:
         foundation = normalize_b_aesthetic_foundation(
             {
                 "aesthetic_score": payload.get("aesthetic_score"),
@@ -319,7 +382,7 @@ def build_dimension_deduction_prompt(
     """Build the Chinese rule-by-rule calling-B prompt from frozen config."""
     dimensions, _, _, mode = _configured_rules(config)
     bonus_cap = mode == "bonus_cap_v2"
-    requires_foundation = isinstance(config.get("b_aesthetic_foundation"), dict)
+    requires_foundation = foundation_required(config)
     system = (
         "你是灵感素材质量核验专家。"
         + (

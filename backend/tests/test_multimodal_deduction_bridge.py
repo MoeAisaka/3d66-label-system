@@ -12,8 +12,12 @@ from app.dimension_deduction_bridge import (
     DimensionDeductionBridgeError,
     FALLBACK_WARNING,
     call_multimodal_for_dimension_deductions,
+    compose_rule_deductions,
+    empty_deduction_output,
+    foundation_required,
     normalize_dimension_deduction_output,
 )
+from app.b_aesthetic_foundation import BAestheticFoundationError
 from app.inspiration_category_seed import build_inspiration_subcategory_dimensions
 
 
@@ -198,3 +202,62 @@ def test_bonus_cap_bridge_rejects_duplicate_provider_hits() -> None:
     with pytest.raises(DimensionDeductionBridgeError) as excinfo:
         normalize_dimension_deduction_output(payload, config)
     assert excinfo.value.code == "rule_duplicate"
+
+
+# --- Call-B failure must stay fail-open for contracts that never declared the
+# --- foundation, while "B answered but omitted the score" stays fail-closed.
+
+
+def _undeclared_config() -> dict:
+    config = deepcopy(build_inspiration_subcategory_dimensions()["class_one"])
+    config.pop("b_aesthetic_foundation", None)
+    return config
+
+
+def _answered_without_score(config: dict) -> dict:
+    """A payload the provider really returned, minus any aesthetic score."""
+    return {
+        "dimensions": {
+            key: {"hit_rules": []}
+            for key in empty_deduction_output(config)["dimensions"]
+        },
+        "overall_note": "已核验规则",
+    }
+
+
+def test_undeclared_contract_degrades_when_call_b_itself_fails() -> None:
+    config = _undeclared_config()
+    assert foundation_required(config) is True
+    fallback = empty_deduction_output(config, warning=FALLBACK_WARNING)
+
+    composed = compose_rule_deductions(
+        config=config,
+        dimension_output=fallback,
+        require_foundation=foundation_required(config),
+    )
+
+    assert composed.get("aesthetic_score") is None
+
+
+def test_undeclared_contract_fails_closed_when_call_b_omits_score() -> None:
+    config = _undeclared_config()
+
+    with pytest.raises(BAestheticFoundationError):
+        compose_rule_deductions(
+            config=config,
+            dimension_output=_answered_without_score(config),
+            require_foundation=foundation_required(config),
+        )
+
+
+def test_declared_contract_stays_strict_even_on_provider_failure() -> None:
+    config = deepcopy(build_inspiration_subcategory_dimensions()["class_one"])
+    assert isinstance(config.get("b_aesthetic_foundation"), dict)
+    fallback = empty_deduction_output(config, warning=FALLBACK_WARNING)
+
+    with pytest.raises(BAestheticFoundationError):
+        compose_rule_deductions(
+            config=config,
+            dimension_output=fallback,
+            require_foundation=foundation_required(config),
+        )

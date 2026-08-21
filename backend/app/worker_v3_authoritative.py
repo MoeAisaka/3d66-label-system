@@ -602,6 +602,8 @@ async def evaluate_v3_authoritative(
         from .dimension_deduction_bridge import (
             call_multimodal_for_dimension_deductions,
             compose_rule_deductions,
+            declares_foundation,
+            foundation_required,
             has_deduction_rules,
             rule_scoring_mode,
         )
@@ -623,10 +625,16 @@ async def evaluate_v3_authoritative(
                 precheck=precheck_obj,
             )
             try:
+                # normalize validates ``track_config``, so the track-level
+                # switch decides; the category-level switch still opts the
+                # whole contract out.  Both default to True.
                 composed = compose_rule_deductions(
                     config=track_config,
                     dimension_output=rule_dimension_output,
-                    require_foundation=True,
+                    require_foundation=(
+                        foundation_required(contract)
+                        and foundation_required(track_config)
+                    ),
                 )
                 from .category_evaluation_aggregator import (
                     aggregate_category_evaluation,
@@ -653,11 +661,19 @@ async def evaluate_v3_authoritative(
         common_keys = _dimension_keys(track_config.get("common_group"))
         specific_dims = _dimension_defs(track_config.get("specific_group"))
         specific_keys = [item["key"] for item in specific_dims]
-        if isinstance(contract.get("b_aesthetic_foundation"), dict):
+        # The graded matcher starts from calling B's aesthetic score. Contracts
+        # that declare b_aesthetic_foundation stay strict/fail-closed. On this
+        # grade path B may legitimately return only 1-5 grades, so an absent
+        # score falls back to the historical base_score + dimension_max instead
+        # of failing the whole category.
+        contract_declares_foundation = declares_foundation(contract)
+        if foundation_required(contract):
             try:
                 foundation = normalize_b_aesthetic_foundation(aesthetic)
             except BAestheticFoundationError as exc:
-                raise V3AuthoritativeError(exc.code, str(exc)) from exc
+                if contract_declares_foundation:
+                    raise V3AuthoritativeError(exc.code, str(exc)) from exc
+                foundation = None
         strict_grades = _strict_static_grades(
             aesthetic,
             track_config=track_config,
