@@ -49,6 +49,45 @@ def _candidate_prompt_bindings(candidate: Any) -> dict[str, Any]:
     return {}
 
 
+def _prompt_binding_override(bundle: Mapping[str, Any]) -> dict[str, Any]:
+    value = bundle.get("prompt_binding_override")
+    return dict(value) if isinstance(value, Mapping) else {}
+
+
+def _snapshot_prompt_bindings_consistent(
+    bundle: Mapping[str, Any],
+    snapshot_bindings: Any,
+    candidate: Any,
+) -> bool:
+    """Accept a regression that deliberately ran an operator-chosen A/B pair.
+
+    Evaluation-mechanism experiments require running any candidate against any
+    A/B pair, so the run snapshot records the pair that actually executed rather
+    than the pair the candidate declared at generation time.  Equality with the
+    declared pair is therefore no longer required -- but the divergence must be
+    self-consistent: the snapshot's own override record has to name the
+    candidate's declared pair as ``declared`` and the executed pair as
+    ``executed``.  A snapshot carrying arbitrary bindings with no matching
+    override record is still rejected, so this stays a forgery check rather than
+    becoming an unconditional bypass.
+    """
+    declared = _candidate_prompt_bindings(candidate)
+    executed = dict(snapshot_bindings) if isinstance(snapshot_bindings, Mapping) else {}
+    if executed == declared:
+        return True
+    override = _prompt_binding_override(bundle)
+    if not override:
+        return False
+    override_declared = override.get("declared")
+    override_executed = override.get("executed")
+    return (
+        isinstance(override_declared, Mapping)
+        and isinstance(override_executed, Mapping)
+        and dict(override_declared) == declared
+        and dict(override_executed) == executed
+    )
+
+
 def _snapshot_bundle(regression_run: Any) -> dict[str, Any]:
     snapshot = _json_object(getattr(regression_run, "execution_snapshot_json", None))
     bundle = snapshot.get("v3_authoritative_bundle")
@@ -147,7 +186,9 @@ def evaluate_candidate_release_gate(
         bundle.get("candidate_revision_id") != getattr(candidate, "id", None)
         or bundle.get("category_key") != category_key
         or bundle.get("contract_hash") != getattr(candidate, "contract_hash", None)
-        or snapshot_prompt_bindings != _candidate_prompt_bindings(candidate)
+        or not _snapshot_prompt_bindings_consistent(
+            bundle, snapshot_prompt_bindings, candidate
+        )
     ):
         raise CandidateReleaseGateError(
             "candidate_snapshot_mismatch",
