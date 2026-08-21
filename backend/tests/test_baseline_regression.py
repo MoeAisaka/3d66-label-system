@@ -463,7 +463,7 @@ def test_candidate_baseline_bundle_rejects_non_candidate_revision() -> None:
     engine.dispose()
 
 
-def test_candidate_baseline_bundle_rejects_projection_drift() -> None:
+def test_candidate_baseline_bundle_records_diverged_lineage() -> None:
     engine = create_engine("sqlite://", poolclass=StaticPool)
     Base.metadata.create_all(engine)
     db = Session(engine, expire_on_commit=False)
@@ -512,15 +512,63 @@ def test_candidate_baseline_bundle_rejects_projection_drift() -> None:
     db.add(drifted_candidate)
     db.commit()
 
-    with pytest.raises(HTTPException) as exc_info:
-        _required_baseline_v3_bundle(
-            db,
-            "inspiration_image",
-            drifted_candidate.id,
-        )
+    # Lineage drift no longer blocks the run: operators keep manual control over
+    # which graded-matcher version a regression exercises, and the divergence is
+    # recorded in the frozen bundle for traceability instead.
+    bundle = _required_baseline_v3_bundle(
+        db,
+        "inspiration_image",
+        drifted_candidate.id,
+    )
 
-    assert exc_info.value.status_code == 409
-    assert exc_info.value.detail["code"] == "candidate_revision_projection_drift"
+    assert bundle["candidate_revision_id"] == drifted_candidate.id
+    assert bundle["candidate_lineage"] == "diverged"
+    assert bundle["base_projected_revision_id"] == projected.projected_revision_id
+    db.close()
+    engine.dispose()
+
+
+def test_candidate_baseline_bundle_marks_on_active_chain_lineage() -> None:
+    engine = create_engine("sqlite://", poolclass=StaticPool)
+    Base.metadata.create_all(engine)
+    db = Session(engine, expire_on_commit=False)
+    artifacts = add_active_v3_contract(db, "inspiration_image")
+    projected = db.scalar(
+        select(CategoryEvaluationV3Config).where(
+            CategoryEvaluationV3Config.category_key == "inspiration_image"
+        )
+    )
+    assert projected is not None
+    active_revision = ensure_projected_revision(db, projected)
+
+    # Sibling candidate branching off the active revision's own parent: this is
+    # the real model_3d_su shape (V8 activated from V5, candidates hang off V5).
+    sibling_contract = deepcopy(artifacts["contract"])
+    sibling_contract["spec_version"] = "sibling-candidate-test-v1"
+    sibling = CategoryEvaluationV3Revision(
+        category_key="inspiration_image",
+        display_name="同链候选",
+        revision=active_revision.revision + 1,
+        status="candidate",
+        parent_revision_id=active_revision.id,
+        contract_json=canonical_json(sibling_contract),
+        classification_map_json=canonical_json(artifacts["classification_map"]),
+        subcategory_dimensions_json=canonical_json(
+            artifacts["subcategory_dimensions"]
+        ),
+        contract_hash=canonical_contract_hash(sibling_contract),
+        created_by="test",
+    )
+    db.add(sibling)
+    db.commit()
+
+    bundle = _required_baseline_v3_bundle(
+        db,
+        "inspiration_image",
+        sibling.id,
+    )
+
+    assert bundle["candidate_lineage"] == "on_active_chain"
     db.close()
     engine.dispose()
 

@@ -4885,31 +4885,44 @@ def _required_baseline_v3_bundle(
                 "message": "只有未发布候选修订可以用于候选回归",
             },
         )
-    ancestor = candidate
+    # Revisions link child -> parent, so an activated revision sits at the tip of
+    # its chain and is never an ancestor of a candidate. Walking upward from the
+    # candidate to the active revision therefore fails for every candidate once a
+    # new revision is published. Lineage is now recorded for traceability instead
+    # of blocking the run: the operator keeps manual control over which graded
+    # matcher version a regression exercises.
+    active_chain: set[int] = set()
+    cursor = db.get(
+        CategoryEvaluationV3Revision,
+        projected.projected_revision_id,
+    )
+    while cursor is not None and cursor.id not in active_chain:
+        active_chain.add(cursor.id)
+        if cursor.parent_revision_id is None:
+            break
+        cursor = db.get(
+            CategoryEvaluationV3Revision,
+            cursor.parent_revision_id,
+        )
+
+    lineage = "diverged"
+    ancestor: CategoryEvaluationV3Revision | None = candidate
     seen: set[int] = set()
-    while ancestor.id != projected.projected_revision_id:
-        if ancestor.id in seen or ancestor.parent_revision_id is None:
-            raise HTTPException(
-                status_code=409,
-                detail={
-                    "code": "candidate_revision_projection_drift",
-                    "message": "现役机制已变化，请基于当前现役合同重新创建候选",
-                },
-            )
+    while ancestor is not None and ancestor.id not in seen:
+        if ancestor.id in active_chain:
+            lineage = "on_active_chain"
+            break
         seen.add(ancestor.id)
+        if ancestor.parent_revision_id is None:
+            break
         parent = db.get(
             CategoryEvaluationV3Revision,
             ancestor.parent_revision_id,
         )
         if parent is None or parent.category_key != category_key:
-            raise HTTPException(
-                status_code=409,
-                detail={
-                    "code": "candidate_revision_projection_drift",
-                    "message": "候选祖先链已损坏，不能启动回归",
-                },
-            )
+            break
         ancestor = parent
+
     frozen = revision_bundle(candidate)
     frozen.update(
         {
@@ -4917,6 +4930,7 @@ def _required_baseline_v3_bundle(
             "candidate_revision_id": candidate.id,
             "base_projected_revision_id": projected.projected_revision_id,
             "base_projected_contract_hash": projected.contract_hash,
+            "candidate_lineage": lineage,
         }
     )
     return frozen

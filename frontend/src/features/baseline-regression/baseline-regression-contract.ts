@@ -94,21 +94,62 @@ export function v3RevisionGroup(
   return "history"
 }
 
-export function isSelectableV3Candidate(
-  revision: Pick<BaselineV3Revision, "id" | "status" | "parent_revision_id" | "category_key">,
-  revisions: Array<Pick<BaselineV3Revision, "id" | "status" | "parent_revision_id" | "category_key">>,
-  projectedRevisionId: number,
-): boolean {
-  if (revision.status !== "candidate") return false
-  const byId = new Map(revisions.map((item) => [item.id, item]))
-  let current: typeof revision | undefined = revision
-  const seen = new Set<number>()
-  while (current && current.id !== projectedRevisionId) {
-    if (seen.has(current.id) || current.parent_revision_id == null) return false
-    seen.add(current.id)
-    current = byId.get(current.parent_revision_id)
+export type V3CandidateLineage = "on_active_chain" | "diverged"
+
+type LineageRevision = Pick<
+  BaselineV3Revision,
+  "id" | "status" | "parent_revision_id" | "category_key"
+>
+
+function ancestorIdsOf(
+  startId: number,
+  byId: Map<number, LineageRevision>,
+): Set<number> {
+  const chain = new Set<number>()
+  let cursor = byId.get(startId)
+  while (cursor && !chain.has(cursor.id)) {
+    chain.add(cursor.id)
+    if (cursor.parent_revision_id == null) break
+    cursor = byId.get(cursor.parent_revision_id)
   }
-  return current?.id === projectedRevisionId
+  return chain
+}
+
+/**
+ * Revisions are linked child -> parent (a new revision points at the one it
+ * replaced), so the active revision sits at the *tip* of its chain and is never
+ * an ancestor of a candidate. A candidate is therefore "on the active chain"
+ * when it branches off any revision in the active revision's own ancestry.
+ */
+export function v3CandidateLineage(
+  revision: LineageRevision,
+  revisions: LineageRevision[],
+  projectedRevisionId: number,
+): V3CandidateLineage {
+  const byId = new Map(revisions.map((item) => [item.id, item]))
+  const activeChain = ancestorIdsOf(projectedRevisionId, byId)
+  const seen = new Set<number>()
+  let cursor: LineageRevision | undefined = byId.get(revision.id) ?? revision
+  while (cursor) {
+    if (activeChain.has(cursor.id)) return "on_active_chain"
+    if (seen.has(cursor.id) || cursor.parent_revision_id == null) break
+    seen.add(cursor.id)
+    cursor = byId.get(cursor.parent_revision_id)
+  }
+  return "diverged"
+}
+
+/**
+ * Selectability is intentionally limited to category + lifecycle status. Lineage
+ * drift is surfaced as a note via {@link v3CandidateLineage} instead of blocking
+ * the run, so operators keep full manual control over the graded matcher.
+ */
+export function isSelectableV3Candidate(
+  revision: LineageRevision,
+  _revisions: LineageRevision[],
+  _projectedRevisionId: number,
+): boolean {
+  return revision.status === "candidate"
 }
 
 export function resolveV3PromptBinding(

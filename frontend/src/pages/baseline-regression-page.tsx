@@ -50,6 +50,7 @@ import {
   baselineRunIdAfterSetLoad,
   resolveCandidatePromptBinding,
   resolveV3PromptBinding,
+  v3CandidateLineage,
   v3RevisionGroup,
 } from "@/features/baseline-regression/baseline-regression-contract"
 import type { CandidatePromptBindingResolution } from "@/features/baseline-regression/baseline-regression-contract"
@@ -97,6 +98,7 @@ export function BaselineRegressionPage() {
   const queryClient = useQueryClient()
   const [searchParams, setSearchParams] = useSearchParams()
   const uploadRef = useRef<HTMLInputElement>(null)
+  const appliedBindingRevisionRef = useRef<number>(0)
   const [selectedCategoryKey, setSelectedCategoryKey] = useState("space_image")
   const [selectedAssetIds, setSelectedAssetIds] = useState<Set<number>>(new Set())
   const [expectedByAsset, setExpectedByAsset] = useState<Record<number, BaselineLevel>>({})
@@ -250,9 +252,10 @@ export function BaselineRegressionPage() {
     (revision) => revision.id === v3Revisions.data?.projected_revision_id
       || revision.status === "active",
   )
-  const selectedV3Revision = v3Revisions.data?.items.find(
+  const explicitV3Revision = v3Revisions.data?.items.find(
     (revision) => revision.id === selectedV3RevisionId,
-  ) ?? activeV3Revision
+  )
+  const selectedV3Revision = explicitV3Revision ?? activeV3Revision
   const selectableV3Candidates = (v3Revisions.data?.items ?? []).filter((revision) => (
     isSelectableV3Candidate(
       revision,
@@ -260,11 +263,19 @@ export function BaselineRegressionPage() {
       v3Revisions.data?.projected_revision_id ?? 0,
     )
   ))
-  const candidatePromptBindingA = v3SelectionMode === "candidate" && selectedV3Revision
-    ? resolveV3PromptBinding(selectedV3Revision, "A")
+  // Bindings must resolve from the explicitly chosen candidate. Falling back to
+  // the active revision here compared the operator's A/B against V8's bindings
+  // and reported a phantom mismatch.
+  const candidateBindingRevision = v3SelectionMode === "candidate"
+    && explicitV3Revision
+    && explicitV3Revision.id !== (v3Revisions.data?.projected_revision_id ?? 0)
+    ? explicitV3Revision
     : null
-  const candidatePromptBindingB = v3SelectionMode === "candidate" && selectedV3Revision
-    ? resolveV3PromptBinding(selectedV3Revision, "B")
+  const candidatePromptBindingA = candidateBindingRevision
+    ? resolveV3PromptBinding(candidateBindingRevision, "A")
+    : null
+  const candidatePromptBindingB = candidateBindingRevision
+    ? resolveV3PromptBinding(candidateBindingRevision, "B")
     : null
   const candidatePromptResolutionA = useMemo(
     () => resolveCandidatePromptBinding(
@@ -286,17 +297,13 @@ export function BaselineRegressionPage() {
     ? publishedPromptA?.id ?? 0
     : promptAOptions.some((prompt) => prompt.id === selectedPromptAId)
       ? selectedPromptAId
-      : v3SelectionMode === "candidate"
-        ? 0
-        : publishedPromptA?.id ?? promptAOptions[0]?.id ?? 0
+      : publishedPromptA?.id ?? promptAOptions[0]?.id ?? 0
   const effectivePromptBId = promptSelectionMode === "single"
     ? 0
     : promptSelectionMode === "manual"
       ? promptBOptions.some((prompt) => prompt.id === selectedPromptBId)
         ? selectedPromptBId
-        : v3SelectionMode === "candidate"
-          ? 0
-          : publishedPromptB?.id ?? promptBOptions[0]?.id ?? 0
+        : publishedPromptB?.id ?? promptBOptions[0]?.id ?? 0
       : publishedPromptB?.id ?? 0
   const selectedPromptA = promptAOptions.find((prompt) => prompt.id === effectivePromptAId)
   const selectedPromptB = promptBOptions.find((prompt) => prompt.id === effectivePromptBId)
@@ -309,6 +316,13 @@ export function BaselineRegressionPage() {
       || (candidatePromptBindingA && selectedPromptA?.version !== candidatePromptBindingA)
       || (candidatePromptBindingB && selectedPromptB?.version !== candidatePromptBindingB),
   )
+  const selectedV3Lineage = candidateBindingRevision
+    ? v3CandidateLineage(
+      candidateBindingRevision,
+      v3Revisions.data?.items ?? [],
+      v3Revisions.data?.projected_revision_id ?? 0,
+    )
+    : null
   const v3SelectionLoading = v3Revisions.isLoading || prompts.isLoading
   const v3SelectionUnavailable = v3Revisions.isError || !selectedV3Revision
 
@@ -329,24 +343,37 @@ export function BaselineRegressionPage() {
     }
   }, [searchParams, selectedCategoryKey, selectedV3RevisionId, v3Revisions.data])
 
+  // Bindings are a starting suggestion, not a lock: apply them once per candidate
+  // selection so a later manual A/B change is never overwritten.
   useEffect(() => {
-    if (v3SelectionMode !== "candidate" || !selectedV3Revision) return
-    const bindingA = resolveV3PromptBinding(selectedV3Revision, "A")
-    const bindingB = resolveV3PromptBinding(selectedV3Revision, "B")
-    setSelectedPromptAId(
-      bindingA && candidatePromptResolutionA.status === "available"
-        ? candidatePromptResolutionA.promptId ?? 0
-        : 0,
-    )
-    if (bindingB) {
-      setSelectedPromptBId(
-        candidatePromptResolutionB.status === "available"
-          ? candidatePromptResolutionB.promptId ?? 0
-          : 0,
-      )
+    if (!candidateBindingRevision) {
+      appliedBindingRevisionRef.current = 0
+      return
+    }
+    if (appliedBindingRevisionRef.current === candidateBindingRevision.id) return
+    appliedBindingRevisionRef.current = candidateBindingRevision.id
+    if (
+      candidatePromptBindingA
+      && candidatePromptResolutionA.status === "available"
+      && candidatePromptResolutionA.promptId
+    ) {
+      setSelectedPromptAId(candidatePromptResolutionA.promptId)
+    }
+    if (
+      candidatePromptBindingB
+      && candidatePromptResolutionB.status === "available"
+      && candidatePromptResolutionB.promptId
+    ) {
+      setSelectedPromptBId(candidatePromptResolutionB.promptId)
     }
     setPromptSelectionMode("manual")
-  }, [candidatePromptResolutionA, candidatePromptResolutionB, selectedV3Revision, v3SelectionMode])
+  }, [
+    candidateBindingRevision,
+    candidatePromptBindingA,
+    candidatePromptBindingB,
+    candidatePromptResolutionA,
+    candidatePromptResolutionB,
+  ])
 
   useEffect(() => {
     const categoryFromUrl = searchParams.get("category_key")
@@ -1111,7 +1138,6 @@ export function BaselineRegressionPage() {
                           createRun.isPending
                           || v3SelectionLoading
                           || v3SelectionUnavailable
-                          || promptBindingMismatch
                           || selectedSet.data.runs.some((run) => run.status === "running")
                           || (
                             promptSelectionMode !== "published"
@@ -1207,9 +1233,9 @@ export function BaselineRegressionPage() {
                         </select>
                       </label>
                       {v3Revisions.isError && <div className="border border-[#d7a09d] bg-[#fff5f4] px-3 py-3 text-xs text-[#8d2924]">等级规则版本列表加载失败，无法启动。<button type="button" className="ml-2 underline" onClick={() => v3Revisions.refetch()}>重试</button></div>}
-                      {selectedV3Revision && <div className="border border-[var(--line)] bg-[#fafbf8] px-3 py-3 text-xs leading-5"><p className="font-semibold">{selectedV3Revision.display_name} · Revision {selectedV3Revision.revision}</p><p className="text-[var(--muted)]">状态：{selectedV3Revision.status} · Hash {selectedV3Revision.contract_hash.slice(0, 12)}</p></div>}
-                      {v3SelectionMode === "candidate" && candidatePromptUnavailable && <div className="border border-[#d7a09d] bg-[#fff5f4] px-3 py-3 text-xs leading-5 text-[#8d2924]">候选等级规则绑定 Prompt 不可用：{candidatePromptBindingA && candidatePromptResolutionA.status !== "available" ? formatCandidatePromptBindingIssue("A", candidatePromptResolutionA) : ""}{candidatePromptBindingB && candidatePromptResolutionB.status !== "available" ? `，${formatCandidatePromptBindingIssue("B", candidatePromptResolutionB)}` : ""}。不能用当前 v4 替代；请恢复原 Prompt 或基于当前 Prompt 重建候选。</div>}
-                      {v3SelectionMode === "candidate" && promptBindingMismatch && !candidatePromptUnavailable && <div className="border border-[#d7a09d] bg-[#fff5f4] px-3 py-3 text-xs leading-5 text-[#8d2924]">候选等级规则绑定版本不匹配：{candidatePromptBindingA ? `A 需要 ${candidatePromptBindingA}` : ""}{candidatePromptBindingB ? `，B 需要 ${candidatePromptBindingB}` : ""}。请调整 A/B 后再启动。</div>}
+                      {selectedV3Revision && <div className="border border-[var(--line)] bg-[#fafbf8] px-3 py-3 text-xs leading-5"><p className="font-semibold">{selectedV3Revision.display_name} · Revision {selectedV3Revision.revision}</p><p className="text-[var(--muted)]">状态：{selectedV3Revision.status} · Hash {selectedV3Revision.contract_hash.slice(0, 12)}</p>{selectedV3Lineage === "diverged" && <p className="text-[var(--muted)]">该候选与当前现役已分叉，可正常回归，结果不代表现役机制表现。</p>}</div>}
+                      {candidatePromptUnavailable && <div className="border border-[var(--line)] bg-[#fffaf0] px-3 py-3 text-xs leading-5"><p className="font-semibold">候选原绑定 Prompt 已不可用</p><p className="text-[var(--muted)]">{candidatePromptBindingA && candidatePromptResolutionA.status !== "available" ? formatCandidatePromptBindingIssue("A", candidatePromptResolutionA) : ""}{candidatePromptBindingB && candidatePromptResolutionB.status !== "available" ? `，${formatCandidatePromptBindingIssue("B", candidatePromptResolutionB)}` : ""}。已改用当前选中的 A/B，本轮实际版本会如实写入冻结快照。</p></div>}
+                      {promptBindingMismatch && !candidatePromptUnavailable && <div className="border border-[var(--line)] bg-[#fffaf0] px-3 py-3 text-xs leading-5"><p className="font-semibold">A/B 与候选原绑定版本不同</p><p className="text-[var(--muted)]">原绑定 {candidatePromptBindingA ? `A ${candidatePromptBindingA}` : ""}{candidatePromptBindingB ? `，B ${candidatePromptBindingB}` : ""}。可以按当前选择直接启动，本轮以实际选中的 A/B 冻结。</p></div>}
                     </section>
 
                     <section className="space-y-4 border-t border-[var(--line)] pt-6" aria-labelledby="baseline-execution-config">
