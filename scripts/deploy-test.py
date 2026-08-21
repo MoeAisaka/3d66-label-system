@@ -15,6 +15,7 @@ from typing import Iterable, Sequence
 
 
 CODEUP_URL = "https://codeup.aliyun.com/3d66/tepeng/3d66.label-system.git"
+CODEUP_SSH_URL = "git@codeup.aliyun.com:3d66/tepeng/3d66.label-system.git"
 SERVER = "yuankangzhi@192.168.1.35"
 REMOTE_PROJECT = "/opt/3d66-label-system"
 REMOTE_DEPLOY_SCRIPT = "/usr/local/sbin/deploy-3d66-label-test"
@@ -49,8 +50,13 @@ class RemoteCommands:
 
 
 def validate_origin(url: str) -> None:
-    if url.rstrip("/") != CODEUP_URL.rstrip("/"):
-        raise DeployError(f"origin must be the Codeup repository: {CODEUP_URL}")
+    normalized = url.rstrip("/")
+    allowed = {CODEUP_URL.rstrip("/"), CODEUP_SSH_URL.rstrip("/")}
+    if normalized not in allowed:
+        raise DeployError(
+            "origin must be the Codeup repository: "
+            f"{CODEUP_URL} or {CODEUP_SSH_URL}"
+        )
 
 
 def validate_commit(commit: str) -> None:
