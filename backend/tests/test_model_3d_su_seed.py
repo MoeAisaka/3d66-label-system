@@ -32,6 +32,7 @@ from app.model_3d_su_category_seed import (
     MODEL_3D_SU_CALL_A_VERSION,
     MODEL_3D_SU_CALL_B_VERSION,
     MODEL_3D_SU_CATEGORY_KEY,
+    MODEL_3D_SU_CREATED_BY,
     MODEL_3D_SU_RUBRIC_VERSION,
     MODEL_3D_SU_SEMANTIC_CONTRACT_KEY,
     build_model_3d_su_classification_map,
@@ -220,7 +221,7 @@ def test_model_3d_su_seed_repairs_missing_same_spec_projection() -> None:
         assert revision.category_key == MODEL_3D_SU_CATEGORY_KEY
 
 
-def test_model_3d_su_seed_rejects_same_version_prompt_identity_collision() -> None:
+def test_model_3d_su_seed_isolates_operator_same_version_prompt_collision() -> None:
     engine = _engine()
     with Session(engine) as db:
         db.add(ModelConfig(active=True))
@@ -243,8 +244,27 @@ def test_model_3d_su_seed_rejects_same_version_prompt_identity_collision() -> No
         db.add(prompt)
         db.commit()
 
-        with pytest.raises(RuntimeError, match="内容或身份不匹配"):
-            seed_model_3d_su(db, SimpleNamespace(project_root=PROJECT_ROOT))
+        seed_model_3d_su(db, SimpleNamespace(project_root=PROJECT_ROOT))
+        db.commit()
+
+        rows = db.scalars(
+            select(PromptVersion).where(
+                PromptVersion.category_key == MODEL_3D_SU_CATEGORY_KEY,
+                PromptVersion.stage == "A",
+            )
+        ).all()
+        assert len(rows) == 2
+        operator_row = next(row for row in rows if row.created_by == "operator:prompt-owner")
+        system_row = next(row for row in rows if row.created_by == MODEL_3D_SU_CREATED_BY)
+        assert operator_row.version == MODEL_3D_SU_CALL_A_VERSION
+        assert system_row.version.startswith(f"{MODEL_3D_SU_CALL_A_VERSION}-system-seed-")
+        config = db.scalar(
+            select(CategoryEvaluationV3Config).where(
+                CategoryEvaluationV3Config.category_key == MODEL_3D_SU_CATEGORY_KEY
+            )
+        )
+        assert config is not None
+        assert json.loads(config.contract_json)["prompt_bindings"]["call_a_version"] == system_row.version
 
 
 def test_model_3d_su_seed_rejects_same_spec_content_drift() -> None:

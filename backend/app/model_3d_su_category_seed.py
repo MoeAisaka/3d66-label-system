@@ -347,8 +347,12 @@ def _normalize_weight_points(points: list[int]) -> list[float]:
     return [point / total for point in points]
 
 
-def build_model_3d_su_contract() -> dict[str, Any]:
-    """Build and validate the v2 five-dimension grade-scored contract."""
+def build_model_3d_su_contract(
+    *,
+    call_a_version: str = MODEL_3D_SU_CALL_A_VERSION,
+    call_b_version: str = MODEL_3D_SU_CALL_B_VERSION,
+) -> dict[str, Any]:
+    """Build and validate the five-dimension grade-scored contract."""
     contract = {
         "schema_version": CATEGORY_EVALUATION_CONTRACT_VERSION,
         "spec_version": MODEL_3D_SU_SPEC_VERSION,
@@ -365,8 +369,8 @@ def build_model_3d_su_contract() -> dict[str, Any]:
             ],
         },
         "prompt_bindings": {
-            "call_a_version": MODEL_3D_SU_CALL_A_VERSION,
-            "call_b_version": MODEL_3D_SU_CALL_B_VERSION,
+            "call_a_version": call_a_version,
+            "call_b_version": call_b_version,
         },
         "b_aesthetic_foundation": {
             "format_version": "b-aesthetic-foundation-v1",
@@ -554,44 +558,62 @@ def _seed_prompt(
     system_prompt: str,
     change_note: str,
 ) -> PromptVersion:
-    existing = db.scalar(select(PromptVersion).where(PromptVersion.version == version))
-    if existing is not None:
-        expected_identity = {
-            "stage": stage,
-            "category_key": MODEL_3D_SU_CATEGORY_KEY,
-            "pipeline_scope": "shared",
-            "name": name,
-            "system_prompt": system_prompt,
-            "user_prompt": "",
-            "rubric_version": MODEL_3D_SU_RUBRIC_VERSION,
-            "status": "published",
-            "source": "imported",
-            "change_note": change_note,
-            "created_by": MODEL_3D_SU_CREATED_BY,
-        }
-        if any(
-            getattr(existing, field_name) != expected_value
+    expected_identity = {
+        "stage": stage,
+        "category_key": MODEL_3D_SU_CATEGORY_KEY,
+        "pipeline_scope": "shared",
+        "name": name,
+        "system_prompt": system_prompt,
+        "user_prompt": "",
+        "rubric_version": MODEL_3D_SU_RUBRIC_VERSION,
+        "status": "published",
+        "source": "imported",
+        "change_note": change_note,
+        "created_by": MODEL_3D_SU_CREATED_BY,
+    }
+
+    def matches(row: PromptVersion) -> bool:
+        return all(
+            getattr(row, field_name) == expected_value
             for field_name, expected_value in expected_identity.items()
-        ):
-            raise RuntimeError(f"冻结提示词 {version} 已存在但内容或身份不匹配")
-        return existing
-    row = PromptVersion(
-        stage=stage,
-        category_key=MODEL_3D_SU_CATEGORY_KEY,
-        pipeline_scope="shared",
-        name=name,
-        version=version,
-        system_prompt=system_prompt,
-        user_prompt="",
-        rubric_version=MODEL_3D_SU_RUBRIC_VERSION,
-        status="published",
-        source="imported",
-        change_note=change_note,
-        created_by=MODEL_3D_SU_CREATED_BY,
-    )
-    db.add(row)
-    db.flush()
-    return row
+        )
+
+    for attempt in range(100):
+        candidate_version = (
+            version if attempt == 0 else f"{version}-system-seed-{attempt}"
+        )
+        existing = db.scalar(
+            select(PromptVersion).where(PromptVersion.version == candidate_version)
+        )
+        if existing is not None:
+            if matches(existing):
+                return existing
+            if existing.created_by in _MODEL_3D_SU_SYSTEM_OWNERS:
+                raise RuntimeError(
+                    f"冻结提示词 {candidate_version} 已存在但内容或身份不匹配"
+                )
+            # Operators may legitimately use any version string. Keep their
+            # immutable row and allocate a deterministic platform-owned alias.
+            continue
+
+        row = PromptVersion(
+            stage=stage,
+            category_key=MODEL_3D_SU_CATEGORY_KEY,
+            pipeline_scope="shared",
+            name=name,
+            version=candidate_version,
+            system_prompt=system_prompt,
+            user_prompt="",
+            rubric_version=MODEL_3D_SU_RUBRIC_VERSION,
+            status="published",
+            source="imported",
+            change_note=change_note,
+            created_by=MODEL_3D_SU_CREATED_BY,
+        )
+        db.add(row)
+        db.flush()
+        return row
+    raise RuntimeError(f"无法为 {version} 分配可用的系统提示词版本")
 
 
 def seed_model_3d_su(db: Session, settings: Any) -> None:
@@ -660,7 +682,10 @@ def seed_model_3d_su(db: Session, settings: Any) -> None:
             profile.pipeline_revision = (profile.pipeline_revision or 0) + 1
         profile.rubric_version = MODEL_3D_SU_RUBRIC_VERSION
 
-    contract = build_model_3d_su_contract()
+    contract = build_model_3d_su_contract(
+        call_a_version=prompt_a.version,
+        call_b_version=prompt_b.version,
+    )
     classification_map = build_model_3d_su_classification_map()
     subcategory_dimensions = build_model_3d_su_subcategory_dimensions()
     contract_json = canonical_json(contract)
