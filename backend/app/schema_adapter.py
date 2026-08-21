@@ -62,6 +62,15 @@ PRODUCTION_FIELD_KEYS = (
     "trait",
 )
 
+# Some operator-authored prompts have historically rendered a literal ``\t``
+# escape before ``itle``/``ags``.  Accept only these two observed aliases so a
+# harmless prompt-formatting defect does not discard otherwise valid output;
+# all unknown fields still fail through the normal required-field check.
+PRODUCTION_FIELD_KEY_ALIASES = {
+    "\t" + "itle": "title",
+    "\t" + "ags": "tags",
+}
+
 _INSPIRATION_REDLINE_REASON_MAP = {
     "screenshot": "是截图",
     "casual_photo": "是随手拍",
@@ -422,6 +431,12 @@ def normalize_production_fields(
         if required:
             raise ValueError("标准评分合同缺少 production_fields")
         return precheck
+
+    canonical_source = dict(source)
+    for alias, canonical in PRODUCTION_FIELD_KEY_ALIASES.items():
+        if canonical not in canonical_source and alias in canonical_source:
+            canonical_source[canonical] = canonical_source[alias]
+    source = canonical_source
 
     missing = [key for key in PRODUCTION_FIELD_KEYS if key not in source]
     if required and missing:

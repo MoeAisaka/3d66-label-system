@@ -118,6 +118,7 @@ def test_contract_bound_rule_mirror_keeps_bonus_rules_and_dimension_caps() -> No
     for config in dimensions.values():
         for dimension in config["common_group"]["schema_definition"]["dimensions"]:
             dimension["dimension_score_cap"] = 92
+            dimension["dimension_deduction_cap"] = 50
             dimension["bonus_rules"] = [
                 {
                     "rule_id": "composition_clear",
@@ -135,6 +136,7 @@ def test_contract_bound_rule_mirror_keeps_bonus_rules_and_dimension_caps() -> No
         "visual_structure"
     ]
     assert first["dimension_score_cap"] == 92
+    assert first["dimension_deduction_cap"] == 50
     assert first["bonus_rules"][0]["rule_id"] == "composition_clear"
     assert first["deduction_rules"]
     assert mirror["track_adjustments"] == contract.get("track_adjustments", {})

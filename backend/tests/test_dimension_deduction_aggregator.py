@@ -30,7 +30,8 @@ def _precheck() -> dict:
 
 
 def _bonus_cap_config(
-    *, cap: float = 90, deduction: float = 20, bonus: float = 8
+    *, cap: float = 90, deduction: float = 20, bonus: float = 8,
+    deduction_cap: float | None = None,
 ) -> dict:
     return {
         "format_version": "subcategory-dimensions-v1",
@@ -67,6 +68,15 @@ def _bonus_cap_config(
         },
         "specific_group": None,
     }
+
+
+def _set_dimension_deduction_cap(config: dict, cap: float | None) -> dict:
+    dimension = config["common_group"]["schema_definition"]["dimensions"][0]
+    if cap is None:
+        dimension.pop("dimension_deduction_cap", None)
+    else:
+        dimension["dimension_deduction_cap"] = cap
+    return config
 
 
 def _bonus_cap_hits(*, deduction: bool = False, bonus: bool = False) -> dict:
@@ -124,6 +134,59 @@ def test_dimension_cap_limits_unpenalized_dimension() -> None:
     assert evidence["dimension_score"] == 80
     assert evidence["cap_applied"] is True
     assert result["deductions"]["visual_structure"] == 6
+
+
+def test_dimension_deduction_cap_limits_only_cumulative_deductions() -> None:
+    config = _set_dimension_deduction_cap(_bonus_cap_config(deduction=40, bonus=8), 50)
+    dimension = config["common_group"]["schema_definition"]["dimensions"][0]
+    dimension["deduction_rules"] += [
+        {
+            "rule_id": f"structure_defect_{index}",
+            "description": f"视觉结构规则{index}命中",
+            "deduction": 40,
+            "tags": ["结构"],
+        }
+        for index in range(2)
+    ]
+    hits = _bonus_cap_hits(deduction=True, bonus=True)
+    hits["dimensions"]["visual_structure"]["hit_rules"] += [
+        {
+            "rule_id": f"structure_defect_{index}",
+            "confidence": "high",
+            "evidence": "同一维度继续命中",
+        }
+        for index in range(2)
+    ]
+
+    result = compose_rule_scores(config=config, dimension_output=hits)
+    evidence = result["evidence"]["visual_structure"]
+    assert evidence["raw_rule_deduction"] == 120
+    assert evidence["dimension_deduction_cap"] == 50
+    assert evidence["applied_rule_deduction"] == 50
+    assert evidence["cap_applied"] is True
+    assert evidence["dimension_score"] == 58
+    assert evidence["cap_reason"] == "维度累计扣分按 dimension_deduction_cap=50 封顶"
+
+
+def test_dimension_deduction_cap_also_applies_to_deduction_v1_contracts() -> None:
+    config = deepcopy(build_inspiration_subcategory_dimensions()["class_one"])
+    for dimension in config["common_group"]["schema_definition"]["dimensions"]:
+        dimension["dimension_deduction_cap"] = 10
+    first = config["common_group"]["schema_definition"]["dimensions"][0]
+    output = empty_deduction_output(config)
+    output["dimensions"][first["key"]]["hit_rules"] = [
+        {
+            "rule_id": rule["rule_id"],
+            "confidence": "high",
+            "evidence": "规则命中",
+        }
+        for rule in first["deduction_rules"][:2]
+    ]
+    result = compose_rule_deductions(config=config, dimension_output=output)
+    evidence = result["evidence"][first["key"]]
+    assert evidence["raw_rule_deduction"] > 10
+    assert evidence["applied_rule_deduction"] == 10
+    assert evidence["dimension_deduction_cap"] == 10
 
 
 def test_rule_hits_accumulate_into_weighted_dimension_deductions() -> None:

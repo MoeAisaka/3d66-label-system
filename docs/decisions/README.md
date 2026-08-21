@@ -67,6 +67,7 @@
 | [0049](0049-versioned-adaptive-correction-contract.md) | Proposed | 版本化纠偏合同与自适应纠偏面板 |
 | [0050](0050-contract-owned-redline-values-and-prefilter.md) | Accepted | 合同自有红线业务值与调用 A 后前置过滤 |
 | [0051](0051-contract-owned-scoring-primitives.md) | Accepted | 合同自有评分原语与自定义配置兼容 |
+| [0052](0052-operational-mechanism-compatibility-and-dimension-deduction-cap.md) | Accepted | 运营机制兼容、A→红线→B 顺序与维度累计扣分上限 |
 
 文件名格式：
 

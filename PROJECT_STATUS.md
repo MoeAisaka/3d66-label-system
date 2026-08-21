@@ -2257,3 +2257,20 @@ npm.cmd run build
 - 首次候选输出无效时自动发起一次结构修复调用，不增加人工配置步骤。成功和最终失败均记录两次调用的限长原始文本、请求关联 ID、token 用量和校验错误；AI 仍只能创建候选并运行回归，不能绕过现有人工启用门。
 - TDD 先确认旧实现对部分候选报错、且最终失败不保存生成证据；修改后纠偏专项 `33 passed`。修改前全量基线为 `1609 passed, 1 skipped, 6 warnings`，前端 lint/build 通过。
 - 本节当前仅为本地 Task 1；尚未推送、合并、部署或重新执行真实纠偏任务 #6。
+
+## 最新完成：运营灵感图机制兼容与维度累计扣分上限（2026-08-21）
+
+- 基于 `origin/main@53cd890e8227f7a0da77d52c1f49a65ab41073a7` 在隔离工作树
+  `codex/operational-mechanism-compatibility-20260821` 实现，未修改并发前端重构会话负责的
+  `App.tsx`、`app-shell.tsx`、`index.css` 或 `pages/*`。
+- 运营机制执行顺序明确为：调用 A → 红线前置过滤 → 红线未命中才调用 B → 服务端等级撮合与计分；
+  候选合同继续要求绑定具体 A/B Prompt 版本。
+- `production_fields` 对已观察到的 `\t` 前缀 `title`/`tags` 误写提供窄别名兼容；未知字段仍严格拒绝。
+- 新增 `dimension_deduction_cap`，与 `dimension_score_cap` 分离；原始扣分、实际扣分、上限、触顶和
+  维度得分均进入证据。未配置新字段的旧合同默认上限 100，历史行为保持不变。
+- 机制配置编辑器新增维度累计扣分上限输入和说明，规则镜像同步保留该字段。
+- 计划与决策记录：`docs/superpowers/plans/2026-08-21-operational-mechanism-compatibility.md`、
+  `docs/decisions/0052-operational-mechanism-compatibility-and-dimension-deduction-cap.md`。
+- 验证：专项后端 `38 passed`；前端 `npm run build` 通过。后端全量为 `1675 passed, 1 skipped, 4 failed`，
+  失败均为当前测试环境既有的应用启动/seed 隔离问题（字段合同、只读源、影子投影相关），不是本批新增断言。
+- 测试服真实单素材验证暂未执行：`192.168.1.35:8081` 当前容器因既有冻结提示词内容不匹配而持续重启，需先恢复健康；本批未推送、未合并、未部署、未启用候选、未批量运行。

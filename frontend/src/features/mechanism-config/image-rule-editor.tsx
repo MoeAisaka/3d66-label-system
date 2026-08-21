@@ -708,7 +708,10 @@ function GroupEditor({
                     <label className="grid gap-1 text-[0.68rem]"><span className="font-semibold">维度分数上限</span>
                       <input type="number" min={0} max={100} step={1} className={numberClass} value={defaults.dimensionScoreCap} onChange={(e) => onPatch((n) => { n.subcategory_dimensions[trackKey][groupKey].schema_definition.dimensions[idx].dimension_score_cap = Number(e.target.value) })} />
                     </label>
-                    <div className="text-[0.68rem] leading-5 text-[var(--muted)]">该维度按 0–100 内部分数计算，最终贡献受当前维度权重和上限共同约束。{duplicateRuleIds.length > 0 && <span className="ml-2 font-semibold text-[#8d2924]">规则 ID 重复：{duplicateRuleIds.join("、")}</span>}</div>
+                    <label className="grid gap-1 text-[0.68rem]"><span className="font-semibold">维度累计扣分上限</span>
+                      <input type="number" min={0} max={100} step={1} className={numberClass} value={defaults.dimensionDeductionCap} onChange={(e) => onPatch((n) => { n.subcategory_dimensions[trackKey][groupKey].schema_definition.dimensions[idx].dimension_deduction_cap = Number(e.target.value) })} />
+                    </label>
+                    <div className="text-[0.68rem] leading-5 text-[var(--muted)]">分数上限限制最终维度得分；累计扣分上限限制本维度所有命中规则最多扣多少分。{duplicateRuleIds.length > 0 && <span className="ml-2 font-semibold text-[#8d2924]">规则 ID 重复：{duplicateRuleIds.join("、")}</span>}</div>
                   </div>
                 })()}
                 <div className="grid gap-2 sm:grid-cols-[1fr_1fr_110px_auto] sm:items-end">
@@ -726,7 +729,7 @@ function GroupEditor({
                 <div className="mt-3 border-t border-dashed border-[var(--line)] pt-2">
                   <div className="mb-2 flex items-center justify-between">
                     <span className="text-[0.68rem] font-semibold">
-                      扣分规则（调用B逐条判定） · 总扣分上限 {Math.min(100, (dim.deduction_rules ?? []).reduce((sum: number, rule: Json) => sum + Number(rule.deduction || 0), 0))}
+                      扣分规则（调用B逐条判定） · 累计扣分上限 {typeof dim.dimension_deduction_cap === "number" ? dim.dimension_deduction_cap : 100}
                     </span>
                     <Button variant="ghost" size="sm" onClick={() => onPatch((n) => {
                       const rules = n.subcategory_dimensions[trackKey][groupKey].schema_definition.dimensions[idx].deduction_rules ??= []
@@ -759,6 +762,7 @@ function GroupEditor({
                 deduction_rules: placeholderRules("新维度"),
                 bonus_rules: [],
                 dimension_score_cap: 100,
+                dimension_deduction_cap: 100,
                 grade_points: { "1": 20, "2": 45, "3": 65, "4": 82, "5": 95 },
               })
             })}
@@ -772,7 +776,7 @@ function GroupEditor({
 }
 
 function isImageRuleDimension(dimension: Json): boolean {
-  return Array.isArray(dimension.deduction_rules) || "bonus_rules" in dimension || "dimension_score_cap" in dimension
+  return Array.isArray(dimension.deduction_rules) || "bonus_rules" in dimension || "dimension_score_cap" in dimension || "dimension_deduction_cap" in dimension
 }
 
 function duplicateIds(deductionRules: Json[], bonusRules: Json[]): string[] {

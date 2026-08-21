@@ -97,6 +97,25 @@ def test_old_contract_mode_is_not_changed_by_read_defaults() -> None:
     assert "dimension_score_cap" not in old
 
 
+@pytest.mark.parametrize("value", [-1, 100.1, float("nan"), float("inf"), True])
+def test_dimension_deduction_cap_rejects_invalid_values(value: object) -> None:
+    config = deepcopy(build_inspiration_subcategory_dimensions()["class_one"])
+    dimension = config["common_group"]["schema_definition"]["dimensions"][0]
+    dimension["dimension_score_cap"] = 100
+    dimension["bonus_rules"] = []
+    dimension["dimension_deduction_cap"] = value
+    with pytest.raises(DimensionCompositionError) as excinfo:
+        validate_subcategory_dimensions(config)
+    assert excinfo.value.code.endswith("dimension_deduction_cap_invalid")
+
+
+def test_dimension_deduction_cap_is_optional_for_legacy_and_defaults_to_full_range() -> None:
+    config = deepcopy(build_inspiration_subcategory_dimensions()["class_one"])
+    dimension = config["common_group"]["schema_definition"]["dimensions"][0]
+    dimension.pop("dimension_deduction_cap", None)
+    validate_subcategory_dimensions(config)
+
+
 def test_grade_points_remain_a_deprecated_compatible_fallback() -> None:
     config = deepcopy(build_inspiration_subcategory_dimensions()["class_one"])
     for dimension in config["common_group"]["schema_definition"]["dimensions"]:

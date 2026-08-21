@@ -4,6 +4,7 @@ type Json = JsonObject
 
 export type ImageRuleViewDefaults = {
   dimensionScoreCap: number
+  dimensionDeductionCap: number
   deductionRules: Json[]
   bonusRules: Json[]
 }
@@ -21,6 +22,9 @@ export function imageRuleViewDefaults(dimension: Json): ImageRuleViewDefaults {
     dimensionScoreCap: typeof dimension.dimension_score_cap === "number"
       ? dimension.dimension_score_cap
       : 100,
+    dimensionDeductionCap: typeof dimension.dimension_deduction_cap === "number"
+      ? dimension.dimension_deduction_cap
+      : 100,
     deductionRules: Array.isArray(dimension.deduction_rules)
       ? cloneJson(dimension.deduction_rules)
       : [],
@@ -34,6 +38,7 @@ function isRuleDimension(dimension: Json): boolean {
   return Array.isArray(dimension.deduction_rules)
     || "bonus_rules" in dimension
     || "dimension_score_cap" in dimension
+    || "dimension_deduction_cap" in dimension
 }
 
 export function prepareImageRulePayload(draft: Editable): Editable {
@@ -49,6 +54,9 @@ export function prepareImageRulePayload(draft: Editable): Editable {
         if (!isRecord(dimension) || !isRuleDimension(dimension)) continue
         if (typeof dimension.dimension_score_cap !== "number") {
           dimension.dimension_score_cap = 100
+        }
+        if (typeof dimension.dimension_deduction_cap !== "number") {
+          dimension.dimension_deduction_cap = 100
         }
         if (!Array.isArray(dimension.bonus_rules)) {
           dimension.bonus_rules = []

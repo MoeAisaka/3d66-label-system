@@ -215,6 +215,31 @@ def test_production_fields_contract_rejects_missing_tags_and_invalid_media() -> 
         normalize_production_fields(payload, required=True)
 
 
+def test_production_fields_accept_observed_tab_prefixed_title_and_tags_aliases() -> None:
+    payload = {
+        "production_fields": {
+            "\t" + "itle": "现代客厅",
+            "seotitle": "现代简约客厅空间设计效果图",
+            "category": "住宅空间，客厅",
+            "style": "现代简约",
+            "\t" + "ags": ["客厅", "现代", "简约", "木饰面"],
+            "cons": "可见缺点",
+            "design": "可见设计",
+            "score": 80,
+            "reason": [],
+            "image_defects": "",
+            "trait": "3D数字效果图",
+        },
+        "image_quality": {"quality_severity": "normal"},
+        "media_form": {
+            "rendering": {"status": "yes", "confidence": 0.9, "evidence": ["数字渲染"]}
+        },
+    }
+    normalized = normalize_production_fields(payload, required=True)
+    assert normalized["production_fields"]["title"] == "现代客厅"
+    assert normalized["production_fields"]["tags"] == ["客厅", "现代", "简约", "木饰面"]
+
+
 def test_custom_reason_values_are_valid_business_strings() -> None:
     validate_production_correction(
         "production_fields.reason",

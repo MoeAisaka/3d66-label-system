@@ -23,6 +23,7 @@ from .category_evaluation_contract import (
     DeductionRule,
     DimensionDeductionOutput,
     dimension_rule_mode,
+    validate_dimension_deduction_cap,
 )
 from .b_aesthetic_foundation import normalize_b_aesthetic_foundation
 from .dimension_composition import validate_subcategory_dimensions
@@ -521,7 +522,10 @@ def compose_rule_deductions(
             raw_rule_deduction = sum(
                 configured_rules[hit["rule_id"]].deduction for hit in hits
             )
-            applied_rule_deduction = min(100.0, float(raw_rule_deduction))
+            deduction_cap = float(dimension.get("dimension_deduction_cap", 100))
+            applied_rule_deduction = min(
+                deduction_cap, float(raw_rule_deduction)
+            )
             dimension_score = max(0.0, 100.0 - applied_rule_deduction)
             share = float(dimension["weight"]) * weight_scale
             point_deduction = round(share * applied_rule_deduction / 100.0, 4)
@@ -531,8 +535,16 @@ def compose_rule_deductions(
                 "share": round(share, 6),
                 "weight_mode": weight_mode,
                 "raw_rule_deduction": float(raw_rule_deduction),
+                "dimension_deduction_cap": deduction_cap,
                 "applied_rule_deduction": applied_rule_deduction,
                 "dimension_score": dimension_score,
+                "cap_applied": applied_rule_deduction < raw_rule_deduction,
+                "cap_reason": (
+                    "维度累计扣分按 "
+                    f"dimension_deduction_cap={float(dimension.get('dimension_deduction_cap', 100)):g} 封顶"
+                    if applied_rule_deduction < raw_rule_deduction
+                    else None
+                ),
                 "point_deduction": point_deduction,
                 "hit_rules": hits,
             }
@@ -614,8 +626,12 @@ def compose_rule_scores(
                 bonus_rules_by_dimension[key][hit["rule_id"]].bonus
                 for hit in bonus_hits
             )
+            deduction_cap = float(dimension.get("dimension_deduction_cap", 100))
+            applied_rule_deduction = min(
+                deduction_cap, float(raw_rule_deduction)
+            )
             raw_dimension_score = (
-                100.0 - float(raw_rule_deduction) + float(raw_rule_bonus)
+                100.0 - float(applied_rule_deduction) + float(raw_rule_bonus)
             )
             score_before_cap = max(raw_dimension_score, 0.0)
             cap = float(dimension["dimension_score_cap"])
@@ -629,17 +645,28 @@ def compose_rule_scores(
                 "share": round(share, 6),
                 "weight_mode": weight_mode,
                 "raw_rule_deduction": float(raw_rule_deduction),
-                "applied_rule_deduction": float(raw_rule_deduction),
+                "dimension_deduction_cap": deduction_cap,
+                "applied_rule_deduction": float(applied_rule_deduction),
                 "raw_rule_bonus": float(raw_rule_bonus),
                 "applied_rule_bonus": float(raw_rule_bonus),
                 "raw_dimension_score": raw_dimension_score,
                 "score_before_cap": score_before_cap,
                 "dimension_score_cap": cap,
                 "dimension_score": dimension_score,
-                "cap_applied": dimension_score < score_before_cap,
+                "cap_applied": (
+                    applied_rule_deduction < raw_rule_deduction
+                    or dimension_score < score_before_cap
+                ),
                 "cap_reason": (
-                    f"维度分数按 dimension_score_cap={cap:g} 封顶"
-                    if dimension_score < score_before_cap
+                    (
+                        f"维度累计扣分按 dimension_deduction_cap={deduction_cap:g} 封顶"
+                        if applied_rule_deduction < raw_rule_deduction
+                        else f"维度分数按 dimension_score_cap={cap:g} 封顶"
+                    )
+                    if (
+                        applied_rule_deduction < raw_rule_deduction
+                        or dimension_score < score_before_cap
+                    )
                     else None
                 ),
                 "point_contribution": point_contribution,
@@ -717,6 +744,14 @@ def extract_dimension_scoring_rules(
                     rule_set["bonus_rules"] = list(dimension.get("bonus_rules") or [])
                 if "dimension_score_cap" in dimension:
                     rule_set["dimension_score_cap"] = dimension["dimension_score_cap"]
+                if "dimension_deduction_cap" in dimension:
+                    validate_dimension_deduction_cap(
+                        dimension["dimension_deduction_cap"],
+                        dimension_key=str(dimension.get("key") or "dimension"),
+                    )
+                    rule_set["dimension_deduction_cap"] = dimension[
+                        "dimension_deduction_cap"
+                    ]
                 track[group_name][dimension["key"]] = rule_set
         extracted[track_key] = track
     return extracted

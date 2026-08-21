@@ -666,9 +666,30 @@ def dimension_rule_mode(
         return "grade_fallback"
     if "bonus_rules" in dimension or "dimension_score_cap" in dimension:
         return "bonus_cap_v2"
-    if "deduction_rules" in dimension:
+    if "deduction_rules" in dimension or "dimension_deduction_cap" in dimension:
         return "deduction_v1"
     return "grade_fallback"
+
+
+def validate_dimension_deduction_cap(
+    value: Any, *, dimension_key: str
+) -> None:
+    """Validate the maximum cumulative deduction for one dimension.
+
+    The field is intentionally independent from ``dimension_score_cap``:
+    the former limits how many points can be removed by hit rules, while the
+    latter limits the resulting positive dimension score.
+    """
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(float(value))
+        or not 0 <= float(value) <= 100
+    ):
+        raise CategoryEvaluationContractError(
+            "dimension_deduction_cap_invalid",
+            f"维度 {dimension_key} 的 dimension_deduction_cap 必须是 0 至 100 的有限数值",
+        )
 
 
 def validate_dimension_rules(dimension: Any, *, dimension_key: str) -> None:
@@ -676,6 +697,10 @@ def validate_dimension_rules(dimension: Any, *, dimension_key: str) -> None:
     mode = dimension_rule_mode(dimension)
     if mode == "grade_fallback":
         return
+    if "dimension_deduction_cap" in dimension:
+        validate_dimension_deduction_cap(
+            dimension["dimension_deduction_cap"], dimension_key=dimension_key
+        )
     if mode == "deduction_v1":
         validate_deduction_rules(
             dimension.get("deduction_rules"), dimension_key=dimension_key
