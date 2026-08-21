@@ -209,7 +209,7 @@ export const baselineRegressionApi = {
     fingerprint: string
   }>("/api/baseline-sets/inspiration-balanced-100", { method: "POST" }),
   listPrompts: (categoryKey?: string) => {
-    const params = new URLSearchParams({ pipeline_scope: "baseline_regression" })
+    const params = new URLSearchParams({ include_archived: "true" })
     if (categoryKey) params.set("category_key", categoryKey)
     const query = `?${params.toString()}`
     return api<{ items: PromptVersion[] }>(`/api/prompts${query}`)

@@ -13,9 +13,77 @@ export type BaselineAcceptanceProgress = {
   complete: boolean
 }
 
-import type { BaselineV3Revision } from "@/lib/types"
+import type { BaselineV3Revision, PromptVersion } from "@/lib/types"
 
 export type BaselineV3Mode = "active" | "candidate"
+
+export type CandidatePromptBindingResolution = {
+  status: "available" | "unavailable" | "unbound"
+  promptId: number | null
+  requestedVersion: string | null
+  reason?: "missing" | "stage" | "archived" | "pipeline_scope"
+}
+
+type CandidatePrompt = Pick<
+  PromptVersion,
+  "id" | "stage" | "version" | "status" | "pipeline_scope"
+>
+
+export function resolveCandidatePromptBinding(
+  prompts: CandidatePrompt[],
+  stage: "A" | "B",
+  requestedVersion: string | null,
+): CandidatePromptBindingResolution {
+  const normalizedVersion = requestedVersion?.trim() || null
+  if (!normalizedVersion) {
+    return {
+      status: "unbound",
+      promptId: null,
+      requestedVersion: null,
+    }
+  }
+
+  const exactVersion = prompts.find(
+    (prompt) => prompt.version === normalizedVersion && prompt.stage === stage,
+  ) ?? prompts.find((prompt) => prompt.version === normalizedVersion)
+  if (!exactVersion) {
+    return {
+      status: "unavailable",
+      promptId: null,
+      requestedVersion: normalizedVersion,
+      reason: "missing",
+    }
+  }
+  if (exactVersion.stage !== stage) {
+    return {
+      status: "unavailable",
+      promptId: exactVersion.id,
+      requestedVersion: normalizedVersion,
+      reason: "stage",
+    }
+  }
+  if (exactVersion.status === "archived") {
+    return {
+      status: "unavailable",
+      promptId: exactVersion.id,
+      requestedVersion: normalizedVersion,
+      reason: "archived",
+    }
+  }
+  if (exactVersion.pipeline_scope !== "baseline_regression" && exactVersion.pipeline_scope !== "shared") {
+    return {
+      status: "unavailable",
+      promptId: exactVersion.id,
+      requestedVersion: normalizedVersion,
+      reason: "pipeline_scope",
+    }
+  }
+  return {
+    status: "available",
+    promptId: exactVersion.id,
+    requestedVersion: normalizedVersion,
+  }
+}
 
 export function v3RevisionGroup(
   revision: Pick<BaselineV3Revision, "status" | "id">,

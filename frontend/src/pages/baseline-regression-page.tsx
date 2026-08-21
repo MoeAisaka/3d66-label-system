@@ -48,9 +48,11 @@ import {
   isSelectableV3Candidate,
   baselineRunContextPatch,
   baselineRunIdAfterSetLoad,
+  resolveCandidatePromptBinding,
   resolveV3PromptBinding,
   v3RevisionGroup,
 } from "@/features/baseline-regression/baseline-regression-contract"
+import type { CandidatePromptBindingResolution } from "@/features/baseline-regression/baseline-regression-contract"
 import { BaselineSetDialog } from "@/features/baseline-regression/baseline-set-dialog"
 import { CorrectionWorkbench } from "@/features/baseline-regression/correction-workbench"
 import {
@@ -219,7 +221,7 @@ export function BaselineRegressionPage() {
     () => (prompts.data?.items ?? []).filter(
       (prompt: PromptVersion) => prompt.stage === "A"
         && prompt.status !== "archived"
-        && (prompt.pipeline_scope === "baseline_regression" || prompt.pipeline_scope === "shared" || !prompt.pipeline_scope),
+        && (prompt.pipeline_scope === "baseline_regression" || prompt.pipeline_scope === "shared"),
     ),
     [prompts.data?.items],
   )
@@ -227,7 +229,7 @@ export function BaselineRegressionPage() {
     () => (prompts.data?.items ?? []).filter(
       (prompt: PromptVersion) => prompt.stage === "B"
         && prompt.status !== "archived"
-        && (prompt.pipeline_scope === "baseline_regression" || prompt.pipeline_scope === "shared" || !prompt.pipeline_scope),
+        && (prompt.pipeline_scope === "baseline_regression" || prompt.pipeline_scope === "shared"),
     ),
     [prompts.data?.items],
   )
@@ -244,18 +246,6 @@ export function BaselineRegressionPage() {
   const publishedPromptB = promptBOptions.find(
     (prompt) => prompt.id === selectedCategory?.prompt_b_id,
   )
-  const effectivePromptAId = promptSelectionMode === "published"
-    ? publishedPromptA?.id ?? 0
-    : promptAOptions.some((prompt) => prompt.id === selectedPromptAId)
-      ? selectedPromptAId
-      : publishedPromptA?.id ?? promptAOptions[0]?.id ?? 0
-  const effectivePromptBId = promptSelectionMode === "single"
-    ? 0
-    : promptSelectionMode === "manual"
-      ? promptBOptions.some((prompt) => prompt.id === selectedPromptBId)
-        ? selectedPromptBId
-        : publishedPromptB?.id ?? promptBOptions[0]?.id ?? 0
-      : publishedPromptB?.id ?? 0
   const activeV3Revision = v3Revisions.data?.items.find(
     (revision) => revision.id === v3Revisions.data?.projected_revision_id
       || revision.status === "active",
@@ -276,10 +266,47 @@ export function BaselineRegressionPage() {
   const candidatePromptBindingB = v3SelectionMode === "candidate" && selectedV3Revision
     ? resolveV3PromptBinding(selectedV3Revision, "B")
     : null
+  const candidatePromptResolutionA = useMemo(
+    () => resolveCandidatePromptBinding(
+      prompts.data?.items ?? [],
+      "A",
+      candidatePromptBindingA,
+    ),
+    [candidatePromptBindingA, prompts.data?.items],
+  )
+  const candidatePromptResolutionB = useMemo(
+    () => resolveCandidatePromptBinding(
+      prompts.data?.items ?? [],
+      "B",
+      candidatePromptBindingB,
+    ),
+    [candidatePromptBindingB, prompts.data?.items],
+  )
+  const effectivePromptAId = promptSelectionMode === "published"
+    ? publishedPromptA?.id ?? 0
+    : promptAOptions.some((prompt) => prompt.id === selectedPromptAId)
+      ? selectedPromptAId
+      : v3SelectionMode === "candidate"
+        ? 0
+        : publishedPromptA?.id ?? promptAOptions[0]?.id ?? 0
+  const effectivePromptBId = promptSelectionMode === "single"
+    ? 0
+    : promptSelectionMode === "manual"
+      ? promptBOptions.some((prompt) => prompt.id === selectedPromptBId)
+        ? selectedPromptBId
+        : v3SelectionMode === "candidate"
+          ? 0
+          : publishedPromptB?.id ?? promptBOptions[0]?.id ?? 0
+      : publishedPromptB?.id ?? 0
   const selectedPromptA = promptAOptions.find((prompt) => prompt.id === effectivePromptAId)
   const selectedPromptB = promptBOptions.find((prompt) => prompt.id === effectivePromptBId)
+  const candidatePromptUnavailable = v3SelectionMode === "candidate" && Boolean(
+    (candidatePromptBindingA && candidatePromptResolutionA.status !== "available")
+      || (candidatePromptBindingB && candidatePromptResolutionB.status !== "available"),
+  )
   const promptBindingMismatch = v3SelectionMode === "candidate" && Boolean(
-    (candidatePromptBindingA && selectedPromptA?.version !== candidatePromptBindingA)
+    candidatePromptUnavailable
+      || (candidatePromptBindingA && selectedPromptA?.version !== candidatePromptBindingA)
       || (candidatePromptBindingB && selectedPromptB?.version !== candidatePromptBindingB),
   )
   const v3SelectionLoading = v3Revisions.isLoading || prompts.isLoading
@@ -306,16 +333,20 @@ export function BaselineRegressionPage() {
     if (v3SelectionMode !== "candidate" || !selectedV3Revision) return
     const bindingA = resolveV3PromptBinding(selectedV3Revision, "A")
     const bindingB = resolveV3PromptBinding(selectedV3Revision, "B")
-    if (bindingA) {
-      const match = promptAOptions.find((prompt) => prompt.version === bindingA)
-      if (match) setSelectedPromptAId(match.id)
-    }
+    setSelectedPromptAId(
+      bindingA && candidatePromptResolutionA.status === "available"
+        ? candidatePromptResolutionA.promptId ?? 0
+        : 0,
+    )
     if (bindingB) {
-      const match = promptBOptions.find((prompt) => prompt.version === bindingB)
-      if (match) setSelectedPromptBId(match.id)
+      setSelectedPromptBId(
+        candidatePromptResolutionB.status === "available"
+          ? candidatePromptResolutionB.promptId ?? 0
+          : 0,
+      )
     }
     setPromptSelectionMode("manual")
-  }, [promptAOptions, promptBOptions, selectedV3Revision, v3SelectionMode])
+  }, [candidatePromptResolutionA, candidatePromptResolutionB, selectedV3Revision, v3SelectionMode])
 
   useEffect(() => {
     const categoryFromUrl = searchParams.get("category_key")
@@ -1177,7 +1208,8 @@ export function BaselineRegressionPage() {
                       </label>
                       {v3Revisions.isError && <div className="border border-[#d7a09d] bg-[#fff5f4] px-3 py-3 text-xs text-[#8d2924]">等级规则版本列表加载失败，无法启动。<button type="button" className="ml-2 underline" onClick={() => v3Revisions.refetch()}>重试</button></div>}
                       {selectedV3Revision && <div className="border border-[var(--line)] bg-[#fafbf8] px-3 py-3 text-xs leading-5"><p className="font-semibold">{selectedV3Revision.display_name} · Revision {selectedV3Revision.revision}</p><p className="text-[var(--muted)]">状态：{selectedV3Revision.status} · Hash {selectedV3Revision.contract_hash.slice(0, 12)}</p></div>}
-                      {v3SelectionMode === "candidate" && promptBindingMismatch && <div className="border border-[#d7a09d] bg-[#fff5f4] px-3 py-3 text-xs leading-5 text-[#8d2924]">候选等级规则绑定版本不匹配：{candidatePromptBindingA ? `A 需要 ${candidatePromptBindingA}` : ""}{candidatePromptBindingB ? `，B 需要 ${candidatePromptBindingB}` : ""}。请调整 A/B 后再启动。</div>}
+                      {v3SelectionMode === "candidate" && candidatePromptUnavailable && <div className="border border-[#d7a09d] bg-[#fff5f4] px-3 py-3 text-xs leading-5 text-[#8d2924]">候选等级规则绑定 Prompt 不可用：{candidatePromptBindingA && candidatePromptResolutionA.status !== "available" ? formatCandidatePromptBindingIssue("A", candidatePromptResolutionA) : ""}{candidatePromptBindingB && candidatePromptResolutionB.status !== "available" ? `，${formatCandidatePromptBindingIssue("B", candidatePromptResolutionB)}` : ""}。不能用当前 v4 替代；请恢复原 Prompt 或基于当前 Prompt 重建候选。</div>}
+                      {v3SelectionMode === "candidate" && promptBindingMismatch && !candidatePromptUnavailable && <div className="border border-[#d7a09d] bg-[#fff5f4] px-3 py-3 text-xs leading-5 text-[#8d2924]">候选等级规则绑定版本不匹配：{candidatePromptBindingA ? `A 需要 ${candidatePromptBindingA}` : ""}{candidatePromptBindingB ? `，B 需要 ${candidatePromptBindingB}` : ""}。请调整 A/B 后再启动。</div>}
                     </section>
 
                     <section className="space-y-4 border-t border-[var(--line)] pt-6" aria-labelledby="baseline-execution-config">
@@ -2949,6 +2981,19 @@ function promptScopeName(scope: PromptVersion["pipeline_scope"]) {
   if (scope === "baseline_regression") return "基准回归专用"
   if (scope === "full_pipeline") return "完整流水线专用"
   return "共用"
+}
+
+function formatCandidatePromptBindingIssue(
+  stage: "A" | "B",
+  resolution: CandidatePromptBindingResolution,
+) {
+  const reason = {
+    missing: "不存在",
+    stage: "阶段不匹配",
+    archived: "已归档",
+    pipeline_scope: "未开放基准回归",
+  }[resolution.reason ?? "missing"]
+  return `${stage} ${resolution.requestedVersion ?? "未绑定"}（${reason}）`
 }
 
 function percent(value: number) {
