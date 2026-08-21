@@ -11,11 +11,14 @@ from app.dimension_deduction_bridge import (
     DEDUCTION_PROMPT_TEMPLATE_VERSION,
     DimensionDeductionBridgeError,
     FALLBACK_WARNING,
+    OPERATOR_PROMPT_BYPASS_WARNING,
+    OPERATOR_PROMPT_TEMPLATE_VERSION,
     call_multimodal_for_dimension_deductions,
     compose_rule_deductions,
     empty_deduction_output,
     foundation_required,
     normalize_dimension_deduction_output,
+    operator_prompt_declares_rule_takeover,
 )
 from app.b_aesthetic_foundation import BAestheticFoundationError
 from app.inspiration_category_seed import build_inspiration_subcategory_dimensions
@@ -128,6 +131,8 @@ def test_bridge_normalizes_rule_hits_and_uses_chinese_prompt() -> None:
     assert "扣" in client.user
     assert output["prompt_identity"] == {
         "template_version": DEDUCTION_PROMPT_TEMPLATE_VERSION,
+        "operator_prompt_version": None,
+        "bypassed_operator_prompt_version": None,
         "system_sha256": hashlib.sha256(client.system.encode("utf-8")).hexdigest(),
         "user_sha256": hashlib.sha256(client.user.encode("utf-8")).hexdigest(),
     }
@@ -261,3 +266,163 @@ def test_declared_contract_stays_strict_even_on_provider_failure() -> None:
             dimension_output=fallback,
             require_foundation=foundation_required(config),
         )
+
+
+# --- 运营手选调用 B 接管规则模式正文（决策：手选版本接管） -------------------
+
+
+class OperatorPrompt:
+    """运营在提示词管理器里手选的调用 B 版本。"""
+
+    def __init__(self, *, user_prompt: str, version: str = "insp-b-v6-levels-20260821",
+                 system_prompt: str = "你是资深灵感图审美评估专家，先给基础美感分再逐条核验。") -> None:
+        self.stage = "B"
+        self.version = version
+        self.system_prompt = system_prompt
+        self.user_prompt = user_prompt
+
+
+_TAKEOVER_BODY = "请按以下维度规则逐条核验：\n\n{{dimension_rules}}"
+
+
+class SchemaFaultClient:
+    """真的答了，但输出形状不符合冻结合同（bonus-cap 缺 hit_bonus_rules）。"""
+
+    def __init__(self, config: dict) -> None:
+        self.config = config
+
+    async def chat_json(self, system: str, user: str, **_kwargs) -> Response:
+        return Response(
+            {
+                "aesthetic_score": 88,
+                "aesthetic_evidence": ["整体可见"],
+                "aesthetic_confidence": 0.8,
+                "dimensions": {
+                    dimension["key"]: {"hit_rules": []}
+                    for dimension in self.config["common_group"]["schema_definition"]["dimensions"]
+                },
+                "overall_note": "缺少加分规则数组",
+            }
+        )
+
+
+def test_takeover_helper_requires_rules_placeholder() -> None:
+    assert operator_prompt_declares_rule_takeover(
+        OperatorPrompt(user_prompt=_TAKEOVER_BODY)
+    ) is True
+    assert operator_prompt_declares_rule_takeover(
+        OperatorPrompt(user_prompt="八维评分，直接给出等级")
+    ) is False
+    assert operator_prompt_declares_rule_takeover(None) is False
+
+
+def test_operator_selected_prompt_owns_body_and_server_injects_rules() -> None:
+    config = build_inspiration_subcategory_dimensions()["class_one"]
+    client = Client()
+    operator = OperatorPrompt(user_prompt=_TAKEOVER_BODY)
+
+    output = asyncio.run(
+        call_multimodal_for_dimension_deductions(
+            "image.jpg", config, client=client, mime_type="image/jpeg",
+            precheck={"信息提取": {}}, operator_prompt=operator,
+        )
+    )
+
+    # 手选正文决定人设，服务端强制注入规则清单与输出结构。
+    assert client.system == operator.system_prompt
+    assert "请按以下维度规则逐条核验" in client.user
+    assert "{{dimension_rules}}" not in client.user
+    assert "扣" in client.user
+    assert "hit_rules" in client.user
+    assert "调用A预检字段" in client.user
+    assert output["warning"] is None
+    assert output["prompt_identity"]["template_version"] == (
+        OPERATOR_PROMPT_TEMPLATE_VERSION
+    )
+    assert output["prompt_identity"]["operator_prompt_version"] == operator.version
+    assert output["prompt_identity"]["bypassed_operator_prompt_version"] is None
+
+
+def test_operator_prompt_may_place_precheck_and_contract_itself() -> None:
+    config = build_inspiration_subcategory_dimensions()["class_one"]
+    client = Client()
+    operator = OperatorPrompt(
+        user_prompt=(
+            "预检：{{precheck_json}}\n规则：{{dimension_rules}}\n输出：{{response_contract}}"
+        )
+    )
+
+    asyncio.run(
+        call_multimodal_for_dimension_deductions(
+            "image.jpg", config, client=client, mime_type="image/jpeg",
+            precheck={"分类": "class_one"}, operator_prompt=operator,
+        )
+    )
+
+    assert "{{" not in client.user
+    assert client.user.index("预检：") < client.user.index("规则：")
+    assert "class_one" in client.user
+
+
+def test_operator_prompt_without_placeholder_is_not_credited() -> None:
+    """未声明接管的历史版本仍由合同正文执行，但不得归因到该版本。"""
+    config = build_inspiration_subcategory_dimensions()["class_one"]
+    client = Client()
+    operator = OperatorPrompt(user_prompt="八维评分，直接输出等级")
+
+    output = asyncio.run(
+        call_multimodal_for_dimension_deductions(
+            "image.jpg", config, client=client, mime_type="image/jpeg",
+            operator_prompt=operator,
+        )
+    )
+
+    assert "灵感素材质量核验专家" in client.system
+    assert output["warning"] == OPERATOR_PROMPT_BYPASS_WARNING
+    identity = output["prompt_identity"]
+    assert identity["template_version"] == DEDUCTION_PROMPT_TEMPLATE_VERSION
+    assert identity["operator_prompt_version"] is None
+    assert identity["bypassed_operator_prompt_version"] == operator.version
+
+
+def test_operator_prompt_missing_system_body_fails_closed() -> None:
+    config = build_inspiration_subcategory_dimensions()["class_one"]
+    operator = OperatorPrompt(user_prompt=_TAKEOVER_BODY, system_prompt="   ")
+
+    with pytest.raises(DimensionDeductionBridgeError) as excinfo:
+        asyncio.run(
+            call_multimodal_for_dimension_deductions(
+                "image.jpg", config, client=Client(), mime_type="image/jpeg",
+                operator_prompt=operator,
+            )
+        )
+    assert excinfo.value.code == "operator_prompt_system_empty"
+
+
+# --- 兜底拆分：provider 故障 fail-open，输出形状不符 fail-closed -------------
+
+
+def test_contract_shape_fault_fails_closed_instead_of_full_marks() -> None:
+    config = _bonus_cap_config()
+
+    with pytest.raises(DimensionDeductionBridgeError) as excinfo:
+        asyncio.run(
+            call_multimodal_for_dimension_deductions(
+                "image.jpg", config, client=SchemaFaultClient(config),
+                mime_type="image/jpeg",
+            )
+        )
+    assert excinfo.value.code == "dimension_output_invalid"
+
+
+def test_provider_outage_records_reason_on_fail_open() -> None:
+    config = build_inspiration_subcategory_dimensions()["class_one"]
+
+    output = asyncio.run(
+        call_multimodal_for_dimension_deductions(
+            "image.jpg", config, client=Client(fail=True), mime_type="image/jpeg",
+        )
+    )
+
+    assert output["warning"] == FALLBACK_WARNING
+    assert "TimeoutError" in output["provider_error"]

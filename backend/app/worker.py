@@ -2244,6 +2244,7 @@ async def evaluate_job(job_id: int) -> None:
         # 共性/特有 grade 拿不齐或引擎异常 → V3AuthoritativeError → score/level=None +
         # 人工复核，绝不降级成 v1 给出误导性分数。
         _v3_level_semantics = UNIFIED_LEVEL_SEMANTICS_VERSION
+        rule_mode_prompt_b_bypassed = False
         v3_bundle = v3_bundle_for_job or v3_authoritative_category(
             db, current_job.category_key
         )
@@ -2264,6 +2265,8 @@ async def evaluate_job(job_id: int) -> None:
                 v3_bundle=v3_scoring_bundle,
                 precheck=v3_scoring_precheck,
                 aesthetic=aesthetic,
+                # 规则计分模式下手选调用B接管正文；否则该参数无副作用。
+                operator_prompt_b=prompt_b,
             )
             scoring = build_v3_authoritative_scoring(
                 v3_result,
@@ -2274,6 +2277,13 @@ async def evaluate_job(job_id: int) -> None:
                 raw_payload = scoring.pop(
                     "_dimension_deduction_raw_payload", None
                 )
+                # 规则计分模式下若手选调用B无法接管正文，本次执行的是维度合同正文，
+                # 不得记成该 B 版本的成绩，否则版本指标与候选血缘会被污染。
+                _identity = dimension_output.get("prompt_identity")
+                if isinstance(_identity, dict) and _identity.get(
+                    "bypassed_operator_prompt_version"
+                ):
+                    rule_mode_prompt_b_bypassed = True
                 aesthetic = dimension_output
                 # Even the approved fail-open fallback must leave a
                 # complete 调用B audit record.  It has no provider payload,
@@ -2456,7 +2466,11 @@ async def evaluate_job(job_id: int) -> None:
             needs_review=bool(scoring.get("needs_review")),
             model_id=bundle.model_id,
             prompt_a_version=prompt_a.version,
-            prompt_b_version=prompt_b.version if response_b and prompt_b else None,
+            prompt_b_version=(
+                prompt_b.version
+                if response_b and prompt_b and not rule_mode_prompt_b_bypassed
+                else None
+            ),
             risk_review_version=bundle.risk_review_version,
             rubric_version=rubric_version,
             engine_version=bundle.engine_version,

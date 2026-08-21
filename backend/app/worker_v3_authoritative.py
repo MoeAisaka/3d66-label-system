@@ -477,6 +477,7 @@ async def evaluate_v3_authoritative(
     v3_bundle: dict,
     precheck: Any,
     aesthetic: Any,
+    operator_prompt_b: Any = None,
 ) -> dict:
     """编排一次 v3 权威评分，返回 ``evaluate_one`` 的 ``result``。
 
@@ -496,6 +497,10 @@ async def evaluate_v3_authoritative(
     与影子的根本区别：影子拿不齐 grade → skip/None；这里是权威路径，拿不齐 → **必须
     fail-closed 抛错**，绝不静默降级成老引擎给出误导性分数。``evaluate_one`` 内部的
     确定性异常（合同 / 组合 / 聚合错误）也统一包成 ``V3AuthoritativeError`` 上抛。
+
+    ``operator_prompt_b`` 是运营手选的调用 B 版本。规则计分模式下它接管调用 B 正文
+    （规则清单与输出结构仍由服务端强制注入）；未声明接管占位符的历史版本仍由维度合同
+    正文执行，但结果会带 warning 且不得归因到该版本。
     """
     # 延迟 import：seed 会拉起整套框架栈，保持惰性，且让 import 失败也走 fail-closed。
     from .inspiration_category_seed import evaluate_one
@@ -600,6 +605,7 @@ async def evaluate_v3_authoritative(
             )
 
         from .dimension_deduction_bridge import (
+            DimensionDeductionBridgeError,
             call_multimodal_for_dimension_deductions,
             compose_rule_deductions,
             declares_foundation,
@@ -607,6 +613,24 @@ async def evaluate_v3_authoritative(
             has_deduction_rules,
             rule_scoring_mode,
         )
+
+        # 手选调用B是否偏离合同原生配对。等于合同 prompt_bindings.call_b_version 时，
+        # 合同正文就是该版本的正式执行体，归因合法、无需告警；只有偏离合同绑定的手选
+        # 版本才需要接管正文，接管不了则不得计入该版本成绩。
+        contract_bindings = contract.get("prompt_bindings")
+        contract_bound_b = (
+            contract_bindings.get("call_b_version")
+            if isinstance(contract_bindings, dict)
+            else None
+        )
+        deviating_prompt_b = operator_prompt_b
+        if (
+            deviating_prompt_b is not None
+            and contract_bound_b is not None
+            and str(getattr(deviating_prompt_b, "version", "") or "")
+            == str(contract_bound_b)
+        ):
+            deviating_prompt_b = None
 
         if has_deduction_rules(track_config):
             active_rule_mode = rule_scoring_mode(track_config)
@@ -616,14 +640,24 @@ async def evaluate_v3_authoritative(
                 else "rule_deduction"
             )
             # New rule-deduction path: calling B judges rule hits only.  Provider
-            # failure is converted by the bridge into empty hits + warning.
-            rule_dimension_output = await call_multimodal_for_dimension_deductions(
-                image_path,
-                track_config,
-                client=client,
-                mime_type=mime_type,
-                precheck=precheck_obj,
-            )
+            # failure is converted by the bridge into empty hits + warning; a
+            # provider that answered in a shape the frozen contract rejects
+            # fails closed here rather than scoring every dimension full marks.
+            try:
+                rule_dimension_output = (
+                    await call_multimodal_for_dimension_deductions(
+                        image_path,
+                        track_config,
+                        client=client,
+                        mime_type=mime_type,
+                        precheck=precheck_obj,
+                        operator_prompt=deviating_prompt_b,
+                    )
+                )
+            except DimensionDeductionBridgeError as exc:
+                raise V3AuthoritativeError(
+                    exc.code, f"v3 规则计分调用B输出不符合冻结合同：{exc}"
+                ) from exc
             try:
                 # normalize validates ``track_config``, so the track-level
                 # switch decides; the category-level switch still opts the

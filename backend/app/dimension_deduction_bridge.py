@@ -38,10 +38,22 @@ DEDUCTION_BRIDGE_VERSION = "dimension-deduction-bridge-v2"
 BONUS_CAP_BRIDGE_VERSION = "dimension-deduction-bridge-v3-bonus-cap"
 DEDUCTION_PROMPT_TEMPLATE_VERSION = "dimension-deduction-prompt-v1"
 BONUS_CAP_PROMPT_TEMPLATE_VERSION = "dimension-deduction-prompt-v2-bonus-cap"
+OPERATOR_PROMPT_TEMPLATE_VERSION = "dimension-deduction-prompt-v3-operator-selected"
 RULE_COMPOSITION_VERSION = "dimension-rule-composition-v1"
 RULE_COMPOSITION_V2 = "dimension-rule-composition-v2-bonus-cap"
 FALLBACK_WARNING = "调用B失败，维度分按满分通过（安全兜底）"
+OPERATOR_PROMPT_BYPASS_WARNING = (
+    "手选调用B未声明 {{dimension_rules}} 占位符，本次由维度合同正文执行；"
+    "该结果不可归因于所选调用B版本"
+)
 _WEIGHT_TOLERANCE = 1e-9
+
+# 运营手选的调用 B 正文靠这些占位符接管规则模式：规则清单与输出结构由服务端
+# 强制注入，手选正文只决定人设、口径与推理引导。声明 RULES_PLACEHOLDER 即视为
+# 显式要求接管；未声明的历史版本继续由合同生成正文，但归因必须如实标注。
+RULES_PLACEHOLDER = "{{dimension_rules}}"
+RESPONSE_CONTRACT_PLACEHOLDER = "{{response_contract}}"
+PRECHECK_PLACEHOLDER = "{{precheck_json}}"
 
 
 class DimensionDeductionBridgeError(ValueError):
@@ -111,7 +123,8 @@ def rule_scoring_mode(config: Any) -> str:
 
 def empty_deduction_output(
     config: dict[str, Any], *, warning: str | None = None,
-    prompt_identity: dict[str, str] | None = None,
+    prompt_identity: dict[str, str | None] | None = None,
+    provider_error: str | None = None,
 ) -> dict[str, Any]:
     mode = rule_scoring_mode(config)
     bonus_cap = mode == "bonus_cap_v2"
@@ -120,6 +133,9 @@ def empty_deduction_output(
             BONUS_CAP_BRIDGE_VERSION if bonus_cap else DEDUCTION_BRIDGE_VERSION
         ),
         "prompt_identity": prompt_identity,
+        # Why the fail-open triggered, so a full-marks fallback can never be
+        # mistaken for a genuine clean run when auditing regression results.
+        "provider_error": provider_error,
         "dimensions": {
             dimension["key"]: (
                 {"hit_rules": [], "hit_bonus_rules": []}
@@ -376,28 +392,8 @@ def normalize_dimension_deduction_output(
     }
 
 
-def build_dimension_deduction_prompt(
-    config: dict[str, Any], *, precheck: dict[str, Any] | None = None
-) -> tuple[str, str]:
-    """Build the Chinese rule-by-rule calling-B prompt from frozen config."""
-    dimensions, _, _, mode = _configured_rules(config)
-    bonus_cap = mode == "bonus_cap_v2"
-    requires_foundation = foundation_required(config)
-    system = (
-        "你是灵感素材质量核验专家。"
-        + (
-            "先输出0-100的 aesthetic_score 作为基础美感分，再逐条判断合同规则命中；"
-            "基础分不得输出最终等级。"
-            if requires_foundation
-            else "你只做规则命中判断，不打1-5分、不输出总分或等级。"
-        )
-        + (
-            "逐维度分别检查每条扣分规则与加分规则；只返回确有视觉证据的命中项。"
-            if bonus_cap
-            else "逐维度检查每条扣分规则；只返回确有视觉证据的命中项。"
-        )
-        + "每条命中必须给出独立、可定位的中文证据和 high/medium/low 置信度。严格输出 JSON。"
-    )
+def _rules_text(dimensions: list[dict[str, Any]], *, bonus_cap: bool) -> str:
+    """Render the frozen per-dimension rule list that calling B must judge."""
     rule_blocks: list[str] = []
     for dimension in dimensions:
         deduction_lines = [
@@ -415,6 +411,28 @@ def build_dimension_deduction_prompt(
             f"# 维度：{dimension.get('label') or dimension['key']}（{dimension['key']}）\n"
             + rules_text
         )
+    return "\n\n".join(rule_blocks)
+
+
+def _precheck_text(precheck: dict[str, Any] | None) -> str:
+    return json.dumps(precheck or {}, ensure_ascii=False, sort_keys=True)
+
+
+def _response_contract_preamble(*, bonus_cap: bool) -> str:
+    return (
+        "\n\n输出结构（未命中时 hit_rules 与 hit_bonus_rules 必须为空数组）：\n"
+        if bonus_cap
+        else "\n\n输出结构（未命中时 hit_rules 必须为空数组）：\n"
+    )
+
+
+def _response_contract_text(
+    dimensions: list[dict[str, Any]],
+    *,
+    bonus_cap: bool,
+    requires_foundation: bool,
+) -> str:
+    """Render the machine-parseable output shape the composer later validates."""
     response_contract = {
         **(
             {
@@ -452,29 +470,131 @@ def build_dimension_deduction_prompt(
         },
         "overall_note": "整体说明",
     }
-    user = (
-        "\n\n".join(rule_blocks)
-        + "\n\n调用A预检字段：\n"
-        + json.dumps(precheck or {}, ensure_ascii=False, sort_keys=True)
-        + (
-            "\n\n输出结构（未命中时 hit_rules 与 hit_bonus_rules 必须为空数组）：\n"
-            if bonus_cap
-            else "\n\n输出结构（未命中时 hit_rules 必须为空数组）：\n"
+    return json.dumps(response_contract, ensure_ascii=False)
+
+
+def operator_prompt_declares_rule_takeover(operator_prompt: Any) -> bool:
+    """True when a hand-picked B version asks to own the rule-mode prompt body.
+
+    Declaring ``{{dimension_rules}}`` is the opt-in: such a version replaces the
+    contract-generated persona and wording.  Versions without the placeholder
+    cannot be executed on this path at all, because the rule list would never
+    reach the model -- the historical silent-bypass defect.
+    """
+    if operator_prompt is None:
+        return False
+    user_prompt = getattr(operator_prompt, "user_prompt", None)
+    return isinstance(user_prompt, str) and RULES_PLACEHOLDER in user_prompt
+
+
+def build_operator_dimension_deduction_prompt(
+    config: dict[str, Any],
+    operator_prompt: Any,
+    *,
+    precheck: dict[str, Any] | None = None,
+) -> tuple[str, str]:
+    """Let the operator-selected B version own the rule-mode prompt body.
+
+    The frozen rule list and the response contract are injected by the server,
+    so a hand-picked version controls persona, wording and reasoning guidance
+    but can never drop a rule or reshape the JSON the deterministic composer
+    parses.  A version that does not declare ``{{dimension_rules}}`` fails
+    closed here instead of being silently ignored.
+    """
+    dimensions, _, _, mode = _configured_rules(config)
+    bonus_cap = mode == "bonus_cap_v2"
+    requires_foundation = foundation_required(config)
+    system = str(getattr(operator_prompt, "system_prompt", "") or "")
+    user_template = str(getattr(operator_prompt, "user_prompt", "") or "")
+    if RULES_PLACEHOLDER not in user_template:
+        raise DimensionDeductionBridgeError(
+            "operator_prompt_rules_placeholder_missing",
+            f"手选调用B正文必须包含 {RULES_PLACEHOLDER} 占位符才能接管规则模式评分",
         )
-        + json.dumps(response_contract, ensure_ascii=False)
+    if not system.strip():
+        raise DimensionDeductionBridgeError(
+            "operator_prompt_system_empty", "手选调用B缺少 system 正文，拒绝执行"
+        )
+    user = user_template.replace(
+        RULES_PLACEHOLDER, _rules_text(dimensions, bonus_cap=bonus_cap)
+    )
+    precheck_text = _precheck_text(precheck)
+    if PRECHECK_PLACEHOLDER in user:
+        user = user.replace(PRECHECK_PLACEHOLDER, precheck_text)
+    else:
+        user += "\n\n调用A预检字段：\n" + precheck_text
+    contract_text = _response_contract_text(
+        dimensions, bonus_cap=bonus_cap, requires_foundation=requires_foundation
+    )
+    # Always appended when not explicitly placed: the output contract is what
+    # makes the response machine-parseable and is never the operator's to drop.
+    if RESPONSE_CONTRACT_PLACEHOLDER in user:
+        user = user.replace(RESPONSE_CONTRACT_PLACEHOLDER, contract_text)
+    else:
+        user += _response_contract_preamble(bonus_cap=bonus_cap) + contract_text
+    return system, user
+
+
+def build_dimension_deduction_prompt(
+    config: dict[str, Any], *, precheck: dict[str, Any] | None = None
+) -> tuple[str, str]:
+    """Build the Chinese rule-by-rule calling-B prompt from frozen config."""
+    dimensions, _, _, mode = _configured_rules(config)
+    bonus_cap = mode == "bonus_cap_v2"
+    requires_foundation = foundation_required(config)
+    system = (
+        "你是灵感素材质量核验专家。"
+        + (
+            "先输出0-100的 aesthetic_score 作为基础美感分，再逐条判断合同规则命中；"
+            "基础分不得输出最终等级。"
+            if requires_foundation
+            else "你只做规则命中判断，不打1-5分、不输出总分或等级。"
+        )
+        + (
+            "逐维度分别检查每条扣分规则与加分规则；只返回确有视觉证据的命中项。"
+            if bonus_cap
+            else "逐维度检查每条扣分规则；只返回确有视觉证据的命中项。"
+        )
+        + "每条命中必须给出独立、可定位的中文证据和 high/medium/low 置信度。严格输出 JSON。"
+    )
+    user = (
+        _rules_text(dimensions, bonus_cap=bonus_cap)
+        + "\n\n调用A预检字段：\n"
+        + _precheck_text(precheck)
+        + _response_contract_preamble(bonus_cap=bonus_cap)
+        + _response_contract_text(
+            dimensions, bonus_cap=bonus_cap, requires_foundation=requires_foundation
+        )
     )
     return system, user
 
 
 def _deduction_prompt_identity(
-    system_prompt: str, user_prompt: str, *, bonus_cap: bool = False
-) -> dict[str, str]:
+    system_prompt: str,
+    user_prompt: str,
+    *,
+    bonus_cap: bool = False,
+    operator_prompt_version: str | None = None,
+    bypassed_operator_prompt_version: str | None = None,
+) -> dict[str, str | None]:
+    """Record the prompt that was actually sent, never the one merely selected.
+
+    ``operator_prompt_version`` is the hand-picked calling-B version that owns
+    this body.  ``bypassed_operator_prompt_version`` is a version that was
+    selected but could not take over.  Both are reported separately from the
+    template version so a run can never again be filed under a B version whose
+    text never reached the model.
+    """
     return {
         "template_version": (
-            BONUS_CAP_PROMPT_TEMPLATE_VERSION
+            OPERATOR_PROMPT_TEMPLATE_VERSION
+            if operator_prompt_version is not None
+            else BONUS_CAP_PROMPT_TEMPLATE_VERSION
             if bonus_cap
             else DEDUCTION_PROMPT_TEMPLATE_VERSION
         ),
+        "operator_prompt_version": operator_prompt_version,
+        "bypassed_operator_prompt_version": bypassed_operator_prompt_version,
         "system_sha256": hashlib.sha256(system_prompt.encode("utf-8")).hexdigest(),
         "user_sha256": hashlib.sha256(user_prompt.encode("utf-8")).hexdigest(),
     }
@@ -487,20 +607,49 @@ async def call_multimodal_for_dimension_deductions(
     client: Any,
     mime_type: str,
     precheck: dict[str, Any] | None = None,
+    operator_prompt: Any = None,
 ) -> dict[str, Any]:
     """Call the multimodal model and normalize rule hits.
 
     ``contract`` is the resolved track's ``subcategory-dimensions-v1`` config.
-    A provider/parse/validation failure returns empty hits plus ``warning``;
-    malformed local rule configuration is validated before the ``try`` and
-    therefore fails closed instead of being disguised as a model outage.
+    ``operator_prompt`` is the hand-picked calling-B version, which owns the
+    prompt body while the server keeps injecting the frozen rule list and the
+    response contract.  Passing a version that cannot take over fails closed
+    rather than executing a different prompt under that version's name.
+
+    Only a genuine provider/transport failure is fail-open (empty hits plus
+    ``warning``).  A provider that answered in a shape the frozen contract does
+    not accept fails closed, because silently awarding full marks to every
+    dimension is indistinguishable from a real high score downstream.
     """
     _, _, _, mode = _configured_rules(contract)  # local corruption fails closed
-    system_prompt, user_prompt = build_dimension_deduction_prompt(
-        contract, precheck=precheck
-    )
+    operator_version: str | None = None
+    bypassed_version: str | None = None
+    if operator_prompt is not None and operator_prompt_declares_rule_takeover(
+        operator_prompt
+    ):
+        operator_version = str(getattr(operator_prompt, "version", "") or "") or None
+        system_prompt, user_prompt = build_operator_dimension_deduction_prompt(
+            contract, operator_prompt, precheck=precheck
+        )
+    else:
+        # A selected version that predates the takeover placeholder cannot be
+        # executed here (its body would drop the rule list), so the contract
+        # body still runs -- but the run must say so instead of being filed
+        # under a B version whose text never reached the model.
+        if operator_prompt is not None:
+            bypassed_version = (
+                str(getattr(operator_prompt, "version", "") or "") or None
+            )
+        system_prompt, user_prompt = build_dimension_deduction_prompt(
+            contract, precheck=precheck
+        )
     prompt_identity = _deduction_prompt_identity(
-        system_prompt, user_prompt, bonus_cap=mode == "bonus_cap_v2"
+        system_prompt,
+        user_prompt,
+        bonus_cap=mode == "bonus_cap_v2",
+        operator_prompt_version=operator_version,
+        bypassed_operator_prompt_version=bypassed_version,
     )
     try:
         response = await client.chat_json(
@@ -509,17 +658,27 @@ async def call_multimodal_for_dimension_deductions(
             image_path=image,
             mime_type=mime_type,
         )
-        parsed = response.parsed if hasattr(response, "parsed") else response
-        normalized = normalize_dimension_deduction_output(
-            parsed, contract, require_foundation=True
-        )
-        normalized["prompt_identity"] = prompt_identity
-        normalized["raw_payload"] = getattr(response, "raw_payload", parsed)
-        return normalized
-    except Exception:  # noqa: BLE001 - approved subjective-node fail-open policy
+    except Exception as exc:  # noqa: BLE001 - approved subjective-node fail-open
+        # Provider outage only.  Contract-shape faults are handled below.
         return empty_deduction_output(
-            contract, warning=FALLBACK_WARNING, prompt_identity=prompt_identity
+            contract,
+            warning=FALLBACK_WARNING,
+            prompt_identity=prompt_identity,
+            provider_error=f"{type(exc).__name__}: {exc}",
         )
+    parsed = response.parsed if hasattr(response, "parsed") else response
+    # Contract-shape faults deliberately propagate: the caller turns them into a
+    # fail-closed V3AuthoritativeError instead of full marks for every dimension.
+    normalized = normalize_dimension_deduction_output(
+        parsed, contract, require_foundation=True
+    )
+    normalized["prompt_identity"] = prompt_identity
+    normalized["raw_payload"] = getattr(response, "raw_payload", parsed)
+    if bypassed_version is not None:
+        # Carried into review_reasons so the run is quarantined rather than
+        # silently counted as a clean result for the selected B version.
+        normalized["warning"] = OPERATOR_PROMPT_BYPASS_WARNING
+    return normalized
 
 
 def compose_rule_deductions(

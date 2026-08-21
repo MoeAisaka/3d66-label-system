@@ -1169,3 +1169,102 @@ def test_frozen_bundle_with_invalid_subcategory_dimensions_fails_closed(
     error = _assert_invalid_frozen_bundle(sessions, frozen)
 
     assert str(error) == "基线作业的冻结 v3 配置无效"
+
+
+# --------------------------------------------------------------------------- #
+# 运营手选调用 B：偏离合同绑定时接管正文，合同原生配对不受影响
+# --------------------------------------------------------------------------- #
+
+
+def _operator_b(version: str, *, takeover: bool) -> SimpleNamespace:
+    return SimpleNamespace(
+        stage="B",
+        version=version,
+        system_prompt="你是资深灵感图审美评估专家。",
+        user_prompt=(
+            "请逐条核验：\n{{dimension_rules}}" if takeover else "八维评分并给出等级"
+        ),
+    )
+
+
+def test_contract_bound_b_version_is_not_treated_as_deviation(
+    sessions: sessionmaker[Session],
+) -> None:
+    """合同自带的 B 版本就是该合同的正式执行体，不得判为绕过。"""
+    with sessions() as db:
+        bundle = _bundle(db)
+    bound = bundle["contract"]["prompt_bindings"]["call_b_version"]
+
+    result = asyncio.run(
+        evaluate_v3_authoritative(
+            _FakeClient(specific_grade=4),
+            "img.jpg",
+            "image/jpeg",
+            v3_bundle=bundle,
+            precheck=_class_one_precheck(),
+            aesthetic=_aesthetic(common_grade=4),
+            operator_prompt_b=_operator_b(bound, takeover=False),
+        )
+    )
+
+    output = result["dimension_deduction_output"]
+    assert output["warning"] is None
+    assert output["prompt_identity"]["bypassed_operator_prompt_version"] is None
+    assert output["prompt_identity"]["operator_prompt_version"] is None
+
+
+def test_deviating_operator_b_takes_over_rule_prompt(
+    sessions: sessionmaker[Session],
+) -> None:
+    with sessions() as db:
+        bundle = _bundle(db)
+    operator = _operator_b("insp-b-v6-levels-20260821", takeover=True)
+
+    result = asyncio.run(
+        evaluate_v3_authoritative(
+            _FakeClient(specific_grade=4),
+            "img.jpg",
+            "image/jpeg",
+            v3_bundle=bundle,
+            precheck=_class_one_precheck(),
+            aesthetic=_aesthetic(common_grade=4),
+            operator_prompt_b=operator,
+        )
+    )
+
+    identity = result["dimension_deduction_output"]["prompt_identity"]
+    assert identity["operator_prompt_version"] == operator.version
+    assert identity["template_version"] == (
+        "dimension-deduction-prompt-v3-operator-selected"
+    )
+    assert result["dimension_deduction_output"]["warning"] is None
+
+
+def test_deviating_operator_b_without_placeholder_is_not_credited(
+    sessions: sessionmaker[Session],
+) -> None:
+    """无法接管的手选版本仍跑合同正文，但结果必须带 warning 且不归因该版本。"""
+    with sessions() as db:
+        bundle = _bundle(db)
+    operator = _operator_b("insp-b-v6-levels-20260821", takeover=False)
+
+    result = asyncio.run(
+        evaluate_v3_authoritative(
+            _FakeClient(specific_grade=4),
+            "img.jpg",
+            "image/jpeg",
+            v3_bundle=bundle,
+            precheck=_class_one_precheck(),
+            aesthetic=_aesthetic(common_grade=4),
+            operator_prompt_b=operator,
+        )
+    )
+
+    identity = result["dimension_deduction_output"]["prompt_identity"]
+    assert identity["operator_prompt_version"] is None
+    assert identity["bypassed_operator_prompt_version"] == operator.version
+
+    # 该 warning 必须进入 review_reasons，使样本被隔离而非计入干净成绩。
+    scoring = build_v3_authoritative_scoring(result, precheck=_class_one_precheck())
+    assert scoring["needs_review"] is True
+    assert any("手选调用B" in reason for reason in scoring["review_reasons"])
