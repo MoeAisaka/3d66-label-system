@@ -305,20 +305,6 @@ def test_baseline_run_can_freeze_candidate_v3_revision_without_changing_projecti
         )
         assert baseline_set.status_code == 200
 
-        mismatched = client.post(
-            f"/api/baseline-sets/{baseline_set.json()['id']}/runs",
-            json={
-                "prompt_a_id": prompt_a.id,
-                "prompt_b_id": wrong_prompt_b.id,
-                "candidate_revision_id": candidate.id,
-            },
-        )
-        assert mismatched.status_code == 409
-        assert mismatched.json()["detail"]["code"] == (
-            "candidate_prompt_binding_mismatch"
-        )
-        assert db.query(BaselineRegressionRun).count() == 0
-
         run_response = client.post(
             f"/api/baseline-sets/{baseline_set.json()['id']}/runs",
             json={
@@ -378,6 +364,182 @@ def test_baseline_run_can_freeze_candidate_v3_revision_without_changing_projecti
         with pytest.raises(RuntimeError, match="候选合同 Prompt 绑定"):
             asyncio.run(worker.evaluate_job(job.id))
         assert provider_constructions == 0
+    finally:
+        app.dependency_overrides.clear()
+        db.close()
+        engine.dispose()
+
+
+def test_candidate_baseline_run_accepts_operator_chosen_prompt_pair() -> None:
+    """运营可用任意 A/B 跑任意候选合同：评测机制实验要求这种自由。
+
+    候选合同声明的 A/B 只是出厂建议。冻结快照必须记录本轮真实执行的一对，
+    并在与出厂声明不同时留下覆盖审计；候选修订本体不得被改写。
+    """
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    db = Session(engine, expire_on_commit=False)
+    active_artifacts = add_active_v3_contract(db, "inspiration_image")
+    projected = db.scalar(
+        select(CategoryEvaluationV3Config).where(
+            CategoryEvaluationV3Config.category_key == "inspiration_image"
+        )
+    )
+    assert projected is not None
+    active_revision = ensure_projected_revision(db, projected)
+    declared_bindings = {
+        "call_a_version": "declared-A1",
+        "call_b_version": "declared-B1",
+    }
+    candidate_contract = deepcopy(active_artifacts["contract"])
+    candidate_contract["spec_version"] = "inspiration-operator-override-test-v1"
+    candidate_contract["prompt_bindings"] = deepcopy(declared_bindings)
+    if isinstance(candidate_contract.get("aesthetic_foundation"), dict):
+        candidate_contract["aesthetic_foundation"]["call_b_version"] = "declared-B1"
+    candidate = CategoryEvaluationV3Revision(
+        category_key="inspiration_image",
+        display_name="运营自选 A/B 候选",
+        revision=2,
+        status="candidate",
+        parent_revision_id=active_revision.id,
+        contract_json=canonical_json(candidate_contract),
+        classification_map_json=canonical_json(
+            active_artifacts["classification_map"]
+        ),
+        subcategory_dimensions_json=canonical_json(
+            active_artifacts["subcategory_dimensions"]
+        ),
+        dimension_deduction_rules_json="{}",
+        media_penalty_enabled=False,
+        contract_hash=canonical_contract_hash(candidate_contract),
+        created_by="test",
+    )
+    user = User(
+        username="operator",
+        password_hash="unused",
+        display_name="运营",
+    )
+    asset = Asset(
+        original_name="override-L1.jpg",
+        stored_name="override-L1.jpg",
+        mime_type="image/jpeg",
+        size_bytes=10,
+        sha256="d" * 64,
+        status="uploaded",
+        category_key="inspiration_image",
+    )
+    model = ModelConfig(
+        name="override-model",
+        provider="doubao",
+        base_url="https://example.test",
+        api_path="/chat",
+        model_id="override-model",
+        active=True,
+    )
+    declared_a = PromptVersion(
+        stage="A",
+        name="出厂A",
+        version="declared-A1",
+        system_prompt="classification prompt",
+        user_prompt="classify",
+        rubric_version="inspiration-rubric-v1",
+        status="published",
+        category_key="inspiration_image",
+    )
+    declared_b = PromptVersion(
+        stage="B",
+        name="出厂B",
+        version="declared-B1",
+        system_prompt="aesthetic prompt",
+        user_prompt="evaluate",
+        rubric_version="inspiration-rubric-v1",
+        status="draft",
+        pipeline_scope="baseline_regression",
+        category_key="inspiration_image",
+    )
+    chosen_b = PromptVersion(
+        stage="B",
+        name="运营自选B",
+        version="chosen-B9",
+        system_prompt="newer aesthetic prompt",
+        user_prompt="evaluate with newer version",
+        rubric_version="inspiration-rubric-v1",
+        status="draft",
+        pipeline_scope="baseline_regression",
+        category_key="inspiration_image",
+    )
+    db.add_all(
+        [candidate, user, asset, model, declared_a, declared_b, chosen_b]
+    )
+    db.commit()
+
+    frozen_projection = (
+        projected.projected_revision_id,
+        projected.revision,
+        projected.contract_hash,
+        projected.contract_json,
+    )
+    app.dependency_overrides[get_db] = lambda: (yield db)
+    app.dependency_overrides[current_user] = lambda: user
+    client = TestClient(app)
+    try:
+        baseline_set = client.post(
+            "/api/baseline-sets",
+            json={
+                "name": "运营自选 A/B 基准集",
+                "default_expected_level": "L1",
+                "category_key": "inspiration_image",
+                "items": [{"asset_id": asset.id}],
+            },
+        )
+        assert baseline_set.status_code == 200
+
+        response = client.post(
+            f"/api/baseline-sets/{baseline_set.json()['id']}/runs",
+            json={
+                "prompt_a_id": declared_a.id,
+                "prompt_b_id": chosen_b.id,
+                "candidate_revision_id": candidate.id,
+            },
+        )
+        assert response.status_code == 200
+
+        run = db.get(BaselineRegressionRun, response.json()["id"])
+        assert run is not None
+        bundle = json.loads(run.execution_snapshot_json)[
+            "v3_authoritative_bundle"
+        ]
+        executed_bindings = {
+            "call_a_version": "declared-A1",
+            "call_b_version": "chosen-B9",
+        }
+        assert bundle["contract"]["prompt_bindings"] == executed_bindings
+        if isinstance(bundle["contract"].get("aesthetic_foundation"), dict):
+            assert bundle["contract"]["aesthetic_foundation"][
+                "call_b_version"
+            ] == "chosen-B9"
+        assert bundle["prompt_binding_override"] == {
+            "declared": declared_bindings,
+            "executed": executed_bindings,
+            "actor": "operator",
+        }
+
+        # 候选修订本体与现役投影都不因一次实验而改写。
+        db.refresh(candidate)
+        assert json.loads(candidate.contract_json)["prompt_bindings"] == (
+            declared_bindings
+        )
+        db.refresh(projected)
+        assert (
+            projected.projected_revision_id,
+            projected.revision,
+            projected.contract_hash,
+            projected.contract_json,
+        ) == frozen_projection
     finally:
         app.dependency_overrides.clear()
         db.close()

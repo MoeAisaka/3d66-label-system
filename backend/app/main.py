@@ -235,6 +235,7 @@ from .category_evaluation_v3_revisions import (
 )
 from .category_evaluation_contract import (
     CategoryEvaluationPromptBindingError,
+    bind_category_evaluation_prompt_versions,
     validate_category_evaluation_prompt_bindings,
 )
 from .inspiration_auto_correction import (
@@ -11052,20 +11053,47 @@ def create_baseline_run(
             detail="基准回归所选提示词的 rubric 版本不一致",
         )
     if request.candidate_revision_id is not None:
+        # 候选合同声明的 A/B 只是生成时的出厂建议，不是启动闸门：评测机制实验需要
+        # 运营自由组合任意候选合同与任意 A/B 版本。冻结快照因此改为绑定本轮真实
+        # 执行的一对，这样快照不会谎报跑了哪一对，worker 的执行期一致性校验也仍然
+        # 有效（它比对快照与 StrategyBundle，用于发现快照被篡改或漂移）。
+        executed_prompt_b_version = (
+            prompt_b.version if prompt_b is not None else None
+        )
+        declared_bindings = frozen_v3_bundle.get("contract")
+        declared_bindings = (
+            declared_bindings.get("prompt_bindings")
+            if isinstance(declared_bindings, dict)
+            else None
+        )
+        frozen_v3_bundle["contract"] = bind_category_evaluation_prompt_versions(
+            frozen_v3_bundle.get("contract") or {},
+            prompt_a_version=prompt_a.version,
+            prompt_b_version=executed_prompt_b_version,
+        )
+        executed_bindings = {
+            "call_a_version": prompt_a.version,
+            "call_b_version": executed_prompt_b_version,
+        }
+        if isinstance(declared_bindings, dict) and dict(declared_bindings) != executed_bindings:
+            frozen_v3_bundle["prompt_binding_override"] = {
+                "declared": dict(declared_bindings),
+                "executed": executed_bindings,
+                "actor": user.username,
+            }
+        # 绑定后自校验：失败意味着绑定函数与校验器不再自洽，属内部缺陷而非运营输入问题。
         try:
             validate_category_evaluation_prompt_bindings(
                 frozen_v3_bundle.get("contract"),
                 prompt_a_version=prompt_a.version,
-                prompt_b_version=(
-                    prompt_b.version if prompt_b is not None else None
-                ),
+                prompt_b_version=executed_prompt_b_version,
             )
         except CategoryEvaluationPromptBindingError as exc:
             raise HTTPException(
-                status_code=409,
+                status_code=500,
                 detail={
-                    "code": "candidate_prompt_binding_mismatch",
-                    "message": str(exc),
+                    "code": "candidate_prompt_binding_rebind_failed",
+                    "message": f"冻结候选合同绑定本轮 A/B 后仍不自洽：{exc}",
                     "reason": exc.code,
                 },
             ) from exc
