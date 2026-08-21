@@ -2271,6 +2271,11 @@ npm.cmd run build
 - 机制配置编辑器新增维度累计扣分上限输入和说明，规则镜像同步保留该字段。
 - 计划与决策记录：`docs/superpowers/plans/2026-08-21-operational-mechanism-compatibility.md`、
   `docs/decisions/0052-operational-mechanism-compatibility-and-dimension-deduction-cap.md`。
-- 验证：专项后端 `38 passed`；前端 `npm run build` 通过。后端全量为 `1675 passed, 1 skipped, 4 failed`，
+- 验证：兼容与扣分上限专项后端 `47 passed`，V3/worker/回归相关专项 `81 passed`；前端机制合同、
+  维度合同与 `npm run build` 均通过。后端全量为 `1675 passed, 1 skipped, 4 failed`，
   失败均为当前测试环境既有的应用启动/seed 隔离问题（字段合同、只读源、影子投影相关），不是本批新增断言。
-- 测试服真实单素材验证暂未执行：`192.168.1.35:8081` 当前容器因既有冻结提示词内容不匹配而持续重启，需先恢复健康；本批未推送、未合并、未部署、未启用候选、未批量运行。
+- 测试服真实单素材验证已完成：新增仅验证候选 revision 20（记录 id=24），只绑定 A#81 + B#82；
+  baseline run=44、job=10114、evaluation=4313。A 未命中红线后调用 B，服务端完成维度规则计分与等级
+  撮合，结果 L1 / 100，1/1 有效、0 失败。候选保持 `candidate`，现役投影未改变。
+- 本地实现提交 `2c0f2eff62aa8f0f2370162791eca0a7fbf1fc66` 尚未推送、合并或部署；除上述候选验证记录和
+  单素材回归记录外，未启用候选、未批量运行。
