@@ -219,6 +219,7 @@ from .baseline_regression import (
     latest_locked_golden_levels,
     run_comparison,
 )
+from .baseline_rule_diagnostics import diagnostics_from_run
 from .baseline_correction_orchestration import (
     CorrectionOrchestrationError,
     advance_correction_run,
@@ -11500,6 +11501,24 @@ def baseline_run_metrics(
     if run is None:
         raise HTTPException(status_code=404, detail="基准回归 run 不存在")
     return build_baseline_field_metrics(db, run)
+
+
+@app.get("/api/baseline-regressions/{run_id}/rule-diagnostics")
+def baseline_run_rule_diagnostics(
+    run_id: int,
+    _user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """Report which declared scoring rules actually fired during one run.
+
+    Raising deduction points or lowering a redline threshold changes nothing for
+    rules the model never reports, so this coverage view is what tells an
+    operator whether the mechanism or the prompt is the thing to fix.
+    """
+    run = db.get(BaselineRegressionRun, run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="基准回归 run 不存在")
+    return diagnostics_from_run(run)
 
 
 def _semantic_entity_values(value: Any) -> set[str]:

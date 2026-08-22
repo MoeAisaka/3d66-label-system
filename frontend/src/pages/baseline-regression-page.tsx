@@ -24,7 +24,7 @@ import {
   ImagePreviewButton,
   type ImagePreview,
 } from "@/components/image-lightbox"
-import { api, baselineRegressionApi } from "@/lib/api"
+import { ApiError, api, baselineRegressionApi } from "@/lib/api"
 import { submitReviewDecision } from "@/lib/review-submit"
 import type {
   Asset,
@@ -71,6 +71,14 @@ import { candidateRefreshPlan } from "@/features/correction-contract/candidate-r
 import { LevelPerformanceSummary } from "@/features/baseline-regression/level-performance-summary"
 import { correctionLevelDisplay } from "@/features/baseline-regression/correction-level-display"
 import { MetricsDrawer } from "@/features/baseline-regression/metrics-drawer"
+import {
+  CandidateGateRejection,
+  CandidateRebasePanel,
+} from "@/features/baseline-regression/candidate-release-panels"
+import {
+  RuleDiagnosticsDrawer,
+  RuleDiagnosticsEvidence,
+} from "@/features/baseline-regression/rule-diagnostics-evidence"
 import { RunConfigDrawer } from "@/features/baseline-regression/run-config-drawer"
 import { RunHistoryDrawer } from "@/features/baseline-regression/run-history-drawer"
 
@@ -121,6 +129,7 @@ export function BaselineRegressionPage() {
   const [baselineSetDialogOpen, setBaselineSetDialogOpen] = useState(false)
   const [runConfigDrawerOpen, setRunConfigDrawerOpen] = useState(false)
   const [metricsDrawerOpen, setMetricsDrawerOpen] = useState(false)
+  const [ruleDiagnosticsDrawerOpen, setRuleDiagnosticsDrawerOpen] = useState(false)
   const [semanticQualityDrawerOpen, setSemanticQualityDrawerOpen] = useState(false)
   const [runHistoryDrawerOpen, setRunHistoryDrawerOpen] = useState(false)
 
@@ -186,6 +195,11 @@ export function BaselineRegressionPage() {
     queryFn: () => baselineRegressionApi.getMetrics(selectedRunId),
     enabled: selectedRunId > 0,
     refetchInterval: runDetail.data?.summary.status === "running" ? 3000 : false,
+  })
+  const ruleDiagnostics = useQuery({
+    queryKey: ["baseline-rule-diagnostics", selectedRunId],
+    queryFn: () => baselineRegressionApi.getRuleDiagnostics(selectedRunId),
+    enabled: selectedRunId > 0 && ruleDiagnosticsDrawerOpen,
   })
   const semanticMetrics = useQuery<BaselineSemanticQualityMetrics>({
     queryKey: ["baseline-semantic-metrics", selectedRunId],
@@ -757,6 +771,13 @@ export function BaselineRegressionPage() {
             </Button>
             <Button
               variant="secondary"
+              onClick={() => setRuleDiagnosticsDrawerOpen(true)}
+              disabled={!selectedRunId}
+            >
+              规则命中诊断
+            </Button>
+            <Button
+              variant="secondary"
               onClick={() => setMetricsDrawerOpen(true)}
               disabled={!selectedRunId}
             >
@@ -1233,7 +1254,15 @@ export function BaselineRegressionPage() {
                         </select>
                       </label>
                       {v3Revisions.isError && <div className="border border-[#d7a09d] bg-[#fff5f4] px-3 py-3 text-xs text-[#8d2924]">等级规则版本列表加载失败，无法启动。<button type="button" className="ml-2 underline" onClick={() => v3Revisions.refetch()}>重试</button></div>}
-                      {selectedV3Revision && <div className="border border-[var(--line)] bg-[#fafbf8] px-3 py-3 text-xs leading-5"><p className="font-semibold">{selectedV3Revision.display_name} · Revision {selectedV3Revision.revision}</p><p className="text-[var(--muted)]">状态：{selectedV3Revision.status} · Hash {selectedV3Revision.contract_hash.slice(0, 12)}</p>{selectedV3Lineage === "diverged" && <p className="text-[var(--muted)]">该候选与当前现役已分叉，可正常回归，结果不代表现役机制表现。</p>}</div>}
+                      {selectedV3Revision && <div className="border border-[var(--line)] bg-[#fafbf8] px-3 py-3 text-xs leading-5"><p className="font-semibold">{selectedV3Revision.display_name} · Revision {selectedV3Revision.revision}</p><p className="text-[var(--muted)]">状态：{selectedV3Revision.status} · Hash {selectedV3Revision.contract_hash.slice(0, 12)}</p>{selectedV3Lineage === "diverged" && <p className="text-[var(--muted)]">该候选与当前现役已分叉：可正常回归做实验，但<strong>启用会被拒绝</strong>，因为直接启用会丢弃现役版本引入的改动。</p>}</div>}
+                      {selectedV3Lineage === "diverged" && selectedV3Revision && activeV3Revision && (
+                        <CandidateRebasePanel
+                          categoryKey={selectedCategoryKey}
+                          candidate={selectedV3Revision}
+                          activeRevision={activeV3Revision}
+                          onRebased={(created) => setSelectedV3RevisionId(created.id)}
+                        />
+                      )}
                       {candidatePromptUnavailable && <div className="border border-[var(--line)] bg-[#fffaf0] px-3 py-3 text-xs leading-5"><p className="font-semibold">候选原绑定 Prompt 已不可用</p><p className="text-[var(--muted)]">{candidatePromptBindingA && candidatePromptResolutionA.status !== "available" ? formatCandidatePromptBindingIssue("A", candidatePromptResolutionA) : ""}{candidatePromptBindingB && candidatePromptResolutionB.status !== "available" ? `，${formatCandidatePromptBindingIssue("B", candidatePromptResolutionB)}` : ""}。已改用当前选中的 A/B，本轮实际版本会如实写入冻结快照。</p></div>}
                       {promptBindingMismatch && !candidatePromptUnavailable && <div className="border border-[var(--line)] bg-[#fffaf0] px-3 py-3 text-xs leading-5"><p className="font-semibold">A/B 与候选原绑定版本不同</p><p className="text-[var(--muted)]">原绑定 {candidatePromptBindingA ? `A ${candidatePromptBindingA}` : ""}{candidatePromptBindingB ? `，B ${candidatePromptBindingB}` : ""}。可以按当前选择直接启动，本轮以实际选中的 A/B 冻结。</p></div>}
                     </section>
@@ -1330,23 +1359,29 @@ export function BaselineRegressionPage() {
               {summary && (
                 <>
                 {candidateRevisionFromRun && summary.status === "completed" && me.data?.is_admin && (
-                  <div className="mt-5 flex flex-wrap items-center justify-between gap-3 border-l-2 border-primary bg-[#f8faed] px-4 py-4">
-                    <div>
-                      <p className="text-sm font-bold">候选回归已完成</p>
-                      <p className="mt-1 text-xs leading-5 text-[var(--muted)]">
-                        Revision {candidateRevisionFromRun.revision} 使用当前冻结基准集完成回归；通过后可切换运行时机制，标签事实发布保持独立。
-                      </p>
+                  <div className="mt-5 border-l-2 border-primary bg-[#f8faed] px-4 py-4">
+                    <div className="flex flex-wrap items-center justify-between gap-3">
+                      <div>
+                        <p className="text-sm font-bold">候选回归已完成</p>
+                        <p className="mt-1 text-xs leading-5 text-[var(--muted)]">
+                          Revision {candidateRevisionFromRun.revision} 使用当前冻结基准集完成回归；通过后可切换运行时机制，标签事实发布保持独立。
+                        </p>
+                      </div>
+                      <Button
+                        disabled={activateCandidate.isPending || !summary.previous_run_id}
+                        onClick={() => {
+                          if (window.confirm("确认启用该候选机制？此操作会更新当前类目的运行时投影。")) {
+                            activateCandidate.mutate()
+                          }
+                        }}
+                      >
+                        <Check weight="bold" />{activateCandidate.isPending ? "正在启用" : "启用候选"}
+                      </Button>
                     </div>
-                    <Button
-                      disabled={activateCandidate.isPending || !summary.previous_run_id}
-                      onClick={() => {
-                        if (window.confirm("确认启用该候选机制？此操作会更新当前类目的运行时投影。")) {
-                          activateCandidate.mutate()
-                        }
-                      }}
-                    >
-                      <Check weight="bold" />{activateCandidate.isPending ? "正在启用" : "启用候选"}
-                    </Button>
+                    {/* 门禁拒绝时把每条阻塞原因摊开：只弹一句 toast 会把可行动的信息全丢掉。 */}
+                    <CandidateGateRejection
+                      error={activateCandidate.error instanceof ApiError ? activateCandidate.error : null}
+                    />
                   </div>
                 )}
                 <StatusSummaryStrip className="mt-5">
@@ -1425,6 +1460,16 @@ export function BaselineRegressionPage() {
           />
         </MetricsDrawer>
       )}
+      <RuleDiagnosticsDrawer
+        open={ruleDiagnosticsDrawerOpen}
+        onOpenChange={setRuleDiagnosticsDrawerOpen}
+      >
+        <RuleDiagnosticsEvidence
+          data={ruleDiagnostics.data}
+          loading={ruleDiagnostics.isLoading}
+          error={ruleDiagnostics.error}
+        />
+      </RuleDiagnosticsDrawer>
       <SemanticQualityDrawer
         open={semanticQualityDrawerOpen}
         onOpenChange={setSemanticQualityDrawerOpen}

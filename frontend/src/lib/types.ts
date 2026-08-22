@@ -636,6 +636,56 @@ export type BaselineV3RevisionList = {
   items: BaselineV3Revision[]
 }
 
+export type BaselineCandidateRebaseConflict = {
+  path: string
+  reason: string
+}
+
+export type BaselineCandidateRebasePlan = {
+  schema_version: "candidate-rebase-v1"
+  needed: boolean
+  reason?: string
+  base_revision_id: number
+  base_revision?: number
+  source_revision_id?: number
+  source_revision?: number
+  onto_revision_id?: number
+  onto_revision?: number
+  adopted_changes: string[]
+  conflicts: BaselineCandidateRebaseConflict[]
+}
+
+export type BaselineRuleCoverage = {
+  dimension_key: string
+  dimension_label: string
+  rule_id: string
+  kind: "deduction" | "bonus"
+  description: string
+  points: number | null
+  tracks: string[]
+  hit_count: number
+}
+
+export type BaselineRuleDiagnostics = {
+  schema_version: "baseline-rule-diagnostics-v1"
+  candidate_revision_id: number | null
+  config_revision: number | null
+  rules: BaselineRuleCoverage[]
+  declared_rule_count: number
+  never_hit_rule_count: number
+  undeclared_hits: Array<{ dimension_key: string; rule_id: string; hit_count: number }>
+  scored_item_count: number
+  items_without_rule_hits: number
+  items_with_score_caps: number
+  level_distribution: Record<string, number>
+  score_buckets: Record<string, number>
+  level_scale: Record<string, unknown>
+  redline_policy: Record<string, unknown>
+  redline_rule_count: number
+  rule_layer_inert: boolean
+  unpenalised_level: string | null
+}
+
 export type BaselineRegressionRun = {
   id: number
   baseline_set_id: number

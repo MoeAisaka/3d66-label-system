@@ -38,6 +38,7 @@ from sqlalchemy.orm import Session
 
 from .category_evaluation_contract import canonical_contract_hash
 from .audit import append_audit_event
+from .candidate_rebase import CandidateRebaseError, plan_candidate_rebase
 from .category_evaluation_v3_revisions import (
     CategoryEvaluationV3RevisionError,
     RevisionArtifacts,
@@ -169,6 +170,16 @@ class LevelScaleResponse(BaseModel):
 
 class V3RevisionWriteRequest(V3ConfigWriteRequest):
     parent_revision_id: int = Field(ge=1)
+    expected_projected_revision: int = Field(ge=1)
+    expected_projected_contract_hash: str = Field(min_length=64, max_length=64)
+
+
+class V3RevisionRebaseRequest(BaseModel):
+    """Rebase one diverged candidate onto the current active revision."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    display_name: str | None = Field(default=None, max_length=120)
     expected_projected_revision: int = Field(ge=1)
     expected_projected_contract_hash: str = Field(min_length=64, max_length=64)
 
@@ -449,6 +460,26 @@ def _load(db: Session, category_key: str) -> CategoryEvaluationV3Config:
             detail={
                 "code": "v3_config_not_found",
                 "message": f"未找到 category_key={category_key} 的 v3 配置",
+            },
+        )
+    return row
+
+
+def _require_revision(
+    db: Session, category_key: str, revision: int
+) -> CategoryEvaluationV3Revision:
+    row = db.scalar(
+        select(CategoryEvaluationV3Revision).where(
+            CategoryEvaluationV3Revision.category_key == category_key,
+            CategoryEvaluationV3Revision.revision == revision,
+        )
+    )
+    if row is None:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "code": "v3_revision_not_found",
+                "message": f"未找到 category_key={category_key} 的 Revision {revision}",
             },
         )
     return row
@@ -758,6 +789,141 @@ def build_category_evaluation_v3_config_router(
         except Exception:
             db.rollback()
             raise
+
+    @router.get(
+        "/{category_key}/revisions/{revision}/rebase-preview",
+        response_model=dict[str, Any],
+    )
+    def preview_candidate_rebase(
+        category_key: str,
+        revision: int,
+        _user: Any = Depends(require_user),
+        db: Session = Depends(get_db),
+    ) -> dict[str, Any]:
+        """Show what rebasing this candidate onto the active revision would do.
+
+        Read-only: it reports the changes that would be carried over and any
+        conflicts, so an operator can see the outcome before writing anything.
+        """
+        projected = _load(db, category_key)
+        active = _projected_revision(db, projected)
+        candidate = _require_revision(db, category_key, revision)
+        try:
+            plan = plan_candidate_rebase(db, candidate=candidate, active=active)
+        except CandidateRebaseError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": exc.code, "message": str(exc)},
+            ) from exc
+        plan.pop("artifacts", None)
+        return plan
+
+    @router.post(
+        "/{category_key}/revisions/{revision}/rebase",
+        response_model=V3RevisionDetail,
+        status_code=201,
+    )
+    def rebase_candidate(
+        category_key: str,
+        revision: int,
+        payload: V3RevisionRebaseRequest,
+        response: Response,
+        user: Any = Depends(require_user),
+        db: Session = Depends(get_db),
+    ) -> V3RevisionDetail:
+        """Create a new candidate that replays this one onto the active revision.
+
+        The diverged candidate is left untouched -- rebasing appends a fresh
+        candidate rather than rewriting history, so a run already recorded
+        against the original still refers to exactly what it executed.  A merge
+        with conflicts is refused instead of guessed.
+        """
+        projected = _load(db, category_key)
+        active = _projected_revision(db, projected)
+        candidate = _require_revision(db, category_key, revision)
+        try:
+            plan = plan_candidate_rebase(db, candidate=candidate, active=active)
+        except CandidateRebaseError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": exc.code, "message": str(exc)},
+            ) from exc
+        if not plan.get("needed"):
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "candidate_rebase_not_needed",
+                    "message": plan.get("reason") or "该候选无需变基",
+                },
+            )
+        if plan.get("conflicts"):
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "candidate_rebase_conflict",
+                    "message": "候选与现役版本存在冲突改动，需人工决定取舍后再变基",
+                    "conflicts": plan["conflicts"],
+                },
+            )
+        artifacts = plan["artifacts"]
+        actor = getattr(user, "username", None) or "system"
+        try:
+            created_revision, created = create_candidate_revision(
+                db,
+                projected,
+                parent_revision_id=active.id,
+                artifacts=RevisionArtifacts(
+                    display_name=(
+                        payload.display_name
+                        or f"{candidate.display_name}（变基于 Revision {active.revision}）"
+                    )[:120],
+                    contract=artifacts["contract"],
+                    classification_map=artifacts["classification_map"],
+                    subcategory_dimensions=artifacts["subcategory_dimensions"],
+                ),
+                expected_projected_revision=payload.expected_projected_revision,
+                expected_projected_hash=payload.expected_projected_contract_hash,
+                actor=actor,
+            )
+        except MechanismProfileError as exc:
+            db.rollback()
+            raise _coded_400(exc) from exc
+        except CategoryEvaluationV3RevisionError as exc:
+            db.rollback()
+            raise HTTPException(
+                status_code=409,
+                detail={"code": exc.code, "message": str(exc)},
+            ) from exc
+        except Exception:
+            db.rollback()
+            raise
+        append_audit_event(
+            db,
+            category="category_evaluation_v3",
+            action="candidate_rebased",
+            subject_type="category_evaluation_v3_revision",
+            subject_id=created_revision.id,
+            actor=actor,
+            payload={
+                "category_key": category_key,
+                "source_revision_id": candidate.id,
+                "source_revision": candidate.revision,
+                "onto_revision_id": active.id,
+                "onto_revision": active.revision,
+                "base_revision_id": plan.get("base_revision_id"),
+                "adopted_changes": plan.get("adopted_changes") or [],
+                "rebased_revision_id": created_revision.id,
+                "rebased_revision": created_revision.revision,
+            },
+            event_key=(
+                f"candidate-rebase:{candidate.id}:{active.id}:{created_revision.id}"
+            ),
+        )
+        db.commit()
+        db.refresh(created_revision)
+        if not created:
+            response.status_code = 200
+        return _revision_detail(created_revision)
 
     @router.post(
         "/{category_key}/revisions",
