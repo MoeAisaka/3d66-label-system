@@ -1,10 +1,17 @@
 import { Check, CheckCircle, FloppyDisk, Plus, Trash, WarningCircle } from "@phosphor-icons/react"
+import { useQuery } from "@tanstack/react-query"
 import type { ReactNode } from "react"
 
 import { Button } from "@/components/ui/button"
+import { baselineRegressionApi } from "@/lib/api"
 
 import { isNewMechanismDraft } from "./types"
-import { imageRuleViewDefaults } from "./image-rule-contract"
+import {
+  applyImageRuleBinding,
+  imageRuleBindingView,
+  imageRuleViewDefaults,
+  setAestheticFoundationEnabled,
+} from "./image-rule-contract"
 import type {
   Editable,
   JsonObject,
@@ -71,6 +78,11 @@ export function ImageRuleEditor({
       busy={busy}
       banner={banner}
       errors={errors}
+      foundationTemplate={
+        selectedRevision?.contract?.aesthetic_foundation
+        ?? runtimeRevision?.contract?.aesthetic_foundation
+        ?? null
+      }
       onDisplayName={(value) => onPatch((next) => { next.display_name = value })}
       onKey={(value) => onPatch((next) => { next.category_key = value })}
       onPatch={onPatch}
@@ -86,6 +98,7 @@ function V3ConfigEditor({
   busy,
   banner,
   errors,
+  foundationTemplate,
   onDisplayName,
   onKey,
   onPatch,
@@ -97,6 +110,7 @@ function V3ConfigEditor({
   busy: boolean
   banner: string | null
   errors: ValidationErrorItem[]
+  foundationTemplate: Json | null
   onDisplayName: (value: string) => void
   onKey: (value: string) => void
   onPatch: (mutator: (next: Editable) => void) => void
@@ -176,6 +190,11 @@ function V3ConfigEditor({
         </div>
       </FieldCard>
 
+      <PromptBindingEditor
+        draft={draft}
+        foundationTemplate={foundationTemplate}
+        onPatch={onPatch}
+      />
       <RedlineEditor draft={draft} onPatch={onPatch} />
       <LevelScaleEditor
         draft={draft}
@@ -299,6 +318,111 @@ function LevelScaleEditor({
         </div>
         <p className="text-xs text-[var(--muted)]">等级档位会随整份等级规则创建候选版本。</p>
       </div>
+    </FieldCard>
+  )
+}
+
+function PromptBindingEditor({
+  draft,
+  foundationTemplate,
+  onPatch,
+}: {
+  draft: Editable
+  foundationTemplate: Json | null
+  onPatch: (mutator: (next: Editable) => void) => void
+}) {
+  const binding = imageRuleBindingView(draft.contract)
+  const categoryKey = draft.category_key.trim()
+  const promptsQuery = useQuery({
+    queryKey: ["mechanism-config", "prompts", categoryKey],
+    queryFn: () => baselineRegressionApi.listPrompts(categoryKey),
+    enabled: categoryKey.length > 0,
+  })
+  const prompts = promptsQuery.data?.items ?? []
+  const optionsFor = (stage: "A" | "B") => {
+    const versions = prompts
+      .filter((item) => item.stage === stage && item.status !== "archived")
+      .map((item) => item.version)
+    return Array.from(new Set(versions)).sort()
+  }
+  const current = { A: binding.callAVersion, B: binding.callBVersion }
+  const canRestoreFoundation = binding.foundationEnabled || foundationTemplate !== null
+
+  return (
+    <FieldCard title="A / B 调用绑定与美感前置基座">
+      <p className="mb-3 text-[0.68rem] text-[var(--muted)]">
+        这里声明的 A/B 版本就是这份修订会实际执行的版本。维度规则和权重是按某一对 A/B
+        标定出来的，换绑等于换掉标定前提，改完请重新跑一轮回归再启用。
+      </p>
+      <div className="grid gap-3 sm:grid-cols-2">
+        {(["A", "B"] as const).map((stage) => {
+          const options = optionsFor(stage)
+          const value = current[stage]
+          const missing = value.length > 0 && !options.includes(value)
+          // 调用 A 在执行侧是必填（prompt_a_version: str），空着存下去这份修订永远
+          // 对不上执行版本，只会在发起时被 prompt_bindings_mismatch 拒掉。调用 B
+          // 允许为空，表示这条修订不走调用 B。
+          const emptyLabel = stage === "A" ? "请选择调用 A 版本" : "不走调用 B"
+          return (
+            <label key={stage} className="grid gap-1 text-xs">
+              <span className="font-semibold">调用 {stage} 版本</span>
+              <select
+                className={inputClass}
+                value={value}
+                onChange={(event) => onPatch((next) => {
+                  applyImageRuleBinding(next.contract, stage, event.target.value)
+                })}
+              >
+                <option value="">{emptyLabel}</option>
+                {missing && <option value={value}>{value}（清单里没有）</option>}
+                {options.map((version) => (
+                  <option key={version} value={version}>{version}</option>
+                ))}
+              </select>
+              {stage === "A" && value.length === 0 && (
+                <span className="text-[0.68rem] text-[#8d2924]">
+                  调用 A 必须绑定一个版本，留空的修订发起时会被直接拒单。
+                </span>
+              )}
+              {promptsQuery.isError && (
+                <span className="text-[0.68rem] text-[#8d2924]">
+                  版本清单没取到，可手工核对后再改；此时下拉只有当前值。
+                </span>
+              )}
+              {missing && !promptsQuery.isError && (
+                <span className="text-[0.68rem] text-[#8d2924]">
+                  当前绑定的版本不在该类目的 {stage} 清单里，可能已归档或属于别的类目。
+                </span>
+            )}
+            </label>
+          )
+        })}
+      </div>
+      <label className="mt-4 flex items-start gap-2 text-xs font-semibold">
+        <input
+          type="checkbox"
+          className="mt-0.5"
+          checked={binding.foundationEnabled}
+          disabled={!canRestoreFoundation}
+          onChange={(event) => onPatch((next) => {
+            setAestheticFoundationEnabled(
+              next.contract,
+              event.target.checked,
+              foundationTemplate,
+            )
+          })}
+        />
+        <span>
+          启用美感前置基座（锚图赛道）
+          <span className="mt-1 block font-normal text-[0.68rem] text-[var(--muted)]">
+            {binding.foundationEnabled
+              ? "关掉就从这份合同里删掉整个 aesthetic_foundation，锚图赛道随之停用。"
+              : canRestoreFoundation
+                ? "从所选修订恢复基座，恢复后 call_b_version 跟随上面的调用 B 版本。"
+                : "所选修订里没有基座内容可恢复。基座含标定过的锚图与分档，界面无法凭空生成，请改从带基座的修订派生。"}
+          </span>
+        </span>
+      </label>
     </FieldCard>
   )
 }

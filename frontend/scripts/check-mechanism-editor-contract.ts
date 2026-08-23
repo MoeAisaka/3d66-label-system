@@ -4,8 +4,11 @@ import path from "node:path"
 
 import { patchProposalContract } from "../src/features/mechanism-config/proposal-text-contract.ts"
 import {
+  applyImageRuleBinding,
+  imageRuleBindingView,
   imageRuleViewDefaults,
   prepareImageRulePayload,
+  setAestheticFoundationEnabled,
 } from "../src/features/mechanism-config/image-rule-contract.ts"
 import { getMechanismEditorPlugin } from "../src/features/mechanism-config/registry.ts"
 import { isNewMechanismDraft } from "../src/features/mechanism-config/types.ts"
@@ -128,5 +131,73 @@ assert.match(proposalEditorSource, /PDF 输入与确定性预检/)
 assert.match(proposalEditorSource, /红线与人工复核/)
 assert.match(proposalEditorSource, /赛道与三分项评分/)
 assert.match(proposalEditorSource, /回归与验收/)
+
+// 运营手选 A/B 绑定：改 B 必须同时改 aesthetic_foundation.call_b_version，否则后端
+// 门禁会以 aesthetic_foundation_prompt_binding_mismatch 拒单。
+const bindingContract: Record<string, any> = {
+  prompt_bindings: { call_a_version: "a-rev3", call_b_version: "b-rev3" },
+  aesthetic_foundation: {
+    call_b_version: "b-rev3",
+    anchors: [{ asset_id: 1 }],
+    dimension_keys: ["composition"],
+  },
+}
+const bindingView = imageRuleBindingView(bindingContract)
+assert.equal(bindingView.callAVersion, "a-rev3")
+assert.equal(bindingView.callBVersion, "b-rev3")
+assert.equal(bindingView.foundationEnabled, true)
+
+applyImageRuleBinding(bindingContract, "B", " b-rev4 ")
+assert.equal(bindingContract.prompt_bindings.call_b_version, "b-rev4")
+assert.equal(bindingContract.aesthetic_foundation.call_b_version, "b-rev4")
+applyImageRuleBinding(bindingContract, "A", "a-rev4")
+assert.equal(bindingContract.prompt_bindings.call_a_version, "a-rev4")
+assert.equal(bindingContract.aesthetic_foundation.call_b_version, "b-rev4")
+
+// 没有 prompt_bindings 的合同也要能写进去，不能静默丢弃运营的选择。
+const bareContract: Record<string, any> = {}
+applyImageRuleBinding(bareContract, "A", "a-rev5")
+assert.equal(bareContract.prompt_bindings.call_a_version, "a-rev5")
+
+// 「未绑定」写 null 而不是空串：后端 call_b_version 用 None 表示不走调用 B，
+// 空串会变成声明了却对不上任何版本的假绑定。基座要一起跟到 null。
+applyImageRuleBinding(bindingContract, "B", "")
+assert.equal(bindingContract.prompt_bindings.call_b_version, null)
+assert.equal(bindingContract.aesthetic_foundation.call_b_version, null)
+assert.equal(imageRuleBindingView(bindingContract).callBVersion, "")
+applyImageRuleBinding(bindingContract, "B", "b-rev4")
+
+// 关基座 = 从合同里删掉整个 aesthetic_foundation，worker 侧正是以此判断锚图赛道。
+const foundationTemplate = JSON.parse(
+  JSON.stringify(bindingContract.aesthetic_foundation),
+)
+assert.equal(setAestheticFoundationEnabled(bindingContract, false, null), true)
+assert.equal("aesthetic_foundation" in bindingContract, false)
+assert.equal(imageRuleBindingView(bindingContract).foundationEnabled, false)
+// 关掉后改 B 不应凭空造出基座
+applyImageRuleBinding(bindingContract, "B", "b-rev6")
+assert.equal("aesthetic_foundation" in bindingContract, false)
+
+// 没有模板时如实拒绝恢复，而不是造一个空基座让后续拒单
+assert.equal(setAestheticFoundationEnabled(bindingContract, true, null), false)
+assert.equal("aesthetic_foundation" in bindingContract, false)
+
+// 从原修订恢复时，基座的 call_b_version 跟随当前绑定
+assert.equal(
+  setAestheticFoundationEnabled(bindingContract, true, foundationTemplate),
+  true,
+)
+assert.equal(bindingContract.aesthetic_foundation.call_b_version, "b-rev6")
+assert.deepEqual(bindingContract.aesthetic_foundation.anchors, [{ asset_id: 1 }])
+// 恢复出来的基座必须是副本，改它不能污染模板
+bindingContract.aesthetic_foundation.anchors[0].asset_id = 99
+assert.deepEqual(foundationTemplate.anchors, [{ asset_id: 1 }])
+
+assert.match(imageEditorSource, /A \/ B 调用绑定与美感前置基座/)
+assert.match(imageEditorSource, /applyImageRuleBinding/)
+assert.match(imageEditorSource, /setAestheticFoundationEnabled/)
+// 调用 A 在执行侧是必填，界面必须挡住留空，否则存出来的修订发起时必然被拒单
+assert.match(imageEditorSource, /调用 A 必须绑定一个版本/)
+assert.match(imageEditorSource, /不走调用 B/)
 
 console.log("mechanism editor contract: ok")

@@ -34,6 +34,79 @@ export function imageRuleViewDefaults(dimension: Json): ImageRuleViewDefaults {
   }
 }
 
+export type ImageRuleBindingView = {
+  callAVersion: string
+  callBVersion: string
+  foundationEnabled: boolean
+}
+
+export function imageRuleBindingView(contract: Json | null | undefined): ImageRuleBindingView {
+  const source = isRecord(contract) ? contract : {}
+  const bindings = isRecord(source.prompt_bindings) ? source.prompt_bindings : {}
+  return {
+    callAVersion: typeof bindings.call_a_version === "string" ? bindings.call_a_version : "",
+    callBVersion: typeof bindings.call_b_version === "string" ? bindings.call_b_version : "",
+    foundationEnabled: isRecord(source.aesthetic_foundation),
+  }
+}
+
+/**
+ * 写入运营手选的 A/B 绑定。
+ *
+ * 美感前置基座自己也声明一份 call_b_version，后端门禁要求两处相等，不等就以
+ * aesthetic_foundation_prompt_binding_mismatch 拒单。所以改 B 必须一并改基座，
+ * 否则运营在界面上存出来的修订一定跑不起来。
+ */
+export function applyImageRuleBinding(
+  contract: Json,
+  stage: "A" | "B",
+  version: string,
+): void {
+  const bindings = isRecord(contract.prompt_bindings) ? contract.prompt_bindings : {}
+  contract.prompt_bindings = bindings
+  // 「未绑定」的规范值是 null，不是空串：后端 call_b_version 允许 None 表示这条
+  // 修订不走调用 B，空串会变成一个声明了却对不上任何版本的假绑定。
+  const trimmed = version.trim()
+  const next = trimmed === "" ? null : trimmed
+  if (stage === "A") {
+    bindings.call_a_version = next
+    return
+  }
+  bindings.call_b_version = next
+  const foundation = contract.aesthetic_foundation
+  if (isRecord(foundation)) {
+    foundation.call_b_version = next
+  }
+}
+
+/**
+ * 开关美感前置基座（锚图赛道）。
+ *
+ * 关掉就是从合同里删掉整个 aesthetic_foundation——worker 侧正是以「合同里有没有
+ * 这个块」判断锚图赛道是否激活的。重新开启只能从原修订恢复：基座里的锚图资产、
+ * 维度键、分档切点都是标定过的内容，界面凭空造不出来，没有模板时如实拒绝。
+ */
+export function setAestheticFoundationEnabled(
+  contract: Json,
+  enabled: boolean,
+  template: Json | null | undefined,
+): boolean {
+  if (!enabled) {
+    delete contract.aesthetic_foundation
+    return true
+  }
+  if (isRecord(contract.aesthetic_foundation)) return true
+  if (!isRecord(template)) return false
+  const restored = cloneJson(template)
+  const bindings = isRecord(contract.prompt_bindings) ? contract.prompt_bindings : {}
+  // 一律对齐当前绑定（含未绑定的 null），否则模板里的旧版本号会留下来，
+  // 直接撞上 aesthetic_foundation_prompt_binding_mismatch。
+  const bound = bindings.call_b_version
+  restored.call_b_version = typeof bound === "string" ? bound : null
+  contract.aesthetic_foundation = restored
+  return true
+}
+
 function isRuleDimension(dimension: Json): boolean {
   return Array.isArray(dimension.deduction_rules)
     || "bonus_rules" in dimension
