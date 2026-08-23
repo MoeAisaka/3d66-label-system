@@ -62,6 +62,14 @@ export function computeBaselineLevelBucketMetrics(
 export function LevelPerformanceSummary({ metrics }: { metrics: BaselineLevelMetrics }) {
   const bucketMetrics = computeBaselineLevelBucketMetrics(metrics)
   const matrixMetrics = computeBaselineLevelMatrixMetrics(metrics)
+  // 准确率的分母是有效预测数，不是样本总数。不显示分母时，一个 2/100 有效的
+  // 回归会呈现成"准确率 100%"，看不出这个数字只由 2 条样本得出。
+  const unscored = metrics.unscored ?? 0
+  const basisHint =
+    metrics.valid_predictions < metrics.total
+      ? `基于 ${metrics.valid_predictions}/${metrics.total} 条有效预测` +
+        (unscored ? `，${unscored} 条未评级` : "")
+      : `基于全部 ${metrics.total} 条`
 
   return (
     <section className="mt-6 space-y-3" aria-label="等级表现">
@@ -78,11 +86,13 @@ export function LevelPerformanceSummary({ metrics }: { metrics: BaselineLevelMet
           label="精确等级准确率"
           value={formatPercent(metrics.exact_accuracy)}
           testId="baseline-exact-accuracy"
+          hint={basisHint}
         />
         <MetricCard
           label="相邻等级准确率"
           value={formatPercent(metrics.adjacent_accuracy)}
           testId="baseline-adjacent-accuracy"
+          hint={basisHint}
         />
       </div>
 
@@ -155,15 +165,20 @@ function MetricCard({
   label,
   value,
   testId,
+  hint,
 }: {
   label: string
   value: string
   testId: string
+  hint?: string
 }) {
   return (
     <div className="bg-white px-5 py-4">
       <p className="text-xs font-semibold text-[var(--muted)]">{label}</p>
       <p className="font-data mt-2 text-2xl font-bold" data-testid={testId}>{value}</p>
+      {hint ? (
+        <p className="font-data mt-1 text-xs text-[var(--muted)]">{hint}</p>
+      ) : null}
     </div>
   )
 }

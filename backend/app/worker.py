@@ -2618,17 +2618,34 @@ async def evaluate_job(job_id: int) -> None:
                 if aesthetic is None:
                     reasons.append("missing_aesthetic_result")
             error_code = "invalid_result:" + ",".join(reasons)
-            db.execute(
-                update(EvaluationJob)
-                .where(EvaluationJob.id == job_id)
-                .values(
-                    status="failed",
-                    stage="invalid_result",
-                    progress=100,
-                    error_message=error_code,
-                    finished_at=now,
+            # 与完成路径同型：缺 status == "processing" 守卫时，一个已被取消的
+            # job 会被改写成 invalid_result，把"运营自己点了取消"伪装成
+            # "模型质量失败"，运营查因时看不到真实原因。
+            invalid_applied = int(
+                db.execute(
+                    update(EvaluationJob)
+                    .where(
+                        EvaluationJob.id == job_id,
+                        EvaluationJob.status == "processing",
+                    )
+                    .values(
+                        status="failed",
+                        stage="invalid_result",
+                        progress=100,
+                        error_message=error_code,
+                        finished_at=now,
+                    )
+                ).rowcount
+                or 0
+            ) == 1
+            if not invalid_applied:
+                logger.warning(
+                    "job=%s 结果不合同但已不在 processing（很可能被取消或暂停），"
+                    "保留其当前状态与错误原因，不覆盖为 invalid_result",
+                    job_id,
                 )
-            )
+                db.commit()
+                return
             fail_baseline_item(
                 db,
                 item_id=current_job.baseline_regression_item_id,

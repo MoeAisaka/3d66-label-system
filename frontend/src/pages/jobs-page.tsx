@@ -59,7 +59,10 @@ export function JobsPage() {
   })
   const action = useMutation({
     mutationFn: (name: "pause" | "resume" | "cancel") =>
-      api<{ ok: boolean; affected: number }>(`/api/jobs/control/${name}`, { method: "POST" }),
+      api<{ ok: boolean; affected: number; scope?: string }>(
+        `/api/jobs/control/${name}`,
+        { method: "POST" },
+      ),
     onSuccess: async (data, name) => {
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ["jobs"] }),
@@ -77,7 +80,16 @@ export function JobsPage() {
   const isPaused = control.data?.paused ?? false
 
   function cancelAll() {
-    if (window.confirm("确定取消全部未完成任务吗？已完成的评测结果会保留，取消后不可继续。")) {
+    // 这个按钮没有 run 作用域：它会把当时所有排队中与进行中的任务判失败，
+    // 跨 run、跨基准集一并击穿。要只停某一轮回归，请用回归详情页的「取消本轮」。
+    if (
+      window.confirm(
+        `确定取消全部未完成任务吗？\n\n` +
+          `这会取消当前所有正在进行的回归（共 ${activeCount} 个未完成任务），` +
+          `不限于某一轮。已完成的评测结果会保留，取消后不可继续。\n\n` +
+          `若只想停止某一轮回归，请到该轮回归的详情页使用「取消本轮」。`,
+      )
+    ) {
       action.mutate("cancel")
     }
   }

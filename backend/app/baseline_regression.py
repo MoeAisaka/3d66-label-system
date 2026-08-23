@@ -932,6 +932,12 @@ def refresh_baseline_run(run: BaselineRegressionRun) -> dict[str, Any]:
             run.status = "failed"
         elif metrics["failed"]:
             run.status = "partial_failed"
+        elif metrics.get("unscored"):
+            # unscored 的条目（预测等级不在 L1-L5，例如降级或结构抖动）此前只被
+            # 跳过、不计 failed，于是一个 2/100 有效的 run 也会被标成 completed，
+            # 而准确率的分母是 valid_predictions —— 运营看到的是"completed ·
+            # 准确率 100%"，实质是 2 条里 2 条对。有 unscored 就不给 completed。
+            run.status = "partial_failed"
         else:
             run.status = "completed"
         run.finished_at = run.finished_at or datetime.now(timezone.utc)
