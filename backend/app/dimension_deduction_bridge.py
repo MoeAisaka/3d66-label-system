@@ -60,7 +60,9 @@ PREVIOUS_OUTPUT_PLACEHOLDER = "{{previous_output}}"
 _UNRESOLVED_PLACEHOLDER_PATTERN = re.compile(r"\{\{[A-Za-z0-9_]+\}\}")
 # 平台承诺可用于调用B正文的全部占位符。写在这里是为了让「未知占位符」的判断有一份
 # 单一事实来源：任何一处新增支持都必须同步登记，否则运营会被误判拒单。
-_SUPPORTED_PLACEHOLDERS = (
+# 这是公开接口：AI 自动推荐候选时也要用同一份清单校验与提示，避免生成出来的候选
+# 建得成、跑起来却每条样本都被拒。
+SUPPORTED_PLACEHOLDERS = (
     RULES_PLACEHOLDER,
     PRECHECK_PLACEHOLDER,
     RESPONSE_CONTRACT_PLACEHOLDER,
@@ -531,11 +533,16 @@ def _server_injected_blocks(contract: Any) -> str:
         return "本赛道的全部维度规则"
 
 
-def _unknown_placeholders(user_prompt: str) -> list[str]:
-    """Return ``{{name}}`` tokens this path cannot substitute, in first-seen order."""
+def unknown_placeholders(user_prompt: str) -> list[str]:
+    """Return ``{{name}}`` tokens this path cannot substitute, in first-seen order.
+
+    Public because the AI-recommendation path validates its generated candidates
+    against the same list: a candidate that would be rejected on every sample
+    must be caught when it is proposed, not N failures later.
+    """
     seen: list[str] = []
     for token in _UNRESOLVED_PLACEHOLDER_PATTERN.findall(user_prompt or ""):
-        if token not in _SUPPORTED_PLACEHOLDERS and token not in seen:
+        if token not in SUPPORTED_PLACEHOLDERS and token not in seen:
             seen.append(token)
     return seen
 
@@ -550,7 +557,7 @@ def _unknown_placeholder_refusal_detail(
         f"原因：正文里的占位符 {'、'.join(unknown)} 不是平台支持的占位符，"
         f"服务端无法替换它们。若照原样发给模型，模型会把 "
         f"{unknown[0]} 当成字面文本，评分结果不可信，所以这里直接拒绝而不是带病运行。\n"
-        f"可用的占位符只有：{'、'.join(_SUPPORTED_PLACEHOLDERS)}。\n"
+        f"可用的占位符只有：{'、'.join(SUPPORTED_PLACEHOLDERS)}。\n"
         f"修复办法：把上述不支持的占位符删掉，或改写成可用占位符之一；"
         f"若只是想描述文字内容，请不要使用双花括号写法。"
     )
@@ -617,7 +624,7 @@ def build_operator_dimension_deduction_prompt(
             "operator_prompt_body_empty",
             _empty_body_refusal_detail(operator_prompt, config),
         )
-    unknown = _unknown_placeholders(user_template)
+    unknown = unknown_placeholders(user_template)
     if unknown:
         # Sending an unsubstituted ``{{name}}`` to the model is a silently broken
         # run.  Name the offenders and the supported set instead.

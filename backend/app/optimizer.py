@@ -12,6 +12,10 @@ from sqlalchemy import select
 
 from .config import get_settings
 from .database import SessionLocal
+from .dimension_deduction_bridge import (
+    SUPPORTED_PLACEHOLDERS,
+    unknown_placeholders,
+)
 from .dimension_schema_registry import canonical_hash
 from .doubao import DoubaoClient, DoubaoError, DoubaoResponse
 from .models import ModelNodeBinding, OptimizerConfig, PromptOptimizationRun
@@ -58,6 +62,24 @@ class AutomationCandidateGeneration:
     total_tokens: int
 
 
+def reject_unrunnable_candidate_prompt(user_prompt: str, *, source: str) -> None:
+    """Reject an AI-written candidate body that the engine could never execute.
+
+    A candidate carrying an unsupported ``{{placeholder}}`` can be created and
+    even adopted, then fail on every single regression sample -- the operator
+    would have to read N identical failures before learning the model wrote a
+    broken prompt.  Catching it at generation time makes the diagnosis immediate.
+    """
+    unknown = unknown_placeholders(user_prompt)
+    if not unknown:
+        return
+    raise ValueError(
+        f"{source}正文含平台不支持的占位符 {'、'.join(unknown)}，"
+        f"服务端无法替换它们，这样的候选在回归时每条样本都会被拒。"
+        f"可用的占位符只有 {'、'.join(SUPPORTED_PLACEHOLDERS)}"
+    )
+
+
 async def generate_automation_candidates(
     *,
     config: OptimizerConfig,
@@ -95,7 +117,9 @@ async def generate_automation_candidates(
     synthesis = await client.chat_json(
         "你是3D66提示词优化专家。根据诊断做最小且可回归的修改，"
         "保留原有字段、JSON结构、安全边界和调用变量。只输出合法JSON，"
-        "字段 candidates；每个候选必须含 system_prompt、user_prompt、change_note。",
+        "字段 candidates；每个候选必须含 system_prompt、user_prompt、change_note。"
+        f"user_prompt 里只允许出现这些双花括号占位符：{'、'.join(SUPPORTED_PLACEHOLDERS)}；"
+        "写出其他双花括号标记会导致候选无法执行。",
         json.dumps(
             {
                 "base_prompt": {
@@ -139,6 +163,7 @@ async def generate_automation_candidates(
         change_note = str(candidate.get("change_note") or "").strip()
         if not system_prompt or not user_prompt or not change_note:
             raise ValueError("优化候选缺少提示词或变更说明")
+        reject_unrunnable_candidate_prompt(user_prompt, source="优化候选")
         normalized.append(
             {
                 "system_prompt": system_prompt,
@@ -672,6 +697,8 @@ async def run_prompt_optimization(run_id: int) -> None:
             "锁定并保留原有JSON输出结构、字段名、业务分类、安全边界和调用变量。"
             "优先修改维度定义、等级边界、常见误判规则和正反例。"
             "证据不足时保持原文；不得针对单张图片增加特例。"
+            f"candidate_user_prompt 里只允许出现这些双花括号占位符："
+            f"{'、'.join(SUPPORTED_PLACEHOLDERS)}；写出其他双花括号标记会导致候选无法执行。"
             "输出合法JSON，必须包含 summary、diagnosis、prompt_changes、"
             "candidate_system_prompt、candidate_user_prompt、change_note、validation_focus。"
         )
@@ -735,6 +762,9 @@ async def run_prompt_optimization(run_id: int) -> None:
                 raise ValueError(
                     "诊断模型没有生成完整的候选 System Prompt 和 User Prompt"
                 )
+            reject_unrunnable_candidate_prompt(
+                candidate_user, source="诊断模型生成的候选 User Prompt"
+            )
         except Exception as exc:
             context_source: DoubaoResponse | Exception = (
                 synthesis_response if synthesis_response is not None else exc

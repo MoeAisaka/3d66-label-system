@@ -8,7 +8,7 @@ import pytest
 from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import Session, sessionmaker
 
-from app import optimizer
+from app import dimension_deduction_bridge, optimizer
 from app.database import Base
 from app.doubao import DoubaoClient, DoubaoHTTPError, DoubaoResponse
 from app.main import _optimization_payload
@@ -863,3 +863,47 @@ def test_optimization_api_payload_allowlists_stage_audit(
             assert "metadata" not in audit
     finally:
         engine.dispose()
+
+
+def test_reject_unrunnable_candidate_prompt_allows_supported_placeholders() -> None:
+    """平台支持的占位符必须放行，否则 AI 推荐会被自己的校验堵死。"""
+    body = "\n".join(
+        f"参考 {placeholder} 打分"
+        for placeholder in dimension_deduction_bridge.SUPPORTED_PLACEHOLDERS
+    )
+
+    # 不抛异常即通过。
+    optimizer.reject_unrunnable_candidate_prompt(body, source="优化候选")
+    optimizer.reject_unrunnable_candidate_prompt("没有任何占位符", source="优化候选")
+    optimizer.reject_unrunnable_candidate_prompt("", source="优化候选")
+
+
+def test_reject_unrunnable_candidate_prompt_blocks_unknown_placeholder() -> None:
+    """AI 写出引擎不认识的占位符时，必须在生成期就拦下。
+
+    否则候选能建成、能被运营采纳成正式版本，直到回归时每条样本都失败——运营要
+    看着 N 条相同的失败才知道是 AI 把提示词写坏了。
+    """
+    with pytest.raises(ValueError) as excinfo:
+        optimizer.reject_unrunnable_candidate_prompt(
+            "请结合 {{human_truth}} 与 {{another_bad}} 打分",
+            source="优化候选",
+        )
+
+    detail = str(excinfo.value)
+    # 点名全部不支持的占位符，运营才知道要删哪几个。
+    assert "{{human_truth}}" in detail
+    assert "{{another_bad}}" in detail
+    # 列出可用清单，并说明为什么必须拦。
+    for supported in dimension_deduction_bridge.SUPPORTED_PLACEHOLDERS:
+        assert supported in detail
+    assert "每条样本都会被拒" in detail
+    assert "优化候选" in detail
+
+
+def test_reject_unrunnable_candidate_prompt_labels_its_caller() -> None:
+    """两条 AI 推荐路径共用该校验，报错要能分辨是哪一条。"""
+    with pytest.raises(ValueError, match="诊断模型生成的候选 User Prompt"):
+        optimizer.reject_unrunnable_candidate_prompt(
+            "参考 {{nope}}", source="诊断模型生成的候选 User Prompt"
+        )

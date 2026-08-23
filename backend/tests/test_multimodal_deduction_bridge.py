@@ -12,7 +12,7 @@ from app.dimension_deduction_bridge import (
     DimensionDeductionBridgeError,
     FALLBACK_WARNING,
     OPERATOR_PROMPT_TEMPLATE_VERSION,
-    _SUPPORTED_PLACEHOLDERS,
+    SUPPORTED_PLACEHOLDERS,
     call_multimodal_for_dimension_deductions,
     compose_rule_deductions,
     empty_deduction_output,
@@ -512,7 +512,7 @@ def test_operator_prompt_unknown_placeholder_fails_closed() -> None:
     detail = str(excinfo.value)
     assert "{{human_truth}}" in detail
     # 必须告诉运营可用的占位符有哪些。
-    for supported in _SUPPORTED_PLACEHOLDERS:
+    for supported in SUPPORTED_PLACEHOLDERS:
         assert supported in detail
     assert "修复办法" in detail
     assert client.user == ""
