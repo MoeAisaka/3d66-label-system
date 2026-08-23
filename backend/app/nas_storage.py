@@ -125,6 +125,33 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+# 同一个 NAS 文件在一次任务里会被反复校验：resolve_asset_path 每次调用都算一遍
+# （锚图按锚点逐个调用），调用方拿到 path 后往往又自己算一遍。跨 SMB 全量重读
+# 一张图的代价远高于 stat，因此用 (路径, mtime_ns, 大小) 做进程内缓存——
+# 文件被替换时这三者必变，不会拿到过期摘要。
+_DIGEST_CACHE_MAX_ENTRIES = 512
+_digest_cache: dict[tuple[str, int, int], str] = {}
+
+
+def sha256_file_cached(path: Path) -> str:
+    try:
+        stat_result = path.stat()
+        key = (str(path), stat_result.st_mtime_ns, stat_result.st_size)
+    except OSError:
+        # stat 失败时不缓存，让下面的读取抛出真实错误。
+        return _sha256_file(path)
+    cached = _digest_cache.get(key)
+    if cached is not None:
+        return cached
+    digest = _sha256_file(path)
+    if len(_digest_cache) >= _DIGEST_CACHE_MAX_ENTRIES:
+        # 简单的 FIFO 淘汰，避免长驻 worker 无界增长。
+        for stale_key in list(_digest_cache)[: _DIGEST_CACHE_MAX_ENTRIES // 4]:
+            _digest_cache.pop(stale_key, None)
+    _digest_cache[key] = digest
+    return digest
+
+
 def inspect_nas_file(uri: str, root: Path) -> NasFileInfo:
     normalized = normalize_nas_uri(uri)
     path = resolve_nas_uri(normalized, root)
@@ -182,7 +209,7 @@ def resolve_asset_path(asset: Any, settings: Any) -> Path:
     if not path.is_file():
         raise NasStorageError("NAS_FILE_MISSING", "NAS 素材文件不存在")
     expected_sha256 = str(getattr(asset, "sha256", "") or "").lower()
-    if expected_sha256 and _sha256_file(path) != expected_sha256:
+    if expected_sha256 and sha256_file_cached(path) != expected_sha256:
         raise NasStorageError(
             "NAS_HASH_MISMATCH",
             "NAS 素材哈希与导入时记录不一致",

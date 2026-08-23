@@ -165,6 +165,7 @@ from .nas_storage import (
     normalize_nas_uri,
     resolve_asset_path,
     resolve_nas_uri,
+    sha256_file_cached,
 )
 from .readonly_sources import (
     ReadOnlySourceError,
@@ -5353,18 +5354,59 @@ def resume_all_jobs(
     return {"ok": True, "affected": len(paused_jobs)}
 
 
+class JobCancelRequest(BaseModel):
+    """按 run 收窄取消范围；两个字段都为空时退回全局取消（保持旧行为）。"""
+
+    baseline_run_ids: list[int] | None = None
+    prompt_run_ids: list[int] | None = None
+
+
 @app.post("/api/jobs/control/cancel")
 def cancel_all_jobs(
+    payload: JobCancelRequest | None = None,
     _user: User = Depends(_permission_user("jobs:write")),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     control = _evaluation_control(db)
-    control.paused = False
-    active_jobs = db.scalars(
-        select(EvaluationJob).where(
-            EvaluationJob.status.in_(("queued", "processing", "paused"))
-        )
-    ).all()
+    baseline_run_ids = list(payload.baseline_run_ids or []) if payload else []
+    prompt_run_ids = list(payload.prompt_run_ids or []) if payload else []
+    scoped = bool(baseline_run_ids or prompt_run_ids)
+    # 全局取消没有 run 作用域：一次点击会把当时所有 queued/processing/paused 的 job
+    # 全部判失败，跨 run、跨基准集连带击穿（2026-08-23 的 run50-54 就是这样连废的）。
+    # 传入 run id 时只取消这些 run 自己的 job，并且不复位 paused——
+    # 按 run 取消不该顺带把整个队列恢复成运行态。
+    if not scoped:
+        control.paused = False
+    status_filter = EvaluationJob.status.in_(("queued", "processing", "paused"))
+    if scoped:
+        scope_conditions = []
+        if baseline_run_ids:
+            scope_conditions.append(
+                EvaluationJob.baseline_regression_item_id.in_(
+                    select(BaselineRegressionItem.id).where(
+                        BaselineRegressionItem.run_id.in_(baseline_run_ids)
+                    )
+                )
+            )
+        if prompt_run_ids:
+            scope_conditions.append(
+                EvaluationJob.regression_item_id.in_(
+                    select(PromptRegressionItem.id).where(
+                        PromptRegressionItem.run_id.in_(prompt_run_ids)
+                    )
+                )
+            )
+        active_jobs = []
+        seen_job_ids: set[int] = set()
+        for condition in scope_conditions:
+            for job in db.scalars(
+                select(EvaluationJob).where(status_filter, condition)
+            ).all():
+                if job.id not in seen_job_ids:
+                    seen_job_ids.add(job.id)
+                    active_jobs.append(job)
+    else:
+        active_jobs = db.scalars(select(EvaluationJob).where(status_filter)).all()
     now = datetime.now(timezone.utc)
     for job in active_jobs:
         if job.regression_item_id is not None:
@@ -5391,7 +5433,14 @@ def cancel_all_jobs(
         job.finished_at = now
         job.asset.status = "evaluated" if has_result else "uploaded"
     db.commit()
-    return {"ok": True, "affected": len(active_jobs)}
+    return {
+        "ok": True,
+        "affected": len(active_jobs),
+        # 让调用方能确认这次到底是全局取消还是按 run 取消。
+        "scope": "runs" if scoped else "global",
+        "baseline_run_ids": baseline_run_ids,
+        "prompt_run_ids": prompt_run_ids,
+    }
 
 
 @app.get("/api/model-config")
@@ -9478,11 +9527,10 @@ def _benchmark_config_snapshot(config: ModelConfig) -> dict[str, Any]:
 
 
 def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as source:
-        for chunk in iter(lambda: source.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+    # 委托给 nas_storage 的缓存实现：横评冻结与执行两处（9579/9937 附近）会对
+    # 同一个 NAS 文件重复校验，而 resolve_asset_path 内部已经算过一次摘要，
+    # N 个素材原本要跨 SMB 全量读 2N 遍。
+    return sha256_file_cached(path)
 
 
 def _real_benchmark_truth(

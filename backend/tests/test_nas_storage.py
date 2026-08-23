@@ -81,3 +81,69 @@ def test_resolve_asset_path_uses_nas_source_when_present(tmp_path) -> None:
     )
 
     assert resolve_asset_path(asset, settings) == image.resolve()
+
+
+def test_sha256_file_cached_reads_once_and_reacts_to_content_change(
+    tmp_path, monkeypatch
+) -> None:
+    """同一个 NAS 文件在一次任务里会被反复校验，摘要只应真正算一次。"""
+    from app import nas_storage
+
+    image = tmp_path / "cached.jpg"
+    image.write_bytes(b"first")
+    nas_storage._digest_cache.clear()
+
+    calls: list[str] = []
+    real = nas_storage._sha256_file
+
+    def counting(path):
+        calls.append(str(path))
+        return real(path)
+
+    monkeypatch.setattr(nas_storage, "_sha256_file", counting)
+
+    first = nas_storage.sha256_file_cached(image)
+    second = nas_storage.sha256_file_cached(image)
+    assert first == second == hashlib.sha256(b"first").hexdigest()
+    assert len(calls) == 1, "第二次调用应命中缓存，不再跨 SMB 全量重读"
+
+    # 文件被替换后 mtime_ns/大小都会变，必须重算而不是返回过期摘要。
+    image.write_bytes(b"second-and-longer")
+    changed = nas_storage.sha256_file_cached(image)
+    assert changed == hashlib.sha256(b"second-and-longer").hexdigest()
+    assert len(calls) == 2
+
+
+def test_resolve_asset_path_verifies_digest_without_rereading(tmp_path) -> None:
+    """resolve_asset_path 反复调用（锚图按锚点逐个调）时不应重复算摘要。"""
+    from app import nas_storage
+
+    root = tmp_path / "maps"
+    root.mkdir()
+    image = root / "anchor.jpg"
+    image.write_bytes(b"anchor-bytes")
+    nas_storage._digest_cache.clear()
+
+    calls: list[str] = []
+    real = nas_storage._sha256_file
+
+    def counting(path):
+        calls.append(str(path))
+        return real(path)
+
+    original = nas_storage._sha256_file
+    nas_storage._sha256_file = counting
+    try:
+        settings = SimpleNamespace(upload_dir=tmp_path / "local", nas_maps_root=root)
+        asset = SimpleNamespace(
+            storage_backend="nas_maps",
+            source_uri="nas://maps/anchor.jpg",
+            stored_name="nas-placeholder.jpg",
+            sha256=hashlib.sha256(b"anchor-bytes").hexdigest(),
+        )
+        for _ in range(4):
+            assert resolve_asset_path(asset, settings) == image.resolve()
+    finally:
+        nas_storage._sha256_file = original
+
+    assert len(calls) == 1, f"4 次解析只应读一遍文件，实际读了 {len(calls)} 遍"

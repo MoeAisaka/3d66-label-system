@@ -611,3 +611,107 @@ def test_casual_signal_with_disorder_remains_l5_redline() -> None:
     assert result["level"] == "L5"
     assert result["hit_rules"] == ["casual_snapshot"]
     assert result["inspiration_aesthetic_score"] is None
+
+
+def _write_nas_anchor(nas_root, *, asset_id: int, level: str) -> tuple[dict, object]:
+    """造一个只存在于 NAS 上的锚图：本地 upload_dir 里没有对应文件。
+
+    线上 6486 个 asset 里 6292 个是这种形态（storage_backend='nas_maps'，
+    stored_name 只是 nas-<sha>-<key> 占位符，本地根本不存在）。
+    """
+    payload = f"nas-anchor-{asset_id}-{level}".encode("utf-8")
+    relative = f"anchor-{asset_id}.jpeg"
+    (nas_root / relative).write_bytes(payload)
+    digest = hashlib.sha256(payload).hexdigest()
+    anchor = {
+        "asset_id": asset_id,
+        "level": level,
+        "stored_name": f"nas-{digest[:32]}-maps.jpeg",
+        "mime_type": "image/jpeg",
+        "sha256": digest,
+    }
+    asset = SimpleNamespace(
+        id=asset_id,
+        stored_name=anchor["stored_name"],
+        mime_type="image/jpeg",
+        sha256=digest,
+        storage_backend="nas_maps",
+        source_uri=f"nas://maps/{relative}",
+    )
+    return anchor, asset
+
+
+def test_anchor_samples_load_nas_backed_anchors_via_resolver(tmp_path) -> None:
+    """锚图迁到 NAS 后必须能通过 resolver 读到。
+
+    此前所有素材类测试都用 local backend 造数据，所以拦不住 NAS 不兼容——
+    现役四锚（asset 2045/747/1263/601）迁到 nas_maps 后整轮 P0，测试全绿。
+    """
+    upload_dir = tmp_path / "uploads"
+    upload_dir.mkdir()
+    nas_root = tmp_path / "maps"
+    nas_root.mkdir()
+
+    pairs = [
+        _write_nas_anchor(nas_root, asset_id=2000 + i, level=f"L{i}")
+        for i in range(1, 5)
+    ]
+    anchors = [a for a, _ in pairs]
+    assets_by_id = {asset.id: asset for _, asset in pairs}
+
+    target = upload_dir / "target.jpeg"
+    target.write_bytes(b"target")
+
+    # 前提确认：锚图文件在本地 upload_dir 里确实不存在。
+    for anchor in anchors:
+        assert not (upload_dir / anchor["stored_name"]).exists()
+
+    def resolver(asset):
+        relative = str(asset.source_uri).removeprefix("nas://maps/")
+        return (nas_root / relative).resolve()
+
+    samples = anchor_samples(
+        upload_dir,
+        target,
+        "image/jpeg",
+        anchors=anchors,
+        assets_by_id=assets_by_id,
+        asset_path_resolver=resolver,
+    )
+
+    assert len(samples) == 5
+    for anchor, (_label, path, mime) in zip(anchors, samples[:-1]):
+        assert path.parent == nas_root.resolve(), "锚图应从 NAS 读取，而不是本地 upload_dir"
+        assert path.is_file()
+        assert mime == "image/jpeg"
+    assert samples[-1][1] == target
+
+
+def test_anchor_samples_without_resolver_fail_closed_for_nas_assets(tmp_path) -> None:
+    """不传 resolver 时 NAS 锚图必须显式失败，不能静默拿到错的图。"""
+    upload_dir = tmp_path / "uploads"
+    upload_dir.mkdir()
+    nas_root = tmp_path / "maps"
+    nas_root.mkdir()
+
+    pairs = [
+        _write_nas_anchor(nas_root, asset_id=3000 + i, level=f"L{i}")
+        for i in range(1, 5)
+    ]
+    anchors = [anchor for anchor, _ in pairs]
+    assets_by_id = {asset.id: asset for _, asset in pairs}
+    target = upload_dir / "target.jpeg"
+    target.write_bytes(b"target")
+
+    with pytest.raises(AestheticFoundationError) as exc_info:
+        anchor_samples(
+            upload_dir,
+            target,
+            "image/jpeg",
+            anchors=anchors,
+            assets_by_id=assets_by_id,
+        )
+
+    # 没有 resolver 时只能拼 upload_dir / stored_name，而 NAS 素材的 stored_name
+    # 是 nas-<sha>-<key> 占位符，本地不存在 —— 必须显式报错而不是静默取错图。
+    assert exc_info.value.code == "anchor_missing"

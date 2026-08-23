@@ -2666,11 +2666,28 @@ async def evaluate_job(job_id: int) -> None:
                 .where(Asset.id == asset.id)
                 .values(status="evaluated")
             )
-        db.execute(
-            update(EvaluationJob)
-            .where(EvaluationJob.id == job_id)
-            .values(status="completed", stage="done", progress=100, finished_at=now)
-        )
+        # 只在 job 仍是 processing 时才落 completed。缺这个守卫时，一个已被
+        # "取消全部"改成 canceled 的 job 在模型调用返回后仍会被翻回 completed，
+        # 与 item 侧的 failed 形成状态不一致（_set_job 一直有这个守卫，此处漏了）。
+        completion_applied = int(
+            db.execute(
+                update(EvaluationJob)
+                .where(
+                    EvaluationJob.id == job_id,
+                    EvaluationJob.status == "processing",
+                )
+                .values(
+                    status="completed", stage="done", progress=100, finished_at=now
+                )
+            ).rowcount
+            or 0
+        ) == 1
+        if not completion_applied:
+            logger.warning(
+                "job=%s 完成时已不在 processing（很可能被取消或暂停），"
+                "保留其当前状态，不翻回 completed",
+                job_id,
+            )
         if current_job.loop_attempt_id:
             current_attempt = db.get(
                 LoopAttempt, current_job.loop_attempt_id

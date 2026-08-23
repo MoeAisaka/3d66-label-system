@@ -2,6 +2,8 @@ import asyncio
 import json
 import importlib
 import re
+
+from sqlalchemy import text as _sa_text
 from copy import deepcopy
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -2342,6 +2344,427 @@ def test_category_dimension_snapshot_and_isolated_correction_retry(
         ] == "L3"
         assert db.query(PromptVersion).count() == 3
 
+    finally:
+        app.dependency_overrides.clear()
+        db.close()
+        engine.dispose()
+
+
+def test_cancel_jobs_scoped_to_run_spares_other_runs() -> None:
+    """按 run 取消不应连带击穿别的 run。
+
+    全局"取消全部"没有 run 作用域，一次点击会把当时所有 queued/processing 的
+    job 全部判失败（2026-08-23 的 run50-54 就是这样连废的）。
+    """
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    db = Session(engine, expire_on_commit=False)
+    user = User(
+        username="scoped-cancel",
+        password_hash="unused",
+        display_name="作用域取消测试员",
+    )
+    asset_a = Asset(
+        original_name="scoped-a-L2.jpg",
+        stored_name="scoped-a-L2.jpg",
+        mime_type="image/jpeg",
+        size_bytes=10,
+        sha256="a" * 64,
+        status="uploaded",
+    )
+    asset_b = Asset(
+        original_name="scoped-b-L2.jpg",
+        stored_name="scoped-b-L2.jpg",
+        mime_type="image/jpeg",
+        size_bytes=10,
+        sha256="b" * 64,
+        status="uploaded",
+    )
+    model = ModelConfig(
+        name="test",
+        provider="doubao",
+        base_url="https://example.test",
+        api_path="/chat",
+        model_id="model",
+        active=True,
+    )
+    prompt_a = PromptVersion(
+        stage="A",
+        name="A",
+        version="scoped-A1",
+        system_prompt="classification prompt",
+        user_prompt="classify",
+        rubric_version="R1",
+        status="published",
+    )
+    prompt_b = PromptVersion(
+        stage="B",
+        name="B",
+        version="scoped-B1",
+        system_prompt="aesthetic prompt",
+        user_prompt="evaluate",
+        rubric_version="R1",
+        status="published",
+    )
+    db.add_all([user, asset_a, asset_b, model, prompt_a, prompt_b])
+    add_active_v3_contract(db)
+    db.commit()
+
+    app.dependency_overrides[get_db] = lambda: (yield db)
+    app.dependency_overrides[current_user] = lambda: user
+    client = TestClient(app)
+    try:
+        set_a = client.post(
+            "/api/baseline-sets",
+            json={
+                "name": "作用域集A",
+                "default_expected_level": "L2",
+                "items": [{"asset_id": asset_a.id}],
+            },
+        ).json()
+        set_b = client.post(
+            "/api/baseline-sets",
+            json={
+                "name": "作用域集B",
+                "default_expected_level": "L2",
+                "items": [{"asset_id": asset_b.id}],
+            },
+        ).json()
+        run_a = client.post(f"/api/baseline-sets/{set_a['id']}/runs").json()
+        run_b = client.post(f"/api/baseline-sets/{set_b['id']}/runs").json()
+
+        item_a = db.scalars(
+            select(BaselineRegressionItem).where(
+                BaselineRegressionItem.run_id == run_a["id"]
+            )
+        ).one()
+        item_b = db.scalars(
+            select(BaselineRegressionItem).where(
+                BaselineRegressionItem.run_id == run_b["id"]
+            )
+        ).one()
+        assert item_a.status == "queued"
+        assert item_b.status == "queued"
+
+        response = client.post(
+            "/api/jobs/control/cancel",
+            json={"baseline_run_ids": [run_a["id"]]},
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert body["scope"] == "runs"
+        assert body["baseline_run_ids"] == [run_a["id"]]
+        assert body["affected"] == 1
+
+        db.expire_all()
+        assert db.get(BaselineRegressionItem, item_a.id).status == "failed"
+        assert (
+            db.get(BaselineRegressionItem, item_a.id).error_message
+            == "technical:operator_canceled"
+        )
+        # 关键断言：另一个 run 完全不受影响。
+        assert db.get(BaselineRegressionItem, item_b.id).status == "queued"
+        assert db.get(BaselineRegressionRun, run_b["id"]).status == "running"
+        # 按 run 取消不该顺带把整个队列恢复成运行态。
+        assert client.get("/api/jobs/control").json()["paused"] is False
+    finally:
+        app.dependency_overrides.clear()
+        db.close()
+        engine.dispose()
+
+
+def test_completed_update_does_not_revive_canceled_job(
+    monkeypatch, tmp_path
+) -> None:
+    """取消落地后，模型返回不应把 job 从 canceled 翻回 completed。"""
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    db = Session(engine, expire_on_commit=False)
+    add_active_v3_contract(db)
+    user = User(
+        username="tester",
+        password_hash="unused",
+        display_name="测试员",
+    )
+    asset = Asset(
+        original_name="manual-version.jpg",
+        stored_name="manual-version.jpg",
+        mime_type="image/jpeg",
+        size_bytes=10,
+        sha256="c" * 64,
+        status="uploaded",
+    )
+    model = ModelConfig(
+        name="test",
+        provider="doubao",
+        base_url="https://example.test",
+        api_path="/chat",
+        model_id="model",
+        encrypted_api_key="test-reference",
+        active=True,
+    )
+    published_a = PromptVersion(
+        stage="A",
+        name="发布 A",
+        version="A-published",
+        system_prompt="published system a",
+        user_prompt="published user a",
+        rubric_version="R1",
+        status="published",
+    )
+    published_b = PromptVersion(
+        stage="B",
+        name="发布 B",
+        version="B-published",
+        system_prompt="published system b",
+        user_prompt="published user b",
+        rubric_version="R1",
+        status="published",
+    )
+    draft_a = PromptVersion(
+        stage="A",
+        name="候选 A",
+        version="A-draft",
+        system_prompt="draft system a",
+        user_prompt="draft user a",
+        rubric_version="R2",
+        status="draft",
+    )
+    draft_b = PromptVersion(
+        stage="B",
+        name="候选 B",
+        version="B-draft",
+        system_prompt="draft system b",
+        user_prompt="B sees {{previous_output}} / {{precheck_json}}",
+        rubric_version="R2",
+        status="draft",
+    )
+    full_only = PromptVersion(
+        stage="A",
+        name="仅完整流水线",
+        version="A-full-only",
+        system_prompt="full pipeline only system prompt",
+        user_prompt="full pipeline only user prompt",
+        rubric_version="R2",
+        pipeline_scope="full_pipeline",
+        status="draft",
+    )
+    dimension_definition = space_schema_definition_for_version(ACTIVE_V13_VERSION)
+    dimension_schema = DimensionSchema(
+        schema_key=SPACE_SCHEMA_KEY,
+        version=ACTIVE_V13_VERSION,
+        schema_type="family_pack",
+        family_key="space",
+        display_name="空间现役维度",
+        status="published",
+        definition_json=canonical_json(dimension_definition),
+        canonical_hash=canonical_hash(dimension_definition),
+        created_by="test",
+        published_by="test",
+        published_at=datetime.now(timezone.utc),
+    )
+    db.add_all(
+        [
+            user,
+            asset,
+            model,
+            published_a,
+            published_b,
+            draft_a,
+            draft_b,
+            full_only,
+            dimension_schema,
+        ]
+    )
+    db.commit()
+
+    app.dependency_overrides[get_db] = lambda: (yield db)
+    app.dependency_overrides[current_user] = lambda: user
+    client = TestClient(app)
+    try:
+        created = client.post(
+            "/api/baseline-sets",
+            json={
+                "name": "手选版本基准",
+                "description": "",
+                "default_expected_level": "L2",
+                "items": [{"asset_id": asset.id}],
+            },
+        )
+        assert created.status_code == 200
+        set_id = created.json()["id"]
+
+        single_conflict = client.post(
+            f"/api/baseline-sets/{set_id}/runs",
+            json={"prompt_id": draft_a.id, "prompt_a_id": draft_a.id, "prompt_b_id": draft_b.id},
+        )
+        assert single_conflict.status_code == 422
+        assert "不能同时指定" in single_conflict.text
+
+        single = client.post(
+            f"/api/baseline-sets/{set_id}/runs",
+            json={"prompt_id": draft_a.id},
+        )
+        assert single.status_code == 200
+        single_payload = single.json()
+        assert single_payload["selection"]["prompt_a"]["id"] == draft_a.id
+        assert single_payload["selection"]["prompt_b"] is None
+        assert single_payload["selection"]["prompt_a"]["rubric_version"] == "R2"
+        single_run = db.get(BaselineRegressionRun, single_payload["id"])
+        assert single_run is not None
+        single_job = db.get(EvaluationJob, single_run.items[0].job_id)
+        assert single_job is not None
+        assert single_job.prompt_a_id == draft_a.id
+        assert single_job.prompt_b_id is None
+        assert json.loads(single_run.strategy_snapshot_json)["prompt_b"] is None
+        fail_baseline_item(
+            db,
+            item_id=single_run.items[0].id,
+            error_code="test_single_prompt_finished",
+        )
+        db.commit()
+
+        scope_rejected = client.post(
+            f"/api/baseline-sets/{set_id}/runs",
+            json={"prompt_id": full_only.id},
+        )
+        assert scope_rejected.status_code == 422
+        assert "不允许用于基准回归" in scope_rejected.text
+
+        partial = client.post(
+            f"/api/baseline-sets/{set_id}/runs",
+            json={"prompt_a_id": draft_a.id},
+        )
+        assert partial.status_code == 422
+        assert "必须同时指定 A 与 B" in partial.text
+
+        reserved_dimension = client.post(
+            f"/api/baseline-sets/{set_id}/runs",
+            json={"dimension_schema_id": 99991},
+        )
+        assert reserved_dimension.status_code == 410
+        assert reserved_dimension.json()["detail"]["code"] == "legacy_dimension_write_retired"
+
+        missing = client.post(
+            f"/api/baseline-sets/{set_id}/runs",
+            json={"prompt_a_id": 99991, "prompt_b_id": 99992},
+        )
+        assert missing.status_code == 404
+        assert "提示词版本不存在" in missing.text
+
+        swapped = client.post(
+            f"/api/baseline-sets/{set_id}/runs",
+            json={
+                "prompt_a_id": draft_b.id,
+                "prompt_b_id": draft_a.id,
+            },
+        )
+        assert swapped.status_code == 422
+        assert "提示词阶段不匹配" in swapped.text
+        assert db.query(BaselineRegressionRun).count() == 1
+
+        response = client.post(
+            f"/api/baseline-sets/{set_id}/runs",
+            json={
+                "prompt_a_id": draft_a.id,
+                "prompt_b_id": draft_b.id,
+            },
+        )
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["selection"]["prompt_a"]["id"] == draft_a.id
+        assert payload["selection"]["prompt_a"]["version"] == "A-draft"
+        assert payload["selection"]["prompt_b"]["id"] == draft_b.id
+        assert payload["selection"]["prompt_b"]["version"] == "B-draft"
+        assert payload["selection"]["dimension"]["v3_contract"] is not None
+        assert payload["selection"]["dimension"]["v3_contract"]["tracks"]
+
+        run = db.get(BaselineRegressionRun, payload["id"])
+        assert run is not None
+        job = db.get(EvaluationJob, run.items[0].job_id)
+        assert job is not None
+        assert job.prompt_a_id == draft_a.id
+        assert job.prompt_b_id == draft_b.id
+        job.status = "processing"
+        db.commit()
+
+        source_path = tmp_path / asset.stored_name
+        source_path.write_bytes(b"freeform-image")
+        calls: list[str] = []
+
+        class FakeClient:
+            def __init__(self, _config) -> None:
+                pass
+
+            async def chat_text(self, _system_prompt, user_prompt, **_kwargs):
+                calls.append(user_prompt)
+                raw_text = (
+                    "A 自由结论"
+                    if len(calls) == 1
+                    else "B 自由结论，已参考 A 自由结论"
+                )
+                return DoubaoResponse(
+                    parsed={},
+                    raw_text=raw_text,
+                    raw_payload={"provider_id": f"call-{len(calls)}"},
+                )
+
+            async def chat_json(self, _system_prompt, user_prompt, **_kwargs):
+                # 模拟"取消全部"在模型调用在途时落地。
+                db.execute(
+                    _sa_text(
+                        "UPDATE evaluation_jobs SET status='canceled', "
+                        "stage='canceled' WHERE status='processing'"
+                    )
+                )
+                db.commit()
+                keys = re.findall(r"维度：.*?（([^）]+)）", user_prompt)
+                return DoubaoResponse(
+                    parsed={
+                        "aesthetic_score": 88,
+                        "aesthetic_evidence": ["主体结构、材质和光影均有可见证据"],
+                        "aesthetic_confidence": 0.9,
+                        "dimensions": {
+                            key: {"hit_rules": []} for key in dict.fromkeys(keys)
+                        },
+                        "overall_note": "",
+                    },
+                    raw_text="{}",
+                    raw_payload={"provider_id": "call-b"},
+                )
+
+        @contextmanager
+        def test_scope():
+            try:
+                yield db
+                db.commit()
+            except Exception:
+                db.rollback()
+                raise
+
+        monkeypatch.setattr(worker, "session_scope", test_scope)
+        monkeypatch.setattr(worker, "settings", SimpleNamespace(upload_dir=tmp_path))
+        monkeypatch.setattr(worker, "DoubaoClient", FakeClient)
+        monkeypatch.setattr(
+            worker,
+            "prepare_model_image",
+            lambda *_args, **_kwargs: (source_path, "image/jpeg"),
+        )
+        asyncio.run(worker.evaluate_job(job.id))
+        db.expire_all()
+        refreshed = db.get(EvaluationJob, job.id)
+        assert refreshed is not None
+        # 关键断言：缺守卫时这里会是 "completed"，与 item 侧的 failed 状态矛盾。
+        assert refreshed.status == "canceled"
+        assert refreshed.stage == "canceled"
     finally:
         app.dependency_overrides.clear()
         db.close()
