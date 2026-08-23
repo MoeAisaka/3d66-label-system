@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react"
 import {
   ArrowClockwise,
+  ArrowsClockwise,
   Check,
   CheckSquare,
   CloudArrowUp,
@@ -28,6 +29,7 @@ import { ApiError, api, baselineRegressionApi } from "@/lib/api"
 import { submitReviewDecision } from "@/lib/review-submit"
 import type {
   Asset,
+  BalancedRebuildStrategy,
   BaselineLevel,
   BaselineCorrectionRun,
   BaselineFieldMetrics,
@@ -54,6 +56,10 @@ import {
   v3RevisionGroup,
 } from "@/features/baseline-regression/baseline-regression-contract"
 import type { CandidatePromptBindingResolution } from "@/features/baseline-regression/baseline-regression-contract"
+import {
+  BalancedRebuildDrawer,
+  BalancedRebuildForm,
+} from "@/features/baseline-regression/balanced-rebuild-drawer"
 import { BaselineSetDialog } from "@/features/baseline-regression/baseline-set-dialog"
 import { CorrectionWorkbench } from "@/features/baseline-regression/correction-workbench"
 import {
@@ -127,6 +133,10 @@ export function BaselineRegressionPage() {
   const [runPage, setRunPage] = useState(0)
   const [imagePreview, setImagePreview] = useState<ImagePreview | null>(null)
   const [baselineSetDialogOpen, setBaselineSetDialogOpen] = useState(false)
+  const [balancedRebuildDrawerOpen, setBalancedRebuildDrawerOpen] = useState(false)
+  const [rebuildPerLevel, setRebuildPerLevel] = useState(20)
+  const [rebuildStrategy, setRebuildStrategy] = useState<BalancedRebuildStrategy>("stable_hash")
+  const [rebuildSeed, setRebuildSeed] = useState(1)
   const [runConfigDrawerOpen, setRunConfigDrawerOpen] = useState(false)
   const [metricsDrawerOpen, setMetricsDrawerOpen] = useState(false)
   const [ruleDiagnosticsDrawerOpen, setRuleDiagnosticsDrawerOpen] = useState(false)
@@ -564,11 +574,53 @@ export function BaselineRegressionPage() {
 
   const createBalanced100 = useMutation({
     mutationFn: () => baselineRegressionApi.createBalanced100(),
-    onSuccess: async ({ summary, idempotent }) => {
+    onSuccess: async ({ summary, idempotent, item_count }) => {
       setSelectedSetId(summary.id)
       setSelectedRunId(0)
       await queryClient.invalidateQueries({ queryKey: ["baseline-sets"] })
-      toast.success(idempotent ? "100 张均衡基准集已存在，已切换" : "100 张均衡基准集已冻结")
+      // 这个接口是幂等的：集合建过一次之后，再点只是切换选中。说清楚"已切换、
+      // 什么都没新建"，否则界面看不出变化会被当成没生效。
+      if (idempotent) {
+        const frozenAt = new Date(summary.created_at).toLocaleDateString("zh-CN")
+        toast.success(
+          `已切换到均衡基准集（${item_count} 张，${frozenAt} 冻结）`,
+          { description: "这份样本已存在，本次没有新建。要纳入新标注素材请用「重建均衡样本」。" },
+        )
+      } else {
+        toast.success(`均衡基准集已冻结（${item_count} 张）`)
+      }
+    },
+    onError: (error) => toast.error(error.message),
+  })
+
+  const rebuildSurvey = useQuery({
+    queryKey: ["baseline-sets", "balanced-rebuild-survey"],
+    queryFn: () => baselineRegressionApi.surveyBalancedRebuild(),
+    enabled: balancedRebuildDrawerOpen && selectedCategoryKey === "inspiration_image",
+  })
+
+  const rebuildBalanced = useMutation({
+    mutationFn: () => baselineRegressionApi.rebuildBalancedSample({
+      per_level: rebuildPerLevel,
+      strategy: rebuildStrategy,
+      seed: rebuildSeed,
+    }),
+    onSuccess: async (result) => {
+      setSelectedSetId(result.summary.id)
+      setSelectedRunId(0)
+      setBalancedRebuildDrawerOpen(false)
+      await queryClient.invalidateQueries({ queryKey: ["baseline-sets"] })
+      if (result.idempotent) {
+        toast.success(
+          `这套参数的样本已存在，已切换（${result.item_count} 张）`,
+          { description: "同一批素材配同一组参数抽出的是同一份清单。换一个随机种子才会得到新的抽样。" },
+        )
+      } else {
+        toast.success(
+          `新均衡样本已冻结（${result.item_count} 张）`,
+          { description: `其中 ${result.coverage.new_asset_count} 张是原样本没有的素材；原样本与它的历史回归未被改动。` },
+        )
+      }
     },
     onError: (error) => toast.error(error.message),
   })
@@ -741,13 +793,22 @@ export function BaselineRegressionPage() {
             >
               <CloudArrowUp />{upload.isPending ? "正在上传" : "上传基准素材"}
             </Button>
+            {/* 这个接口幂等：首次点会冻结，之后只切换。文案说"切换"而不是"生成"，
+                因为叫"生成"会让人以为每次都重抽一份，看不到变化就以为坏了。 */}
             {selectedCategoryKey === "inspiration_image" && <Button
               variant="secondary"
-              title="L1-L5 各 20 张；按人工真值与 SHA-256 去重后冻结"
+              title="L1-L5 各 20 张的既有均衡样本；已冻结，点击只切换到它，不会重新抽样"
               onClick={() => createBalanced100.mutate()}
               disabled={createBalanced100.isPending}
             >
-              <CheckSquare />{createBalanced100.isPending ? "正在校验" : "生成 100 张均衡基准集"}
+              <CheckSquare />{createBalanced100.isPending ? "正在校验" : "切换到均衡基准集"}
+            </Button>}
+            {selectedCategoryKey === "inspiration_image" && <Button
+              variant="secondary"
+              title="用当前全部人工评级素材重新抽样，冻结为新的基准集；原样本与其历史回归不受影响"
+              onClick={() => setBalancedRebuildDrawerOpen(true)}
+            >
+              <ArrowsClockwise />重建均衡样本
             </Button>}
             <Button
               variant="secondary"
@@ -1477,6 +1538,52 @@ export function BaselineRegressionPage() {
         loading={semanticMetrics.isLoading}
         error={semanticMetrics.error}
       />
+      <BalancedRebuildDrawer
+        open={balancedRebuildDrawerOpen}
+        onOpenChange={setBalancedRebuildDrawerOpen}
+        footer={
+          <div className="flex items-center justify-between gap-3">
+            <p className="text-xs text-[var(--muted)]">
+              冻结后会自动切换到新样本；原样本与其历史回归保持不变。
+            </p>
+            <div className="flex items-center gap-2">
+              <Button
+                variant="secondary"
+                onClick={() => setBalancedRebuildDrawerOpen(false)}
+                disabled={rebuildBalanced.isPending}
+              >
+                取消
+              </Button>
+              <Button
+                onClick={() => rebuildBalanced.mutate()}
+                disabled={
+                  rebuildBalanced.isPending
+                  || !rebuildSurvey.data
+                  || rebuildPerLevel < 1
+                  || rebuildPerLevel > (rebuildSurvey.data?.max_per_level ?? 0)
+                }
+              >
+                <ArrowsClockwise />
+                {rebuildBalanced.isPending
+                  ? "正在冻结"
+                  : `冻结 ${rebuildPerLevel * 5} 张新样本`}
+              </Button>
+            </div>
+          </div>
+        }
+      >
+        <BalancedRebuildForm
+          survey={rebuildSurvey.data}
+          loading={rebuildSurvey.isLoading}
+          error={rebuildSurvey.error}
+          perLevel={rebuildPerLevel}
+          strategy={rebuildStrategy}
+          seed={rebuildSeed}
+          onPerLevel={setRebuildPerLevel}
+          onStrategy={setRebuildStrategy}
+          onSeed={setRebuildSeed}
+        />
+      </BalancedRebuildDrawer>
     </>
   )
 }

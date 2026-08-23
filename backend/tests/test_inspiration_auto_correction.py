@@ -13,12 +13,16 @@ from app.database import Base
 from app.database import get_db
 from app.inspiration_auto_correction import (
     AutoCorrectionPolicy,
+    BALANCED_GOLDEN_SET_NAME,
+    balanced_rebuild_set_name,
     build_drift_report,
     decide_level_correction,
     ensure_inspiration_golden_set,
     ensure_inspiration_balanced_golden_set,
     fit_level_calibration,
     rating_from_original_name,
+    rebuild_inspiration_balanced_golden_set,
+    survey_inspiration_balanced_candidates,
 )
 from app.main import app, current_user
 from app.models import Asset, BaselineSet, BaselineSetItem, User
@@ -226,6 +230,252 @@ def test_balanced_golden_set_rejects_duplicate_sha256() -> None:
         with pytest.raises(ValueError, match="重复 SHA-256"):
             ensure_inspiration_balanced_golden_set(db)
     engine.dispose()
+
+
+def _seed_rated_assets(db, *, per_rating: int = 40) -> None:
+    for rating in ("好", "中等", "中差", "极差", "过滤"):
+        for index in range(per_rating):
+            db.add(
+                Asset(
+                    original_name=f"batch/{rating}_{rating}-{index}.jpeg",
+                    stored_name=f"{rating}-{index}.jpeg",
+                    mime_type="image/jpeg",
+                    size_bytes=1,
+                    sha256=f"{rating}-{index}".encode().hex().ljust(64, "0"),
+                    category_key="space_image",
+                )
+            )
+    db.commit()
+
+
+def _asset_ids_of(db, baseline_set_id: int) -> set[int]:
+    return set(
+        db.scalars(
+            select(BaselineSetItem.asset_id).where(
+                BaselineSetItem.baseline_set_id == baseline_set_id
+            )
+        ).all()
+    )
+
+
+def test_balanced_rebuild_lands_in_new_set_and_never_rewrites_the_frozen_one() -> None:
+    engine, sessions = _sessions()
+    with sessions() as db:
+        _seed_rated_assets(db)
+        original, _ = ensure_inspiration_balanced_golden_set(db)
+        original_ids = _asset_ids_of(db, original.id)
+
+        rebuilt, report = rebuild_inspiration_balanced_golden_set(
+            db, created_by="ops"
+        )
+        assert rebuilt.id != original.id
+        assert report["created"] is True
+        assert report["idempotent"] is False
+        assert report["item_count"] == 100
+        assert report["distribution"] == {
+            "好": 20, "中等": 20, "中差": 20, "极差": 20, "过滤": 20
+        }
+        # The frozen sample keeps both its identity and its exact membership:
+        # runs already reference it, so a rebuild must not touch it.
+        assert db.get(BaselineSet, original.id).name == BALANCED_GOLDEN_SET_NAME
+        assert _asset_ids_of(db, original.id) == original_ids
+
+        again, replay = rebuild_inspiration_balanced_golden_set(
+            db, created_by="ops"
+        )
+        assert again.id == rebuilt.id
+        assert replay["idempotent"] is True
+        assert replay["fingerprint"] == report["fingerprint"]
+    engine.dispose()
+
+
+def test_balanced_rebuild_can_reach_material_the_frozen_sample_missed() -> None:
+    """The reason this capability exists: newly rated assets stay unreachable.
+
+    The original sample draws ascending by asset id, so once the corpus grows
+    past the quota every later upload is permanently excluded from it.
+    """
+
+    engine, sessions = _sessions()
+    with sessions() as db:
+        _seed_rated_assets(db)
+        original, _ = ensure_inspiration_balanced_golden_set(db)
+        original_ids = _asset_ids_of(db, original.id)
+
+        rebuilt, report = rebuild_inspiration_balanced_golden_set(
+            db, created_by="ops", strategy="newest"
+        )
+        rebuilt_ids = _asset_ids_of(db, rebuilt.id)
+        assert rebuilt_ids.isdisjoint(original_ids)
+        assert report["coverage"]["new_asset_count"] == 100
+        assert report["coverage"]["reused_asset_count"] == 0
+        assert report["coverage"]["previous_balanced_set_id"] == original.id
+    engine.dispose()
+
+
+def test_rebuild_seed_reshuffles_stable_hash_but_is_inert_for_recency() -> None:
+    engine, sessions = _sessions()
+    with sessions() as db:
+        _seed_rated_assets(db)
+        first, _ = rebuild_inspiration_balanced_golden_set(
+            db, created_by="ops", seed=1
+        )
+        second, second_report = rebuild_inspiration_balanced_golden_set(
+            db, created_by="ops", seed=2
+        )
+        # A different seed is a genuinely different draw, so it must become its
+        # own frozen set rather than rewriting the first.
+        assert second.id != first.id
+        assert second_report["created"] is True
+        assert _asset_ids_of(db, second.id) != _asset_ids_of(db, first.id)
+
+        # For recency strategies the seed cannot change anything, so bumping it
+        # replays the same set instead of freezing a byte-identical copy.
+        newest, _ = rebuild_inspiration_balanced_golden_set(
+            db, created_by="ops", strategy="newest", seed=1
+        )
+        newest_again, replay = rebuild_inspiration_balanced_golden_set(
+            db, created_by="ops", strategy="newest", seed=999
+        )
+        assert newest_again.id == newest.id
+        assert replay["idempotent"] is True
+    engine.dispose()
+
+
+def test_rebuild_name_only_carries_parameters_that_change_the_draw() -> None:
+    assert balanced_rebuild_set_name(
+        per_level=20, strategy="stable_hash", seed=7
+    ).endswith("stable_hash-seed7")
+    for strategy in ("newest", "oldest"):
+        assert balanced_rebuild_set_name(
+            per_level=20, strategy=strategy, seed=7
+        ) == balanced_rebuild_set_name(
+            per_level=20, strategy=strategy, seed=8
+        )
+
+
+def test_rebuild_excludes_deleted_and_deduplicates_by_sha256() -> None:
+    engine, sessions = _sessions()
+    with sessions() as db:
+        _seed_rated_assets(db, per_rating=22)
+        # Hidden from the operator's asset list, so a fresh draw must skip it.
+        hidden = db.scalars(select(Asset).order_by(Asset.id.asc())).first()
+        hidden.status = "deleted"
+        # Same binary re-uploaded under another rated name.
+        duplicate_of = db.scalars(
+            select(Asset).order_by(Asset.id.asc())
+        ).all()[1]
+        db.add(
+            Asset(
+                original_name="batch/好_reupload.jpeg",
+                stored_name="好_reupload.jpeg",
+                mime_type="image/jpeg",
+                size_bytes=1,
+                sha256=duplicate_of.sha256,
+                category_key="space_image",
+            )
+        )
+        db.commit()
+
+        rebuilt, report = rebuild_inspiration_balanced_golden_set(
+            db, created_by="ops", strategy="oldest"
+        )
+        assert report["deleted_excluded"] == 1
+        assert report["duplicate_sha256_skipped"] == 1
+        selected = _asset_ids_of(db, rebuilt.id)
+        assert hidden.id not in selected
+        assert report["item_count"] == 100
+    engine.dispose()
+
+
+def test_rebuild_refuses_when_a_level_cannot_fill_the_quota() -> None:
+    engine, sessions = _sessions()
+    with sessions() as db:
+        _seed_rated_assets(db, per_rating=20)
+        with pytest.raises(ValueError, match="无法满足"):
+            rebuild_inspiration_balanced_golden_set(
+                db, created_by="ops", per_level=25
+            )
+        with pytest.raises(ValueError, match="不支持的抽样方式"):
+            rebuild_inspiration_balanced_golden_set(
+                db, created_by="ops", strategy="random"
+            )
+    engine.dispose()
+
+
+def test_rebuild_survey_reports_reach_without_writing() -> None:
+    engine, sessions = _sessions()
+    with sessions() as db:
+        _seed_rated_assets(db)
+        original, _ = ensure_inspiration_balanced_golden_set(db)
+        before = len(db.scalars(select(BaselineSet)).all())
+
+        survey = survey_inspiration_balanced_candidates(db)
+        assert survey["candidate_total"] == 200
+        assert survey["max_per_level"] == 40
+        assert survey["current_balanced_set"]["baseline_set_id"] == original.id
+        assert survey["current_balanced_set"]["item_count"] == 100
+        assert "stable_hash" in survey["strategies"]
+        assert len(db.scalars(select(BaselineSet)).all()) == before
+    engine.dispose()
+
+
+def test_rebuild_endpoint_freezes_a_new_set_alongside_the_original() -> None:
+    engine, sessions = _sessions()
+    db = sessions()
+    user = User(
+        username="baseline-owner", password_hash="unused", display_name="基准负责人"
+    )
+    db.add(user)
+    _seed_rated_assets(db)
+    app.dependency_overrides[get_db] = lambda: (yield db)
+    app.dependency_overrides[current_user] = lambda: user
+    client = TestClient(app)
+    try:
+        frozen = client.post("/api/baseline-sets/inspiration-balanced-100")
+        assert frozen.status_code == 200
+        original_id = frozen.json()["summary"]["id"]
+
+        survey = client.get(
+            "/api/baseline-sets/inspiration-balanced-sample/rebuild-survey"
+        )
+        assert survey.status_code == 200
+        assert survey.json()["max_per_level"] == 40
+
+        response = client.post(
+            "/api/baseline-sets/inspiration-balanced-sample/rebuild",
+            json={"per_level": 20, "strategy": "newest", "seed": 1},
+        )
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["summary"]["id"] != original_id
+        assert payload["summary"]["category_key"] == "inspiration_image"
+        assert payload["summary"]["item_count"] == 100
+        assert payload["created"] is True
+        assert db.get(BaselineSet, original_id) is not None
+
+        # Within the schema bound but beyond what the corpus can fill: the
+        # quota check must refuse it rather than freeze a short sample.
+        conflict = client.post(
+            "/api/baseline-sets/inspiration-balanced-sample/rebuild",
+            json={"per_level": 200, "strategy": "newest", "seed": 1},
+        )
+        assert conflict.status_code == 409
+        assert "无法满足" in conflict.json()["detail"]
+
+        # Out-of-range parameters are rejected by the schema before any work.
+        assert client.post(
+            "/api/baseline-sets/inspiration-balanced-sample/rebuild",
+            json={"per_level": 0},
+        ).status_code == 422
+        assert client.post(
+            "/api/baseline-sets/inspiration-balanced-sample/rebuild",
+            json={"strategy": "random"},
+        ).status_code == 422
+    finally:
+        app.dependency_overrides.clear()
+        db.close()
+        engine.dispose()
 
 
 def test_calibration_decision_uses_only_frozen_mapping_and_confidence_gate() -> None:

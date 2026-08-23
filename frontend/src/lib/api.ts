@@ -1,5 +1,8 @@
 import type {
   Asset,
+  BalancedRebuildResult,
+  BalancedRebuildStrategy,
+  BalancedRebuildSurvey,
   BaselineCorrectionRun,
   BaselineFieldMetrics,
   BaselineLevel,
@@ -210,6 +213,17 @@ export const baselineRegressionApi = {
     distribution: Record<string, number>
     fingerprint: string
   }>("/api/baseline-sets/inspiration-balanced-100", { method: "POST" }),
+  surveyBalancedRebuild: () => api<BalancedRebuildSurvey>(
+    "/api/baseline-sets/inspiration-balanced-sample/rebuild-survey",
+  ),
+  rebuildBalancedSample: (payload: {
+    per_level: number
+    strategy: BalancedRebuildStrategy
+    seed: number
+  }) => api<BalancedRebuildResult>(
+    "/api/baseline-sets/inspiration-balanced-sample/rebuild",
+    { method: "POST", ...jsonBody(payload) },
+  ),
   listPrompts: (categoryKey?: string) => {
     const params = new URLSearchParams({ include_archived: "true" })
     if (categoryKey) params.set("category_key", categoryKey)

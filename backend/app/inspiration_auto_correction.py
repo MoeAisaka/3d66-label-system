@@ -64,6 +64,10 @@ BALANCED_RATING_DISTRIBUTION = {
     "极差": 20,
     "过滤": 20,
 }
+# 重建均衡样本用的确定性抽样命名空间。种子进命名空间，所以同一批素材 + 同一
+# 种子永远得到同一份清单（指纹可复现），换种子才会重新洗牌。
+BALANCED_REBUILD_NAMESPACE = "inspiration-balanced-rebuild-v1"
+BALANCED_REBUILD_STRATEGIES = ("stable_hash", "newest", "oldest")
 _RATING_PATTERN = re.compile(r"(?:^|/|_)(好|中等|中差|极差|过滤)_")
 
 
@@ -93,6 +97,36 @@ class AutoCorrectionPolicy:
 def rating_from_original_name(original_name: str) -> str | None:
     match = _RATING_PATTERN.search(original_name or "")
     return match.group(1) if match else None
+
+
+def _human_rating_snapshot(
+    asset: Asset, rating: str, truth_source: str
+) -> dict[str, Any]:
+    """Freeze one human-rated asset into a baseline item snapshot.
+
+    Shared by the full golden set and the rebuilt balanced sample so both
+    freeze truth in exactly the same shape; the snapshot is what a later run
+    reads, so any divergence here would silently change run semantics.
+    """
+
+    return {
+        "schema_version": "baseline-asset-v1",
+        "asset_id": asset.id,
+        "category_key": "inspiration_image",
+        "asset_source_category_key": asset.category_key,
+        "name": asset.original_name,
+        "sha256": asset.sha256,
+        "mime_type": asset.mime_type,
+        "size_bytes": asset.size_bytes,
+        "width": asset.width,
+        "height": asset.height,
+        "source_package_id": None,
+        "expected_level_source": "human_filename_rating",
+        "human_rating": rating,
+        "truth_updated_by": truth_source,
+        "truth_source": truth_source,
+        "created_at": asset.created_at.isoformat(),
+    }
 
 
 def _stable_fraction(namespace: str, value: int) -> float:
@@ -259,24 +293,7 @@ def ensure_inspiration_golden_set(
     db.add(baseline_set)
     db.flush()
     for asset, rating, level in selected:
-        snapshot = {
-            "schema_version": "baseline-asset-v1",
-            "asset_id": asset.id,
-            "category_key": "inspiration_image",
-            "asset_source_category_key": asset.category_key,
-            "name": asset.original_name,
-            "sha256": asset.sha256,
-            "mime_type": asset.mime_type,
-            "size_bytes": asset.size_bytes,
-            "width": asset.width,
-            "height": asset.height,
-            "source_package_id": None,
-            "expected_level_source": "human_filename_rating",
-            "human_rating": rating,
-            "truth_updated_by": truth_source,
-            "truth_source": truth_source,
-            "created_at": asset.created_at.isoformat(),
-        }
+        snapshot = _human_rating_snapshot(asset, rating, truth_source)
         db.add(
             BaselineSetItem(
                 baseline_set_id=baseline_set.id,
@@ -350,6 +367,336 @@ def ensure_inspiration_balanced_golden_set(
         expected_distribution=BALANCED_RATING_DISTRIBUTION,
         reject_duplicate_sha256=True,
     )
+
+
+def _rebuild_parameter_suffix(strategy: str, seed: int) -> str:
+    """Describe only the parameters that actually change the draw.
+
+    ``seed`` reshuffles ``stable_hash`` but is inert for ``newest``/``oldest``,
+    which are fully determined by upload order. Leaving it out of those names
+    means bumping the seed there replays the same set instead of freezing a
+    second, byte-identical copy under a different name.
+    """
+
+    return f"{strategy}-seed{seed}" if strategy == "stable_hash" else strategy
+
+
+def balanced_rebuild_set_name(
+    *, per_level: int, strategy: str, seed: int
+) -> str:
+    """Name a rebuilt sample from its own parameters.
+
+    The name is derived, not free-form, so replaying the same parameters lands
+    on the same frozen set (idempotent) while a genuinely different draw
+    necessarily becomes a new set instead of rewriting a sample that runs
+    already reference.
+    """
+
+    return (
+        f"灵感图人工评级均衡样本-{per_level}x5-"
+        f"{_rebuild_parameter_suffix(strategy, seed)}"
+    )
+
+
+def survey_inspiration_balanced_candidates(
+    db: Session,
+    *,
+    include_deleted: bool = False,
+) -> dict[str, Any]:
+    """Report what a rebuild could draw from, without writing anything.
+
+    Operators need this before rebuilding: the frozen sample cannot be
+    changed in place, so the only way to judge whether a rebuild is worth a
+    new set is to see how much rated material exists now versus what the
+    current sample covers.
+    """
+
+    assets = db.scalars(select(Asset).order_by(Asset.id.asc())).all()
+    per_rating: dict[str, int] = {rating: 0 for rating in RATING_TO_LEVEL}
+    deduped_per_rating: dict[str, int] = {rating: 0 for rating in RATING_TO_LEVEL}
+    deleted_excluded = 0
+    seen_sha256: set[str] = set()
+    duplicate_skipped = 0
+    for asset in assets:
+        rating = rating_from_original_name(asset.original_name)
+        if rating is None:
+            continue
+        per_rating[rating] += 1
+        if not include_deleted and asset.status == "deleted":
+            deleted_excluded += 1
+            continue
+        if asset.sha256 in seen_sha256:
+            duplicate_skipped += 1
+            continue
+        seen_sha256.add(asset.sha256)
+        deduped_per_rating[rating] += 1
+
+    max_per_level = min(deduped_per_rating.values()) if deduped_per_rating else 0
+    current = db.scalar(
+        select(BaselineSet).where(BaselineSet.name == BALANCED_GOLDEN_SET_NAME)
+    )
+    current_summary: dict[str, Any] | None = None
+    if current is not None:
+        current_asset_ids = set(
+            db.scalars(
+                select(BaselineSetItem.asset_id).where(
+                    BaselineSetItem.baseline_set_id == current.id
+                )
+            ).all()
+        )
+        current_summary = {
+            "baseline_set_id": current.id,
+            "name": current.name,
+            "item_count": len(current_asset_ids),
+            "run_count": len(current.runs),
+            "max_asset_id": max(current_asset_ids) if current_asset_ids else None,
+            "created_at": current.created_at.isoformat(),
+        }
+    return {
+        "candidate_total": sum(per_rating.values()),
+        "candidate_distribution": per_rating,
+        "selectable_distribution": deduped_per_rating,
+        "max_per_level": max_per_level,
+        "duplicate_sha256_skipped": duplicate_skipped,
+        "deleted_excluded": deleted_excluded,
+        "include_deleted": include_deleted,
+        "strategies": list(BALANCED_REBUILD_STRATEGIES),
+        "current_balanced_set": current_summary,
+    }
+
+
+def rebuild_inspiration_balanced_golden_set(
+    db: Session,
+    *,
+    created_by: str,
+    per_level: int = 20,
+    strategy: str = "stable_hash",
+    seed: int = 1,
+) -> tuple[BaselineSet, dict[str, Any]]:
+    """Freeze a *new* balanced sample that can include newly rated material.
+
+    The original sample is never rewritten. It is frozen truth with runs
+    already attached, and mutating it in place would silently change what
+    those historical runs were measured against. A rebuild therefore always
+    lands in a new set, named from its own parameters.
+
+    ``strategy`` decides which rated asset wins a level's quota once the pool
+    exceeds it:
+
+    - ``stable_hash`` spreads the draw across the whole corpus by a seeded
+      deterministic hash, so a rebuild is representative rather than biased
+      toward one end of the upload history. This is the default precisely
+      because the original sample drew ascending and therefore froze only the
+      earliest uploads.
+    - ``newest`` / ``oldest`` draw by upload recency when an operator
+      deliberately wants the latest or the earliest batch.
+
+    All three are deterministic: the same parameters over the same corpus
+    reproduce the same fingerprint, which is what keeps the set frozen.
+    """
+
+    if per_level < 1:
+        raise ValueError("每级张数必须至少为 1")
+    if strategy not in BALANCED_REBUILD_STRATEGIES:
+        raise ValueError(
+            "不支持的抽样方式："
+            f"{strategy}；可用 {', '.join(BALANCED_REBUILD_STRATEGIES)}"
+        )
+
+    # Soft-deleted rows are hidden from the operator's asset list, so a *fresh*
+    # sample must not quietly draw them. This differs from the frozen corpus
+    # above, which must never shrink once rated.
+    assets = db.scalars(select(Asset).order_by(Asset.id.asc())).all()
+    candidate_distribution = {rating: 0 for rating in RATING_TO_LEVEL}
+    pools: dict[str, list[Asset]] = {rating: [] for rating in RATING_TO_LEVEL}
+    seen_sha256: set[str] = set()
+    duplicate_skipped = 0
+    deleted_excluded = 0
+    for asset in assets:
+        rating = rating_from_original_name(asset.original_name)
+        if rating is None:
+            continue
+        candidate_distribution[rating] += 1
+        if asset.status == "deleted":
+            deleted_excluded += 1
+            continue
+        if asset.sha256 in seen_sha256:
+            duplicate_skipped += 1
+            continue
+        seen_sha256.add(asset.sha256)
+        pools[rating].append(asset)
+
+    if not any(pools.values()):
+        raise ValueError("未找到文件名含人工评级前缀的可用灵感图资产")
+
+    shortfall = {
+        rating: per_level - len(pool)
+        for rating, pool in pools.items()
+        if len(pool) < per_level
+    }
+    if shortfall:
+        available = {rating: len(pool) for rating, pool in pools.items()}
+        raise ValueError(
+            f"每级 {per_level} 张的口径无法满足，以下等级不够："
+            f"{json.dumps(shortfall, ensure_ascii=False, sort_keys=True)}；"
+            f"当前可选 {json.dumps(available, ensure_ascii=False, sort_keys=True)}"
+        )
+
+    def order_key(asset: Asset) -> tuple[Any, ...]:
+        if strategy == "newest":
+            return (-asset.id,)
+        if strategy == "oldest":
+            return (asset.id,)
+        return (
+            _stable_fraction(f"{BALANCED_REBUILD_NAMESPACE}:{seed}", asset.id),
+            asset.id,
+        )
+
+    selected: list[tuple[Asset, str, str]] = []
+    for rating in sorted(pools):
+        chosen = sorted(pools[rating], key=order_key)[:per_level]
+        for asset in chosen:
+            selected.append((asset, rating, RATING_TO_LEVEL[rating]))
+    selected.sort(key=lambda entry: entry[0].id)
+
+    distribution = {rating: 0 for rating in RATING_TO_LEVEL}
+    for _asset, rating, _level in selected:
+        distribution[rating] += 1
+
+    truth_source = (
+        "灵感图人工评级前缀-均衡重建-"
+        f"{_rebuild_parameter_suffix(strategy, seed)}"
+    )
+    name = balanced_rebuild_set_name(
+        per_level=per_level, strategy=strategy, seed=seed
+    )
+    manifest = [
+        {
+            "asset_id": asset.id,
+            "asset_sha256": asset.sha256,
+            "expected_level": level,
+        }
+        for asset, _rating, level in selected
+    ]
+    fingerprint = baseline_set_fingerprint(
+        manifest, category_key="inspiration_image"
+    )
+
+    previous = db.scalar(
+        select(BaselineSet).where(BaselineSet.name == BALANCED_GOLDEN_SET_NAME)
+    )
+    previous_asset_ids: set[int] = set()
+    if previous is not None:
+        previous_asset_ids = set(
+            db.scalars(
+                select(BaselineSetItem.asset_id).where(
+                    BaselineSetItem.baseline_set_id == previous.id
+                )
+            ).all()
+        )
+    selected_ids = {asset.id for asset, _rating, _level in selected}
+    coverage = {
+        "previous_balanced_set_id": previous.id if previous is not None else None,
+        "reused_asset_count": len(selected_ids & previous_asset_ids),
+        "new_asset_count": len(selected_ids - previous_asset_ids),
+        "selected_asset_id_min": min(selected_ids),
+        "selected_asset_id_max": max(selected_ids),
+    }
+
+    report_base = {
+        "item_count": len(selected),
+        "distribution": distribution,
+        "fingerprint": fingerprint,
+        "candidate_distribution": candidate_distribution,
+        "selectable_distribution": {
+            rating: len(pool) for rating, pool in pools.items()
+        },
+        "per_level": per_level,
+        "strategy": strategy,
+        "seed": seed,
+        "duplicate_sha256_skipped": duplicate_skipped,
+        "deleted_excluded": deleted_excluded,
+        "candidate_selection": f"dedupe_sha256_then_{strategy}_per_rating",
+        "coverage": coverage,
+        "name": name,
+    }
+
+    existing = db.scalar(select(BaselineSet).where(BaselineSet.name == name))
+    if existing is not None:
+        if existing.fingerprint != fingerprint:
+            raise ValueError(
+                "同参数的均衡样本已存在，但当前人工真值算出的指纹不同；"
+                "冻结集禁止原地改写，请换一个 seed 重建"
+            )
+        return existing, {
+            **report_base,
+            "created": False,
+            "idempotent": True,
+            "baseline_set_id": existing.id,
+        }
+
+    baseline_set = BaselineSet(
+        category_key="inspiration_image",
+        name=name,
+        description=(
+            f"图片级人工真值；仅由文件名人工评级前缀生成。每级 {per_level} 张，"
+            f"按 SHA-256 去重后以 {strategy}（seed={seed}）确定性抽样，"
+            "不含已删除素材。原始 asset.category_key 保持不变。"
+        ),
+        default_expected_level="L3",
+        fingerprint=fingerprint,
+        created_by=created_by,
+    )
+    db.add(baseline_set)
+    db.flush()
+    for asset, rating, level in selected:
+        db.add(
+            BaselineSetItem(
+                baseline_set_id=baseline_set.id,
+                asset_id=asset.id,
+                source_package_id=None,
+                expected_level=level,
+                asset_snapshot_json=canonical_json(
+                    _human_rating_snapshot(asset, rating, truth_source)
+                ),
+            )
+        )
+        if len(db.new) >= 500:
+            db.flush()
+    db.flush()
+    persisted_count = db.scalar(
+        select(func.count(BaselineSetItem.id)).where(
+            BaselineSetItem.baseline_set_id == baseline_set.id
+        )
+    )
+    if persisted_count != len(selected):
+        raise ValueError(
+            f"均衡样本落库条目不完整：expected={len(selected)}, "
+            f"actual={persisted_count}"
+        )
+    append_audit_event(
+        db,
+        category="baseline_regression",
+        action="inspiration_balanced_sample_rebuilt",
+        subject_type="baseline_set",
+        subject_id=baseline_set.id,
+        actor=created_by,
+        payload={
+            "category_key": "inspiration_image",
+            "truth_updated_by": truth_source,
+            "asset_category_mutations": 0,
+            **report_base,
+        },
+        event_key=f"inspiration-balanced-rebuild:{fingerprint}",
+    )
+    db.commit()
+    db.refresh(baseline_set)
+    return baseline_set, {
+        **report_base,
+        "created": True,
+        "idempotent": False,
+        "baseline_set_id": baseline_set.id,
+    }
 
 
 def _wilson_lower_bound(successes: int, total: int, *, z: float = 1.96) -> float:

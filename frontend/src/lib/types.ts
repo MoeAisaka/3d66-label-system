@@ -729,6 +729,52 @@ export type BaselineSetSummary = {
   created_at: string
 }
 
+export type BalancedRebuildStrategy = "stable_hash" | "newest" | "oldest"
+
+export type BalancedRebuildSurvey = {
+  candidate_total: number
+  candidate_distribution: Record<string, number>
+  selectable_distribution: Record<string, number>
+  max_per_level: number
+  duplicate_sha256_skipped: number
+  deleted_excluded: number
+  include_deleted: boolean
+  strategies: BalancedRebuildStrategy[]
+  current_balanced_set: {
+    baseline_set_id: number
+    name: string
+    item_count: number
+    run_count: number
+    max_asset_id: number | null
+    created_at: string
+  } | null
+}
+
+export type BalancedRebuildResult = {
+  summary: BaselineSetSummary
+  created: boolean
+  idempotent: boolean
+  baseline_set_id: number
+  item_count: number
+  distribution: Record<string, number>
+  selectable_distribution: Record<string, number>
+  fingerprint: string
+  per_level: number
+  strategy: BalancedRebuildStrategy
+  seed: number
+  duplicate_sha256_skipped: number
+  deleted_excluded: number
+  candidate_selection: string
+  name: string
+  coverage: {
+    previous_balanced_set_id: number | null
+    reused_asset_count: number
+    new_asset_count: number
+    selected_asset_id_min: number
+    selected_asset_id_max: number
+  }
+}
+
 export type BaselineSetItem = {
   id: number
   asset_id: number

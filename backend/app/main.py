@@ -1182,6 +1182,19 @@ class BaselineSetCreateRequest(BaseModel):
         return self
 
 
+class BalancedSampleRebuildRequest(BaseModel):
+    """Parameters of a rebuilt balanced sample.
+
+    All three decide the frozen set's name and fingerprint, so replaying the
+    same parameters is idempotent and a different seed necessarily produces a
+    new set rather than rewriting one that runs already reference.
+    """
+
+    per_level: int = Field(default=20, ge=1, le=500)
+    strategy: Literal["stable_hash", "newest", "oldest"] = "stable_hash"
+    seed: int = Field(default=1, ge=1, le=1_000_000)
+
+
 class BaselineRunCategoryContext(BaseModel):
     source: Literal["baseline_set"]
     category_key: str = Field(pattern=r"^[a-z][a-z0-9_]{2,39}$")
@@ -10761,6 +10774,60 @@ def create_inspiration_balanced_baseline_set(
         baseline_set, report = ensure_inspiration_balanced_golden_set(
             db,
             created_by=user.username,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {
+        "summary": _baseline_set_summary(
+            baseline_set,
+            item_count=int(report["item_count"]),
+        ),
+        **report,
+    }
+
+
+@app.get("/api/baseline-sets/inspiration-balanced-sample/rebuild-survey")
+def survey_inspiration_balanced_rebuild(
+    include_deleted: bool = False,
+    _user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """Read-only: how much rated material a rebuild could draw from now."""
+
+    from .inspiration_auto_correction import (
+        survey_inspiration_balanced_candidates,
+    )
+
+    return survey_inspiration_balanced_candidates(
+        db, include_deleted=include_deleted
+    )
+
+
+@app.post("/api/baseline-sets/inspiration-balanced-sample/rebuild")
+def rebuild_inspiration_balanced_sample(
+    payload: BalancedSampleRebuildRequest | None = None,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """Freeze a new balanced sample that can include newly rated material.
+
+    This never rewrites the original balanced set: that set is frozen truth
+    with runs attached, so a rebuild lands in a new set named from its own
+    parameters.
+    """
+
+    request = payload or BalancedSampleRebuildRequest()
+    from .inspiration_auto_correction import (
+        rebuild_inspiration_balanced_golden_set,
+    )
+
+    try:
+        baseline_set, report = rebuild_inspiration_balanced_golden_set(
+            db,
+            created_by=user.username,
+            per_level=request.per_level,
+            strategy=request.strategy,
+            seed=request.seed,
         )
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
