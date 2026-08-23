@@ -329,6 +329,53 @@ def resolve_frozen_anchor_assets(
     }
 
 
+def _binding_mismatch_detail(
+    frozen_v3_bundle: dict[str, object],
+    strategy_bundle: StrategyBundle | SimpleNamespace,
+    exc: Exception,
+) -> str:
+    """Name the mismatched versions and the two ways an operator can fix it.
+
+    A bare "bindings do not match" leaves the operator with nothing to act on:
+    they cannot tell which of the two calls disagreed, what the contract expected,
+    or whether to change the pick or the mechanism.  Spell all of it out.
+    """
+    contract = frozen_v3_bundle.get("contract")
+    bindings = (
+        contract.get("prompt_bindings") if isinstance(contract, dict) else None
+    )
+    declared_a = declared_b = None
+    if isinstance(bindings, dict):
+        declared_a = bindings.get("call_a_version")
+        declared_b = bindings.get("call_b_version")
+    picked_a = getattr(strategy_bundle, "prompt_a_version", None)
+    picked_b = getattr(strategy_bundle, "prompt_b_version", None)
+    revision_id = frozen_v3_bundle.get("candidate_revision_id")
+
+    rows: list[str] = []
+    for label, declared, picked in (
+        ("调用A", declared_a, picked_a),
+        ("调用B", declared_b, picked_b),
+    ):
+        mark = "一致" if declared == picked else "不一致 ←"
+        rows.append(
+            f"  {label}：等级撮合器声明「{declared or '(未声明)'}」，"
+            f"本次选择「{picked or '(未选择)'}」　{mark}"
+        )
+    return (
+        f"等级撮合器（候选修订 id={revision_id}）绑定的 Prompt 版本与本次选择不一致，"
+        f"本次不出分。\n"
+        + "\n".join(rows)
+        + "\n为什么必须拦下：撮合器的维度规则、权重与输出结构是按它声明的那对 A/B "
+        "标定的，换成别的版本跑出来的分不能算作该撮合器的成绩；若继续执行，成绩会"
+        "记在一个从未真正参与的组合名下。\n"
+        "修复办法（二选一）：一是把选择改回撮合器声明的那对版本；二是新建/编辑一个"
+        "等级撮合器修订，把它的 prompt_bindings 指向你想跑的版本（若该撮合器带 "
+        "aesthetic_foundation，其 call_b_version 也要一并改），再用新修订发起。\n"
+        f"原始校验信息：{exc}"
+    )
+
+
 def validate_candidate_strategy_prompt_bindings(
     frozen_v3_bundle: object,
     strategy_bundle: StrategyBundle | SimpleNamespace | None,
@@ -349,7 +396,7 @@ def validate_candidate_strategy_prompt_bindings(
         )
     except CategoryEvaluationPromptBindingError as exc:
         raise RuntimeError(
-            f"冻结候选合同 Prompt 绑定与 StrategyBundle 不一致：{exc}"
+            _binding_mismatch_detail(frozen_v3_bundle, strategy_bundle, exc)
         ) from exc
 
 

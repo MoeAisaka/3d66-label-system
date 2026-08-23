@@ -206,11 +206,22 @@ def test_worker_rejects_frozen_candidate_prompt_binding_drift() -> None:
         prompt_b_version="unexpected-old-b-version",
     )
 
-    with pytest.raises(RuntimeError, match="候选合同 Prompt 绑定"):
+    # 拦下时必须点名哪一路不一致并给出修复办法，而不是只丢一句「绑定不一致」。
+    with pytest.raises(RuntimeError, match="unexpected-old-b-version.*不一致") as excinfo:
         worker.validate_candidate_strategy_prompt_bindings(
             frozen_candidate,
             strategy_bundle,
         )
+
+    detail = str(excinfo.value)
+    # 点名候选修订、两路各自的声明值与选择值，运营才知道改哪一个。
+    assert "id=91" in detail
+    assert contract["prompt_bindings"]["call_b_version"] in detail
+    assert "unexpected-old-b-version" in detail
+    # 调用A本来就一致，不能被一起标成问题。
+    assert "调用A：" in detail and "调用B：" in detail
+    assert "修复办法" in detail
+    assert "不出分" in detail
 
 
 # 合成的特有维度 key（仅测试用）：方案 A 的真实合同 specific_group 为空，为回归

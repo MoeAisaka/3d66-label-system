@@ -361,7 +361,8 @@ def test_baseline_run_can_freeze_candidate_v3_revision_without_changing_projecti
 
         monkeypatch.setattr(worker, "session_scope", test_scope)
         monkeypatch.setattr(worker, "DoubaoClient", UnexpectedProviderClient)
-        with pytest.raises(RuntimeError, match="候选合同 Prompt 绑定"):
+        # 绑定漂移必须在任何 provider 调用之前拦下，且原因要点名不一致的版本。
+        with pytest.raises(RuntimeError, match="绑定的 Prompt 版本与本次选择不一致"):
             asyncio.run(worker.evaluate_job(job.id))
         assert provider_constructions == 0
     finally:
