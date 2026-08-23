@@ -12,6 +12,7 @@ from app.dimension_deduction_bridge import (
     DimensionDeductionBridgeError,
     FALLBACK_WARNING,
     OPERATOR_PROMPT_TEMPLATE_VERSION,
+    _SUPPORTED_PLACEHOLDERS,
     call_multimodal_for_dimension_deductions,
     compose_rule_deductions,
     empty_deduction_output,
@@ -457,6 +458,64 @@ def test_operator_prompt_with_only_system_body_still_runs() -> None:
     assert "{{" not in client.user
     assert output["prompt_identity"]["operator_prompt_version"] == operator.version
     assert output["warning"] is None
+
+
+def test_operator_prompt_worker_placeholders_are_substituted() -> None:
+    """worker 调用B路径支持的占位符，规则计分路径必须同样替换。
+
+    现网有 15 个 B 版本写了 {{rubric_version}}、3 个写了 {{image_metadata}}。
+    这条路径若不替换，运营会拿到未替换的字面量——等于悄悄跑了个坏提示词。
+    """
+    config = build_inspiration_subcategory_dimensions()["class_one"]
+    client = Client()
+    operator = OperatorPrompt(
+        user_prompt=(
+            "评测规则版本：{{rubric_version}}\n"
+            "图片元数据：{{image_metadata}}\n"
+            "调用A原始输出：{{previous_output}}"
+        )
+    )
+
+    output = asyncio.run(
+        call_multimodal_for_dimension_deductions(
+            "image.jpg", config, client=client, mime_type="image/jpeg",
+            operator_prompt=operator,
+            image_metadata={"width": 1920, "height": 1080},
+            rubric_version="inspiration-rubric-v1",
+            previous_output='{"scope":"in_scope"}',
+        )
+    )
+
+    assert "inspiration-rubric-v1" in client.user
+    assert '"width": 1920' in client.user
+    assert '{"scope":"in_scope"}' in client.user
+    # 一个未替换的占位符都不许发出去。
+    assert "{{" not in client.user
+    assert output["prompt_identity"]["operator_prompt_version"] == operator.version
+
+
+def test_operator_prompt_unknown_placeholder_fails_closed() -> None:
+    """引擎不认识的占位符必须拒单，而不是把字面量发给模型。"""
+    config = build_inspiration_subcategory_dimensions()["class_one"]
+    client = Client()
+    operator = OperatorPrompt(user_prompt="请参考 {{human_truth}} 打分")
+
+    with pytest.raises(DimensionDeductionBridgeError) as excinfo:
+        asyncio.run(
+            call_multimodal_for_dimension_deductions(
+                "image.jpg", config, client=client, mime_type="image/jpeg",
+                operator_prompt=operator,
+            )
+        )
+
+    assert excinfo.value.code == "operator_prompt_unknown_placeholder"
+    detail = str(excinfo.value)
+    assert "{{human_truth}}" in detail
+    # 必须告诉运营可用的占位符有哪些。
+    for supported in _SUPPORTED_PLACEHOLDERS:
+        assert supported in detail
+    assert "修复办法" in detail
+    assert client.user == ""
 
 
 def test_operator_prompt_with_no_body_at_all_fails_closed() -> None:

@@ -478,6 +478,9 @@ async def evaluate_v3_authoritative(
     precheck: Any,
     aesthetic: Any,
     operator_prompt_b: Any = None,
+    image_metadata: Any = None,
+    rubric_version: str | None = None,
+    previous_output: str | None = None,
 ) -> dict:
     """编排一次 v3 权威评分，返回 ``evaluate_one`` 的 ``result``。
 
@@ -641,6 +644,9 @@ async def evaluate_v3_authoritative(
                         mime_type=mime_type,
                         precheck=precheck_obj,
                         operator_prompt=selected_prompt_b,
+                        image_metadata=image_metadata,
+                        rubric_version=rubric_version,
+                        previous_output=previous_output,
                     )
                 )
             except DimensionDeductionBridgeError as exc:

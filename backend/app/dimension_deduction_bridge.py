@@ -16,6 +16,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import re
 from collections.abc import Mapping
 from typing import Any
 
@@ -51,6 +52,22 @@ _WEIGHT_TOLERANCE = 1e-9
 RULES_PLACEHOLDER = "{{dimension_rules}}"
 RESPONSE_CONTRACT_PLACEHOLDER = "{{response_contract}}"
 PRECHECK_PLACEHOLDER = "{{precheck_json}}"
+# 调用B在 worker 侧一直支持这两个占位符，规则计分路径必须同样支持，否则运营写下
+# 它们只会拿到未替换的字面量——那等于悄悄跑了一个坏掉的提示词。
+IMAGE_METADATA_PLACEHOLDER = "{{image_metadata}}"
+RUBRIC_VERSION_PLACEHOLDER = "{{rubric_version}}"
+PREVIOUS_OUTPUT_PLACEHOLDER = "{{previous_output}}"
+_UNRESOLVED_PLACEHOLDER_PATTERN = re.compile(r"\{\{[A-Za-z0-9_]+\}\}")
+# 平台承诺可用于调用B正文的全部占位符。写在这里是为了让「未知占位符」的判断有一份
+# 单一事实来源：任何一处新增支持都必须同步登记，否则运营会被误判拒单。
+_SUPPORTED_PLACEHOLDERS = (
+    RULES_PLACEHOLDER,
+    PRECHECK_PLACEHOLDER,
+    RESPONSE_CONTRACT_PLACEHOLDER,
+    IMAGE_METADATA_PLACEHOLDER,
+    RUBRIC_VERSION_PLACEHOLDER,
+    PREVIOUS_OUTPUT_PLACEHOLDER,
+)
 
 
 class DimensionDeductionBridgeError(ValueError):
@@ -514,6 +531,31 @@ def _server_injected_blocks(contract: Any) -> str:
         return "本赛道的全部维度规则"
 
 
+def _unknown_placeholders(user_prompt: str) -> list[str]:
+    """Return ``{{name}}`` tokens this path cannot substitute, in first-seen order."""
+    seen: list[str] = []
+    for token in _UNRESOLVED_PLACEHOLDER_PATTERN.findall(user_prompt or ""):
+        if token not in _SUPPORTED_PLACEHOLDERS and token not in seen:
+            seen.append(token)
+    return seen
+
+
+def _unknown_placeholder_refusal_detail(
+    operator_prompt: Any, unknown: list[str]
+) -> str:
+    """Explain which placeholders are unsupported and what may be used instead."""
+    version = _operator_prompt_label(operator_prompt)
+    return (
+        f"手选调用B「{version}」无法执行，本次不出分。\n"
+        f"原因：正文里的占位符 {'、'.join(unknown)} 不是平台支持的占位符，"
+        f"服务端无法替换它们。若照原样发给模型，模型会把 "
+        f"{unknown[0]} 当成字面文本，评分结果不可信，所以这里直接拒绝而不是带病运行。\n"
+        f"可用的占位符只有：{'、'.join(_SUPPORTED_PLACEHOLDERS)}。\n"
+        f"修复办法：把上述不支持的占位符删掉，或改写成可用占位符之一；"
+        f"若只是想描述文字内容，请不要使用双花括号写法。"
+    )
+
+
 def _empty_body_refusal_detail(operator_prompt: Any, contract: Any) -> str:
     """Explain why a picked B with no text at all cannot run, in actionable terms.
 
@@ -544,17 +586,24 @@ def build_operator_dimension_deduction_prompt(
     operator_prompt: Any,
     *,
     precheck: dict[str, Any] | None = None,
+    image_metadata: Mapping[str, Any] | None = None,
+    rubric_version: str | None = None,
+    previous_output: str | None = None,
 ) -> tuple[str, str]:
     """Run the operator-selected B version's own body, whatever it declares.
 
     The operator's text always executes: it owns persona, wording and reasoning
-    guidance.  The three server-owned blocks (rule list, Call-A precheck, output
+    guidance.  The server-owned blocks (rule list, Call-A precheck, output
     contract) are placed at the operator's chosen position when the matching
     placeholder appears, and appended otherwise -- so a version that predates
     the placeholders still runs faithfully instead of being refused or, worse,
     silently replaced by the contract body.  What the operator can never do is
     drop a rule or reshape the JSON the deterministic composer parses, because
     those blocks are injected either way.
+
+    ``{{image_metadata}}`` and ``{{rubric_version}}`` are substituted too: the
+    worker's own Call-B path has always supported them, and leaving them literal
+    here would quietly ship a broken prompt.
     """
     dimensions, _, _, mode = _configured_rules(config)
     bonus_cap = mode == "bonus_cap_v2"
@@ -567,6 +616,37 @@ def build_operator_dimension_deduction_prompt(
         raise DimensionDeductionBridgeError(
             "operator_prompt_body_empty",
             _empty_body_refusal_detail(operator_prompt, config),
+        )
+    unknown = _unknown_placeholders(user_template)
+    if unknown:
+        # Sending an unsubstituted ``{{name}}`` to the model is a silently broken
+        # run.  Name the offenders and the supported set instead.
+        raise DimensionDeductionBridgeError(
+            "operator_prompt_unknown_placeholder",
+            _unknown_placeholder_refusal_detail(operator_prompt, unknown),
+        )
+    if RUBRIC_VERSION_PLACEHOLDER in user_template:
+        user_template = user_template.replace(
+            RUBRIC_VERSION_PLACEHOLDER,
+            str(
+                rubric_version
+                if rubric_version is not None
+                else getattr(operator_prompt, "rubric_version", "") or ""
+            ),
+        )
+    if IMAGE_METADATA_PLACEHOLDER in user_template:
+        user_template = user_template.replace(
+            IMAGE_METADATA_PLACEHOLDER,
+            json.dumps(dict(image_metadata or {}), ensure_ascii=False, sort_keys=True),
+        )
+    if PREVIOUS_OUTPUT_PLACEHOLDER in user_template:
+        # worker 侧把它替换为调用A的原始输出。这条路径上调用A的产物就是 precheck，
+        # 所以用它的 JSON 原文，语义一致且不会留下未替换的字面量。
+        user_template = user_template.replace(
+            PREVIOUS_OUTPUT_PLACEHOLDER,
+            previous_output
+            if previous_output is not None
+            else json.dumps(dict(precheck or {}), ensure_ascii=False, sort_keys=True),
         )
     rules_text = _rules_text(dimensions, bonus_cap=bonus_cap)
     rules_block = "必须逐条核验以下维度规则：\n" + rules_text
@@ -670,6 +750,9 @@ async def call_multimodal_for_dimension_deductions(
     mime_type: str,
     precheck: dict[str, Any] | None = None,
     operator_prompt: Any = None,
+    image_metadata: Mapping[str, Any] | None = None,
+    rubric_version: str | None = None,
+    previous_output: str | None = None,
 ) -> dict[str, Any]:
     """Call the multimodal model and normalize rule hits.
 
@@ -691,7 +774,12 @@ async def call_multimodal_for_dimension_deductions(
     ):
         operator_version = str(getattr(operator_prompt, "version", "") or "") or None
         system_prompt, user_prompt = build_operator_dimension_deduction_prompt(
-            contract, operator_prompt, precheck=precheck
+            contract,
+            operator_prompt,
+            precheck=precheck,
+            image_metadata=image_metadata,
+            rubric_version=rubric_version,
+            previous_output=previous_output,
         )
     elif operator_prompt is not None:
         # The picked version has no body to run.  Substituting the contract body

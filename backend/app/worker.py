@@ -1098,6 +1098,9 @@ async def evaluate_job(job_id: int) -> None:
     v3_bundle_for_job: dict[str, object] | None = None
     aesthetic_foundation_active = False
     frozen_anchor_assets: dict[int, SimpleNamespace] | None = None
+    # 调用A的原始输出。只在走调用B的分支里被赋值，但 v3 评分在该分支之外也要用它
+    # 替换手选正文里的 {{previous_output}}，所以在函数级先声明。
+    previous_output: str | None = None
     with session_scope() as db:
         job = db.get(EvaluationJob, job_id)
         if not job:
@@ -2276,6 +2279,13 @@ async def evaluate_job(job_id: int) -> None:
                 aesthetic=aesthetic,
                 # 规则计分模式下手选调用B接管正文；否则该参数无副作用。
                 operator_prompt_b=prompt_b,
+                # 手选正文里的 {{image_metadata}}/{{rubric_version}}/
+                # {{previous_output}} 必须拿到真实数据，否则会把字面量发给模型。
+                image_metadata=metadata,
+                rubric_version=(
+                    prompt_b.rubric_version if prompt_b else prompt_a.rubric_version
+                ),
+                previous_output=previous_output,
             )
             scoring = build_v3_authoritative_scoring(
                 v3_result,
