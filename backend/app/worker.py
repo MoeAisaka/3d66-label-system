@@ -298,10 +298,13 @@ def resolve_frozen_anchor_assets(
 ) -> dict[int, SimpleNamespace] | None:
     """Read the server-owned anchor file metadata for one frozen V3 contract.
 
-    Candidate contracts can freeze the public ``asset_id``/MIME/SHA tuple without
-    revealing the upload namespace's internal file name.  This lookup deliberately
-    performs no repair or fallback: missing assets are left for the anchor request
-    builder to reject as a closed technical failure before any provider call.
+    Every anchor is looked up in the asset table, including the legacy four whose
+    contracts froze a ``stored_name``.  A frozen stored name only ever names a
+    file inside the local upload namespace, so it cannot describe an anchor whose
+    bytes live on the read-only NAS share; the asset table is the sole record of
+    which backend holds a file.  This lookup deliberately performs no repair or
+    fallback: missing assets are left for the anchor request builder to reject as
+    a closed technical failure before any provider call.
     """
     from .inspiration_aesthetic_foundation import validate_anchor_contract
 
@@ -309,9 +312,6 @@ def resolve_frozen_anchor_assets(
     if not isinstance(foundation, dict):
         return None
     anchors = validate_anchor_contract(foundation.get("anchors"))
-    if all("stored_name" in anchor for anchor in anchors):
-        # 现役四锚的内部文件名已随合同冻结；保持原有无资产表查询的行为。
-        return None
     anchor_ids = [int(anchor["asset_id"]) for anchor in anchors]
     anchor_rows = db.scalars(
         select(Asset).where(Asset.id.in_(anchor_ids))

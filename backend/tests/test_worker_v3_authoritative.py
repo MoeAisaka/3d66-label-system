@@ -159,14 +159,40 @@ def test_worker_resolves_candidate_l5_stored_name_from_frozen_asset_id(sessions)
     assert assets[339].sha256 == "f" * 64
 
 
-def test_worker_keeps_legacy_four_anchor_contract_without_asset_lookup() -> None:
+def test_worker_reads_asset_backend_for_legacy_four_anchor_contract(sessions) -> None:
+    """A frozen stored_name cannot reveal that an anchor now lives on the NAS.
+
+    The legacy four anchors froze a ``stored_name`` back when every asset was
+    local.  After those files moved to the read-only NAS share, only the asset
+    table knows which backend holds them, so the lookup must still run.
+    """
     contract = build_inspiration_v3_contract()
+    anchors = contract["aesthetic_foundation"]["anchors"]
+    assert all("stored_name" in anchor for anchor in anchors)
 
-    class UnexpectedAssetLookup:
-        def scalars(self, _statement):
-            raise AssertionError("现役四锚不应查询资产表")
+    with sessions() as db:
+        for anchor in anchors:
+            db.add(Asset(
+                id=anchor["asset_id"],
+                original_name=f"anchor-{anchor['level']}.png",
+                stored_name=anchor["stored_name"],
+                storage_backend="nas_maps",
+                source_uri=f"nas://maps/anchors/{anchor['level']}.png",
+                mime_type=anchor["mime_type"],
+                size_bytes=1,
+                sha256=anchor["sha256"],
+                category_key=_CATEGORY_KEY,
+            ))
+        db.commit()
 
-    assert worker.resolve_frozen_anchor_assets(UnexpectedAssetLookup(), contract) is None
+        assets = worker.resolve_frozen_anchor_assets(db, contract)
+
+    assert assets is not None, "现役四锚必须查询资产表才能得知 NAS 后端"
+    for anchor in anchors:
+        resolved = assets[anchor["asset_id"]]
+        assert resolved.storage_backend == "nas_maps"
+        assert resolved.source_uri == f"nas://maps/anchors/{anchor['level']}.png"
+        assert resolved.stored_name == anchor["stored_name"]
 
 
 def test_worker_rejects_frozen_candidate_prompt_binding_drift() -> None:
