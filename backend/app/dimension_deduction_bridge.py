@@ -42,15 +42,12 @@ OPERATOR_PROMPT_TEMPLATE_VERSION = "dimension-deduction-prompt-v3-operator-selec
 RULE_COMPOSITION_VERSION = "dimension-rule-composition-v1"
 RULE_COMPOSITION_V2 = "dimension-rule-composition-v2-bonus-cap"
 FALLBACK_WARNING = "调用B失败，维度分按满分通过（安全兜底）"
-OPERATOR_PROMPT_BYPASS_WARNING = (
-    "手选调用B未声明 {{dimension_rules}} 占位符，本次由维度合同正文执行；"
-    "该结果不可归因于所选调用B版本"
-)
 _WEIGHT_TOLERANCE = 1e-9
 
 # 运营手选的调用 B 正文靠这些占位符接管规则模式：规则清单与输出结构由服务端
 # 强制注入，手选正文只决定人设、口径与推理引导。声明 RULES_PLACEHOLDER 即视为
-# 显式要求接管；未声明的历史版本继续由合同生成正文，但归因必须如实标注。
+# 显式要求接管；未声明的手选版本一律拒绝执行并如实说明原因，绝不降级成合同正文
+# 假装跑过该版本。
 RULES_PLACEHOLDER = "{{dimension_rules}}"
 RESPONSE_CONTRACT_PLACEHOLDER = "{{response_contract}}"
 PRECHECK_PLACEHOLDER = "{{precheck_json}}"
@@ -474,17 +471,72 @@ def _response_contract_text(
 
 
 def operator_prompt_declares_rule_takeover(operator_prompt: Any) -> bool:
-    """True when a hand-picked B version asks to own the rule-mode prompt body.
+    """True when a hand-picked B version has any text of its own to run.
 
-    Declaring ``{{dimension_rules}}`` is the opt-in: such a version replaces the
-    contract-generated persona and wording.  Versions without the placeholder
-    cannot be executed on this path at all, because the rule list would never
-    reach the model -- the historical silent-bypass defect.
+    Either body counts.  Many published versions keep the whole scoring rubric
+    in ``system_prompt`` and leave ``user_prompt`` empty; for those the server
+    supplies the entire user body (rules, Call-A precheck, output contract) and
+    the operator's system text still decides how the model scores.  Declaring a
+    placeholder is optional positioning, never a precondition -- requiring one
+    would reject most existing versions, and the fallback it used to take
+    (running the contract body under the picked version's name) is exactly the
+    silent downgrade this path forbids.
     """
     if operator_prompt is None:
         return False
-    user_prompt = getattr(operator_prompt, "user_prompt", None)
-    return isinstance(user_prompt, str) and RULES_PLACEHOLDER in user_prompt
+    for attribute in ("system_prompt", "user_prompt"):
+        value = getattr(operator_prompt, attribute, None)
+        if isinstance(value, str) and value.strip():
+            return True
+    return False
+
+
+def _operator_prompt_label(operator_prompt: Any) -> str:
+    version = str(getattr(operator_prompt, "version", "") or "").strip()
+    return version or "(未命名版本)"
+
+
+def _server_injected_blocks(contract: Any) -> str:
+    """Describe what the server adds around the operator's body, for diagnostics."""
+    try:
+        dimensions, _, _, mode = _configured_rules(contract)
+        deduction_count = sum(
+            len(dimension.get("deduction_rules") or []) for dimension in dimensions
+        )
+        scope = f"{len(dimensions)} 个维度、{deduction_count} 条扣分规则"
+        if mode == "bonus_cap_v2":
+            bonus_count = sum(
+                len(dimension.get("bonus_rules") or []) for dimension in dimensions
+            )
+            scope += f"、{bonus_count} 条加分规则"
+        return scope
+    except Exception:  # noqa: BLE001 - 诊断信息绝不能自己抛错掩盖真实原因
+        return "本赛道的全部维度规则"
+
+
+def _empty_body_refusal_detail(operator_prompt: Any, contract: Any) -> str:
+    """Explain why a picked B with no text at all cannot run, in actionable terms.
+
+    This is a genuine impossibility rather than a compatibility gap: the version
+    contains no instruction of its own, so running anything else would attribute
+    a score to a version that contributed nothing.  A version that fills only
+    one of the two bodies is not affected -- the server supplies the rest.
+    """
+    version = _operator_prompt_label(operator_prompt)
+    return (
+        f"手选调用B「{version}」无法执行，本次不出分。\n"
+        f"原因：该版本的 system 与 user 正文都是空的。服务端会自动补上"
+        f"{_server_injected_blocks(contract)}、调用A预检字段与输出JSON结构，"
+        f"但评分口径、人设与推理引导必须来自你选的这个版本本身，"
+        f"两处都空就没有任何可执行的评分指令。\n"
+        f"修复办法：编辑该调用B版本，把评分口径写进 system 正文或 user 正文"
+        f"（只写一处即可，另一处留空不影响执行）；如需自行控制服务端内容的插入位置，"
+        f"可在 user 正文里使用占位符 {RULES_PLACEHOLDER}（维度规则清单）、"
+        f"{PRECHECK_PLACEHOLDER}（调用A预检结果）、{RESPONSE_CONTRACT_PLACEHOLDER}（输出JSON结构），"
+        f"不写则自动追加到末尾。\n"
+        f"为什么不用合同正文兜底：那样跑出来的分属于合同自带的调用B，"
+        f"不能归因于你选的「{version}」，会污染版本准确率与候选血缘。"
+    )
 
 
 def build_operator_dimension_deduction_prompt(
@@ -493,31 +545,41 @@ def build_operator_dimension_deduction_prompt(
     *,
     precheck: dict[str, Any] | None = None,
 ) -> tuple[str, str]:
-    """Let the operator-selected B version own the rule-mode prompt body.
+    """Run the operator-selected B version's own body, whatever it declares.
 
-    The frozen rule list and the response contract are injected by the server,
-    so a hand-picked version controls persona, wording and reasoning guidance
-    but can never drop a rule or reshape the JSON the deterministic composer
-    parses.  A version that does not declare ``{{dimension_rules}}`` fails
-    closed here instead of being silently ignored.
+    The operator's text always executes: it owns persona, wording and reasoning
+    guidance.  The three server-owned blocks (rule list, Call-A precheck, output
+    contract) are placed at the operator's chosen position when the matching
+    placeholder appears, and appended otherwise -- so a version that predates
+    the placeholders still runs faithfully instead of being refused or, worse,
+    silently replaced by the contract body.  What the operator can never do is
+    drop a rule or reshape the JSON the deterministic composer parses, because
+    those blocks are injected either way.
     """
     dimensions, _, _, mode = _configured_rules(config)
     bonus_cap = mode == "bonus_cap_v2"
     requires_foundation = foundation_required(config)
     system = str(getattr(operator_prompt, "system_prompt", "") or "")
     user_template = str(getattr(operator_prompt, "user_prompt", "") or "")
-    if RULES_PLACEHOLDER not in user_template:
+    if not system.strip() and not user_template.strip():
+        # Only a version with no instruction anywhere is unrunnable.  Filling
+        # just one of the two bodies is a normal, supported shape.
         raise DimensionDeductionBridgeError(
-            "operator_prompt_rules_placeholder_missing",
-            f"手选调用B正文必须包含 {RULES_PLACEHOLDER} 占位符才能接管规则模式评分",
+            "operator_prompt_body_empty",
+            _empty_body_refusal_detail(operator_prompt, config),
         )
-    if not system.strip():
-        raise DimensionDeductionBridgeError(
-            "operator_prompt_system_empty", "手选调用B缺少 system 正文，拒绝执行"
-        )
-    user = user_template.replace(
-        RULES_PLACEHOLDER, _rules_text(dimensions, bonus_cap=bonus_cap)
-    )
+    rules_text = _rules_text(dimensions, bonus_cap=bonus_cap)
+    rules_block = "必须逐条核验以下维度规则：\n" + rules_text
+    if RULES_PLACEHOLDER in user_template:
+        user = user_template.replace(RULES_PLACEHOLDER, rules_text)
+    elif user_template.strip():
+        # Symmetric with the two blocks below: never make a rule list the
+        # operator's to remember.  Forgetting it must not change the score.
+        user = user_template.rstrip() + "\n\n" + rules_block
+    else:
+        # Versions that keep the whole rubric in ``system_prompt`` legitimately
+        # ship an empty user body; the server supplies all of it.
+        user = rules_block
     precheck_text = _precheck_text(precheck)
     if PRECHECK_PLACEHOLDER in user:
         user = user.replace(PRECHECK_PLACEHOLDER, precheck_text)
@@ -624,7 +686,6 @@ async def call_multimodal_for_dimension_deductions(
     """
     _, _, _, mode = _configured_rules(contract)  # local corruption fails closed
     operator_version: str | None = None
-    bypassed_version: str | None = None
     if operator_prompt is not None and operator_prompt_declares_rule_takeover(
         operator_prompt
     ):
@@ -632,15 +693,17 @@ async def call_multimodal_for_dimension_deductions(
         system_prompt, user_prompt = build_operator_dimension_deduction_prompt(
             contract, operator_prompt, precheck=precheck
         )
+    elif operator_prompt is not None:
+        # The picked version has no body to run.  Substituting the contract body
+        # would score the run with a prompt the operator never chose, so refuse
+        # with a reason they can act on.
+        raise DimensionDeductionBridgeError(
+            "operator_prompt_body_empty",
+            _empty_body_refusal_detail(operator_prompt, contract),
+        )
     else:
-        # A selected version that predates the takeover placeholder cannot be
-        # executed here (its body would drop the rule list), so the contract
-        # body still runs -- but the run must say so instead of being filed
-        # under a B version whose text never reached the model.
-        if operator_prompt is not None:
-            bypassed_version = (
-                str(getattr(operator_prompt, "version", "") or "") or None
-            )
+        # No hand-picked deviation: the contract body is this contract's own
+        # official executor, so running it is faithful rather than a downgrade.
         system_prompt, user_prompt = build_dimension_deduction_prompt(
             contract, precheck=precheck
         )
@@ -649,7 +712,6 @@ async def call_multimodal_for_dimension_deductions(
         user_prompt,
         bonus_cap=mode == "bonus_cap_v2",
         operator_prompt_version=operator_version,
-        bypassed_operator_prompt_version=bypassed_version,
     )
     try:
         response = await client.chat_json(
@@ -674,10 +736,6 @@ async def call_multimodal_for_dimension_deductions(
     )
     normalized["prompt_identity"] = prompt_identity
     normalized["raw_payload"] = getattr(response, "raw_payload", parsed)
-    if bypassed_version is not None:
-        # Carried into review_reasons so the run is quarantined rather than
-        # silently counted as a clean result for the selected B version.
-        normalized["warning"] = OPERATOR_PROMPT_BYPASS_WARNING
     return normalized
 
 

@@ -1838,6 +1838,11 @@ async def evaluate_job(job_id: int) -> None:
             prompt_b.user_prompt.replace("{{precheck_json}}", previous_output)
             .replace("{{previous_output}}", response_a.raw_text)
             .replace("{{rubric_version}}", prompt_b.rubric_version)
+            # 调用A侧一直支持 {{image_metadata}}，调用B侧漏了。运营在B里写下这个
+            # 占位符时不该收到未替换的字面量，否则等于把提示词写坏了还照跑。
+            .replace(
+                "{{image_metadata}}", json.dumps(metadata, ensure_ascii=False)
+            )
         )
         if proposal_text_active:
             if proposal_pdf_input is None:
@@ -1910,6 +1915,10 @@ async def evaluate_job(job_id: int) -> None:
                 response_b = await client.chat_json_images(
                     prompt_b.system_prompt,
                     anchor_samples_for_request,
+                    # 手选调用B的 user 正文（含调用A预检结果）必须一起发出。
+                    # 早前这里只发 system，等于把运营选定版本的正文和调用A的结论
+                    # 一起丢掉，跑的其实是另一个提示词。
+                    user_prompt=user_b,
                     max_attempts=1,
                     max_image_count=max_anchor_images,
                 )
@@ -2740,6 +2749,21 @@ def _record_job_breakers(
     return opened
 
 
+def _technical_failure_message(exc: BaseException, error_type: str) -> str:
+    """Keep the machine-readable prefix but carry the real reason to the operator.
+
+    ``technical:<error_type>`` alone tells an operator only that something broke,
+    which is useless when the cause is an actionable configuration problem such
+    as a hand-picked Prompt that cannot take over. The exception's own message is
+    written for a human, so it is appended verbatim.
+    """
+    prefix = f"technical:{error_type}"
+    detail = str(exc).strip()
+    if not detail or detail == prefix:
+        return prefix
+    return f"{prefix}\n{detail}"
+
+
 def _handle_technical_failure(
     job_id: int,
     exc: BaseException,
@@ -2762,7 +2786,9 @@ def _handle_technical_failure(
                     technical_error_type=failure.error_type,
                     failure_stage=EvaluationJob.stage,
                     failure_code=str(getattr(exc, "code", failure.error_type))[:80],
-                    error_message=f"technical:{failure.error_type}",
+                    error_message=_technical_failure_message(
+                        exc, failure.error_type
+                    ),
                     finished_at=now,
                 )
             )
@@ -2883,17 +2909,18 @@ def _handle_technical_failure(
             parent.stage = (
                 "error" if failure.retryable else "p0_error"
             )
+            failure_message = _technical_failure_message(exc, failure.error_type)
             if parent.regression_item_id:
                 fail_regression_item(
                     db,
                     parent.regression_item_id,
-                    f"technical:{failure.error_type}",
+                    failure_message,
                 )
             if parent.baseline_regression_item_id:
                 fail_baseline_item(
                     db,
                     item_id=parent.baseline_regression_item_id,
-                    error_code=f"technical:{failure.error_type}",
+                    error_code=failure_message,
                     job_id=parent.id,
                 )
             return False

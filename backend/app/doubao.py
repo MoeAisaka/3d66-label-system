@@ -586,6 +586,7 @@ class DoubaoClient:
         system_prompt: str,
         samples: list[tuple[str, Path, str | None]],
         *,
+        user_prompt: str | None = None,
         max_attempts: int | None = None,
         output_budget: int | None = None,
         reasoning_effort: str | None = None,
@@ -599,6 +600,10 @@ class DoubaoClient:
         remaining_bytes = max_total_image_bytes
         input_image_bytes = 0
         content: list[dict[str, Any]] = []
+        # A caller that has a user body must be able to send it: dropping it
+        # would run a different prompt than the one that was selected.
+        if user_prompt is not None and user_prompt.strip():
+            content.append({"type": "text", "text": user_prompt})
         for text, image_path, mime_type in samples:
             limits = [
                 limit

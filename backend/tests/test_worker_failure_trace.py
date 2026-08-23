@@ -157,7 +157,8 @@ def test_failure_path_persists_sanitized_a_b_usage_stage_and_code(
         assert usage_b == {"input_tokens": 13, "output_tokens": 5, "total_tokens": 18}
         assert failed.failure_stage == "aesthetic"
         assert failed.failure_code == "dimension_evidence_invalid"
-        assert failed.error_message == "technical:non_retryable"
+        # 保留可程序化解析的前缀，同时把面向人的原因原文带给运营。
+        assert failed.error_message == "technical:non_retryable\n逐维证据不可为空"
     finally:
         db.close()
         engine.dispose()

@@ -1213,13 +1213,20 @@ def _operator_b(version: str, *, takeover: bool) -> SimpleNamespace:
     )
 
 
-def test_contract_bound_b_version_is_not_treated_as_deviation(
+def test_contract_bound_b_version_still_runs_its_own_body(
     sessions: sessionmaker[Session],
 ) -> None:
-    """合同自带的 B 版本就是该合同的正式执行体，不得判为绕过。"""
+    """手选B即使等于合同绑定，也要跑它自己的正文并归因到它。
+
+    合同正文是从维度 schema 机器生成的，不是任何 Prompt 版本的正式执行体，所以
+    「版本等于合同绑定就改跑合同正文」同样是拿别的提示词冒名顶替。何况候选回归
+    启动时会把合同 prompt_bindings 改写成实际执行版本，此处一比较就永远相等，
+    偏离将彻底隐形。
+    """
     with sessions() as db:
         bundle = _bundle(db)
     bound = bundle["contract"]["prompt_bindings"]["call_b_version"]
+    operator = _operator_b(bound, takeover=False)
 
     result = asyncio.run(
         evaluate_v3_authoritative(
@@ -1229,14 +1236,14 @@ def test_contract_bound_b_version_is_not_treated_as_deviation(
             v3_bundle=bundle,
             precheck=_class_one_precheck(),
             aesthetic=_aesthetic(common_grade=4),
-            operator_prompt_b=_operator_b(bound, takeover=False),
+            operator_prompt_b=operator,
         )
     )
 
     output = result["dimension_deduction_output"]
     assert output["warning"] is None
     assert output["prompt_identity"]["bypassed_operator_prompt_version"] is None
-    assert output["prompt_identity"]["operator_prompt_version"] is None
+    assert output["prompt_identity"]["operator_prompt_version"] == operator.version
 
 
 def test_deviating_operator_b_takes_over_rule_prompt(
@@ -1266,10 +1273,14 @@ def test_deviating_operator_b_takes_over_rule_prompt(
     assert result["dimension_deduction_output"]["warning"] is None
 
 
-def test_deviating_operator_b_without_placeholder_is_not_credited(
+def test_deviating_operator_b_without_placeholder_runs_and_is_credited(
     sessions: sessionmaker[Session],
 ) -> None:
-    """无法接管的手选版本仍跑合同正文，但结果必须带 warning 且不归因该版本。"""
+    """没写占位符的手选版本照样如实执行，并如实归因到该版本。
+
+    运营手选的版本大多没有占位符；拒单会让机制吃不下运营的正常调整，而拿合同
+    正文冒名顶替则是必须禁止的静默降级。正确行为是执行运营正文、服务端补齐规则。
+    """
     with sessions() as db:
         bundle = _bundle(db)
     operator = _operator_b("insp-b-v6-levels-20260821", takeover=False)
@@ -1287,10 +1298,49 @@ def test_deviating_operator_b_without_placeholder_is_not_credited(
     )
 
     identity = result["dimension_deduction_output"]["prompt_identity"]
-    assert identity["operator_prompt_version"] is None
-    assert identity["bypassed_operator_prompt_version"] == operator.version
+    assert identity["operator_prompt_version"] == operator.version
+    assert identity["bypassed_operator_prompt_version"] is None
+    assert result["dimension_deduction_output"]["warning"] is None
 
-    # 该 warning 必须进入 review_reasons，使样本被隔离而非计入干净成绩。
+    # 正常出分，不再被隔离成人工复核。
     scoring = build_v3_authoritative_scoring(result, precheck=_class_one_precheck())
+    assert scoring["score"] is not None
+    assert scoring["level"] is not None
+
+
+def test_operator_b_with_empty_body_fails_closed_with_actionable_reason(
+    sessions: sessionmaker[Session],
+) -> None:
+    """手选版本没有正文时才拒单，且必须给出运营能照着改的原因。"""
+    with sessions() as db:
+        bundle = _bundle(db)
+    operator = _operator_b("insp-b-v6-levels-20260821", takeover=False)
+    # 两处都空才算没有可执行内容：只空一处属于正常形状，服务端会补齐另一处。
+    operator.user_prompt = "   "
+    operator.system_prompt = "  "
+
+    with pytest.raises(V3AuthoritativeError) as excinfo:
+        asyncio.run(
+            evaluate_v3_authoritative(
+                _FakeClient(specific_grade=4),
+                "img.jpg",
+                "image/jpeg",
+                v3_bundle=bundle,
+                precheck=_class_one_precheck(),
+                aesthetic=_aesthetic(common_grade=4),
+                operator_prompt_b=operator,
+            )
+        )
+
+    assert excinfo.value.code == "operator_prompt_body_empty"
+    detail = str(excinfo.value)
+    assert operator.version in detail
+    assert "修复办法" in detail
+    assert "不出分" in detail
+
+    # 运营在回归明细里读到的就是这段文字，必须保留完整可行动原因。
+    scoring = build_v3_authoritative_error_scoring(excinfo.value)
+    assert scoring["score"] is None
+    assert scoring["level"] is None
     assert scoring["needs_review"] is True
-    assert any("手选调用B" in reason for reason in scoring["review_reasons"])
+    assert any("修复办法" in reason for reason in scoring["review_reasons"])

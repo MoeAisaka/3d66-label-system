@@ -614,23 +614,12 @@ async def evaluate_v3_authoritative(
             rule_scoring_mode,
         )
 
-        # 手选调用B是否偏离合同原生配对。等于合同 prompt_bindings.call_b_version 时，
-        # 合同正文就是该版本的正式执行体，归因合法、无需告警；只有偏离合同绑定的手选
-        # 版本才需要接管正文，接管不了则不得计入该版本成绩。
-        contract_bindings = contract.get("prompt_bindings")
-        contract_bound_b = (
-            contract_bindings.get("call_b_version")
-            if isinstance(contract_bindings, dict)
-            else None
-        )
-        deviating_prompt_b = operator_prompt_b
-        if (
-            deviating_prompt_b is not None
-            and contract_bound_b is not None
-            and str(getattr(deviating_prompt_b, "version", "") or "")
-            == str(contract_bound_b)
-        ):
-            deviating_prompt_b = None
+        # 运营手选的调用B一律执行它自己的正文，不做「是否偏离合同绑定」的豁免。
+        # 合同正文是从维度 schema 机器生成的，并不是某个 Prompt 版本的正式执行体，
+        # 所以「版本等于合同绑定就跑合同正文」同样属于拿别的提示词冒名顶替。更关键
+        # 的是候选回归启动时会把合同 prompt_bindings 改写成实际执行版本（见
+        # prompt_binding_override），一比较就永远相等，偏离会被彻底隐形。
+        selected_prompt_b = operator_prompt_b
 
         if has_deduction_rules(track_config):
             active_rule_mode = rule_scoring_mode(track_config)
@@ -651,7 +640,7 @@ async def evaluate_v3_authoritative(
                         client=client,
                         mime_type=mime_type,
                         precheck=precheck_obj,
-                        operator_prompt=deviating_prompt_b,
+                        operator_prompt=selected_prompt_b,
                     )
                 )
             except DimensionDeductionBridgeError as exc:

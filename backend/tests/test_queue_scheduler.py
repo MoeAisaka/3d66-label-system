@@ -534,7 +534,8 @@ def test_worker_non_retryable_failure_is_p0_without_recovery(
         db.refresh(job)
         assert job.status == "failed"
         assert job.stage == "p0_error"
-        assert job.error_message == "technical:non_retryable"
+        # 保留可程序化解析的前缀，同时把真实原因原文带给运营。
+        assert job.error_message == "technical:non_retryable\ninvalid request"
         assert db.scalar(select(EvaluationJob).where(EvaluationJob.parent_job_id == job.id)) is None
         breaker = db.scalar(
             select(CircuitBreaker).where(

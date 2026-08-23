@@ -562,8 +562,14 @@ def test_model_3d_su_worker_uses_rule_hits_and_preserves_evidence(
     assert outcome["job_status"] == "completed"
     assert len(calls) == 2
     assert "aesthetic_score" in calls[1][0]
-    assert "合同规则命中" in calls[1][0]
+    # system 由运营手选的调用B版本自己决定，不再被合同生成的正文冒名顶替。
+    assert calls[1][0].startswith("你是 TPENG 标签实验台的 3D & SU 模型调用 B")
+    # 规则清单与输出合同仍由服务端强制注入 user 侧，运营丢不掉也改不了形状。
+    assert "必须逐条核验以下维度规则" in calls[1][1]
+    assert "扣分规则" in calls[1][1]
     assert "hit_rules" in calls[1][1]
+    assert "调用A预检字段" in calls[1][1]
+    assert "{{" not in calls[1][1]
     assert "grade" not in calls[1][1]
     assert outcome["score"] == expected_score
     assert outcome["level"] == expected_level

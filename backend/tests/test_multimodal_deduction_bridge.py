@@ -11,7 +11,6 @@ from app.dimension_deduction_bridge import (
     DEDUCTION_PROMPT_TEMPLATE_VERSION,
     DimensionDeductionBridgeError,
     FALLBACK_WARNING,
-    OPERATOR_PROMPT_BYPASS_WARNING,
     OPERATOR_PROMPT_TEMPLATE_VERSION,
     call_multimodal_for_dimension_deductions,
     compose_rule_deductions,
@@ -306,12 +305,28 @@ class SchemaFaultClient:
         )
 
 
-def test_takeover_helper_requires_rules_placeholder() -> None:
+def test_takeover_helper_accepts_any_non_empty_body() -> None:
+    """占位符只决定注入位置，不是能否执行的前提条件。
+
+    要求占位符会让引擎拒掉运营现有的绝大多数调用B版本，而它过去的退路（拿合同
+    正文冒名执行）正是必须禁止的静默降级。所以只要有正文就如实执行。
+    """
     assert operator_prompt_declares_rule_takeover(
         OperatorPrompt(user_prompt=_TAKEOVER_BODY)
     ) is True
     assert operator_prompt_declares_rule_takeover(
         OperatorPrompt(user_prompt="八维评分，直接给出等级")
+    ) is True
+    # 只写一处也算有正文：现役多个已发布版本把口径全放在 system 里。
+    assert operator_prompt_declares_rule_takeover(
+        OperatorPrompt(user_prompt="   ")
+    ) is True
+    assert operator_prompt_declares_rule_takeover(
+        OperatorPrompt(user_prompt="八维评分", system_prompt="  ")
+    ) is True
+    # 两处都空才算没有可执行内容。
+    assert operator_prompt_declares_rule_takeover(
+        OperatorPrompt(user_prompt="   ", system_prompt="  ")
     ) is False
     assert operator_prompt_declares_rule_takeover(None) is False
 
@@ -364,8 +379,12 @@ def test_operator_prompt_may_place_precheck_and_contract_itself() -> None:
     assert "class_one" in client.user
 
 
-def test_operator_prompt_without_placeholder_is_not_credited() -> None:
-    """未声明接管的历史版本仍由合同正文执行，但不得归因到该版本。"""
+def test_operator_prompt_without_placeholder_still_runs_faithfully() -> None:
+    """没写占位符的手选版本照样如实执行，规则由服务端追加而非要求运营预留。
+
+    这是运营兼容性的核心：忘记写占位符不该改变成绩，也不该让引擎拒单，更不该
+    偷偷换成合同正文。运营正文原样执行，服务端在其后补齐规则清单。
+    """
     config = build_inspiration_subcategory_dimensions()["class_one"]
     client = Client()
     operator = OperatorPrompt(user_prompt="八维评分，直接输出等级")
@@ -377,26 +396,91 @@ def test_operator_prompt_without_placeholder_is_not_credited() -> None:
         )
     )
 
-    assert "灵感素材质量核验专家" in client.system
-    assert output["warning"] == OPERATOR_PROMPT_BYPASS_WARNING
+    # 运营的 system 与 user 正文都真的发给了模型。
+    assert client.system == operator.system_prompt
+    assert "八维评分，直接输出等级" in client.user
+    # 合同正文的人设绝不能冒名顶替。
+    assert "灵感素材质量核验专家" not in client.system
+    # 服务端仍然强制注入规则清单与输出合同，运营无法丢掉它们。
+    assert "必须逐条核验以下维度规则" in client.user
+    assert "visual_structure" in client.user
+    assert "调用A预检字段" in client.user
+    assert "{{" not in client.user
+    # 归因必须落在运营选的版本上，且不再标记为绕过。
     identity = output["prompt_identity"]
-    assert identity["template_version"] == DEDUCTION_PROMPT_TEMPLATE_VERSION
-    assert identity["operator_prompt_version"] is None
-    assert identity["bypassed_operator_prompt_version"] == operator.version
+    assert identity["operator_prompt_version"] == operator.version
+    assert identity["bypassed_operator_prompt_version"] is None
+    assert identity["template_version"] == OPERATOR_PROMPT_TEMPLATE_VERSION
+    assert output["warning"] is None
 
 
-def test_operator_prompt_missing_system_body_fails_closed() -> None:
+def test_operator_prompt_with_only_user_body_still_runs() -> None:
+    """只写 user 正文的版本照样如实执行：填一处就够，另一处留空不影响。"""
     config = build_inspiration_subcategory_dimensions()["class_one"]
+    client = Client()
     operator = OperatorPrompt(user_prompt=_TAKEOVER_BODY, system_prompt="   ")
+
+    output = asyncio.run(
+        call_multimodal_for_dimension_deductions(
+            "image.jpg", config, client=client, mime_type="image/jpeg",
+            operator_prompt=operator,
+        )
+    )
+
+    assert "visual_structure" in client.user
+    assert output["prompt_identity"]["operator_prompt_version"] == operator.version
+    assert output["warning"] is None
+
+
+def test_operator_prompt_with_only_system_body_still_runs() -> None:
+    """只写 system 正文的版本照样如实执行：现役多个已发布版本就是这种形状。
+
+    ``model-3d-su-b-v4``、``inspiration-b-v5-anchor-calibration-evidence`` 等
+    都把整套评分口径放在 system 里、user 留空，服务端补齐 user 侧内容。
+    """
+    config = build_inspiration_subcategory_dimensions()["class_one"]
+    client = Client()
+    operator = OperatorPrompt(user_prompt="", system_prompt="你是灵感图审美评估专家。")
+
+    output = asyncio.run(
+        call_multimodal_for_dimension_deductions(
+            "image.jpg", config, client=client, mime_type="image/jpeg",
+            operator_prompt=operator,
+        )
+    )
+
+    assert client.system == "你是灵感图审美评估专家。"
+    # 服务端补齐全部 user 侧内容，且不留下未替换的占位符。
+    assert client.user.startswith("必须逐条核验以下维度规则：")
+    assert "visual_structure" in client.user
+    assert "调用A预检字段" in client.user
+    assert "{{" not in client.user
+    assert output["prompt_identity"]["operator_prompt_version"] == operator.version
+    assert output["warning"] is None
+
+
+def test_operator_prompt_with_no_body_at_all_fails_closed() -> None:
+    """两处都空才拒单，且理由要能指导运营修复。"""
+    config = build_inspiration_subcategory_dimensions()["class_one"]
+    client = Client()
+    operator = OperatorPrompt(user_prompt="  ", system_prompt="   ")
 
     with pytest.raises(DimensionDeductionBridgeError) as excinfo:
         asyncio.run(
             call_multimodal_for_dimension_deductions(
-                "image.jpg", config, client=Client(), mime_type="image/jpeg",
+                "image.jpg", config, client=client, mime_type="image/jpeg",
                 operator_prompt=operator,
             )
         )
-    assert excinfo.value.code == "operator_prompt_system_empty"
+
+    assert excinfo.value.code == "operator_prompt_body_empty"
+    detail = str(excinfo.value)
+    assert operator.version in detail
+    assert "修复办法" in detail
+    assert "不出分" in detail
+    # 拒单时一个字节都不发给 provider。
+    assert client.system == ""
+    assert client.user == ""
 
 
 # --- 兜底拆分：provider 故障 fail-open，输出形状不符 fail-closed -------------

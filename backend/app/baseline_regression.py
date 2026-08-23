@@ -1017,7 +1017,9 @@ def fail_baseline_item(
     item.status = "failed"
     if job_id is not None:
         item.job_id = job_id
-    item.error_message = error_code[:200]
+    # 列本身是 Text，无数据库长度约束。上限只为挡住失控长度，必须宽到能容纳
+    # 面向运营的完整可行动原因（含修复办法），否则截断后剩下的错误码等于没说。
+    item.error_message = error_code[:2000]
     item.finished_at = datetime.now(timezone.utc)
     refresh_baseline_run(item.run)
     _persist_semantic_quality_if_terminal(db, item.run)
