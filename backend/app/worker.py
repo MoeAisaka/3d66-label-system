@@ -11,7 +11,7 @@ import time
 import traceback
 import uuid
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
@@ -1140,10 +1140,31 @@ async def _evaluate_targeted_loop_job(
         current_job.finished_at = now
 
 
+def _anchor_comparison_enabled(foundation: object) -> bool:
+    """Read the frozen contract's anchor-comparison switch.
+
+    Absent keys keep the legacy behavior (anchors on) so already-frozen
+    four-anchor contracts are unaffected.  An explicit false on either
+    ``anchor_comparison_enabled`` or ``use_anchors`` turns anchor loading off,
+    and an empty anchor list means there is nothing to compare against.
+    """
+    if not isinstance(foundation, Mapping):
+        return False
+    for key in ("anchor_comparison_enabled", "use_anchors"):
+        value = foundation.get(key)
+        if isinstance(value, bool) and not value:
+            return False
+    anchors = foundation.get("anchors")
+    if isinstance(anchors, (list, tuple)) and not anchors:
+        return False
+    return True
+
+
 async def evaluate_job(job_id: int) -> None:
     production_dimension_contract = None
     v3_bundle_for_job: dict[str, object] | None = None
     aesthetic_foundation_active = False
+    anchor_comparison_active = False
     frozen_anchor_assets: dict[int, SimpleNamespace] | None = None
     # 调用A的原始输出。只在走调用B的分支里被赋值，但 v3 评分在该分支之外也要用它
     # 替换手选正文里的 {{previous_output}}，所以在函数级先声明。
@@ -1164,10 +1185,19 @@ async def evaluate_job(job_id: int) -> None:
             and proposal_contract.get("category_key") == "inspiration_image"
             and isinstance(proposal_contract.get("aesthetic_foundation"), dict)
         )
+        # 锚图比对与美感评分是两件事：无锚点提示词（insp-b-v6/v7 这类）仍然要走
+        # 八维校验与冻结，但不该被强制加载四张锚图。合同里的 use_anchors /
+        # anchor_comparison_enabled 之前没有任何读取方，运营把它们置 false 也无效，
+        # 锚图文件一旦不可用就把整轮打成 P0。这里让这两个开关真正生效。
+        anchor_comparison_active = aesthetic_foundation_active and _anchor_comparison_enabled(
+            proposal_contract.get("aesthetic_foundation")
+            if isinstance(proposal_contract, dict)
+            else None
+        )
         asset = db.get(Asset, job.asset_id)
         if not asset:
             raise RuntimeError("图片不存在")
-        if aesthetic_foundation_active:
+        if anchor_comparison_active:
             frozen_anchor_assets = resolve_frozen_anchor_assets(
                 db, proposal_contract
             )
@@ -1952,16 +1982,25 @@ async def evaluate_job(job_id: int) -> None:
             )
             if aesthetic_foundation_active:
                 from .inspiration_aesthetic_foundation import anchor_request_from_contract
-                anchor_samples_for_request, max_anchor_images = anchor_request_from_contract(
-                    proposal_contract,
-                    settings.upload_dir,
-                    model_image_path,
-                    model_mime_type,
-                    assets_by_id=frozen_anchor_assets,
-                    asset_path_resolver=lambda anchor_asset: resolve_asset_path(
-                        anchor_asset, settings
-                    ),
-                )
+                if anchor_comparison_active:
+                    anchor_samples_for_request, max_anchor_images = anchor_request_from_contract(
+                        proposal_contract,
+                        settings.upload_dir,
+                        model_image_path,
+                        model_mime_type,
+                        assets_by_id=frozen_anchor_assets,
+                        asset_path_resolver=lambda anchor_asset: resolve_asset_path(
+                            anchor_asset, settings
+                        ),
+                    )
+                else:
+                    # 锚图比对关闭时只发待评图片，但必须继续走 JSON 契约：
+                    # 下游 validate_aesthetic_output 要求八维结构化输出，
+                    # 落到 chat_text 会让 parsed 为空并把整轮判成输出不合同。
+                    anchor_samples_for_request = [
+                        ("待评图片", model_image_path, model_mime_type)
+                    ]
+                    max_anchor_images = 1
                 response_b = await client.chat_json_images(
                     prompt_b.system_prompt,
                     anchor_samples_for_request,

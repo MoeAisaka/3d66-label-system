@@ -47,10 +47,31 @@ ANCHORS = (
 
 
 
+# 只有"结构被写坏"这一类算瞬时抖动：模型把键名吐成 "shortcomings["、
+# 整段不是 JSON 对象、键集合错位，重跑同一张图有很大概率恢复。
+# 内容层错误（证据为空、grade 越界、置信度缺失）是提示词或模型能力的稳定表现，
+# 重试只会拿到同样的输出，还要多付一次调用，因此保持 fail-closed。
+# 合同版本与阈值类错误同理属于确定性配置问题。
+TRANSIENT_OUTPUT_ERROR_CODES = frozenset({
+    "payload_not_object",
+    "top_level_shape_invalid",
+    "dimensions_shape_invalid",
+    "dimension_shape_invalid",
+})
+
+
 class AestheticFoundationError(ValueError):
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
         self.code = code
+        # queue_scheduler.classify_technical_failure 读这两个属性决定是否重试；
+        # 缺了它们时任何模型措辞抖动都会被判成 P0 且零重试。
+        if code in TRANSIENT_OUTPUT_ERROR_CODES:
+            self.technical_error_type = "transient_parse"
+            self.retryable = True
+        else:
+            self.technical_error_type = "non_retryable"
+            self.retryable = False
 
 
 def _is_int(value: Any) -> bool:

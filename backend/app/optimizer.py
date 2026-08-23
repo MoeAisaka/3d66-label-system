@@ -444,7 +444,11 @@ def _bounded_diagnostic_records(
                 else upload_dir / item.asset.stored_name
             )
             image_bytes = image_path.stat().st_size
-        except (OSError, NasStorageError):
+        except NasStorageError:
+            # NAS 挂载不可用或哈希漂移是环境故障，不能和"图片太大"一样静默跳过：
+            # 那会让优化器在几乎没有真实图片的情况下照常出结论。
+            raise
+        except OSError:
             omitted_count += 1
             continue
         if not 0 < image_bytes <= MAX_DIAGNOSTIC_SINGLE_IMAGE_BYTES:
