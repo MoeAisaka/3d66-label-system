@@ -134,7 +134,7 @@ export function CategoryEvaluationPreviewPage() {
           </Button>
         }
       />
-      <div className="mx-auto max-w-[1540px] px-5 py-6 md:px-8 lg:px-10">
+      <div className="mx-auto shell-content px-5 py-6 md:px-8 lg:px-10">
         <div className="mb-4"><EvaluationBoundaryNote /></div>
 
         <div className="flex items-start gap-3 border-y border-[var(--line)] bg-[#f6f9dc] px-4 py-3 text-xs leading-6 text-[#3d5106]">

@@ -18,7 +18,7 @@ export function AutomationOverviewPage() {
   return (
     <>
       <PageHeader index="07" title="自动组批总览" description="统一查看类目泳道、历史审计、候选二审与费用门禁。自动发布已关闭。" actions={<Button variant="secondary" onClick={() => overview.refetch()}><ArrowClockwise />刷新</Button>} />
-      <div className="mx-auto max-w-[1540px] space-y-6 px-5 py-7 md:px-8 lg:px-10">
+      <div className="mx-auto shell-content space-y-6 px-5 py-7 md:px-8 lg:px-10">
         <section className="grid gap-px border-y border-[var(--line-strong)] bg-[var(--line)] sm:grid-cols-2 lg:grid-cols-5">
           <Metric label="自动化总开关" value={data?.policy.enabled ? "开启" : "关闭"} />
           <Metric label="执行模式" value={data?.policy.dry_run ? "演练" : "真实"} />

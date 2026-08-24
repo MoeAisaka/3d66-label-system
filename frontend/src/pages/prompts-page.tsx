@@ -356,8 +356,8 @@ export function PromptCandidatesPage() {
           </>
         }
       />
-      <div className="mx-auto max-w-[1720px] px-5 pt-4 md:px-8 lg:px-10"><EvaluationBoundaryNote slot={stageFilter === "A" ? "A" : "B"} /></div>
-      <div className="mx-auto grid max-w-[1720px] lg:grid-cols-[280px_minmax(0,1fr)]">
+      <div className="mx-auto shell-content-wide px-5 pt-4 md:px-8 lg:px-10"><EvaluationBoundaryNote slot={stageFilter === "A" ? "A" : "B"} /></div>
+      <div className="mx-auto grid shell-content-wide lg:grid-cols-[280px_minmax(0,1fr)]">
         <aside className="border-r border-[var(--line)] bg-white p-4 lg:min-h-[calc(100dvh-125px)]">
           <div className="mb-4 flex items-center justify-between"><h2 className="text-sm font-semibold">版本</h2><span className="font-data text-xs text-[var(--muted)]">{visiblePrompts.length}</span></div>
           <div className="space-y-1">

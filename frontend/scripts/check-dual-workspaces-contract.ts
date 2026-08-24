@@ -9,7 +9,21 @@ const incremental = read("src/pages/incremental-workspace-page.tsx")
 const stock = read("src/pages/stock-workspace-page.tsx")
 const operations = read("src/pages/operations-center-page.tsx")
 const qualityAssets = read("src/pages/quality-assets-page.tsx")
-const baselineRegression = read("src/pages/baseline-regression-page.tsx")
+// 2026-08-24：基准回归页从 3250 行拆成 baseline-regression-page.tsx + features/baseline-regression/* 若干模块。
+// 契约要守的是「基准回归这块界面整体」符合合同，而不是内容挤在同一个文件里，
+// 所以这里把页面与抽出的模块拼起来一起校验：断言语义不变，拆分也不会让合同失效。
+const baselineRegression = [
+  read("src/pages/baseline-regression-page.tsx"),
+  ...[
+  "regression-page-shared.tsx",
+  "regression-results.tsx",
+  "correction-analysis-panel.tsx",
+  "level-explanation.tsx",
+  "field-metrics-evidence.tsx",
+  "form-selects.tsx",
+  "correction-stage-meta.tsx",
+  ].map((f) => read(`src/features/baseline-regression/${f}`)),
+].join("\n")
 const api = read("src/lib/api.ts")
 const types = read("src/lib/types.ts")
 const stepper = read("src/components/workflow-stepper.tsx")

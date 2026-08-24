@@ -156,7 +156,7 @@ export function EvaluationPackagePipelinePage({ user }: { user: User }) {
         description="选择素材包与类目队列后一键开始。生产过程持续追踪真实任务，回归完成后才冻结最终评测包进入二审。"
         actions={<Button asChild variant="secondary"><Link to="/workflow/materials/packages"><Images />导入或整理素材</Link></Button>}
       />
-      <div className="mx-auto max-w-[1540px] space-y-8 px-5 py-8 md:px-8 lg:px-10">
+      <div className="mx-auto shell-content space-y-8 px-5 py-8 md:px-8 lg:px-10">
         {actionError && (
           <OperatorErrorPanel
             error={actionError}
@@ -240,7 +240,7 @@ export function EvaluationPackageReviewListPage() {
   return (
     <>
       <PageHeader index="03.1" title="二审评测包" description="这里只展示已经冻结的最终评测包。按变更、维度、黄金集、回归失败项和风险顺序完成一次整体判断。" actions={<Button variant="secondary" onClick={() => packages.refetch()}><ArrowClockwise />刷新队列</Button>} />
-      <div className="mx-auto max-w-[1540px] px-5 py-8 md:px-8 lg:px-10">
+      <div className="mx-auto shell-content px-5 py-8 md:px-8 lg:px-10">
         <div className="mb-6 grid gap-px border-y border-[var(--line-strong)] bg-[var(--line)] sm:grid-cols-3"><QueueMetric label="等待二审" value={pending.length} active={!showHistory} onClick={() => setShowHistory(false)} /><QueueMetric label="已有结论" value={history.length} active={showHistory} onClick={() => setShowHistory(true)} /><div className="bg-[#f7fadf] px-5 py-4"><p className="text-xs font-semibold text-[var(--muted)]">发布门禁</p><p className="mt-2 text-sm font-semibold">批准与发布始终是两个动作</p></div></div>
         {packages.error ? <OperatorErrorPanel error={toOperatorError(packages.error)} onRetry={() => packages.refetch()} /> : <EvaluationPackageRows items={showHistory ? history : pending} loading={packages.isLoading} />}
       </div>
@@ -271,7 +271,7 @@ export function EvaluationPackageDetailPage() {
   })
   if (!Number.isInteger(id) || id <= 0) return <InvalidPackage onBack={() => navigate("/workflow/releases/packages", { replace: true })} />
   if (detail.isLoading) return <DetailLoading />
-  if (detail.error || !detail.data) return <><PageHeader index="03.2" title="二审评测包详情" description="读取冻结证据。" /><div className="mx-auto max-w-[1180px] px-5 py-10"><OperatorErrorPanel error={toOperatorError(detail.error)} onRetry={() => detail.refetch()} /></div></>
+  if (detail.error || !detail.data) return <><PageHeader index="03.2" title="二审评测包详情" description="读取冻结证据。" /><div className="mx-auto shell-content px-5 py-10"><OperatorErrorPanel error={toOperatorError(detail.error)} onRetry={() => detail.refetch()} /></div></>
   const item = detail.data
   const status = packageStatusMeta(item.status)
   const canReview = item.status === "awaiting_review"
@@ -281,7 +281,7 @@ export function EvaluationPackageDetailPage() {
   return (
     <>
       <PageHeader index="03.2" title={`二审评测包 · ${item.category_key}`} description={`${status.label} · 创建于 ${formatTime(item.created_at)}`} actions={<><Button asChild variant="secondary"><Link to="/workflow/releases/packages"><ArrowLeft />返回二审队列</Link></Button><Button variant="secondary" onClick={() => detail.refetch()}><ArrowClockwise />刷新</Button></>} />
-      <div className="mx-auto max-w-[1320px] space-y-8 px-5 py-8 md:px-8 lg:px-10">
+      <div className="mx-auto shell-content space-y-8 px-5 py-8 md:px-8 lg:px-10">
         {actionError && <OperatorErrorPanel error={actionError} onRetry={() => detail.refetch()} onClose={() => setActionError(null)} />}
         <section className="grid gap-px border-y border-[var(--line-strong)] bg-[var(--line)] sm:grid-cols-2 lg:grid-cols-4"><Metric label="状态" value={status.label} /><Metric label="评测模式" value={item.prompts.mode === "single" ? "单次完整评测" : "A/B 两段评测"} /><Metric label="黄金样本" value={String(item.golden_sample_set.item_count)} /><Metric label="回归结果" value={regressionLabel(item.regression.recommendation)} /></section>
 
@@ -604,7 +604,7 @@ function Metric({ label, value }: { label: string; value: string }) { return <di
 function QueueMetric({ label, value, active, onClick }: { label: string; value: number; active: boolean; onClick: () => void }) { return <button type="button" className={`px-5 py-4 text-left ${active ? "bg-primary" : "bg-white"}`} onClick={onClick}><p className="text-xs font-semibold text-[var(--muted)]">{label}</p><p className="font-data mt-2 text-2xl font-bold">{value}</p></button> }
 function MissingEvidence({ text }: { text: string }) { return <div className="flex items-start gap-3 bg-[#fff9e9] px-4 py-4 text-xs text-[#6f5513]"><WarningCircle /><p>{text}</p></div> }
 function EmptyState({ title }: { title: string }) { return <div className="flex min-h-48 flex-col items-center justify-center border-y border-[var(--line-strong)] bg-white"><Package size={30} weight="light" /><h3 className="font-editorial mt-4 text-xl font-bold">{title}</h3></div> }
-function DetailLoading() { return <><PageHeader index="03.2" title="正在打开评测包" description="读取冻结证据。" /><div className="mx-auto max-w-[1320px] px-5 py-8"><div className="h-72 animate-pulse bg-white" /></div></> }
+function DetailLoading() { return <><PageHeader index="03.2" title="正在打开评测包" description="读取冻结证据。" /><div className="mx-auto shell-content px-5 py-8"><div className="h-72 animate-pulse bg-white" /></div></> }
 function InvalidPackage({ onBack }: { onBack: () => void }) { return <><PageHeader index="03.2" title="无法打开评测包" description="链接中的编号无效。" /><div className="mx-auto flex min-h-[50dvh] flex-col items-center justify-center"><FileText size={32} /><Button className="mt-5" onClick={onBack}><ArrowLeft />返回二审队列</Button></div></> }
 function regressionLabel(value: string) { return value === "pass" ? "建议通过" : value === "fail" ? "建议拒绝" : "尚未形成" }
 function formatTime(value: string | null | undefined) { if (!value) return "时间未记录"; const date = new Date(value); return Number.isNaN(date.getTime()) ? "时间未记录" : date.toLocaleString("zh-CN") }

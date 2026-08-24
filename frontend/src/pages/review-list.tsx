@@ -305,7 +305,7 @@ export function ReviewList({ items, loading, searchParams, setSearchParams, stag
 
   return <>
     <PageHeader index={view ? "02" : "04"} title={view ? reviewWorkspaceMeta[view].title : reviewStageMeta[stage ?? "initial"].title} description={view ? reviewWorkspaceMeta[view].description : reviewStageMeta[stage ?? "initial"].description} />
-    <div className="mx-auto max-w-[1720px] px-5 py-7 md:px-8 lg:px-10 lg:py-9">
+    <div className="mx-auto shell-content-wide px-5 py-7 md:px-8 lg:px-10 lg:py-9">
       {!view && <nav className="mb-5 grid border-y border-[var(--line-strong)] bg-white sm:grid-cols-4" aria-label="兼容历史人工审核工作台">
         {(Object.keys(reviewStageMeta) as ReviewStage[]).map((itemStage) => {
           const active = itemStage === stage

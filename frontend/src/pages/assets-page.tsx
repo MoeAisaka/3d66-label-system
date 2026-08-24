@@ -367,7 +367,7 @@ export function AssetsPage() {
         title="导入与整理素材"
         description="上传、整理和查找素材都在这里完成。一次批量、一个文件夹或一个 ZIP 自动汇总为一个可追溯素材包。"
       />
-      <div className="mx-auto max-w-[1540px] px-5 py-7 md:px-8 lg:px-10 lg:py-10">
+      <div className="mx-auto shell-content px-5 py-7 md:px-8 lg:px-10 lg:py-10">
         <input
           ref={fileInputRef}
           type="file"

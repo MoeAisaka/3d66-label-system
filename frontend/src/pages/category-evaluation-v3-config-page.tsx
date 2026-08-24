@@ -346,7 +346,7 @@ export function CategoryEvaluationV3ConfigPage() {
           </Button>
         }
       />
-      <div className="mx-auto max-w-[1540px] px-5 py-6 md:px-8 lg:px-10">
+      <div className="mx-auto shell-content px-5 py-6 md:px-8 lg:px-10">
         <div className="mb-4"><EvaluationBoundaryNote slot="dimension" /></div>
         <div className="mb-4 flex items-start gap-3 border-y border-[var(--line)] bg-[#fff6e9] px-4 py-3 text-xs leading-6 text-[#7d4308]">
           <WarningCircle className="mt-0.5 shrink-0" size={16} weight="fill" />

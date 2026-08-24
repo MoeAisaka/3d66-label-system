@@ -13,6 +13,11 @@
   --line-strong: #d9ded3;
   --muted: #62685f;
   --muted-soft: #8a9186;
+  /* 选中态三件套，必须成对使用：surface 作底、text 作字、border 作引导线。
+     用青柠淡底而非 brand 实色，避免大面积酸性色（DESIGN.md 限单屏 15%）。 */
+  --active-surface: #f0f8c8;
+  --active-border: #a5c522;
+  --active-text: #263000;
   --danger: #b7362e;
   --warning: #a85a0a;
   --success: #2f6f48;
@@ -126,6 +131,24 @@ select:focus-visible {
 .scrollbar-thin {
   scrollbar-width: thin;
   scrollbar-color: var(--line-strong) transparent;
+}
+
+/* 内容区宽度只允许这两个令牌。
+   强制交互合同按 1440 / 1280 两档桌面视口验收，而侧边栏固定占 252px，
+   所以 1440 视口下可用宽正好 1188px —— 这就是标准档。
+   此前各页自己写死 1540 / 1720 / 1820 / 1640 / 1320 / 1180 六种宽度，
+   在大屏上换页时内容边界会左右跳动，也没有一个对齐 1440 基线。
+
+   注意这是普通 CSS 类，不支持 Tailwind 的 md: / lg: 变体，写了会静默失效。 */
+.shell-content {
+  max-width: 1188px;
+}
+
+/* 给横向密集的表格、混淆矩阵和左右分栏工作台。
+   1440 视口下同样被可用宽 1188 兜住，与标准档看不出差别；
+   只有在更宽的显示器上才真正拉开，避免宽表格被无谓压缩。 */
+.shell-content-wide {
+  max-width: 1680px;
 }
 
 @keyframes pulse-line {

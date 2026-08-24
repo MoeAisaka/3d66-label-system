@@ -18,7 +18,7 @@ export function WorkspacePageHeader({
 }) {
   return (
     <header className="border-b border-[var(--line)] bg-white px-5 py-6 md:px-8 lg:px-10">
-      <div className="mx-auto flex max-w-[1540px] flex-wrap items-end justify-between gap-5">
+      <div className="mx-auto flex shell-content flex-wrap items-end justify-between gap-5">
         <div className="grid grid-cols-[auto_1fr] items-start gap-4">
           {index && <span className="font-data mt-1 text-xs text-[var(--muted)]">{index}</span>}
           <div>

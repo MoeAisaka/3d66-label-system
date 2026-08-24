@@ -78,7 +78,7 @@ export function OperationsCenterPage() {
         description="集中观察队列、并发、失败、重试和恢复状态。一级页面只保留影响当前操作的事实，完整任务详情放入抽屉。"
         actions={<Button variant="secondary" onClick={refresh}><ArrowClockwise />刷新状态</Button>}
       />
-      <div className="mx-auto max-w-[1540px] space-y-6 px-5 py-7 md:px-8 lg:px-10 lg:py-9">
+      <div className="mx-auto shell-content space-y-6 px-5 py-7 md:px-8 lg:px-10 lg:py-9">
         <section className="grid gap-px border-y border-[var(--line-strong)] bg-[var(--line)] sm:grid-cols-2 lg:grid-cols-5">
           <Metric label="排队" value={String(control.data?.queued_count ?? "—")} />
           <Metric label="运行" value={String(control.data?.processing_count ?? "—")} />

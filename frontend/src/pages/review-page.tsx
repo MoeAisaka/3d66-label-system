@@ -290,7 +290,7 @@ export function ReviewPage({ user }: { user: User }) {
         </div>
       ) : (
         <>
-        <div className="mx-auto grid max-w-[1820px] gap-0 bg-white xl:grid-cols-[minmax(0,1fr)_560px]">
+        <div className="mx-auto grid shell-content-wide gap-0 bg-white xl:grid-cols-[minmax(0,1fr)_560px]">
           <section className="min-w-0 border-r border-[var(--line)]">
             <div className="flex min-h-14 flex-wrap items-center justify-between gap-2 border-b border-[var(--line)] px-4 py-2">
               <div className="min-w-0">

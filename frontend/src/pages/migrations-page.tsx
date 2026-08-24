@@ -106,7 +106,7 @@ export function MigrationsPage({ user }: { user: User }) {
         description="旧模型停止服务也没关系：使用已保存的历史结果作为基线，让新模型只重跑分层样本，并把差异项交给人工。"
         actions={<Button variant="secondary" onClick={() => Promise.all([context.refetch(), runs.refetch(), detail.refetch()])}><ArrowsClockwise />刷新状态</Button>}
       />
-      <div className="mx-auto max-w-[1540px] px-5 py-7 md:px-8 lg:px-10 lg:py-10">
+      <div className="mx-auto shell-content px-5 py-7 md:px-8 lg:px-10 lg:py-10">
         <section className="grid border-y border-[var(--line-strong)] bg-white lg:grid-cols-[280px_1fr]">
           <div className="border-b border-[var(--line)] p-5 lg:border-b-0 lg:border-r">
             <p className="font-data text-xs text-[var(--muted)]">CANDIDATE MODEL</p>

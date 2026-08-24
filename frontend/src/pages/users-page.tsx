@@ -33,7 +33,7 @@ export function UsersPage() {
   })
   return <>
     <PageHeader index="07" title="账号与权限" description="多人协作的账号、角色和最小权限管理。权限由服务端强制校验，前端隐藏不等于授权。" />
-    <div className="mx-auto max-w-[1180px] px-5 py-7 md:px-8 lg:px-10 lg:py-10">
+    <div className="mx-auto shell-content px-5 py-7 md:px-8 lg:px-10 lg:py-10">
       <section className="grid gap-7 border-y border-[var(--line-strong)] bg-white px-5 py-6 lg:grid-cols-[230px_1fr] lg:px-7">
         <div><div className="flex size-10 items-center justify-center rounded-[4px] bg-primary"><Plus size={21} weight="bold" /></div><h2 className="font-editorial mt-5 text-2xl font-bold">新增成员</h2><p className="mt-2 text-sm leading-6 text-[var(--muted)]">密码只在创建时提交，服务端仅保存 scrypt 哈希。</p></div>
         <div className="grid gap-4 md:grid-cols-2"><Input value={form.username} onChange={(e) => setForm({ ...form, username: e.target.value })} placeholder="登录账号" /><Input value={form.display_name} onChange={(e) => setForm({ ...form, display_name: e.target.value })} placeholder="显示名称" /><Input type="password" value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} placeholder="初始密码（至少 10 位）" autoComplete="new-password" /><select className="h-11 rounded-[4px] border border-input bg-transparent px-3 text-sm" value={form.role} onChange={(e) => setForm({ ...form, role: e.target.value })}>{roles.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select><div className="md:col-span-2 flex justify-end"><Button onClick={() => create.mutate()} disabled={create.isPending || !form.username || !form.display_name || form.password.length < 10}><Plus />创建账号</Button></div></div>

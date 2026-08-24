@@ -171,7 +171,7 @@ export function PairedRegressionPage({ user }: { user: User }) {
         }
       />
 
-      <div className="mx-auto grid max-w-[1720px] lg:grid-cols-[320px_minmax(0,1fr)]">
+      <div className="mx-auto grid shell-content-wide lg:grid-cols-[320px_minmax(0,1fr)]">
         <aside className="border-r border-[var(--line)] bg-white p-4 lg:min-h-[calc(100dvh-125px)]">
           <div className="mb-4 flex items-center justify-between">
             <h2 className="text-sm font-semibold">配对回归任务</h2>

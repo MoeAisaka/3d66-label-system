@@ -57,7 +57,7 @@ export function TagDemandContractsPage() {
 
   return <>
     <PageHeader index="A.7" title="字段需求合同" description="平台通用语义字段的版本、适用类目和质量门槛。一级页只做版本管理，详细字段矩阵进入二级抽屉。" actions={<Button variant="secondary" onClick={() => contracts.refetch()} disabled={contracts.isFetching}><ArrowsClockwise />刷新</Button>} />
-    <div className="mx-auto max-w-[1540px] space-y-6 px-5 py-8 md:px-8 lg:px-10">
+    <div className="mx-auto shell-content space-y-6 px-5 py-8 md:px-8 lg:px-10">
       <section className="grid gap-px border-y border-[var(--line-strong)] bg-[var(--line)] sm:grid-cols-4"><Metric label="合同版本" value={String(items.length)} /><Metric label="现役版本" value={String(activeCount)} /><Metric label="候选版本" value={String(candidateCount)} /><Metric label="覆盖类目" value={String(categoryCount)} /></section>
       {contracts.isError && <div className="border-y border-[#d7a64d] bg-[#fff9e9] px-5 py-4 text-sm text-[#6f5513]">字段需求合同暂时无法读取，请稍后刷新。</div>}
       <section className="border-y border-[var(--line-strong)] bg-white">
