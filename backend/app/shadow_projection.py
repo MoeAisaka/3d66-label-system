@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
+import os
 import re
 import uuid
 from dataclasses import dataclass
@@ -12,6 +14,12 @@ from sqlalchemy import Connection, func, select
 from sqlalchemy.orm import Session
 
 from .audit import canonical_json
+from .external_datasources import (
+    ExternalDatasourceError,
+    compute_live_schema_fingerprint,
+    verify_least_privilege,
+    writable_connection_factory,
+)
 from .models import (
     FieldDemandContract,
     ProjectionContract,
@@ -22,6 +30,8 @@ from .models import (
     ShadowProjectionTarget,
 )
 
+
+logger = logging.getLogger(__name__)
 
 _IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -396,10 +406,93 @@ def shadow_projection_run_payload(run: ShadowProjectionRun) -> dict[str, Any]:
     }
 
 
+#: 允许放行「最小权限实测」的环境。SQLite 没有账号权限模型，本地与测试环境
+#: 若不放行则任何影子投影都跑不起来。生产环境**不在此列**，无法放行。
+_PRIVILEGE_WAIVER_ENVS = frozenset({"local", "dev", "test", "ci"})
+
+
+def _privilege_waiver_env() -> str:
+    """读取当前部署环境标识。缺省为 ``production``——未声明即按最严处理。"""
+    return (os.getenv("LABEL_SYSTEM_DEPLOY_ENV") or "production").strip().lower()
+
+
 def resolve_configured_shadow_projection_adapter(
-    _target: ShadowProjectionTarget,
+    target: ShadowProjectionTarget,
 ) -> ProjectionTargetAdapter:
-    raise ShadowProjectionError(
-        "SHADOW_ADAPTER_UNAVAILABLE",
-        "影子目标运行时适配器与 secret 引用尚未激活",
+    """把影子目标登记行解析成可真正写库的适配器。
+
+    这是影子投影链路此前唯一的断点：机制（合同、清单、租约、幂等写、读回比对、
+    回滚、重试）都已完整，只差「从登记行拿到真实连接」这一步。
+
+    三项安全证据的产出方式，逐条说明——**没有一项是硬编码的**：
+
+    - ``shadow_only``：来自登记行。登记函数强制 ``environment="shadow"`` 且
+      ``shadow_only=True``，但这里仍然复核，不盲信行内容（行可能被手工改过）。
+    - ``least_privileged``：调 :func:`external_datasources.verify_least_privilege`
+      **实测**数据库账号权限。SQLite 无权限模型会实测为不收敛，此时仅在
+      ``LABEL_SYSTEM_DEPLOY_ENV`` 属于本地／测试类环境时放行，且放行原因会带进
+      异常与日志。生产环境无放行口。
+    - ``schema_fingerprint``：调
+      :func:`external_datasources.compute_live_schema_fingerprint` 从**活库**实算。
+      绝不回传登记值——那会让 ``SHADOW_SCHEMA_DRIFT`` 门禁自证同一、形同废除。
+
+    指纹算法一致性要求：登记目标时写入的 ``schema_fingerprint`` 必须由同一个
+    ``compute_live_schema_fingerprint`` 产出，否则两侧算法不同会导致门禁永久阻断。
+    登记入口应调用同一函数取值。
+    """
+    if target.environment != "shadow" or not target.shadow_only:
+        raise ShadowProjectionError(
+            "SHADOW_TARGET_UNREGISTERED",
+            f"目标 {target.target_key} 不是影子环境，拒绝解析可写适配器",
+        )
+    if target.adapter_key != "sql":
+        raise ShadowProjectionError(
+            "SHADOW_ADAPTER_UNAVAILABLE",
+            f"适配器类型 {target.adapter_key} 尚无运行时实现；当前支持：sql",
+        )
+
+    try:
+        least_privileged, privilege_reason = verify_least_privilege(
+            target.connection_locator,
+            target.secret_reference,
+            table_name=target.table_name,
+        )
+        if not least_privileged:
+            deploy_env = _privilege_waiver_env()
+            if deploy_env in _PRIVILEGE_WAIVER_ENVS:
+                least_privileged = True
+                privilege_reason = (
+                    f"{privilege_reason}；因 LABEL_SYSTEM_DEPLOY_ENV={deploy_env} "
+                    f"属非生产环境而放行"
+                )
+            logger.warning(
+                "影子目标 %s 最小权限实测未通过：%s（环境=%s，放行=%s）",
+                target.target_key,
+                privilege_reason,
+                deploy_env,
+                least_privileged,
+            )
+
+        live_fingerprint = compute_live_schema_fingerprint(
+            target.connection_locator,
+            target.secret_reference,
+            table_name=target.table_name,
+        )
+        connection_factory = writable_connection_factory(
+            target.connection_locator, target.secret_reference
+        )
+    except ExternalDatasourceError as exc:
+        raise ShadowProjectionError(
+            "SHADOW_ADAPTER_UNAVAILABLE",
+            f"影子目标 {target.target_key} 连接不可用：{exc.message}",
+        ) from exc
+
+    return SqlShadowProjectionAdapter(
+        connection_factory=connection_factory,
+        table_name=target.table_name,
+        evidence=ShadowSafetyEvidence(
+            shadow_only=True,
+            least_privileged=least_privileged,
+            schema_fingerprint=live_fingerprint.lower(),
+        ),
     )

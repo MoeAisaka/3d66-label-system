@@ -68,6 +68,7 @@
 | [0050](0050-contract-owned-redline-values-and-prefilter.md) | Accepted | 合同自有红线业务值与调用 A 后前置过滤 |
 | [0051](0051-contract-owned-scoring-primitives.md) | Accepted | 合同自有评分原语与自定义配置兼容 |
 | [0052](0052-operational-mechanism-compatibility-and-dimension-deduction-cap.md) | Accepted | 运营机制兼容、A→红线→B 顺序与维度累计扣分上限 |
+| [0053](0053-external-datasource-connection-layer.md) | Accepted | 外部数据源连接层与上下游适配器解析 |
 
 文件名格式：
 

@@ -169,7 +169,10 @@ from .nas_storage import (
 )
 from .readonly_sources import (
     ReadOnlySourceError,
+    SourceCursor,
     create_upstream_source_contract,
+    poll_upstream_source,
+    resolve_configured_readonly_source_adapter,
     source_contract_payload,
     source_run_payload,
 )
@@ -6360,7 +6363,10 @@ def _apply_prompt_payload(prompt: PromptVersion, payload: PromptUpdateRequest) -
 def update_prompt(
     prompt_id: int,
     payload: PromptUpdateRequest,
-    user: User = Depends(admin_user),
+    # 走 RBAC 的 prompts:write，而不是 admin_user。运营（manager）本就持有该权限，
+    # 绑 admin 会让「改—发布—回滚」必须管理员代操作，自主迭代闭环断在这里。
+    # 已发布/已被引用版本禁止原地改的保护在函数体内，与权限无关，仍然生效。
+    user: User = Depends(require_permission("prompts:write")),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     prompt = db.get(PromptVersion, prompt_id)
@@ -6396,7 +6402,7 @@ def update_prompt(
 def clone_prompt(
     prompt_id: int,
     payload: PromptCloneRequest,
-    user: User = Depends(admin_user),
+    user: User = Depends(require_permission("prompts:write")),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     source = db.get(PromptVersion, prompt_id)
@@ -6752,7 +6758,7 @@ def create_prompt(
 def publish_prompt(
     prompt_id: int,
     payload: PromptPublishRequest | None = None,
-    user: User = Depends(admin_user),
+    user: User = Depends(require_permission("prompts:write")),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     prompt = db.get(PromptVersion, prompt_id)
@@ -6836,7 +6842,7 @@ def publish_prompt(
 @app.post("/api/prompts/{prompt_id}/rollback")
 def rollback_prompt(
     prompt_id: int,
-    user: User = Depends(admin_user),
+    user: User = Depends(require_permission("prompts:write")),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     current = db.get(PromptVersion, prompt_id)
@@ -9058,19 +9064,36 @@ def create_upstream_source_contract_api(
 @app.post("/api/upstream-source-contracts/{contract_id}/poll")
 def poll_upstream_source_api(
     contract_id: int,
-    _payload: UpstreamPollRequest,
-    _user: User = Depends(admin_user),
+    payload: UpstreamPollRequest,
+    user: User = Depends(admin_user),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    if db.get(UpstreamSourceContract, contract_id) is None:
+    contract = db.get(UpstreamSourceContract, contract_id)
+    if contract is None:
         raise HTTPException(status_code=404, detail="只读来源合同不存在")
-    raise HTTPException(
-        status_code=503,
-        detail={
-            "code": "SOURCE_ADAPTER_UNAVAILABLE",
-            "message": "真实来源适配器与 secret 引用尚未在运行环境激活",
-        },
-    )
+    try:
+        adapter = resolve_configured_readonly_source_adapter(contract)
+        run = poll_upstream_source(
+            db,
+            contract=contract,
+            adapter=adapter,
+            limit=payload.limit,
+            actor=user.username,
+            cursor=SourceCursor(values=payload.cursor) if payload.cursor else None,
+        )
+    except ReadOnlySourceError as exc:
+        # 连接／配置不可用仍是 503（可重试的环境问题）；其余是合同或数据本身
+        # 不满足取数前提，属 409。
+        status = 503 if exc.code == "SOURCE_ADAPTER_UNAVAILABLE" else 409
+        raise HTTPException(
+            status_code=status,
+            # ReadOnlySourceError 继承 ValueError，消息在 args[0]，没有 .message
+            # 属性——写成 exc.message 会在这个分支抛 AttributeError，把可诊断的
+            # 409/503 变成 500。
+            detail={"code": exc.code, "message": str(exc)},
+        ) from exc
+    db.commit()
+    return source_run_payload(run)
 
 
 @app.get("/api/upstream-read-runs")
