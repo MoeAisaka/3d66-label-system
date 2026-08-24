@@ -28,6 +28,10 @@ from .inspiration_anchor_contract import (
     InspirationAnchorContractError,
     validate_inspiration_anchor_contract,
 )
+from .inspiration_anchor_mechanism import (
+    ANCHOR_MECHANISM_KEY,
+    validate_anchor_mechanism,
+)
 from .redline_policy import (
     RedlinePolicyError,
     validate_redline_policy,
@@ -837,6 +841,17 @@ def validate_category_evaluation_contract(contract: Any) -> None:
         except InspirationAnchorContractError as exc:
             raise CategoryEvaluationContractError(
                 f"aesthetic_foundation.{exc.code}", str(exc)
+            ) from exc
+
+    # 锚点图机制（``anchor-mechanism-v1``）：只承载各等级锚点图片。
+    # 阈值归 level_scale、维度归 Call B、红线封顶归 Call A 与 redline_policy；
+    # validate_anchor_mechanism 内的隔离守卫会拒绝任何混入的外来机制。
+    if ANCHOR_MECHANISM_KEY in contract:
+        try:
+            validate_anchor_mechanism(contract)
+        except InspirationAnchorContractError as exc:
+            raise CategoryEvaluationContractError(
+                f"{ANCHOR_MECHANISM_KEY}.{exc.code}", str(exc)
             ) from exc
 
 

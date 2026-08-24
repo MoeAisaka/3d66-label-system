@@ -1726,6 +1726,8 @@ def _asset_payload(
         "id": asset.id,
         "name": name,
         "mime_type": asset.mime_type,
+        # 锚点图机制需要 sha256 来冻结所选图片的内容身份（换图必须换哈希）
+        "sha256": asset.sha256,
         "storage_backend": getattr(asset, "storage_backend", "local") or "local",
         "source_uri": getattr(asset, "source_uri", None),
         "category_key": asset.category_key,
