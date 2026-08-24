@@ -698,6 +698,20 @@ export function BaselineRegressionPage() {
     },
     onError: (error) => toast.error(error.message),
   })
+  // 只取消当前这一轮。评测进度页的「取消全部」没有 run 作用域，
+  // 会把当时所有回归一并判失败，运营需要的是这个按 run 的入口。
+  const cancelRun = useMutation({
+    mutationFn: () => baselineRegressionApi.cancelRun(selectedRunId),
+    onSuccess: async (result) => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["baseline-sets"] }),
+        queryClient.invalidateQueries({ queryKey: ["baseline-set", selectedSetId] }),
+        queryClient.invalidateQueries({ queryKey: ["baseline-regression", selectedRunId] }),
+      ])
+      toast.success(`已取消本轮，共 ${result.affected} 个未完成任务`)
+    },
+    onError: (error) => toast.error(error.message),
+  })
   const correctionItemId = searchParams.get("mode") === "correction"
     ? Number(searchParams.get("item") || 0)
     : 0
@@ -1419,6 +1433,37 @@ export function BaselineRegressionPage() {
 
               {summary && (
                 <>
+                {summary.status === "running" && (
+                  <div className="mt-5 border-l-2 border-[var(--muted)] bg-[#f7f7f5] px-4 py-4">
+                    <div className="flex flex-wrap items-center justify-between gap-3">
+                      <div>
+                        <p className="text-sm font-bold">本轮回归进行中</p>
+                        <p className="mt-1 text-xs leading-5 text-[var(--muted)]">
+                          {summary.completed}/{summary.total} 已完成。只想停这一轮就用右侧按钮；
+                          评测进度页的「取消全部」会把当时所有回归一并取消。
+                        </p>
+                      </div>
+                      <Button
+                        variant="secondary"
+                        disabled={cancelRun.isPending}
+                        onClick={() => {
+                          if (
+                            window.confirm(
+                              `确定取消本轮回归（#${summary.id}）吗？\n\n` +
+                                `已完成的 ${summary.completed} 条结果会保留，未完成的任务会判失败，取消后不可继续。\n` +
+                                `其他正在进行的回归不受影响。`,
+                            )
+                          ) {
+                            cancelRun.mutate()
+                          }
+                        }}
+                        data-testid="baseline-cancel-run"
+                      >
+                        {cancelRun.isPending ? "取消中…" : "取消本轮"}
+                      </Button>
+                    </div>
+                  </div>
+                )}
                 {candidateRevisionFromRun && summary.status === "completed" && me.data?.is_admin && (
                   <div className="mt-5 border-l-2 border-primary bg-[#f8faed] px-4 py-4">
                     <div className="flex flex-wrap items-center justify-between gap-3">

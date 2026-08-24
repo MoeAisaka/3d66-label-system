@@ -1121,6 +1121,9 @@ class SampleSetCreateRequest(BaseModel):
     description: str = Field(default="", max_length=2000)
     kind: str = Field(default="test", pattern="^(golden|test)$")
     category_key: str = Field(default="space_image", pattern=r"^[a-z][a-z0-9_]{2,39}$")
+    # 已锁定黄金集不可直接改，_assert_sample_set_is_mutable 让运营"复制形成新草稿
+    # 版本后再调整"——传入源样本集 id 即走这条路径，连同条目与人工纠偏真值一起深拷贝。
+    source_sample_set_id: int | None = Field(default=None, ge=1)
 
 
 class SampleSetAddItemsRequest(BaseModel):
@@ -10288,7 +10291,11 @@ def _assert_sample_set_is_mutable(sample_set: SampleSet) -> None:
     if sample_set.kind == "golden" and sample_set.status == "locked":
         raise HTTPException(
             status_code=409,
-            detail="已锁定黄金集不可直接修改；请复制形成新草稿版本后再调整。",
+            detail=(
+                "已锁定黄金集不可直接修改；请先复制形成新草稿版本后再调整"
+                f"（POST /api/sample-sets 传 source_sample_set_id={sample_set.id}，"
+                "条目与人工纠偏真值会一并复制，新集为 draft 可直接编辑）。"
+            ),
         )
 
 
@@ -12673,17 +12680,54 @@ def create_sample_set(
         raise HTTPException(status_code=400, detail="请填写样本集名称")
     if db.scalar(select(SampleSet).where(SampleSet.name == name)):
         raise HTTPException(status_code=400, detail="样本集名称已存在")
+
+    source: SampleSet | None = None
+    if payload.source_sample_set_id is not None:
+        source = db.get(SampleSet, payload.source_sample_set_id)
+        if not source:
+            raise HTTPException(status_code=404, detail="源样本集不存在")
+
     sample_set = SampleSet(
         name=name,
         description=payload.description.strip(),
-        kind=payload.kind,
-        category_key=payload.category_key,
+        # 复制出来的一律是 draft：locked 守卫的建议是"复制形成新草稿版本后再调整"，
+        # 若复制体也进 locked 就又改不了，等于没给出路。
+        kind=source.kind if source is not None else payload.kind,
+        category_key=source.category_key if source is not None else payload.category_key,
         created_by=user.username,
     )
     db.add(sample_set)
+    db.flush()
+
+    copied = 0
+    if source is not None:
+        for item in source.items:
+            db.add(
+                SampleSetItem(
+                    sample_set_id=sample_set.id,
+                    asset_id=item.asset_id,
+                    source_result_id=item.source_result_id,
+                    expected_level=item.expected_level,
+                    expected_category=item.expected_category,
+                    # 人工纠偏真值连同修订号与署名一起带过去 —— 复制黄金集的意义
+                    # 就在于保留这份人工结论，重置它等于把纠偏工作丢掉。
+                    truth_json=item.truth_json,
+                    truth_revision=item.truth_revision,
+                    truth_updated_by=item.truth_updated_by,
+                    truth_updated_at=item.truth_updated_at,
+                    note=item.note,
+                    added_by=user.username,
+                )
+            )
+            copied += 1
+
     db.commit()
     db.refresh(sample_set)
-    return {"id": sample_set.id}
+    result: dict[str, int] = {"id": sample_set.id}
+    if source is not None:
+        result["copied_items"] = copied
+        result["source_sample_set_id"] = source.id
+    return result
 
 
 @app.get("/api/sample-sets/{sample_set_id}")

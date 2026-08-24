@@ -285,6 +285,12 @@ export const baselineRegressionApi = {
     `/api/baseline-sets/${setId}/runs`,
     { method: "POST", ...jsonBody(payload) },
   ),
+  // 只取消这一轮的任务。不传 baseline_run_ids 时后端会走全局分支，
+  // 把当时所有排队中与进行中的任务一并判失败（run50-54 就是这样连废的）。
+  cancelRun: (runId: number) => api<{ ok: boolean; affected: number; scope?: string }>(
+    "/api/jobs/control/cancel",
+    { method: "POST", ...jsonBody({ baseline_run_ids: [runId] }) },
+  ),
   getRun: (runId: number, offset = 0, limit = 200) => {
     const params = new URLSearchParams({
       offset: String(offset),

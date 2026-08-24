@@ -134,6 +134,25 @@ export function SampleSetsPage() {
     },
     onError: (error) => toast.error(error.message),
   })
+  // 已锁定黄金集不可直接改，守卫要求"复制形成新草稿版本后再调整"。
+  // 传 source_sample_set_id 会连同条目与人工纠偏真值一起复制，新集为 draft 可编辑。
+  const duplicateSet = useMutation({
+    mutationFn: (sourceId: number) =>
+      api<{ id: number; copied_items?: number }>("/api/sample-sets", {
+        method: "POST",
+        ...jsonBody({
+          name: `${detail.data?.summary.name ?? "样本集"} 草稿 ${new Date().toLocaleDateString("zh-CN")}`,
+          description: `复制自「${detail.data?.summary.name ?? ""}」（#${sourceId}）`,
+          source_sample_set_id: sourceId,
+        }),
+      }),
+    onSuccess: async ({ id, copied_items }) => {
+      setSelectedId(id)
+      await refresh()
+      toast.success(`已复制为可编辑草稿，含 ${copied_items ?? 0} 条样本（人工纠偏真值已保留）`)
+    },
+    onError: (error) => toast.error(error.message),
+  })
   const addItems = useMutation({
     mutationFn: () => api(`/api/sample-sets/${selectedId}/items`, {
       method: "POST",
@@ -227,6 +246,7 @@ export function SampleSetsPage() {
                 <div className="flex flex-wrap gap-2">
                   {detail.data.summary.kind === "golden" && detail.data.summary.status === "draft" && <Button variant="secondary" onClick={() => setStatus.mutate("locked")}><Lock />锁定黄金标准</Button>}
                   {detail.data.summary.kind === "golden" && detail.data.summary.status === "locked" && <Button onClick={() => runRegression.mutate()} disabled={runRegression.isPending}><Play />立即全量回归</Button>}
+                  {detail.data.summary.status === "locked" && <Button variant="secondary" data-testid="sample-set-duplicate" disabled={duplicateSet.isPending} onClick={() => { const id = detail.data?.summary.id; if (id && window.confirm(`已锁定的样本集不能直接改。要复制一份可编辑的草稿吗？\n\n条目与人工纠偏真值会一并复制，原样本集保持锁定不变。`)) duplicateSet.mutate(id) }}><FolderSimplePlus />{duplicateSet.isPending ? "复制中…" : "复制为草稿"}</Button>}
                 </div>
               </div>
               {lockedReadOnly && <div className="mt-5 border border-[var(--line)] bg-[#f7f9ef] px-4 py-3 text-xs leading-5"><span className="font-semibold">锁定版本不可直接修改。</span><span className="text-[var(--muted)]"> 如需调整真值或样本范围，请新建后继黄金集草稿，保留当前版本用于回归与审计。</span></div>}

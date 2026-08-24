@@ -297,3 +297,168 @@ def test_sample_set_captures_human_final_level() -> None:
         app.dependency_overrides.clear()
         db.close()
         engine.dispose()
+
+
+def test_create_sample_set_copies_locked_golden_set_into_editable_draft() -> None:
+    """已锁定黄金集的 409 建议"复制形成新草稿版本后再调整"，这条路径必须真实存在。
+
+    在此之前 SampleSetCreateRequest 只有 name/description/kind/category_key，
+    没有任何从现有集复制的能力，运营撞上 409 后只能直连 SQL 绕过守卫。
+    """
+    from datetime import datetime, timezone
+
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        user = User(username="tester", password_hash="unused", display_name="测试员")
+        asset = Asset(
+            original_name="好-inspiration.jpg",
+            stored_name="stored-good.jpg",
+            mime_type="image/jpeg",
+            size_bytes=100,
+            width=1200,
+            height=800,
+            sha256="b" * 64,
+            status="evaluated",
+        )
+        db.add_all([user, asset])
+        db.flush()
+        job = EvaluationJob(
+            asset_id=asset.id,
+            category_key="inspiration_image",
+            status="completed",
+            stage="done",
+            progress=100,
+        )
+        db.add(job)
+        db.flush()
+        result = EvaluationResult(
+            asset_id=asset.id,
+            job_id=job.id,
+            precheck_json="{}",
+            aesthetic_json=None,
+            scoring_json="{}",
+            raw_response_a="{}",
+            score=75,
+            level="L2",
+            confidence=0.9,
+            needs_review=False,
+            model_id="copy-model",
+            prompt_a_version="copy-a",
+            prompt_b_version="copy-b",
+            rubric_version="copy-rubric",
+            engine_version="copy-engine",
+        )
+        db.add(result)
+        db.flush()
+        locked = SampleSet(
+            name="灵感图黄金集 v1",
+            description="已锁定",
+            kind="golden",
+            category_key="inspiration_image",
+            status="locked",
+            created_by="tester",
+        )
+        db.add(locked)
+        db.flush()
+        db.add(
+            SampleSetItem(
+                sample_set_id=locked.id,
+                asset_id=asset.id,
+                source_result_id=result.id,
+                expected_level="L2",
+                expected_category="inspiration_image",
+                truth_json=json.dumps({"level": "L2", "source": "human_correction"}),
+                truth_revision=3,
+                truth_updated_by="运营小张",
+                truth_updated_at=datetime(2026, 8, 20, tzinfo=timezone.utc),
+                note="人工纠偏过",
+                added_by="tester",
+            )
+        )
+        db.commit()
+        locked_id = locked.id
+
+    def _override_db():
+        with Session(engine) as session:
+            yield session
+
+    holder = Session(engine)
+    acting_user = holder.scalar(select(User).where(User.username == "tester"))
+    app.dependency_overrides[get_db] = _override_db
+    app.dependency_overrides[current_user] = lambda: acting_user
+    try:
+        client = TestClient(app)
+        # 锁定集自身不可改（守卫仍在），且提示里给出可用的复制路径
+        blocked = client.patch(
+            f"/api/sample-sets/{locked_id}/status", json={"status": "draft"}
+        )
+        assert blocked.status_code == 409
+        assert "source_sample_set_id" in blocked.json()["detail"]
+
+        created = client.post(
+            "/api/sample-sets",
+            json={"name": "灵感图黄金集 v2 草稿", "source_sample_set_id": locked_id},
+        )
+        assert created.status_code == 200, created.text
+        body = created.json()
+        assert body["copied_items"] == 1
+        assert body["source_sample_set_id"] == locked_id
+        new_id = body["id"]
+    finally:
+        app.dependency_overrides.clear()
+
+    with Session(engine) as db:
+        copy = db.get(SampleSet, new_id)
+        assert copy is not None
+        # 复制体必须是可编辑的 draft，否则又撞 409，等于没给出路
+        assert copy.status == "draft"
+        # kind 与 category_key 跟随源集，否则复制出来的集跑不了同一套回归
+        assert copy.kind == "golden"
+        assert copy.category_key == "inspiration_image"
+        items = db.scalars(
+            select(SampleSetItem).where(SampleSetItem.sample_set_id == new_id)
+        ).all()
+        assert len(items) == 1
+        item = items[0]
+        assert item.expected_level == "L2"
+        # 人工纠偏真值连同修订号与署名一起带过去 —— 复制黄金集的意义就在这份结论
+        assert json.loads(item.truth_json or "{}")["source"] == "human_correction"
+        assert item.truth_revision == 3
+        assert item.truth_updated_by == "运营小张"
+    engine.dispose()
+
+
+def test_create_sample_set_rejects_unknown_source() -> None:
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        db.add(User(username="tester", password_hash="unused", display_name="测试员"))
+        db.commit()
+
+    def _override_db():
+        with Session(engine) as session:
+            yield session
+
+    holder = Session(engine)
+    acting_user = holder.scalar(select(User).where(User.username == "tester"))
+    app.dependency_overrides[get_db] = _override_db
+    app.dependency_overrides[current_user] = lambda: acting_user
+    try:
+        client = TestClient(app)
+        resp = client.post(
+            "/api/sample-sets", json={"name": "复制不存在的集", "source_sample_set_id": 9999}
+        )
+        assert resp.status_code == 404
+    finally:
+        app.dependency_overrides.clear()
+        holder.close()
+    engine.dispose()
