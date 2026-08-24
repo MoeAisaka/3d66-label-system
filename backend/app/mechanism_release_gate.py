@@ -13,6 +13,12 @@ from .baseline_regression import (
     field_metric_release_regressions,
 )
 
+# 可比性所需的最小有效预测覆盖率。此前唯一的门槛是"分母 > 0"，于是一个 2/100 有效的
+# 回归也算可比，只要 delta 恰好为正就允许批准发布 —— 把两条样本的巧合当成机制改进。
+# 实测历史 run 的覆盖率是双峰的：健康的都在 92% 以上，病态的都在 60% 以下，中间是
+# 空档，因此 80% 这条线拦得住病态 run 又不会误伤正常回归（含只跑 1 条的纠偏重跑）。
+MIN_COMPARABLE_COVERAGE = 0.8
+
 
 class CandidateReleaseGateError(ValueError):
     """Stable, user-actionable candidate release failure."""
@@ -226,6 +232,30 @@ def evaluate_candidate_release_gate(
         candidate_metrics, "adjacent_accuracy"
     ) - _metric_value(baseline_metrics, "adjacent_accuracy")
     regressions: list[dict[str, Any]] = []
+
+    # 有效预测覆盖率不足走软失败，不硬抛异常：孤立纠偏重跑本来就只跑 1 条样本，
+    # 硬抛会把那条运营流程整个堵死。这里只阻止"批准发布"，报告照常返回。
+    #
+    # 只看覆盖率、不设绝对分母门槛：unscored 修复后，2/100 那种 run 会落
+    # partial_failed，已被既有的 candidate_run_incomplete 硬拦；真正还漏的是
+    # "状态 completed 但大批样本没进分母"这一形态。绝对分母门槛（例如至少 20 条）
+    # 会连带拦住只跑 1 条的纠偏重跑，属于产品决策，不在这里单方面设定。
+    for metrics, label in ((baseline_metrics, "基准"), (candidate_metrics, "候选")):
+        denominator = _metric_value(metrics, "denominator")
+        total = _metric_value(metrics, "total")
+        if total > 0 and denominator / total < MIN_COMPARABLE_COVERAGE:
+            regressions.append(
+                {
+                    "code": "regression_coverage_too_low",
+                    "message": (
+                        f"{label}回归的有效预测覆盖率只有 {denominator / total:.0%}"
+                        f"（{denominator:.0f}/{total:.0f}），"
+                        f"低于可比所需的 {MIN_COMPARABLE_COVERAGE:.0%}，"
+                        f"这个准确率只由 {denominator:.0f} 条样本得出"
+                    ),
+                }
+            )
+
     if exact_delta < 0:
         regressions.append(
             {

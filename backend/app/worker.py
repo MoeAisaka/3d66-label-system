@@ -2960,33 +2960,53 @@ def _handle_technical_failure(
                 # same transaction that claims the failed parent, so a late
                 # stop cannot be bypassed by an already queued child.
                 control = db.get(EvaluationControl, 1)
-                abort_notice = Path(
-                    os.getenv("ABORT_NOTICE_PATH", "ABORT-NOTICE.txt")
-                ).expanduser()
+                # 默认值必须是绝对路径。相对路径的解析结果取决于 worker 进程的
+                # CWD：运营按文档在部署根放的 ABORT-NOTICE.txt 可能永远读不到，
+                # 而 CWD 下任何人留下的同名文件又会让所有技术重试永久变成
+                # retry_aborted。锚到 settings.data_dir（已 resolve 的绝对路径）。
+                abort_notice_override = os.getenv("ABORT_NOTICE_PATH")
+                abort_notice = (
+                    Path(abort_notice_override).expanduser()
+                    if abort_notice_override
+                    else settings.data_dir / "ABORT-NOTICE.txt"
+                )
+                # reason 进日志（可含绝对路径便于排查），code 进 error_message
+                # （要渲染到界面，必须短且不随环境变化）。
                 retry_abort_reason = None
+                retry_abort_code = None
                 if control is not None and control.paused:
-                    retry_abort_reason = "evaluation_control_paused"
+                    retry_abort_code = "evaluation_control_paused"
+                    retry_abort_reason = retry_abort_code
                 elif parent.status in {"canceled", "cancelled", "paused"}:
-                    retry_abort_reason = f"parent_status:{parent.status}"
+                    retry_abort_code = f"parent_status:{parent.status}"
+                    retry_abort_reason = retry_abort_code
                 elif abort_notice.is_file():
+                    retry_abort_code = "abort_notice_present"
                     retry_abort_reason = f"abort_notice:{abort_notice}"
                 if retry_abort_reason is not None:
                     parent.status = "failed"
                     parent.stage = "retry_aborted"
                     parent.technical_error_type = "retry_aborted"
                     parent.failure_code = "retry_aborted"
-                    parent.error_message = "technical:retry_aborted"
+                    # 三种门禁（全局暂停 / 父任务已取消 / ABORT 制品）此前写的是
+                    # 同一条 error_message，运营在界面上分不清是谁拦的。前端会渲染
+                    # error_message，所以把具体原因带上；failure_code 与
+                    # technical_error_type 保持稳定值，不影响按分类的统计。
+                    # item 层同样带上原因：运营是在回归详情页看到失败条目的，
+                    # 只写 retry_aborted 看不出是自己暂停了队列还是 ABORT 制品拦的。
+                    aborted_code = f"technical:retry_aborted:{retry_abort_code}"
+                    parent.error_message = aborted_code
                     if parent.regression_item_id:
                         fail_regression_item(
                             db,
                             parent.regression_item_id,
-                            "technical:retry_aborted",
+                            aborted_code,
                         )
                     if parent.baseline_regression_item_id:
                         fail_baseline_item(
                             db,
                             item_id=parent.baseline_regression_item_id,
-                            error_code="technical:retry_aborted",
+                            error_code=aborted_code,
                             job_id=parent.id,
                         )
                     logger.warning(

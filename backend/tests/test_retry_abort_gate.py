@@ -60,7 +60,9 @@ def test_abort_notice_blocks_recovery_child_before_creation(tmp_path, monkeypatc
         assert persisted is not None
         assert persisted.status == "failed"
         assert persisted.stage == "retry_aborted"
-        assert persisted.error_message == "technical:retry_aborted"
+        # 带上具体原因：三种门禁（全局暂停 / 父任务已取消 / ABORT 制品）此前写的是
+        # 同一条 error_message，运营在界面上分不清是哪一个拦的。
+        assert persisted.error_message == "technical:retry_aborted:abort_notice_present"
         assert db.scalars(select(EvaluationJob)).all() == [persisted]
     finally:
         db.close()

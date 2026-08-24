@@ -46,14 +46,23 @@ def _run(
     )
 
 
-def _metrics(*, exact: float = 0.9, adjacent: float = 0.95, failed: int = 0) -> dict:
+def _metrics(
+    *,
+    exact: float = 0.9,
+    adjacent: float = 0.95,
+    failed: int = 0,
+    total: int = 100,
+    denominator: int | None = None,
+) -> dict:
+    # 样本量取真实量级（基准集是 50-100 条）。此前写死 10 条，低于门禁要求的
+    # 最小可比分母，而这些用例测的是 delta 与质量码，不是样本量本身。
     return {
-        "denominator": 10,
+        "denominator": total if denominator is None else denominator,
         "exact_accuracy": exact,
         "adjacent_accuracy": adjacent,
         "failed": failed,
-        "total": 10,
-        "valid_predictions": 10 - failed,
+        "total": total,
+        "valid_predictions": total - failed,
     }
 
 
@@ -311,3 +320,90 @@ def test_candidate_release_gate_rejects_snapshot_mismatch(
             expected_projected_contract_hash="p" * 64,
         )
     assert exc_info.value.code == "candidate_snapshot_mismatch"
+
+
+@pytest.mark.parametrize(
+    "metrics_kwargs",
+    [
+        # 2/100 有效：审计里那个"completed · 准确率 100%"的形态
+        {"total": 100, "denominator": 2, "failed": 98},
+        # 60/100：run52 的真实形态
+        {"total": 100, "denominator": 60, "failed": 40},
+    ],
+)
+def test_candidate_release_gate_blocks_low_coverage_regression(
+    monkeypatch: pytest.MonkeyPatch,
+    metrics_kwargs: dict,
+) -> None:
+    """有效预测覆盖率过低的回归不得批准发布，且必须走软失败而非硬抛异常。
+
+    此前唯一的样本量门槛是"分母 > 0"，一个 2/100 有效的回归只要 delta 恰好为正
+    就 approval_allowed —— 把两条样本的巧合当成机制改进。用 regressions 软失败是
+    因为孤立纠偏重跑本来只跑 1 条样本，硬抛会把那条运营流程整个堵死。
+    """
+    projected, candidate, _baseline, candidate_run = _objects()
+    candidate_run.metrics_json = json.dumps(_metrics(**metrics_kwargs))
+    monkeypatch.setattr(
+        "app.mechanism_release_gate.build_baseline_field_metrics",
+        lambda _db, run: {"run_id": run.id, "fields": {}},
+    )
+    monkeypatch.setattr(
+        "app.mechanism_release_gate.field_metric_release_regressions",
+        lambda _before, _after: [],
+    )
+
+    report = evaluate_candidate_release_gate(
+        _Db(),
+        category_key="inspiration_image",
+        projected=projected,
+        candidate=candidate,
+        regression_run=candidate_run,
+        expected_projected_revision=7,
+        expected_projected_contract_hash="p" * 64,
+    )
+
+    # 报告照常返回（不阻断流程），但不允许批准
+    assert report["approval_allowed"] is False
+    assert report["recommendation"] == "reject"
+    assert "regression_coverage_too_low" in {item["code"] for item in report["regressions"]}
+
+
+@pytest.mark.parametrize("total", [1, 20, 100])
+def test_candidate_release_gate_allows_fully_covered_small_runs(
+    monkeypatch: pytest.MonkeyPatch,
+    total: int,
+) -> None:
+    """全覆盖的小样本 run 不得被覆盖率门槛误伤 —— 孤立纠偏重跑只跑 1 条。"""
+    projected, candidate, _baseline, candidate_run = _objects()
+    candidate_run.metrics_json = json.dumps(_metrics(total=total))
+    monkeypatch.setattr(
+        "app.mechanism_release_gate.build_baseline_field_metrics",
+        lambda _db, run: {"run_id": run.id, "fields": {}},
+    )
+    monkeypatch.setattr(
+        "app.mechanism_release_gate.field_metric_release_regressions",
+        lambda _before, _after: [],
+    )
+
+    report = evaluate_candidate_release_gate(
+        _Db(),
+        category_key="inspiration_image",
+        projected=projected,
+        candidate=candidate,
+        regression_run=candidate_run,
+        expected_projected_revision=7,
+        expected_projected_contract_hash="p" * 64,
+    )
+    assert "regression_coverage_too_low" not in {
+        item["code"] for item in report["regressions"]
+    }
+
+
+def test_candidate_release_gate_allows_healthy_coverage() -> None:
+    """真实健康 run 的覆盖率在 92% 以上，不得被新门槛误伤。"""
+    from app.mechanism_release_gate import MIN_COMPARABLE_COVERAGE
+
+    # run58 的真实形态：99/100 有效
+    assert 99 / 100 >= MIN_COMPARABLE_COVERAGE
+    # run52 的病态形态：60/100 —— 必须被拦
+    assert 60 / 100 < MIN_COMPARABLE_COVERAGE
