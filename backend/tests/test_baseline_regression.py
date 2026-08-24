@@ -2769,3 +2769,394 @@ def test_completed_update_does_not_revive_canceled_job(
         app.dependency_overrides.clear()
         db.close()
         engine.dispose()
+
+
+def test_pause_jobs_scoped_to_run_spares_other_runs() -> None:
+    """按 run 暂停不应把别的 run 一起冻住，也不应改动全局暂停开关。"""
+
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    db = Session(engine, expire_on_commit=False)
+    user = User(
+        username="scoped-pause",
+        password_hash="unused",
+        display_name="作用域取消测试员",
+    )
+    asset_a = Asset(
+        original_name="scoped-a-L2.jpg",
+        stored_name="scoped-a-L2.jpg",
+        mime_type="image/jpeg",
+        size_bytes=10,
+        sha256="a" * 64,
+        status="uploaded",
+    )
+    asset_b = Asset(
+        original_name="scoped-b-L2.jpg",
+        stored_name="scoped-b-L2.jpg",
+        mime_type="image/jpeg",
+        size_bytes=10,
+        sha256="b" * 64,
+        status="uploaded",
+    )
+    model = ModelConfig(
+        name="test",
+        provider="doubao",
+        base_url="https://example.test",
+        api_path="/chat",
+        model_id="model",
+        active=True,
+    )
+    prompt_a = PromptVersion(
+        stage="A",
+        name="A",
+        version="scoped-A1",
+        system_prompt="classification prompt",
+        user_prompt="classify",
+        rubric_version="R1",
+        status="published",
+    )
+    prompt_b = PromptVersion(
+        stage="B",
+        name="B",
+        version="scoped-B1",
+        system_prompt="aesthetic prompt",
+        user_prompt="evaluate",
+        rubric_version="R1",
+        status="published",
+    )
+    db.add_all([user, asset_a, asset_b, model, prompt_a, prompt_b])
+    add_active_v3_contract(db)
+    db.commit()
+
+    app.dependency_overrides[get_db] = lambda: (yield db)
+    app.dependency_overrides[current_user] = lambda: user
+    client = TestClient(app)
+    try:
+        set_a = client.post(
+            "/api/baseline-sets",
+            json={
+                "name": "作用域集A",
+                "default_expected_level": "L2",
+                "items": [{"asset_id": asset_a.id}],
+            },
+        ).json()
+        set_b = client.post(
+            "/api/baseline-sets",
+            json={
+                "name": "作用域集B",
+                "default_expected_level": "L2",
+                "items": [{"asset_id": asset_b.id}],
+            },
+        ).json()
+        run_a = client.post(f"/api/baseline-sets/{set_a['id']}/runs").json()
+        run_b = client.post(f"/api/baseline-sets/{set_b['id']}/runs").json()
+
+        item_a = db.scalars(
+            select(BaselineRegressionItem).where(
+                BaselineRegressionItem.run_id == run_a["id"]
+            )
+        ).one()
+        item_b = db.scalars(
+            select(BaselineRegressionItem).where(
+                BaselineRegressionItem.run_id == run_b["id"]
+            )
+        ).one()
+        assert item_a.status == "queued"
+        assert item_b.status == "queued"
+
+        response = client.post(
+            "/api/jobs/control/pause",
+            json={"baseline_run_ids": [run_a["id"]]},
+        )
+        assert response.status_code == 200
+        assert response.json()["scope"] == "runs"
+        assert response.json()["affected"] == 1
+
+        db.expire_all()
+        job_a = db.scalars(
+            select(EvaluationJob).where(
+                EvaluationJob.baseline_regression_item_id == item_a.id
+            )
+        ).one()
+        job_b = db.scalars(
+            select(EvaluationJob).where(
+                EvaluationJob.baseline_regression_item_id == item_b.id
+            )
+        ).one()
+        assert job_a.status == "paused"
+        # 另一个 run 完全不受影响
+        assert job_b.status == "queued"
+        # 按 run 暂停不该动全局开关，否则会顺带把其他 run 一起冻住
+        assert client.get("/api/jobs/control").json()["paused"] is False
+    finally:
+        app.dependency_overrides.clear()
+        db.close()
+        engine.dispose()
+
+
+
+def test_pause_leaves_processing_jobs_to_finish() -> None:
+    """暂停不得把 processing 的 job 拍成 paused。
+
+    那个 job 的模型调用已经在飞、也已经计费。拍成 paused 后 worker 侧的
+    status == "processing" 守卫会让后续进度与完成写入全部静默 no-op，而
+    EvaluationResult 早已落库；resume 再把它打回 queued，同一素材就被重新
+    评测一次，产生第二条结果和第二次 API 计费。"""
+
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    db = Session(engine, expire_on_commit=False)
+    user = User(
+        username="pause-processing",
+        password_hash="unused",
+        display_name="作用域取消测试员",
+    )
+    asset_a = Asset(
+        original_name="scoped-a-L2.jpg",
+        stored_name="scoped-a-L2.jpg",
+        mime_type="image/jpeg",
+        size_bytes=10,
+        sha256="a" * 64,
+        status="uploaded",
+    )
+    asset_b = Asset(
+        original_name="scoped-b-L2.jpg",
+        stored_name="scoped-b-L2.jpg",
+        mime_type="image/jpeg",
+        size_bytes=10,
+        sha256="b" * 64,
+        status="uploaded",
+    )
+    model = ModelConfig(
+        name="test",
+        provider="doubao",
+        base_url="https://example.test",
+        api_path="/chat",
+        model_id="model",
+        active=True,
+    )
+    prompt_a = PromptVersion(
+        stage="A",
+        name="A",
+        version="scoped-A1",
+        system_prompt="classification prompt",
+        user_prompt="classify",
+        rubric_version="R1",
+        status="published",
+    )
+    prompt_b = PromptVersion(
+        stage="B",
+        name="B",
+        version="scoped-B1",
+        system_prompt="aesthetic prompt",
+        user_prompt="evaluate",
+        rubric_version="R1",
+        status="published",
+    )
+    db.add_all([user, asset_a, asset_b, model, prompt_a, prompt_b])
+    add_active_v3_contract(db)
+    db.commit()
+
+    app.dependency_overrides[get_db] = lambda: (yield db)
+    app.dependency_overrides[current_user] = lambda: user
+    client = TestClient(app)
+    try:
+        set_a = client.post(
+            "/api/baseline-sets",
+            json={
+                "name": "作用域集A",
+                "default_expected_level": "L2",
+                "items": [{"asset_id": asset_a.id}],
+            },
+        ).json()
+        set_b = client.post(
+            "/api/baseline-sets",
+            json={
+                "name": "作用域集B",
+                "default_expected_level": "L2",
+                "items": [{"asset_id": asset_b.id}],
+            },
+        ).json()
+        run_a = client.post(f"/api/baseline-sets/{set_a['id']}/runs").json()
+        run_b = client.post(f"/api/baseline-sets/{set_b['id']}/runs").json()
+
+        item_a = db.scalars(
+            select(BaselineRegressionItem).where(
+                BaselineRegressionItem.run_id == run_a["id"]
+            )
+        ).one()
+        item_b = db.scalars(
+            select(BaselineRegressionItem).where(
+                BaselineRegressionItem.run_id == run_b["id"]
+            )
+        ).one()
+        assert item_a.status == "queued"
+        assert item_b.status == "queued"
+
+        job_a = db.scalars(
+            select(EvaluationJob).where(
+                EvaluationJob.baseline_regression_item_id == item_a.id
+            )
+        ).one()
+        job_a.status = "processing"
+        job_a.stage = "call_a"
+        db.commit()
+
+        response = client.post("/api/jobs/control/pause")
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["scope"] == "global"
+        # 只暂停 queued：run_b 那一个
+        assert payload["affected"] == 1
+        # 进行中的任务如实上报，让运营知道它会自然收尾
+        assert payload["still_running"] == 1
+
+        db.expire_all()
+        job_a = db.get(EvaluationJob, job_a.id)
+        assert job_a is not None
+        # 关键：没被拍成 paused，因此不会在 resume 时被重新评测一次
+        assert job_a.status == "processing"
+    finally:
+        app.dependency_overrides.clear()
+        db.close()
+        engine.dispose()
+
+
+
+def test_resume_jobs_scoped_to_run_keeps_global_pause() -> None:
+    """按 run 恢复只唤醒该 run 的任务，且不得把别人刻意暂停的队列一起恢复。"""
+
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    db = Session(engine, expire_on_commit=False)
+    user = User(
+        username="scoped-resume",
+        password_hash="unused",
+        display_name="作用域取消测试员",
+    )
+    asset_a = Asset(
+        original_name="scoped-a-L2.jpg",
+        stored_name="scoped-a-L2.jpg",
+        mime_type="image/jpeg",
+        size_bytes=10,
+        sha256="a" * 64,
+        status="uploaded",
+    )
+    asset_b = Asset(
+        original_name="scoped-b-L2.jpg",
+        stored_name="scoped-b-L2.jpg",
+        mime_type="image/jpeg",
+        size_bytes=10,
+        sha256="b" * 64,
+        status="uploaded",
+    )
+    model = ModelConfig(
+        name="test",
+        provider="doubao",
+        base_url="https://example.test",
+        api_path="/chat",
+        model_id="model",
+        active=True,
+    )
+    prompt_a = PromptVersion(
+        stage="A",
+        name="A",
+        version="scoped-A1",
+        system_prompt="classification prompt",
+        user_prompt="classify",
+        rubric_version="R1",
+        status="published",
+    )
+    prompt_b = PromptVersion(
+        stage="B",
+        name="B",
+        version="scoped-B1",
+        system_prompt="aesthetic prompt",
+        user_prompt="evaluate",
+        rubric_version="R1",
+        status="published",
+    )
+    db.add_all([user, asset_a, asset_b, model, prompt_a, prompt_b])
+    add_active_v3_contract(db)
+    db.commit()
+
+    app.dependency_overrides[get_db] = lambda: (yield db)
+    app.dependency_overrides[current_user] = lambda: user
+    client = TestClient(app)
+    try:
+        set_a = client.post(
+            "/api/baseline-sets",
+            json={
+                "name": "作用域集A",
+                "default_expected_level": "L2",
+                "items": [{"asset_id": asset_a.id}],
+            },
+        ).json()
+        set_b = client.post(
+            "/api/baseline-sets",
+            json={
+                "name": "作用域集B",
+                "default_expected_level": "L2",
+                "items": [{"asset_id": asset_b.id}],
+            },
+        ).json()
+        run_a = client.post(f"/api/baseline-sets/{set_a['id']}/runs").json()
+        run_b = client.post(f"/api/baseline-sets/{set_b['id']}/runs").json()
+
+        item_a = db.scalars(
+            select(BaselineRegressionItem).where(
+                BaselineRegressionItem.run_id == run_a["id"]
+            )
+        ).one()
+        item_b = db.scalars(
+            select(BaselineRegressionItem).where(
+                BaselineRegressionItem.run_id == run_b["id"]
+            )
+        ).one()
+        assert item_a.status == "queued"
+        assert item_b.status == "queued"
+
+        assert client.post("/api/jobs/control/pause").json()["scope"] == "global"
+        db.expire_all()
+        assert client.get("/api/jobs/control").json()["paused"] is True
+
+        response = client.post(
+            "/api/jobs/control/resume",
+            json={"baseline_run_ids": [run_a["id"]]},
+        )
+        assert response.status_code == 200
+        assert response.json()["scope"] == "runs"
+        assert response.json()["affected"] == 1
+
+        db.expire_all()
+        job_a = db.scalars(
+            select(EvaluationJob).where(
+                EvaluationJob.baseline_regression_item_id == item_a.id
+            )
+        ).one()
+        job_b = db.scalars(
+            select(EvaluationJob).where(
+                EvaluationJob.baseline_regression_item_id == item_b.id
+            )
+        ).one()
+        assert job_a.status == "queued"
+        # 别的 run 仍然保持暂停
+        assert job_b.status == "paused"
+        # 全局开关保持暂停：按 run 恢复不该替别人做决定
+        assert client.get("/api/jobs/control").json()["paused"] is True
+    finally:
+        app.dependency_overrides.clear()
+        db.close()
+        engine.dispose()

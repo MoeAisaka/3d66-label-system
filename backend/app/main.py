@@ -5322,46 +5322,146 @@ def get_job_control(
     }
 
 
+class JobScopeRequest(BaseModel):
+    """按 run 收窄操作范围；两个字段都为空时退回全局（保持旧行为）。"""
+
+    baseline_run_ids: list[int] | None = None
+    prompt_run_ids: list[int] | None = None
+
+
+def _scoped_job_conditions(
+    baseline_run_ids: list[int],
+    prompt_run_ids: list[int],
+) -> list[Any]:
+    """把 run id 翻译成 EvaluationJob 的过滤条件（基线回归与提示词回归各一条）。"""
+    conditions: list[Any] = []
+    if baseline_run_ids:
+        conditions.append(
+            EvaluationJob.baseline_regression_item_id.in_(
+                select(BaselineRegressionItem.id).where(
+                    BaselineRegressionItem.run_id.in_(baseline_run_ids)
+                )
+            )
+        )
+    if prompt_run_ids:
+        conditions.append(
+            EvaluationJob.regression_item_id.in_(
+                select(PromptRegressionItem.id).where(
+                    PromptRegressionItem.run_id.in_(prompt_run_ids)
+                )
+            )
+        )
+    return conditions
+
+
+def _collect_scoped_jobs(
+    db: Session,
+    status_filter: Any,
+    conditions: list[Any],
+) -> list[EvaluationJob]:
+    """按多个作用域条件取 job 并去重（一个 job 只可能属于其中一类，但不依赖这个前提）。"""
+    jobs: list[EvaluationJob] = []
+    seen: set[int] = set()
+    for condition in conditions:
+        for job in db.scalars(select(EvaluationJob).where(status_filter, condition)).all():
+            if job.id not in seen:
+                seen.add(job.id)
+                jobs.append(job)
+    return jobs
+
+
 @app.post("/api/jobs/control/pause")
 def pause_all_jobs(
+    payload: JobScopeRequest | None = None,
     _user: User = Depends(_permission_user("jobs:write")),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     control = _evaluation_control(db)
-    control.paused = True
-    result = db.execute(
-        update(EvaluationJob)
-        .where(EvaluationJob.status.in_(("queued", "processing")))
-        .values(status="paused", stage="paused", worker_id=None)
-    )
+    baseline_run_ids = list(payload.baseline_run_ids or []) if payload else []
+    prompt_run_ids = list(payload.prompt_run_ids or []) if payload else []
+    scoped = bool(baseline_run_ids or prompt_run_ids)
+    # 按 run 暂停时不动全局开关，否则会顺带把其他 run 一起冻住。
+    if not scoped:
+        control.paused = True
+
+    # 只暂停 queued。processing 的 job 模型调用已经在飞、也已经计费：把它拍成
+    # paused 会让 worker 侧的 status == "processing" 守卫使后续进度与完成写入
+    # 全部静默 no-op，而 EvaluationResult 早已落库；resume 再把它打回 queued，
+    # 同一素材就被重新评测一次，产生第二条结果和第二次 API 计费。
+    # 让进行中的任务自然收尾——全局暂停已由 control.paused 阻止领取新任务，
+    # 按 run 暂停则由这些 job 自己的 paused 状态阻止。
+    still_running = 0
+    if scoped:
+        conditions = _scoped_job_conditions(baseline_run_ids, prompt_run_ids)
+        jobs = _collect_scoped_jobs(db, EvaluationJob.status == "queued", conditions)
+        for job in jobs:
+            job.status = "paused"
+            job.stage = "paused"
+            job.worker_id = None
+        affected = len(jobs)
+        still_running = len(
+            _collect_scoped_jobs(db, EvaluationJob.status == "processing", conditions)
+        )
+    else:
+        result = db.execute(
+            update(EvaluationJob)
+            .where(EvaluationJob.status == "queued")
+            .values(status="paused", stage="paused", worker_id=None)
+        )
+        affected = int(result.rowcount or 0)
+        still_running = int(
+            db.scalar(
+                select(func.count(EvaluationJob.id)).where(
+                    EvaluationJob.status == "processing"
+                )
+            )
+            or 0
+        )
     db.commit()
-    return {"ok": True, "affected": result.rowcount}
+    return {
+        "ok": True,
+        "affected": affected,
+        "still_running": still_running,
+        "scope": "runs" if scoped else "global",
+    }
 
 
 @app.post("/api/jobs/control/resume")
 def resume_all_jobs(
+    payload: JobScopeRequest | None = None,
     _user: User = Depends(_permission_user("jobs:write")),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     control = _evaluation_control(db)
-    control.paused = False
-    paused_jobs = db.scalars(
-        select(EvaluationJob).where(EvaluationJob.status == "paused")
-    ).all()
+    baseline_run_ids = list(payload.baseline_run_ids or []) if payload else []
+    prompt_run_ids = list(payload.prompt_run_ids or []) if payload else []
+    scoped = bool(baseline_run_ids or prompt_run_ids)
+    # 按 run 恢复不该把全局开关一起打开：别人刻意暂停的队列不能被顺带恢复。
+    if not scoped:
+        control.paused = False
+
+    status_filter = EvaluationJob.status == "paused"
+    if scoped:
+        paused_jobs = _collect_scoped_jobs(
+            db, status_filter, _scoped_job_conditions(baseline_run_ids, prompt_run_ids)
+        )
+    else:
+        paused_jobs = list(db.scalars(select(EvaluationJob).where(status_filter)).all())
     for job in paused_jobs:
         job.status = "queued"
         job.stage = "waiting"
         job.worker_id = None
         job.asset.status = "queued"
     db.commit()
-    return {"ok": True, "affected": len(paused_jobs)}
+    return {
+        "ok": True,
+        "affected": len(paused_jobs),
+        "scope": "runs" if scoped else "global",
+    }
 
 
-class JobCancelRequest(BaseModel):
+class JobCancelRequest(JobScopeRequest):
     """按 run 收窄取消范围；两个字段都为空时退回全局取消（保持旧行为）。"""
-
-    baseline_run_ids: list[int] | None = None
-    prompt_run_ids: list[int] | None = None
 
 
 @app.post("/api/jobs/control/cancel")
@@ -5382,34 +5482,11 @@ def cancel_all_jobs(
         control.paused = False
     status_filter = EvaluationJob.status.in_(("queued", "processing", "paused"))
     if scoped:
-        scope_conditions = []
-        if baseline_run_ids:
-            scope_conditions.append(
-                EvaluationJob.baseline_regression_item_id.in_(
-                    select(BaselineRegressionItem.id).where(
-                        BaselineRegressionItem.run_id.in_(baseline_run_ids)
-                    )
-                )
-            )
-        if prompt_run_ids:
-            scope_conditions.append(
-                EvaluationJob.regression_item_id.in_(
-                    select(PromptRegressionItem.id).where(
-                        PromptRegressionItem.run_id.in_(prompt_run_ids)
-                    )
-                )
-            )
-        active_jobs = []
-        seen_job_ids: set[int] = set()
-        for condition in scope_conditions:
-            for job in db.scalars(
-                select(EvaluationJob).where(status_filter, condition)
-            ).all():
-                if job.id not in seen_job_ids:
-                    seen_job_ids.add(job.id)
-                    active_jobs.append(job)
+        active_jobs = _collect_scoped_jobs(
+            db, status_filter, _scoped_job_conditions(baseline_run_ids, prompt_run_ids)
+        )
     else:
-        active_jobs = db.scalars(select(EvaluationJob).where(status_filter)).all()
+        active_jobs = list(db.scalars(select(EvaluationJob).where(status_filter)).all())
     now = datetime.now(timezone.utc)
     for job in active_jobs:
         if job.regression_item_id is not None:
