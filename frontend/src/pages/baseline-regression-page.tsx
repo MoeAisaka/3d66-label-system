@@ -25,7 +25,7 @@ import {
   ImagePreviewButton,
   type ImagePreview,
 } from "@/components/image-lightbox"
-import { ApiError, api, baselineRegressionApi } from "@/lib/api"
+import { ApiError, api, baselineRegressionApi, jsonBody } from "@/lib/api"
 import { submitReviewDecision } from "@/lib/review-submit"
 import type {
   Asset,
@@ -69,6 +69,9 @@ import {
   updateCorrectionDraft,
 } from "@/features/correction-contract/correction-view-state"
 import type { CorrectionDraft, CorrectionView } from "@/features/correction-contract/types"
+import { EvaluationDetailPanel } from "@/features/evaluation-detail/evaluation-detail-panel"
+import { fieldSpecsFromContractNodes } from "@/features/evaluation-detail/detail-model"
+import type { RowCorrectionSubmit } from "@/features/evaluation-detail/row-correction-dialog"
 import {
   nextPendingCorrectionId,
   previousCorrectionId,
@@ -1804,6 +1807,37 @@ function RegressionResults({
     setCorrectionDraftKey("")
   }, [correctionItemId])
 
+  // 评测细节面板里逐条纠偏：走与增量纠偏同一个节点接口，保证两处口径一致。
+  const correctRow = useMutation({
+    mutationFn: (payload: RowCorrectionSubmit & { evaluationId: number }) => {
+      const suffix = typeof crypto !== "undefined" && "randomUUID" in crypto
+        ? crypto.randomUUID()
+        : `${Date.now()}-${Math.random().toString(16).slice(2)}`
+      return api(`/api/evaluation-results/${payload.evaluationId}/correct-node`, {
+        method: "POST",
+        ...jsonBody({
+          correction_key: `detail-${payload.evaluationId}-${payload.nodePath}-${suffix}`.slice(0, 120),
+          node_type: payload.nodeType,
+          node_path: payload.nodePath,
+          old_value: payload.oldValue,
+          new_value: payload.newValue,
+          evidence: [],
+          reason: payload.reason,
+          reason_codes: payload.reasonCodes,
+        }),
+      })
+    },
+    onSuccess: async () => {
+      toast.success("纠偏已保存")
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["baseline-regression", run.id] }),
+        queryClient.invalidateQueries({ queryKey: ["baseline-acceptance", run.id] }),
+        queryClient.invalidateQueries({ queryKey: ["evaluations"] }),
+      ])
+    },
+    onError: (error) => toast.error(error.message),
+  })
+
   const submitContractCorrection = useMutation({
     mutationFn: async () => {
       const view = correctionViewQuery.data
@@ -1831,6 +1865,8 @@ function RegressionResults({
   })
 
   if (correctionItemId > 0 && correctionItem) {
+    // 提成局部常量，闭包里才能收窄可空性（成员访问在回调中无法保持收窄）。
+    const correctionEvaluation = correctionItem.evaluation
     return (
       <CorrectionWorkbench
         item={correctionItem}
@@ -1867,6 +1903,30 @@ function RegressionResults({
       >
         <div className="grid grid-cols-1 gap-4">
           <LevelExplanation item={correctionItem} />
+          {correctionEvaluation && (
+            <EvaluationDetailPanel
+              precheck={correctionEvaluation.precheck}
+              aesthetic={correctionEvaluation.aesthetic}
+              scoring={correctionEvaluation.scoring}
+              fieldSpecs={fieldSpecsFromContractNodes(correctionViewQuery.data?.nodes)}
+              contractNodes={correctionViewQuery.data?.nodes}
+              correctionHistory={correctionEvaluation.correction_history}
+              correctionPending={correctRow.isPending}
+              onCorrect={
+                correctionEvaluation.review_stage === "completed"
+                  ? undefined
+                  : async (payload) => {
+                      await correctRow.mutateAsync({
+                        ...payload,
+                        evaluationId: correctionEvaluation.id,
+                      })
+                    }
+              }
+              correctedFieldKeys={correctionEvaluation.human_review?.corrections?.map(
+                (correction) => correction.field_key,
+              )}
+            />
+          )}
           <div className="space-y-3">
             <p className="text-sm font-semibold">人工决策</p>
             <p className="text-xs leading-5 text-[var(--muted)]">提交后会停留在当前素材；可使用页面右上角的“上一条”和“下一条”手动切换。</p>
