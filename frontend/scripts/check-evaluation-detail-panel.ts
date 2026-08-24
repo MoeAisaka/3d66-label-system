@@ -642,8 +642,8 @@ const reviewPageSource = readFileSync(
 // 定案入口一律走 requestDecision 暂存，唯一真实提交点在确认框的 onConfirm 上
 assert.equal(
   (reviewPageSource.match(/requestDecision\(\{ decision:/g) ?? []).length,
-  5,
-  "五个定案入口（文档类与常规类的采纳/退回、纠偏）都必须先过确认框",
+  6,
+  "六个定案入口（文档类与常规类的采纳/退回、纠偏，以及「下一张」导航）都必须先过确认框",
 )
 assert.equal(
   (reviewPageSource.match(/review\.mutate\(/g) ?? []).length,
@@ -656,7 +656,9 @@ assert.match(
   "确认框必须提交暂存的 payload，不能另造一份",
 )
 
-// go() 是纯导航：翻页不能顺带把样本标成已复核
+// go(offset) 是纯导航原语：它自己不许提交。
+// 「下一张」确实会定案，但必须经 requestNavigateForward 弹确认框，
+// 不能在 go() 里静默 mutate——静默翻页即定案会污染人工真值。
 const goBody = reviewPageSource.slice(
   reviewPageSource.indexOf("function go(offset: number)"),
   reviewPageSource.indexOf("function go(offset: number)") + 400,
@@ -664,9 +666,30 @@ const goBody = reviewPageSource.slice(
 for (const forbidden of ["review.mutate", "requestDecision", "submitReviewDecision"]) {
   assert.ok(
     !goBody.includes(forbidden),
-    `上一张/下一张必须是纯导航，不能触发 ${forbidden}——翻页即定案会污染人工真值`,
+    `go() 必须是纯导航原语，不能直接触发 ${forbidden}——定案只允许经确认框，静默翻页即定案会污染人工真值`,
   )
 }
+
+// 「下一张」定案是运营明示的产品决定：按钮不得直接 go(1)，必须先弹确认框
+assert.match(
+  reviewPageSource,
+  /onClick=\{requestNavigateForward\}/,
+  "「下一张」必须走 requestNavigateForward 弹确认框，不能直接 go(1) 静默定案",
+)
+assert.match(
+  reviewPageSource,
+  /onSkip=\{pendingNavOffset === null \? undefined :/,
+  "导航触发的确认框必须提供「只看下一条，不定案」出口，否则运营无法纯浏览",
+)
+assert.match(
+  reviewPageSource,
+  /function requestNavigateForward\(\)[\s\S]{0,240}?review_stage === "completed"[\s\S]{0,80}?go\(1\)/,
+  "已定案样本翻页不应重复弹框，requestNavigateForward 必须先放行 completed",
+)
+assert.ok(
+  reviewPageSource.includes("setPendingNavOffset(null)"),
+  "确认框关闭/提交成功后必须清掉导航来源标记，否则下一条会误带出口",
+)
 
 // 提交成功后要清掉暂存，否则下一条会带着上一条的 payload
 assert.match(

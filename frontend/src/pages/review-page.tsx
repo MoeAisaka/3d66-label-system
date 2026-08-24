@@ -254,6 +254,9 @@ export function ReviewPage({ user }: { user: User }) {
   // 其中纠偏还会写进类目黄金集。所以三者统一先过确认框，避免快速翻页时
   // 把只扫了一眼的样本写成人工真值——这个项目在黄金集真值污染上吃过一次亏。
   const [pendingDecision, setPendingDecision] = useState<PendingReviewDecision | null>(null)
+  // 记录本次确认框是由哪个导航动作触发的（null=由三个决定按钮触发）。
+  // 有值时确认框会多出「只看下一条，不定案」出口，避免翻页被迫定案。
+  const [pendingNavOffset, setPendingNavOffset] = useState<number | null>(null)
 
   const review = useMutation({
     mutationFn: async ({ decision, corrected_level, reviewNote, corrections = [] }: { decision: "approved" | "corrected" | "rejected"; corrected_level: string | null; reviewNote: string; corrections?: ReviewCorrection[] }) => {
@@ -273,6 +276,7 @@ export function ReviewPage({ user }: { user: User }) {
         filteredAssets[currentIndex - 1]?.evaluation
       setNote("")
       setPendingDecision(null)
+      setPendingNavOffset(null)
       toast.success(variables.decision === "corrected" ? "人工维度纠错和最终结果已保存" : variables.decision === "approved" ? "已确认模型结果" : "已退回复核")
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ["evaluation", currentId] }),
@@ -294,6 +298,19 @@ export function ReviewPage({ user }: { user: User }) {
    */
   function requestDecision(payload: PendingReviewDecision) {
     setPendingDecision(payload)
+  }
+
+  /**
+   * 「下一张」入口：翻页即定案，所以先弹确认框让运营明确知道这一步在定案。
+   * 已定案的样本不再弹框，直接翻页。
+   */
+  function requestNavigateForward() {
+    if (evaluation?.review_stage === "completed") {
+      go(1)
+      return
+    }
+    setPendingNavOffset(1)
+    requestDecision({ decision: "approved", corrected_level: null, reviewNote: note.trim() })
   }
 
   function go(offset: number) {
@@ -334,7 +351,7 @@ export function ReviewPage({ user }: { user: User }) {
             <div className="flex items-center border border-[var(--line-strong)] bg-white">
               <Button variant="ghost" size="icon" className="rounded-none" onClick={() => go(-1)} disabled={currentIndex <= 0} aria-label="上一张"><ArrowLeft /></Button>
               <span className="font-data min-w-24 border-x border-[var(--line)] px-3 text-center text-xs">{currentIndex >= 0 ? currentIndex + 1 : 0} / {filteredAssets.length}</span>
-              <Button variant="ghost" size="icon" className="rounded-none" onClick={() => go(1)} disabled={currentIndex < 0 || currentIndex >= filteredAssets.length - 1} aria-label="下一张"><ArrowRight /></Button>
+              <Button variant="ghost" size="icon" className="rounded-none" onClick={requestNavigateForward} disabled={currentIndex < 0 || currentIndex >= filteredAssets.length - 1} aria-label="下一张"><ArrowRight /></Button>
             </div>
           </div>
         }
@@ -569,7 +586,16 @@ export function ReviewPage({ user }: { user: User }) {
         onConfirm={() => {
           if (pendingDecision) review.mutate(pendingDecision)
         }}
-        onCancel={() => setPendingDecision(null)}
+        onSkip={pendingNavOffset === null ? undefined : () => {
+          const offset = pendingNavOffset
+          setPendingNavOffset(null)
+          setPendingDecision(null)
+          go(offset)
+        }}
+        onCancel={() => {
+          setPendingNavOffset(null)
+          setPendingDecision(null)
+        }}
       />
     </>
   )
