@@ -198,12 +198,16 @@ def test_execution_snapshot_uses_compatibility_fields_and_v3_rule_nodes() -> Non
         "v3.final_level",
     } <= set(by_key)
     assert any(node["layer"] == "B" for node in contract["nodes"])
-    assert all(
-        node["node_key"].startswith("call_b.")
-        and node["type"] == "rule_hit"
-        for node in contract["nodes"]
-        if node["layer"] == "B"
-    )
+    b_nodes = [node for node in contract["nodes"] if node["layer"] == "B"]
+    assert all(node["node_key"].startswith("call_b.") for node in b_nodes)
+    # 调用B先给出整体美感基础分，再逐条判断规则命中，所以 B 层同时包含这两类节点。
+    rule_nodes = [
+        node for node in b_nodes if node["node_key"] != "call_b.aesthetic_score"
+    ]
+    assert rule_nodes, "冻结的维度规则必须展开成逐条可纠偏的 B 层节点"
+    assert all(node["type"] == "rule_hit" for node in rule_nodes)
+    aesthetic = by_key["call_b.aesthetic_score"]
+    assert aesthetic["type"] == "integer", "美感基础分是 0-100 整数，不是规则命中"
 
 
 def test_reason_correction_options_come_from_frozen_redline_contract() -> None:

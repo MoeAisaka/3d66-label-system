@@ -8,12 +8,14 @@ frozen precheck + rule hits and no model is invoked.
 
 from __future__ import annotations
 
-from typing import Any
+from copy import deepcopy
+from typing import Any, Mapping
 
 from .category_evaluation_aggregator import aggregate_category_evaluation
 from .dimension_deduction_bridge import (
     compose_rule_deductions,
     empty_deduction_output,
+    foundation_required,
     has_deduction_rules,
     rule_scoring_mode,
 )
@@ -25,6 +27,22 @@ class V3PipelineError(ValueError):
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
         self.code = code
+
+
+def _has_aesthetic_foundation(dimension_output: Any) -> bool:
+    """Whether this stored Call-B output actually carries a usable base score.
+
+    Replays read historical rows.  Rows written before the Call-B aesthetic
+    foundation existed — and rows whose Call-B request failed — hold no score,
+    and demanding one would fail their corrections closed.  Rows that do hold a
+    score must keep it, otherwise the matcher restarts from full marks.
+    """
+    if not isinstance(dimension_output, Mapping):
+        return False
+    score = dimension_output.get("aesthetic_score")
+    if isinstance(score, bool) or not isinstance(score, int):
+        return False
+    return 0 <= score <= 100
 
 
 def resolve_v3_track(
@@ -101,12 +119,44 @@ def recompute_qualified_v3(
         # A corrected track can have another dimension set.  Starting that new
         # branch with empty hits is deterministic and does not invent evidence.
         if not isinstance(rule_output, dict) or actual_keys != expected_keys:
-            rule_output = empty_deduction_output(config)
+            reset_output = empty_deduction_output(config)
+            # The Call-B aesthetic score belongs to the image, not to the track,
+            # so a track correction must not silently drop the matcher's
+            # starting score along with the track-specific rule hits.
+            if isinstance(rule_output, dict):
+                for key in (
+                    "aesthetic_score",
+                    "aesthetic_evidence",
+                    "aesthetic_confidence",
+                    "raw_payload",
+                ):
+                    if rule_output.get(key) is not None:
+                        reset_output[key] = deepcopy(rule_output[key])
+                if rule_output.get("warning") is None:
+                    reset_output.pop("warning", None)
+            rule_output = reset_output
+        # The Call-B aesthetic score is the matcher's starting score, so a
+        # replay that drops it restarts from a full-marks baseline and inflates
+        # every corrected result.  Unlike the full worker — which always holds a
+        # fresh Call-B answer — a replay reads historical rows, and rows stored
+        # before the foundation existed carry no score at all.  So the switch
+        # follows the stored data: honour the frozen contract only when this row
+        # actually has a score, and stay in the legacy path when it does not.
         composed = compose_rule_deductions(
-            config=config, dimension_output=rule_output
+            config=config,
+            dimension_output=rule_output,
+            require_foundation=(
+                _has_aesthetic_foundation(rule_output)
+                and foundation_required(contract)
+                and foundation_required(config)
+            ),
         )
         result = aggregate_category_evaluation(
-            contract, precheck, composed, track_key=resolved_track
+            contract,
+            precheck,
+            composed,
+            track_key=resolved_track,
+            initial_score=composed.get("aesthetic_score"),
         )
         result["dimension_scoring_mode"] = public_scoring_mode
         result["dimension_deduction_output"] = rule_output
