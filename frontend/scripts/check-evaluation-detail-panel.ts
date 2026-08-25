@@ -686,6 +686,16 @@ assert.equal(
   "人工撤掉命中（new_value=null）要如实显示为未命中",
 )
 assert.equal(
+  findRow(withHistory[1], "构图秩序：主体被裁切")?.corrected,
+  true,
+  "重放后模型值与人工值一致时，仍要靠 corrected 标记让运营看出这行被人工改过",
+)
+assert.notEqual(
+  findRow(judgementB, "构图秩序：主体被裁切")?.corrected,
+  true,
+  "没有纠偏历史的规则行不得误标已纠偏",
+)
+assert.equal(
   findRow(withHistory[1], "构图秩序：黄金比例构图")?.humanValue,
   "命中 · 置信度 中：三分线构图工整",
   "人工补上的命中要带置信度与证据并列展示",

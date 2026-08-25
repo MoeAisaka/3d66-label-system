@@ -664,6 +664,9 @@ export function buildCallBSection(
           value: ruleHitSummary(hit, spec.ruleKind),
           tone: hit ? (spec.ruleKind === "bonus" ? "success" : "warning") : "neutral",
           evidence: isPlainObject(hit) ? stringList(hit.evidence) : undefined,
+          // 重放后当前值就是人工值，两者相同则不再并列展示；
+          // 但 corrected 必须单独标记，否则运营看不出这行被人工改过。
+          corrected: humanValue !== undefined,
           humanValue:
             humanValue === undefined
               ? undefined
