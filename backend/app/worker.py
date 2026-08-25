@@ -329,6 +329,38 @@ def resolve_frozen_anchor_assets(
     }
 
 
+def resolve_anchor_mechanism_assets(
+    db,
+    proposal_contract: dict[str, object],
+) -> dict[int, SimpleNamespace] | None:
+    """读取锚点图机制（``anchor-mechanism-v1``）引用的素材元数据。
+
+    与 ``resolve_frozen_anchor_assets`` 的关键区别：**不调冻结校验**。
+    ``validate_anchor_contract`` 要求 Owner 锚图 L1→L4/L5 齐全、有序、不许替换，
+    实测会拒绝「只配两档」「换掉某一档的图」「乱序」这三种运营自定义必需的操作。
+    这里只按 asset_id 取素材行，等级组合的自由度由锚点机制自己的校验负责；
+    内容身份仍然靠 sha256 在装配时逐张比对，换图必须换哈希。
+    """
+    from .inspiration_anchor_mechanism import validate_anchor_mechanism
+
+    view = validate_anchor_mechanism(proposal_contract)
+    if view is None or not view["enabled"] or not view["anchors"]:
+        return None
+    anchor_ids = [int(anchor["asset_id"]) for anchor in view["anchors"]]
+    anchor_rows = db.scalars(select(Asset).where(Asset.id.in_(anchor_ids))).all()
+    return {
+        row.id: SimpleNamespace(
+            id=row.id,
+            stored_name=row.stored_name,
+            mime_type=row.mime_type,
+            sha256=row.sha256,
+            storage_backend=getattr(row, "storage_backend", "local") or "local",
+            source_uri=getattr(row, "source_uri", None),
+        )
+        for row in anchor_rows
+    }
+
+
 def _binding_mismatch_detail(
     frozen_v3_bundle: dict[str, object],
     strategy_bundle: StrategyBundle | SimpleNamespace,
@@ -1166,6 +1198,9 @@ async def evaluate_job(job_id: int) -> None:
     aesthetic_foundation_active = False
     anchor_comparison_active = False
     frozen_anchor_assets: dict[int, SimpleNamespace] | None = None
+    # 锚点图机制（anchor-mechanism-v1）引用的素材。与上面的冻结锚图彼此独立：
+    # 前者允许运营自定义等级组合，后者受 Owner 锚图冻结校验约束。
+    anchor_mechanism_assets: dict[int, SimpleNamespace] | None = None
     # 调用A的原始输出。只在走调用B的分支里被赋值，但 v3 评分在该分支之外也要用它
     # 替换手选正文里的 {{previous_output}}，所以在函数级先声明。
     previous_output: str | None = None
@@ -1199,6 +1234,10 @@ async def evaluate_job(job_id: int) -> None:
             raise RuntimeError("图片不存在")
         if anchor_comparison_active:
             frozen_anchor_assets = resolve_frozen_anchor_assets(
+                db, proposal_contract
+            )
+        if isinstance(proposal_contract, dict):
+            anchor_mechanism_assets = resolve_anchor_mechanism_assets(
                 db, proposal_contract
             )
         category_profile_snapshot = _frozen_category_contract(job, asset)
@@ -2012,17 +2051,47 @@ async def evaluate_job(job_id: int) -> None:
                     max_image_count=max_anchor_images,
                 )
             else:
-                response_b = await (
-                client.chat_text(
-                    prompt_b.system_prompt, user_b,
-                    image_path=model_image_path, mime_type=model_mime_type,
-                )
-                if freeform_mode
-                else client.chat_json(
-                    prompt_b.system_prompt, user_b,
-                    image_path=model_image_path, mime_type=model_mime_type,
-                )
-                )
+                # 锚点图机制（anchor-mechanism-v1）：运营自定义的各等级参照图片。
+                # 与上面基座那条路径互不依赖——基座已半退役，生产合同普遍走这里，
+                # 所以锚点图必须在本分支装配，否则运营配了图也发不出去。
+                anchor_mechanism_payload = None
+                if anchor_mechanism_assets is not None:
+                    from .inspiration_anchor_mechanism import anchor_mechanism_request
+                    anchor_mechanism_payload = anchor_mechanism_request(
+                        proposal_contract,
+                        model_image_path,
+                        model_mime_type,
+                        assets_by_id=anchor_mechanism_assets,
+                        asset_path_resolver=lambda anchor_asset: resolve_asset_path(
+                            anchor_asset, settings
+                        ),
+                    )
+                if anchor_mechanism_payload is not None:
+                    anchor_samples, anchor_image_count = anchor_mechanism_payload
+                    response_b = await (
+                    client.chat_text_images(
+                        prompt_b.system_prompt, user_b, anchor_samples,
+                        max_image_count=anchor_image_count,
+                    )
+                    if freeform_mode
+                    else client.chat_json_images(
+                        prompt_b.system_prompt, anchor_samples,
+                        user_prompt=user_b,
+                        max_image_count=anchor_image_count,
+                    )
+                    )
+                else:
+                    response_b = await (
+                    client.chat_text(
+                        prompt_b.system_prompt, user_b,
+                        image_path=model_image_path, mime_type=model_mime_type,
+                    )
+                    if freeform_mode
+                    else client.chat_json(
+                        prompt_b.system_prompt, user_b,
+                        image_path=model_image_path, mime_type=model_mime_type,
+                    )
+                    )
         if aesthetic_foundation_active:
             _persist_provider_trace(job_id, "B", response_b)
         response_b_attempts.append(response_b.raw_payload)

@@ -5,6 +5,9 @@
 """
 from __future__ import annotations
 
+import hashlib
+from pathlib import Path
+
 import pytest
 
 from app.inspiration_anchor_contract import InspirationAnchorContractError
@@ -14,6 +17,7 @@ from app.inspiration_anchor_mechanism import (
     FOREIGN_MECHANISM_KEYS,
     MAX_ANCHOR_IMAGES_CEILING,
     anchor_levels_covered,
+    anchor_mechanism_request,
     assert_anchor_mechanism_isolated,
     validate_anchor_mechanism,
 )
@@ -230,3 +234,175 @@ def test_non_object_block_is_rejected(bad_block: object) -> None:
 def test_anchors_must_be_a_list() -> None:
     with pytest.raises(InspirationAnchorContractError):
         validate_anchor_mechanism({ANCHOR_MECHANISM_KEY: _block(anchors="L1")})
+
+
+# --- 执行层装配：anchor_mechanism_request --------------------------------
+
+
+class _FakeAsset:
+    def __init__(self, asset_id: int, path: Path) -> None:
+        self.id = asset_id
+        self._path = path
+
+
+def _write(tmp_path: Path, name: str, payload: bytes) -> tuple[Path, str]:
+    path = tmp_path / name
+    path.write_bytes(payload)
+    return path, hashlib.sha256(payload).hexdigest()
+
+
+def _resolver(asset: object) -> Path:
+    return asset._path  # type: ignore[attr-defined]
+
+
+def _request(
+    contract: dict[str, object],
+    target: Path,
+    assets: dict[int, object],
+) -> tuple[list[tuple[str, Path, str | None]], int] | None:
+    return anchor_mechanism_request(
+        contract,
+        target,
+        "image/jpeg",
+        assets_by_id=assets,
+        asset_path_resolver=_resolver,
+    )
+
+
+def test_request_returns_none_when_mechanism_absent_disabled_or_empty(
+    tmp_path: Path,
+) -> None:
+    target, _ = _write(tmp_path, "target.jpg", b"target")
+    assert _request({}, target, {}) is None
+    assert (
+        _request(
+            {ANCHOR_MECHANISM_KEY: _block(enabled=False, anchors=[])}, target, {}
+        )
+        is None
+    )
+
+
+def test_request_appends_target_after_anchors(tmp_path: Path) -> None:
+    """锚点图在前、待评图片在最后——顺序决定模型怎么读这批图。"""
+    a1, h1 = _write(tmp_path, "a1.jpg", b"anchor-one")
+    a2, h2 = _write(tmp_path, "a2.jpg", b"anchor-two")
+    target, _ = _write(tmp_path, "target.jpg", b"target")
+    assets = {11: _FakeAsset(11, a1), 33: _FakeAsset(33, a2)}
+    contract = {
+        ANCHOR_MECHANISM_KEY: _block(
+            anchors=[_anchor("L1", 11, sha256=h1), _anchor("L3", 33, sha256=h2)]
+        )
+    }
+
+    result = _request(contract, target, assets)
+    assert result is not None
+    samples, count = result
+    assert count == 3
+    assert [path for _, path, _ in samples] == [a1, a2, target]
+    assert "L1" in samples[0][0] and "L3" in samples[1][0]
+    assert "待评图片" in samples[2][0]
+
+
+def test_request_allows_what_the_frozen_validator_rejects(tmp_path: Path) -> None:
+    """回归守卫：拆分要换来的正是这三种自定义能力。
+
+    旧的 Owner 锚图冻结校验（validate_inspiration_anchor_contract）实测会拒绝
+    「只配两档」「换掉某一档的图」「乱序」，而运营自定义必须支持这三种。
+    """
+    a1, h1 = _write(tmp_path, "a1.jpg", b"one")
+    a2, h2 = _write(tmp_path, "a2.jpg", b"two")
+    swapped, h_swapped = _write(tmp_path, "swapped.jpg", b"replacement")
+    target, _ = _write(tmp_path, "target.jpg", b"target")
+    assets = {
+        11: _FakeAsset(11, a1),
+        33: _FakeAsset(33, a2),
+        99: _FakeAsset(99, swapped),
+    }
+
+    # 只配两档
+    partial = {
+        ANCHOR_MECHANISM_KEY: _block(
+            anchors=[_anchor("L1", 11, sha256=h1), _anchor("L3", 33, sha256=h2)]
+        )
+    }
+    assert _request(partial, target, assets) is not None
+
+    # 换掉 L3 的图
+    replaced = {
+        ANCHOR_MECHANISM_KEY: _block(
+            anchors=[_anchor("L1", 11, sha256=h1), _anchor("L3", 99, sha256=h_swapped)]
+        )
+    }
+    result = _request(replaced, target, assets)
+    assert result is not None
+    assert result[0][1][1] == swapped
+
+    # 乱序录入（规范化后按等级排序，不报错）
+    unordered = {
+        ANCHOR_MECHANISM_KEY: _block(
+            anchors=[_anchor("L3", 33, sha256=h2), _anchor("L1", 11, sha256=h1)]
+        )
+    }
+    ordered = _request(unordered, target, assets)
+    assert ordered is not None
+    assert [path for _, path, _ in ordered[0]] == [a1, a2, target]
+
+
+def test_request_rejects_missing_asset(tmp_path: Path) -> None:
+    target, _ = _write(tmp_path, "target.jpg", b"target")
+    contract = {ANCHOR_MECHANISM_KEY: _block(anchors=[_anchor("L1", 77)])}
+    with pytest.raises(InspirationAnchorContractError) as excinfo:
+        _request(contract, target, {})
+    assert excinfo.value.code == "anchor_asset_missing"
+
+
+def test_request_rejects_hash_mismatch(tmp_path: Path) -> None:
+    """内容身份守卫：图片被换掉但合同没更新哈希，必须失败而不是静默用新图。"""
+    a1, _ = _write(tmp_path, "a1.jpg", b"original")
+    target, _ = _write(tmp_path, "target.jpg", b"target")
+    contract = {
+        ANCHOR_MECHANISM_KEY: _block(anchors=[_anchor("L1", 11, sha256="b" * 64)])
+    }
+    with pytest.raises(InspirationAnchorContractError) as excinfo:
+        _request(contract, target, {11: _FakeAsset(11, a1)})
+    assert excinfo.value.code == "anchor_hash_mismatch"
+
+
+def test_request_rejects_missing_file(tmp_path: Path) -> None:
+    target, _ = _write(tmp_path, "target.jpg", b"target")
+    absent = tmp_path / "gone.jpg"
+    contract = {ANCHOR_MECHANISM_KEY: _block(anchors=[_anchor("L1", 11)])}
+    with pytest.raises(InspirationAnchorContractError) as excinfo:
+        _request(contract, target, {11: _FakeAsset(11, absent)})
+    assert excinfo.value.code == "anchor_missing"
+
+
+def test_request_wraps_resolver_failure(tmp_path: Path) -> None:
+    target, _ = _write(tmp_path, "target.jpg", b"target")
+    contract = {ANCHOR_MECHANISM_KEY: _block(anchors=[_anchor("L1", 11)])}
+
+    def boom(_asset: object) -> Path:
+        raise RuntimeError("NAS 不可达")
+
+    with pytest.raises(InspirationAnchorContractError) as excinfo:
+        anchor_mechanism_request(
+            contract,
+            target,
+            "image/jpeg",
+            assets_by_id={11: _FakeAsset(11, tmp_path / "x.jpg")},
+            asset_path_resolver=boom,
+        )
+    assert excinfo.value.code == "anchor_source_unavailable"
+
+
+def test_request_puts_note_into_the_label(tmp_path: Path) -> None:
+    a1, h1 = _write(tmp_path, "a1.jpg", b"one")
+    target, _ = _write(tmp_path, "target.jpg", b"target")
+    contract = {
+        ANCHOR_MECHANISM_KEY: _block(
+            anchors=[_anchor("L1", 11, sha256=h1, note="构图最干净")]
+        )
+    }
+    result = _request(contract, target, {11: _FakeAsset(11, a1)})
+    assert result is not None
+    assert "构图最干净" in result[0][0][0]

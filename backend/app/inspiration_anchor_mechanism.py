@@ -28,7 +28,9 @@
 """
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+import hashlib
+from collections.abc import Callable, Mapping, Sequence
+from pathlib import Path
 from typing import Any
 
 from .inspiration_anchor_contract import (
@@ -265,6 +267,62 @@ def _validated_anchors(
     order = {level: rank for rank, level in enumerate(ANCHOR_LEVELS)}
     items.sort(key=lambda it: (order[it["level"]], it["asset_id"]))
     return items
+
+
+def anchor_mechanism_request(
+    contract: object,
+    target: Path,
+    target_mime: str | None,
+    *,
+    assets_by_id: Mapping[int, object],
+    asset_path_resolver: Callable[[object], Path],
+) -> tuple[list[tuple[str, Path, str | None]], int] | None:
+    """按锚点机制块装配 Call B 的图片载荷。
+
+    机制缺失、关闭或没有锚点图时返回 ``None``，调用方据此走无锚图路径。
+
+    这里**故意不复用** ``inspiration_aesthetic_foundation.anchor_samples``：那条
+    路径内部会调 ``validate_anchor_contract``，它要求 Owner 锚图必须 L1→L4 或
+    L1→L5 齐全且有序、不许替换——正是本次拆分要解开的限制。实测该校验会拒绝
+    「只配两档」「换掉 L3 的图」「乱序」这三种运营必需的操作，所以锚点机制
+    自带装载器，只保留内容身份校验（sha256），不再约束等级组合。
+    """
+    view = validate_anchor_mechanism(contract)
+    if view is None or not view["enabled"] or not view["anchors"]:
+        return None
+
+    samples: list[tuple[str, Path, str | None]] = []
+    for anchor in view["anchors"]:
+        asset_id = int(anchor["asset_id"])
+        asset = assets_by_id.get(asset_id)
+        if asset is None:
+            raise InspirationAnchorContractError(
+                "anchor_asset_missing", f"锚点图素材 {asset_id} 不在库中"
+            )
+        try:
+            path = asset_path_resolver(asset)
+        except Exception as exc:  # noqa: BLE001 - 来源不可用统一转成合同错误
+            raise InspirationAnchorContractError(
+                "anchor_source_unavailable", f"锚点图素材 {asset_id} 来源不可用"
+            ) from exc
+        if not path.is_file():
+            raise InspirationAnchorContractError(
+                "anchor_missing", f"锚点图素材 {asset_id} 文件不存在"
+            )
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        if digest != anchor["sha256"]:
+            raise InspirationAnchorContractError(
+                "anchor_hash_mismatch",
+                f"锚点图素材 {asset_id} 内容哈希不匹配，图片可能已被替换",
+            )
+        label = f"锚点图 {anchor['level']}（素材 {asset_id}）"
+        note = anchor.get("note")
+        if note:
+            label = f"{label}：{note}"
+        samples.append((label, path, anchor["mime_type"]))
+
+    samples.append(("待评图片（禁止把锚点图等级直接当作输出）", target, target_mime))
+    return samples, len(samples)
 
 
 def anchor_levels_covered(block: object) -> list[str]:
