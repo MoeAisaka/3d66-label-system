@@ -643,7 +643,7 @@ const reviewPageSource = readFileSync(
 assert.equal(
   (reviewPageSource.match(/requestDecision\(\{ decision:/g) ?? []).length,
   6,
-  "六个定案入口（文档类与常规类的采纳/退回、纠偏，以及「下一张」导航）都必须先过确认框",
+  "六个定案入口（文档类与常规类的采纳/退回、纠偏，以及上一张/下一张导航）都必须先过确认框",
 )
 assert.equal(
   (reviewPageSource.match(/review\.mutate\(/g) ?? []).length,
@@ -657,7 +657,7 @@ assert.match(
 )
 
 // go(offset) 是纯导航原语：它自己不许提交。
-// 「下一张」确实会定案，但必须经 requestNavigateForward 弹确认框，
+// 上一张/下一张确实会定案，但必须经 requestNavigate 弹确认框，
 // 不能在 go() 里静默 mutate——静默翻页即定案会污染人工真值。
 const goBody = reviewPageSource.slice(
   reviewPageSource.indexOf("function go(offset: number)"),
@@ -670,21 +670,42 @@ for (const forbidden of ["review.mutate", "requestDecision", "submitReviewDecisi
   )
 }
 
-// 「下一张」定案是运营明示的产品决定：按钮不得直接 go(1)，必须先弹确认框
-assert.match(
-  reviewPageSource,
-  /onClick=\{requestNavigateForward\}/,
-  "「下一张」必须走 requestNavigateForward 弹确认框，不能直接 go(1) 静默定案",
-)
+// 翻页即定案是运营明示的产品决定：两个方向的按钮都不得直接 go()，必须先弹确认框
+for (const [label, offset] of [["上一张", "-1"], ["下一张", "1"]] as const) {
+  assert.match(
+    reviewPageSource,
+    new RegExp(`onClick=\\{\\(\\) => requestNavigate\\(${offset}\\)\\}[^\\n]{0,160}aria-label="${label}"`),
+    `「${label}」必须走 requestNavigate(${offset}) 弹确认框，不能直接 go(${offset}) 静默定案`,
+  )
+}
 assert.match(
   reviewPageSource,
   /onSkip=\{pendingNavOffset === null \? undefined :/,
-  "导航触发的确认框必须提供「只看下一条，不定案」出口，否则运营无法纯浏览",
+  "导航触发的确认框必须提供只翻页不定案的出口，否则运营无法纯浏览",
 )
 assert.match(
   reviewPageSource,
-  /function requestNavigateForward\(\)[\s\S]{0,240}?review_stage === "completed"[\s\S]{0,80}?go\(1\)/,
-  "已定案样本翻页不应重复弹框，requestNavigateForward 必须先放行 completed",
+  /function requestNavigate\(offset: number\)[\s\S]{0,320}?review_stage === "completed"[\s\S]{0,80}?go\(offset\)/,
+  "已定案样本翻页不应重复弹框，requestNavigate 必须先放行 completed",
+)
+
+// 往回翻页时确认框文案必须跟着方向改，否则按钮会对运营说谎
+assert.match(
+  reviewPageSource,
+  /confirmLabel=\{pendingNavOffset === -1 \?/,
+  "点「上一张」定案时必须覆盖确认按钮文案，DECISION_COPY 默认写的是「进入下一条」",
+)
+assert.match(
+  reviewPageSource,
+  /skipLabel=\{pendingNavOffset === -1 \?/,
+  "点「上一张」时纯浏览出口文案也必须跟着方向改",
+)
+
+// 定案成功后的跳转必须跟随运营点的方向，不能固定前进
+assert.match(
+  reviewPageSource,
+  /const preferred = pendingNavOffset \?\? 1[\s\S]{0,200}?filteredAssets\[currentIndex \+ preferred\]/,
+  "导航定案成功后必须按 pendingNavOffset 的方向跳，否则点「上一张」会跳到反方向",
 )
 assert.ok(
   reviewPageSource.includes("setPendingNavOffset(null)"),
