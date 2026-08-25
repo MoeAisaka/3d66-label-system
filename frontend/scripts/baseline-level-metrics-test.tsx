@@ -5,7 +5,7 @@ import {
   computeBaselineLevelBucketMetrics,
   LevelPerformanceSummary,
 } from "../src/features/baseline-regression/level-performance-summary"
-import { FieldMetricsEvidence } from "../src/pages/baseline-regression-page"
+import { FieldMetricsEvidence } from "../src/features/baseline-regression/field-metrics-evidence"
 import type { BaselineFieldMetrics, BaselineLevelMetrics } from "../src/lib/types"
 import "../src/index.css"
 
