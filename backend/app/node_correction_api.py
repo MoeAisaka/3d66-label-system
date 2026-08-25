@@ -49,6 +49,8 @@ class CorrectNodeRequest(BaseModel):
     new_value: Any
     evidence: list[NodeCorrectionEvidence] = Field(default_factory=list)
     reason: str
+    # 结构化归因码，供纠偏分析聚合；自由文本的 reason 无法统计。
+    reason_codes: list[str] = Field(default_factory=list)
 
     @field_validator("node_type")
     @classmethod
@@ -59,6 +61,7 @@ class CorrectNodeRequest(BaseModel):
             "redline",
             "track",
             "dimension_rule",
+            "aesthetic_score",
             "final_level",
         }
         if value not in allowed:
@@ -399,6 +402,7 @@ def apply_node_correction(
             new_value=payload.new_value,
             evidence=payload.evidence,
             reason=payload.reason,
+            reason_codes=payload.reason_codes,
             corrector=corrector,
             corrector_confidence=corrector_confidence,
             corrector_policy=corrector_policy,
@@ -439,6 +443,48 @@ def apply_node_correction(
             payload.node_path,
             frozen_config=frozen_config,
         )
+    elif payload.node_type == "aesthetic_score":
+        if not isinstance(dimension_output, dict):
+            raise _coded(
+                409, "dimension_output_missing", "结果缺少调用B输出，无法纠偏美感分"
+            )
+        if payload.node_path not in {
+            "aesthetic.aesthetic_score",
+            "aesthetic_score",
+            "call_b.aesthetic_score",
+        }:
+            raise _coded(
+                400, "node_path_invalid", "美感分路径必须是 aesthetic.aesthetic_score"
+            )
+        old_value = dimension_output.get("aesthetic_score")
+        if (
+            isinstance(payload.new_value, bool)
+            or not isinstance(payload.new_value, int)
+            or not 0 <= payload.new_value <= 100
+        ):
+            raise _coded(400, "aesthetic_score_invalid", "美感分必须是 0-100 的整数")
+
+        def _assign_aesthetic_score(value: Any) -> None:
+            dimension_output["aesthetic_score"] = value
+            # 美感基座校验要求非空可见证据，否则重放会 fail-closed 直接失败。
+            # 人工填写的纠偏理由就是这个新分数的证据，同时保留模型原有证据供对照。
+            existing = dimension_output.get("aesthetic_evidence")
+            texts = [
+                item.strip()
+                for item in (existing if isinstance(existing, list) else [])
+                if isinstance(item, str) and item.strip()
+            ]
+            human_note = payload.reason.strip()
+            if human_note and human_note not in texts:
+                texts.insert(0, human_note)
+            dimension_output["aesthetic_evidence"] = texts or [
+                f"人工判定美感分为 {value}"
+            ]
+            # 人工真值不再沿用模型置信度，否则模型的低置信会被误读成人工不确定。
+            dimension_output["aesthetic_confidence"] = 1.0
+            dimension_output["manual_aesthetic_score"] = True
+
+        assign = _assign_aesthetic_score
     elif payload.node_type == "track":
         old_value = scoring.get("track_key")
         if payload.node_path not in {"track", "track_key", "scoring.track_key"}:
@@ -517,6 +563,7 @@ def apply_node_correction(
         new_value=payload.new_value,
         evidence=payload.evidence,
         reason=payload.reason,
+        reason_codes=payload.reason_codes,
         corrector=corrector,
         corrector_confidence=corrector_confidence,
         corrector_policy=corrector_policy,

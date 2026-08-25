@@ -56,9 +56,10 @@ assert.match(baselinePage, /levelMetrics=\{summary\.metrics\}/)
 assert.match(baselinePage, /RunHistoryDrawer/)
 assert.match(baselinePage, /CorrectionWorkbench/)
 assert.match(baselinePage, /baselineAcceptanceProgressFromPages/)
+// 每个会改动验收状态的 mutation 都必须刷新验收进度：复核、逐条纠偏、合同纠偏。
 assert.equal(
   (baselinePage.match(/queryKey: \["baseline-acceptance", run\.id\]/g) ?? []).length,
-  3,
+  4,
 )
 assert.doesNotMatch(baselinePage, /function BaselineCorrectionPanel/)
 assert.doesNotMatch(baselinePage, /awaiting_confirmation/)

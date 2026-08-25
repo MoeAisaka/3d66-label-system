@@ -19,7 +19,6 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { api, jsonBody } from "@/lib/api"
 import { evaluationProductionApi } from "@/lib/evaluation-packages"
-import { formatRuleConfidence } from "@/lib/node-correction"
 import { submitReviewDecision } from "@/lib/review-submit"
 import {
   dimensionKeys as dimensionKeysForSchema,
@@ -29,6 +28,13 @@ import type { EvaluationRecord, ReviewCorrection, ReviewStage, User } from "@/li
 import { NodeCorrectionEditor } from "@/pages/node-correction-editor"
 import { ReviewCorrectionForm } from "@/pages/review-correction-form"
 import { CorrectionContractRenderer } from "@/features/correction-contract/contract-renderer.tsx"
+import { EvaluationDetailPanel } from "@/features/evaluation-detail/evaluation-detail-panel"
+import { fieldSpecsFromContractNodes } from "@/features/evaluation-detail/detail-model"
+import type { RowCorrectionSubmit } from "@/features/evaluation-detail/row-correction-dialog"
+import {
+  ReviewDecisionConfirmDialog,
+  type PendingReviewDecision,
+} from "@/features/evaluation-detail/review-decision-confirm-dialog"
 import {
   correctionDraftFromView,
   correctionSubmissionPayload,
@@ -150,6 +156,11 @@ export function ReviewPage({ user }: { user: User }) {
   const sampling = asset?.sampling
   const dimensions = evaluation?.aesthetic?.dimensions ?? {}
   const scoring = evaluation?.scoring
+  // 冻结合同是调用A字段中文名的权威源：机制新增字段时前端无需改代码就能显示中文名
+  const contractFieldSpecs = useMemo(
+    () => fieldSpecsFromContractNodes(correctionViewQuery.data?.nodes),
+    [correctionViewQuery.data?.nodes],
+  )
   const ruleMode = scoring?.dimension_scoring_mode === "rule_deduction"
   const deductionDimensions = useMemo(
     () => ruleDeductionDimensions(evaluation) ?? {},
@@ -193,6 +204,40 @@ export function ReviewPage({ user }: { user: User }) {
       .map(([key]) => ({ real_photo: "实景图", rendering: "效果图", ai_generated: "AI 图", professional_photography: "专业摄影", documentary_record: "现场记录", casual_snapshot: "随拍", collage_or_multiview: "多视角", unfinished_scene: "未完工", white_background_product: "白底产品" })[key] || key)
   }, [evaluation])
 
+  // 评测细节面板里逐条纠偏：每条独立提交、独立留痕，可反复修改。
+  const correctRow = useMutation({
+    mutationFn: (payload: RowCorrectionSubmit) => {
+      if (!currentId) throw new Error("尚未选中评测结果")
+      const suffix = typeof crypto !== "undefined" && "randomUUID" in crypto
+        ? crypto.randomUUID()
+        : `${Date.now()}-${Math.random().toString(16).slice(2)}`
+      return api(`/api/evaluation-results/${currentId}/correct-node`, {
+        method: "POST",
+        ...jsonBody({
+          correction_key: `detail-${currentId}-${payload.nodePath}-${suffix}`.slice(0, 120),
+          node_type: payload.nodeType,
+          node_path: payload.nodePath,
+          old_value: payload.oldValue,
+          new_value: payload.newValue,
+          evidence: [],
+          reason: payload.reason,
+          reason_codes: payload.reasonCodes,
+        }),
+      })
+    },
+    onSuccess: async () => {
+      toast.success("纠偏已保存")
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["evaluation", currentId] }),
+        queryClient.invalidateQueries({ queryKey: ["evaluations"] }),
+        queryClient.invalidateQueries({
+          queryKey: ["incremental-correction-view", productionRunId, currentId],
+        }),
+      ])
+    },
+    onError: (error) => toast.error(error.message),
+  })
+
   const enqueue = useMutation({
     mutationFn: () => api("/api/jobs/enqueue", { method: "POST", ...jsonBody({ asset_ids: [asset?.id], prompt_id: evaluation?.prompt_id, prompt_a_id: evaluation?.prompt_a_id, prompt_b_id: evaluation?.prompt_b_id }) }),
     onSuccess: async () => {
@@ -205,6 +250,14 @@ export function ReviewPage({ user }: { user: User }) {
     },
     onError: (error) => toast.error(error.message),
   })
+  // 定案动作（采纳／纠偏／退回）在服务端都会把 review_stage 置为 completed，
+  // 其中纠偏还会写进类目黄金集。所以三者统一先过确认框，避免快速翻页时
+  // 把只扫了一眼的样本写成人工真值——这个项目在黄金集真值污染上吃过一次亏。
+  const [pendingDecision, setPendingDecision] = useState<PendingReviewDecision | null>(null)
+  // 记录本次确认框是由哪个导航动作触发的（null=由三个决定按钮触发）。
+  // 有值时确认框会多出「只看下一条，不定案」出口，避免翻页被迫定案。
+  const [pendingNavOffset, setPendingNavOffset] = useState<number | null>(null)
+
   const review = useMutation({
     mutationFn: async ({ decision, corrected_level, reviewNote, corrections = [] }: { decision: "approved" | "corrected" | "rejected"; corrected_level: string | null; reviewNote: string; corrections?: ReviewCorrection[] }) => {
       if (!evaluation) throw new Error("评测结果尚未加载")
@@ -222,6 +275,8 @@ export function ReviewPage({ user }: { user: User }) {
         filteredAssets[currentIndex + 1]?.evaluation ??
         filteredAssets[currentIndex - 1]?.evaluation
       setNote("")
+      setPendingDecision(null)
+      setPendingNavOffset(null)
       toast.success(variables.decision === "corrected" ? "人工维度纠错和最终结果已保存" : variables.decision === "approved" ? "已确认模型结果" : "已退回复核")
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ["evaluation", currentId] }),
@@ -236,6 +291,27 @@ export function ReviewPage({ user }: { user: User }) {
     },
     onError: (error) => toast.error(error.message),
   })
+
+  /**
+   * 定案入口：不直接提交，先把 payload 暂存并弹确认框。
+   * 真正的提交发生在确认框的「确认」上（见文件末尾的 ReviewDecisionConfirmDialog）。
+   */
+  function requestDecision(payload: PendingReviewDecision) {
+    setPendingDecision(payload)
+  }
+
+  /**
+   * 「下一张」入口：翻页即定案，所以先弹确认框让运营明确知道这一步在定案。
+   * 已定案的样本不再弹框，直接翻页。
+   */
+  function requestNavigateForward() {
+    if (evaluation?.review_stage === "completed") {
+      go(1)
+      return
+    }
+    setPendingNavOffset(1)
+    requestDecision({ decision: "approved", corrected_level: null, reviewNote: note.trim() })
+  }
 
   function go(offset: number) {
     if (!filteredAssets.length || currentIndex < 0) return
@@ -275,7 +351,7 @@ export function ReviewPage({ user }: { user: User }) {
             <div className="flex items-center border border-[var(--line-strong)] bg-white">
               <Button variant="ghost" size="icon" className="rounded-none" onClick={() => go(-1)} disabled={currentIndex <= 0} aria-label="上一张"><ArrowLeft /></Button>
               <span className="font-data min-w-24 border-x border-[var(--line)] px-3 text-center text-xs">{currentIndex >= 0 ? currentIndex + 1 : 0} / {filteredAssets.length}</span>
-              <Button variant="ghost" size="icon" className="rounded-none" onClick={() => go(1)} disabled={currentIndex < 0 || currentIndex >= filteredAssets.length - 1} aria-label="下一张"><ArrowRight /></Button>
+              <Button variant="ghost" size="icon" className="rounded-none" onClick={requestNavigateForward} disabled={currentIndex < 0 || currentIndex >= filteredAssets.length - 1} aria-label="下一张"><ArrowRight /></Button>
             </div>
           </div>
         }
@@ -377,7 +453,7 @@ export function ReviewPage({ user }: { user: User }) {
                 <section className="border-b border-[var(--line)] px-5 py-4">
                   <div className="flex flex-wrap items-center justify-between gap-2"><p className="text-sm font-bold">{reviewStageMeta[evaluation.review_stage].label}</p><Badge tone={evaluation.review_stage === "completed" ? "success" : "danger"}>{evaluation.review_stage === "completed" ? "已完成" : "待处理"}</Badge></div>
                   {(evaluation.review_history?.length ?? 0) > 0 && <details className="mt-3"><summary className="cursor-pointer text-xs font-semibold">查看人工审核记录（{evaluation.review_history.length}）</summary><div className="mt-2 divide-y divide-[var(--line)] border-y border-[var(--line)]">{evaluation.review_history.map((item) => <div key={item.id} className="py-2 text-xs"><p className="font-semibold">{reviewStageMeta[item.stage].label} · {reviewDecisionLabel(item.decision)} · {item.reviewer_name}</p>{item.note && <p className="mt-1 leading-5 text-[var(--muted)]">{item.note}</p>}</div>)}</div></details>}
-                  {evaluation.review_stage !== "completed" && <><label className="mt-4 block"><span className="mb-2 block text-xs font-semibold">审核说明（确认或退回时可选）</span><Input value={note} onChange={(event) => setNote(event.target.value)} placeholder="补充文档级判断依据" /></label><div className="mt-3 grid grid-cols-2 gap-2"><Button variant="secondary" onClick={() => review.mutate({ decision: "rejected", corrected_level: null, reviewNote: note.trim() })} disabled={review.isPending}>退回复核</Button><Button onClick={() => review.mutate({ decision: "approved", corrected_level: null, reviewNote: note.trim() })} disabled={review.isPending}><Check weight="bold" />确认文档结果</Button></div></>}
+                  {evaluation.review_stage !== "completed" && <><label className="mt-4 block"><span className="mb-2 block text-xs font-semibold">审核说明（确认或退回时可选）</span><Input value={note} onChange={(event) => setNote(event.target.value)} placeholder="补充文档级判断依据" /></label><div className="mt-3 grid grid-cols-2 gap-2"><Button variant="secondary" onClick={() => requestDecision({ decision: "rejected", corrected_level: null, reviewNote: note.trim() })} disabled={review.isPending}>退回复核</Button><Button onClick={() => requestDecision({ decision: "approved", corrected_level: null, reviewNote: note.trim() })} disabled={review.isPending}><Check weight="bold" />确认文档结果</Button></div></>}
                 </section>
               </div>
             ) : scopeStatus === "out_of_scope" ? (
@@ -398,27 +474,23 @@ export function ReviewPage({ user }: { user: User }) {
               </div>
             ) : (
               <>
-                {ruleMode && (
-                  <section className="border-b border-[var(--line-strong)] bg-[#f7faef] px-5 py-4" aria-label="维度扣分规则命中证据">
-                    <div className="flex flex-wrap items-start justify-between gap-3">
-                      <div>
-                        <p className="text-sm font-bold">维度扣分（规则命中）</p>
-                        <p className="font-data mt-1 text-[0.68rem] text-[var(--muted)]">{evaluation.aesthetic?.bridge_version || "dimension-deduction-bridge"} · 服务端确定性聚合</p>
-                      </div>
-                      <Badge tone="success">{scoring?.dimension_evidence?.applied_deduction_total ?? 0} 分扣减</Badge>
-                    </div>
-                    <div className="mt-3 grid gap-2">
-                      {requiredDimensionKeys.map((key) => {
-                        const hits = Array.isArray(deductionDimensions[key]?.hit_rules) ? deductionDimensions[key].hit_rules : []
-                        return <div key={key} className="border border-[var(--line)] bg-white px-3 py-2.5">
-                          <div className="flex items-center justify-between gap-3"><p className="text-xs font-semibold">{dimensionLabels[key] || key}</p><Badge tone={hits.length ? "warning" : "success"}>{hits.length ? `命中 ${hits.length} 条` : "未命中"}</Badge></div>
-                          {hits.map((hit: any, index: number) => <div key={`${hit.rule_id || "rule"}-${index}`} className="mt-2 border-t border-[var(--line)] pt-2 text-xs leading-5"><p><strong>{hit.rule_id || "规则"}</strong>{hit.deduction != null ? ` · 扣 ${hit.deduction} 分` : ""}{hit.confidence != null ? ` · 置信度 ${formatRuleConfidence(hit.confidence)}` : ""}</p>{hit.evidence && <p className="mt-1 text-[var(--muted)]">证据：{String(hit.evidence)}</p>}</div>)}
-                        </div>
-                      })}
-                    </div>
-                    {Array.isArray(scoring?.steps) && scoring.steps.find((item: any) => item.step === "dimension_rule_deduction")?.note && <p className="mt-3 text-xs font-semibold text-[#45620c]">{scoring.steps.find((item: any) => item.step === "dimension_rule_deduction").note}</p>}
-                  </section>
-                )}
+                <EvaluationDetailPanel
+                  precheck={evaluation.precheck}
+                  aesthetic={evaluation.aesthetic}
+                  scoring={scoring}
+                  dimensionLabels={dimensionLabels}
+                  fieldSpecs={contractFieldSpecs}
+                  contractNodes={correctionViewQuery.data?.nodes}
+                  correctionHistory={evaluation.correction_history}
+                  correctionPending={correctRow.isPending}
+                  onCorrect={
+                    evaluation.review_stage === "completed"
+                      ? undefined
+                      : async (payload) => {
+                          await correctRow.mutateAsync(payload)
+                        }
+                  }
+                />
                 {evaluation.preprocess?.category_key === "pdf_text" && (
                   <div className="border-b border-[var(--line)] bg-[#f5f8fb] px-5 py-4">
                     <div className="flex flex-wrap items-center justify-between gap-3">
@@ -476,11 +548,11 @@ export function ReviewPage({ user }: { user: User }) {
                   </div>
                   {evaluation.review_stage !== "completed" && <div className="px-5 pb-5"><label className="mt-3 block"><span className="mb-2 block text-xs font-semibold">审核说明（确认或退回时可选）</span><Input value={note} onChange={(event) => setNote(event.target.value)} placeholder="补充判断依据" /></label>
                   <div className="mt-3 grid grid-cols-2 gap-2">
-                    <Button variant="secondary" onClick={() => review.mutate({ decision: "rejected", corrected_level: null, reviewNote: note.trim() })} disabled={review.isPending}>退回复核</Button>
-                    <Button onClick={() => review.mutate({ decision: "approved", corrected_level: null, reviewNote: note.trim() })} disabled={review.isPending}><Check weight="bold" />确认结果</Button>
+                    <Button variant="secondary" onClick={() => requestDecision({ decision: "rejected", corrected_level: null, reviewNote: note.trim() })} disabled={review.isPending}>退回复核</Button>
+                    <Button onClick={() => requestDecision({ decision: "approved", corrected_level: null, reviewNote: note.trim() })} disabled={review.isPending}><Check weight="bold" />确认结果</Button>
                   </div></div>}
                   {ruleMode ? <div className="border-t border-[var(--line)] bg-[#fafbf8] px-5 py-4 text-xs leading-5 text-[var(--muted)]">逐规则证据保留在审核区；如需修改调用A、红线、赛道、规则命中或最终等级，请使用下方“节点纠偏工作台”。</div> : <ReviewCorrectionForm key={`${evaluation.id}-${evaluation.review_revision}`} dimensions={dimensions} precheck={evaluation.precheck ?? {}} dimensionSchema={evaluation.dimension_schema} scoring={scoring ?? {}} pending={review.isPending} editable={evaluation.review_stage !== "completed"} onSubmit={({ note: correctionNote, corrections }) => {
-                    review.mutate({ decision: "corrected", corrected_level: null, reviewNote: correctionNote, corrections })
+                    requestDecision({ decision: "corrected", corrected_level: null, reviewNote: correctionNote, corrections })
                   }} />}
                 </div>
               </>
@@ -508,6 +580,23 @@ export function ReviewPage({ user }: { user: User }) {
         />}
         </>
       )}
+      <ReviewDecisionConfirmDialog
+        pending={pendingDecision}
+        submitting={review.isPending}
+        onConfirm={() => {
+          if (pendingDecision) review.mutate(pendingDecision)
+        }}
+        onSkip={pendingNavOffset === null ? undefined : () => {
+          const offset = pendingNavOffset
+          setPendingNavOffset(null)
+          setPendingDecision(null)
+          go(offset)
+        }}
+        onCancel={() => {
+          setPendingNavOffset(null)
+          setPendingDecision(null)
+        }}
+      />
     </>
   )
 }

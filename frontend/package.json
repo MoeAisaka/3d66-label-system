@@ -18,6 +18,7 @@
     "contract:level-rules-naming": "node --experimental-strip-types scripts/check-level-rules-naming.ts",
     "contract:dual-workspaces": "node --experimental-strip-types scripts/check-dual-workspaces-contract.ts",
     "contract:baseline-correction": "node --experimental-strip-types scripts/check-baseline-correction-workbench.ts",
+    "contract:evaluation-detail": "node --experimental-strip-types scripts/check-evaluation-detail-panel.ts",
     "contract:baseline-correction-purpose": "node --experimental-strip-types scripts/check-correction-purpose-level-display.ts",
     "contract:baseline-run-url": "node --experimental-strip-types scripts/check-baseline-run-url-state.ts",
     "contract:candidate-prompt-binding": "node --experimental-strip-types scripts/check-candidate-prompt-binding.ts",

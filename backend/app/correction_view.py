@@ -739,6 +739,13 @@ def _node_runtime_type(node: Mapping[str, Any]) -> str:
     path = str(node.get("path") or node.get("node_key") or "")
     if path.startswith("call_a."):
         return "call_a_field"
+    # 美感分要在维度前缀之前判定：它是调用B的整体基础分，不属于任何单个维度规则。
+    if path in {
+        "aesthetic.aesthetic_score",
+        "aesthetic_score",
+        "call_b.aesthetic_score",
+    }:
+        return "aesthetic_score"
     if path.startswith("dimension.") or path.startswith("dimensions."):
         return "dimension_rule"
     if path.startswith("redline."):

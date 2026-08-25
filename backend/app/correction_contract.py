@@ -688,6 +688,95 @@ def _dimension_rule_nodes(
     return nodes
 
 
+def _hard_defect_options(v3_bundle: Mapping[str, Any] | None) -> list[dict[str, Any]]:
+    """Read the frozen hard-defect rule list so options follow the mechanism.
+
+    Options come from the frozen contract rather than a frontend constant, so
+    adding or removing a defect in a new mechanism version needs no code change.
+    """
+    if not isinstance(v3_bundle, Mapping):
+        return []
+    contract = v3_bundle.get("contract")
+    modifiers = contract.get("common_modifiers") if isinstance(contract, Mapping) else None
+    veto = modifiers.get("high_score_veto") if isinstance(modifiers, Mapping) else None
+    rules = veto.get("rules") if isinstance(veto, Mapping) else None
+    options: list[dict[str, Any]] = []
+    for rule in rules or []:
+        if not isinstance(rule, Mapping) or rule.get("source") != "hard_defects":
+            continue
+        key = str(rule.get("key") or "").strip()
+        if not key or any(item["value"] == key for item in options):
+            continue
+        options.append(
+            {
+                "value": key,
+                "label": _chinese_text(rule.get("description"), key),
+                "severity": str(rule.get("severity") or ""),
+            }
+        )
+    return options
+
+
+def _judgement_nodes(v3_bundle: Mapping[str, Any] | None) -> list[dict[str, Any]]:
+    """Model judgements that drive the score but had no correctable node.
+
+    Both write through the deterministic replay path: hard defects cap or veto
+    the score, and the Call-B aesthetic score is the matcher's starting score.
+    Without these nodes an operator could see a judgement they disagree with and
+    have no way to correct it.
+    """
+    if not isinstance(v3_bundle, Mapping) or not isinstance(
+        v3_bundle.get("contract"), Mapping
+    ):
+        return []
+    spec_version = str(v3_bundle["contract"].get("spec_version") or "1")
+    defect_options = _hard_defect_options(v3_bundle)
+    nodes: list[dict[str, Any]] = [
+        {
+            "node_key": "call_a.hard_defects",
+            "layer": "A",
+            "path": "precheck.hard_defects",
+            "order": 0,
+            "label": "硬缺陷判定",
+            "description": "调用A判定的硬缺陷；命中会压分或封顶，改动后服务端重算",
+            "type": "list",
+            "options": [option["value"] for option in defect_options],
+            "semantic_version": spec_version,
+            "compatibility_key": "precheck-hard-defects",
+            "required": False,
+            "evidence": _node_evidence("硬缺陷判定", required=True),
+            "metadata": {
+                "node_type": "precheck_field",
+                "option_labels": {
+                    option["value"]: option["label"] for option in defect_options
+                },
+                "option_severities": {
+                    option["value"]: option["severity"] for option in defect_options
+                },
+            },
+            "recompute_ref": "evaluation_v3_pipeline.recompute_qualified_v3",
+        },
+        {
+            "node_key": "call_b.aesthetic_score",
+            "layer": "B",
+            "path": "aesthetic.aesthetic_score",
+            "order": 0,
+            "label": "调用B美感分",
+            "description": "调用B给出的 0-100 美感分，是等级撮合器的初始分",
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100,
+            "semantic_version": spec_version,
+            "compatibility_key": "call-b-aesthetic-score",
+            "required": False,
+            "evidence": _node_evidence("调用B美感分", required=True),
+            "metadata": {"node_type": "aesthetic_score"},
+            "recompute_ref": "evaluation_v3_pipeline.recompute_qualified_v3",
+        },
+    ]
+    return nodes
+
+
 def _v3_nodes(v3_bundle: Mapping[str, Any] | None) -> list[dict[str, Any]]:
     """Expose readable V3 decision nodes while keeping rule execution server-side."""
 
@@ -904,6 +993,15 @@ def freeze_contract_from_execution_snapshot(
         selected_keys=selected_keys,
     )
     v3_nodes = _v3_nodes(v3)
+    # Model judgements that drive the score but had no correctable node before:
+    # the hard-defect list (layer A) and the Call-B aesthetic score (layer B).
+    # Each node carries its own layer, so appending them here keeps the frozen
+    # snapshot grouping intact.
+    for node in _judgement_nodes(v3):
+        if node["layer"] == "B":
+            dimension_nodes.append(node)
+        else:
+            production_nodes.append(node)
     prompt_snapshot = {
         "stage": "A",
         "version": execution_snapshot.get("rubric_version") or "frozen",

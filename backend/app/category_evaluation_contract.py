@@ -182,6 +182,7 @@ class NodeCorrection(BaseModel):
         "redline",
         "track",
         "dimension_rule",
+        "aesthetic_score",
         "final_level",
     ]
     node_path: str
@@ -189,6 +190,8 @@ class NodeCorrection(BaseModel):
     new_value: Any
     evidence: list[NodeCorrectionEvidence] = Field(default_factory=list)
     reason: str
+    # 结构化归因码。自由文本无法聚合，纠偏分析要靠这里统计「哪一层最常犯哪类错」。
+    reason_codes: list[str] = Field(default_factory=list)
     corrector: str
     corrector_confidence: float | None = Field(default=None, ge=0.0, le=1.0)
     corrector_policy: str | None = None
