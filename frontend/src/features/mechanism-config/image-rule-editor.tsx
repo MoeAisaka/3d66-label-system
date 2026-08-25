@@ -516,6 +516,11 @@ function GroupEditor({
                     })}><Plus />新增规则</Button>
                   </div>
                   <div className="space-y-1">
+                    {(dim.deduction_rules ?? []).length === 0 && (
+                      <p className="text-[0.68rem] leading-5 text-[var(--muted)]">
+                        本维度未配置扣分规则（纯基础分模式）：调用B只给美感基础分，本维度零扣分；上方标题与按钮是编辑框架，不代表存在规则。
+                      </p>
+                    )}
                     {(dim.deduction_rules ?? []).map((rule: Json, ruleIdx: number) => (
                       <div key={ruleIdx} className="grid gap-2 sm:grid-cols-[160px_1fr_110px_1fr_auto] sm:items-end">
                         <label className="grid gap-1 text-[0.68rem]"><span>规则标识</span><input className={inputClass} value={rule.rule_id ?? ""} onChange={(e) => onPatch((n) => { n.subcategory_dimensions[trackKey][groupKey].schema_definition.dimensions[idx].deduction_rules[ruleIdx].rule_id = e.target.value })} /></label>
@@ -594,6 +599,11 @@ function BonusRuleEditor({
       })}><Plus />新增加分规则</Button>
     </div>
     <div className="space-y-1">
+      {rules.length === 0 && (
+        <p className="text-[0.68rem] leading-5 text-[var(--muted)]">
+          本维度未配置加分规则。
+        </p>
+      )}
       {rules.map((rule, ruleIdx) => (
         <div key={ruleIdx} className="grid gap-2 sm:grid-cols-[160px_1fr_110px_1fr_auto] sm:items-end">
           <label className="grid gap-1 text-[0.68rem]"><span>规则标识</span><input className={inputClass} value={rule.rule_id ?? ""} onChange={(e) => onPatch((n) => { n.subcategory_dimensions[trackKey][groupKey].schema_definition.dimensions[dimensionIndex].bonus_rules[ruleIdx].rule_id = e.target.value })} /></label>
