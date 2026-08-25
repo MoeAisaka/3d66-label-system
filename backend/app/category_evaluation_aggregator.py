@@ -294,12 +294,14 @@ def _quality_reason_values(precheck: dict[str, Any]) -> list[str]:
 def _apply_quality_defect_exemptions(
     precheck: dict[str, Any],
     exemptions: list[dict[str, Any]],
+    dimension_deductions: dict[str, Any] | None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]], list[str]]:
     """按硬伤例外名单过滤 precheck 副本；输入保持只读。
 
-    维度门槛（require_dimensions）依赖八维 grade+shortcomings 证据，本聚合路径
-    的调用B输出是规则命中形状、拿不到这份证据，因此 fail-closed：佐证关键词
-    命中但维度门槛无从核实的豁免**不生效**，只在 notes 里向运营说明原因。
+    维度门槛按证据来源分两类：``min_grade``/``no_shortcomings`` 依赖八维档位
+    输出，本聚合路径拿不到，配了就 fail-closed 不豁免并在 notes 里说明；
+    ``no_deduction_hits``/``max_deduction`` 用本路径现成的每维累计扣分核实。
+    一条豁免的全部门槛都核实通过才生效。
     """
     import copy as _copy
     import json as _json
@@ -307,6 +309,7 @@ def _apply_quality_defect_exemptions(
     adjusted = _copy.deepcopy(precheck)
     applied: list[dict[str, Any]] = []
     notes: list[str] = []
+    deductions = dimension_deductions if isinstance(dimension_deductions, dict) else {}
     evidence_text = _json.dumps(
         precheck.get("decisive_evidence"), ensure_ascii=False, sort_keys=True
     )
@@ -321,11 +324,30 @@ def _apply_quality_defect_exemptions(
             for token in exemption["evidence_contains_any"]
         ):
             continue
-        if exemption["foundation_requirements"]:
-            notes.append(
-                f"硬伤例外「{exemption['key']}」佐证关键词已命中，但本评测路径"
-                f"没有八维档位输出、维度门槛无法核实，按不豁免处理"
-            )
+        qualified = True
+        for dimension_key, requirement in exemption["foundation_requirements"].items():
+            if requirement.get("min_grade") is not None or requirement["shortcomings_empty"]:
+                notes.append(
+                    f"硬伤例外「{exemption['key']}」的维度 {dimension_key} 配了"
+                    f"档位类门槛（最低档位/不能有缺点），本评测路径没有八维档位"
+                    f"输出、无法核实，按不豁免处理"
+                )
+                qualified = False
+                continue
+            if dimension_key not in deductions:
+                notes.append(
+                    f"硬伤例外「{exemption['key']}」的维度 {dimension_key} 不在"
+                    f"本次评测的维度扣分结果里，门槛无法核实，按不豁免处理"
+                )
+                qualified = False
+                continue
+            dimension_deduction = float(deductions[dimension_key])
+            if requirement.get("no_deduction_hits") and dimension_deduction > 0:
+                qualified = False
+            max_deduction = requirement.get("max_deduction")
+            if max_deduction is not None and dimension_deduction > max_deduction:
+                qualified = False
+        if not qualified:
             continue
         adjusted[source] = [item for item in defects if item != defect_key]
         applied.append({
@@ -718,7 +740,9 @@ def aggregate_category_evaluation(
     policy_precheck = precheck
     if quality_exemptions:
         policy_precheck, applied_exemptions, exemption_notes = (
-            _apply_quality_defect_exemptions(precheck, quality_exemptions)
+            _apply_quality_defect_exemptions(
+                precheck, quality_exemptions, dim_evidence.get("deductions")
+            )
         )
         quality_evidence["exemptions_applied"] = applied_exemptions
         quality_evidence["notes"].extend(exemption_notes)

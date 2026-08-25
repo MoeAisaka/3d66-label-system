@@ -470,10 +470,26 @@ function DimensionRequirementsEditor({
   requirements: DefectExceptionView["requireDimensions"]
   onChange: (next: DefectExceptionView["requireDimensions"]) => void
 }) {
+  const kindOf = (requirement: DefectExceptionView["requireDimensions"][number]) =>
+    requirement.minGrade != null
+      ? "grade"
+      : requirement.maxDeduction != null
+        ? "max_deduction"
+        : "no_hits"
+  const patch = (
+    index: number,
+    changes: Partial<DefectExceptionView["requireDimensions"][number]>,
+  ) =>
+    onChange(
+      requirements.map((item, position) =>
+        position === index ? { ...item, ...changes } : item,
+      ),
+    )
   return (
     <div className="space-y-1 text-[0.72rem]">
       <span className="text-[var(--muted)]">
-        且以下维度都达到要求（至少配一条，否则等于无条件豁免）
+        且以下维度都达到要求（至少配一条，否则等于无条件豁免）。「档位」类门槛只在调用B
+        输出八维档位的评测路径生效；走规则计分的评测路径请用「未命中扣分规则」或「累计扣分」门槛。
       </span>
       {requirements.map((requirement, index) => (
         <div key={index} className="flex flex-wrap items-center gap-2">
@@ -482,48 +498,64 @@ function DimensionRequirementsEditor({
             style={{ maxWidth: "14rem" }}
             value={requirement.dimension}
             placeholder="维度标识，如：detail_completion"
-            onChange={(event) =>
-              onChange(
-                requirements.map((item, position) =>
-                  position === index ? { ...item, dimension: event.target.value } : item,
-                ),
-              )
-            }
+            onChange={(event) => patch(index, { dimension: event.target.value })}
           />
-          <span>不低于</span>
-          <input
-            className={numberClass}
-            type="number"
-            min={1}
-            max={5}
-            value={requirement.minGrade}
-            onChange={(event) =>
-              onChange(
-                requirements.map((item, position) =>
-                  position === index
-                    ? { ...item, minGrade: Number.parseInt(event.target.value, 10) || 1 }
-                    : item,
-                ),
-              )
-            }
-          />
-          <span>档</span>
-          <label className="flex items-center gap-1">
-            <input
-              type="checkbox"
-              checked={requirement.noShortcomings}
-              onChange={(event) =>
-                onChange(
-                  requirements.map((item, position) =>
-                    position === index
-                      ? { ...item, noShortcomings: event.target.checked }
-                      : item,
-                  ),
-                )
-              }
-            />
-            <span>且无缺点</span>
-          </label>
+          <select
+            className={inputClass}
+            style={{ maxWidth: "13rem" }}
+            value={kindOf(requirement)}
+            onChange={(event) => {
+              const kind = event.target.value
+              patch(index, {
+                minGrade: kind === "grade" ? 4 : null,
+                maxDeduction: kind === "max_deduction" ? 5 : null,
+                noDeductionHits: kind === "no_hits",
+                noShortcomings: kind === "grade" ? requirement.noShortcomings : false,
+              })
+            }}
+          >
+            <option value="grade">档位不低于…（八维档位路径）</option>
+            <option value="no_hits">未命中扣分规则（规则计分路径）</option>
+            <option value="max_deduction">累计扣分不超过…（规则计分路径）</option>
+          </select>
+          {requirement.minGrade != null && (
+            <>
+              <input
+                className={numberClass}
+                type="number"
+                min={1}
+                max={5}
+                value={requirement.minGrade}
+                onChange={(event) =>
+                  patch(index, { minGrade: Number.parseInt(event.target.value, 10) || 1 })
+                }
+              />
+              <span>档</span>
+              <label className="flex items-center gap-1">
+                <input
+                  type="checkbox"
+                  checked={requirement.noShortcomings}
+                  onChange={(event) => patch(index, { noShortcomings: event.target.checked })}
+                />
+                <span>且无缺点</span>
+              </label>
+            </>
+          )}
+          {requirement.maxDeduction != null && (
+            <>
+              <input
+                className={numberClass}
+                type="number"
+                min={0}
+                max={100}
+                value={requirement.maxDeduction}
+                onChange={(event) =>
+                  patch(index, { maxDeduction: Number.parseFloat(event.target.value) || 0 })
+                }
+              />
+              <span>分</span>
+            </>
+          )}
           {requirements.length > 1 && (
             <IconButton
               title="移除这条维度门槛"
@@ -537,7 +569,16 @@ function DimensionRequirementsEditor({
         type="button"
         className="flex items-center gap-1 border border-[var(--line-strong)] px-2 py-1 text-[0.68rem]"
         onClick={() =>
-          onChange([...requirements, { dimension: "", minGrade: 4, noShortcomings: true }])
+          onChange([
+            ...requirements,
+            {
+              dimension: "",
+              minGrade: 4,
+              noShortcomings: true,
+              noDeductionHits: false,
+              maxDeduction: null,
+            },
+          ])
         }
       >
         <Plus className="size-3" />

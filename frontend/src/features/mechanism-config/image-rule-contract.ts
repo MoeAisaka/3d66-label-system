@@ -368,8 +368,13 @@ export type SnapshotLimitView = {
 
 export type DimensionRequirementView = {
   dimension: string
-  minGrade: number
+  /** 档位门槛（1-5）；仅在调用B输出八维档位的评测路径可核实。null 表示不配。 */
+  minGrade: number | null
   noShortcomings: boolean
+  /** 该维度未命中任何扣分规则；规则计分路径用现成的每维扣分核实。 */
+  noDeductionHits: boolean
+  /** 该维度累计扣分不超过 N 分；规则计分路径可核实。null 表示不配。 */
+  maxDeduction: number | null
 }
 
 export type DefectExceptionView = {
@@ -449,8 +454,11 @@ function readDefectExceptions(raw: unknown): DefectExceptionView[] {
         if (typeof requirement.dimension !== "string") continue
         requirements.push({
           dimension: requirement.dimension,
-          minGrade: typeof requirement.min_grade === "number" ? requirement.min_grade : 4,
+          minGrade: typeof requirement.min_grade === "number" ? requirement.min_grade : null,
           noShortcomings: requirement.no_shortcomings === true,
+          noDeductionHits: requirement.no_deduction_hits === true,
+          maxDeduction:
+            typeof requirement.max_deduction === "number" ? requirement.max_deduction : null,
         })
       }
     }
@@ -611,11 +619,16 @@ function serializeDefectException(item: DefectExceptionView): Json {
     when_evidence_contains: item.whenEvidenceContains
       .map((token) => token.trim())
       .filter(Boolean),
-    require_dimensions: item.requireDimensions.map((requirement) => ({
-      dimension: requirement.dimension.trim(),
-      min_grade: requirement.minGrade,
-      no_shortcomings: requirement.noShortcomings,
-    })),
+    require_dimensions: item.requireDimensions.map((requirement) => {
+      const serialized: Json = {
+        dimension: requirement.dimension.trim(),
+        no_shortcomings: requirement.noShortcomings,
+      }
+      if (requirement.minGrade != null) serialized.min_grade = requirement.minGrade
+      if (requirement.noDeductionHits) serialized.no_deduction_hits = true
+      if (requirement.maxDeduction != null) serialized.max_deduction = requirement.maxDeduction
+      return serialized
+    }),
   }
 }
 
@@ -642,7 +655,13 @@ export function appendDefectException(contract: Json): void {
         defect: "",
         defectSource: "image_defects",
         whenEvidenceContains: [],
-        requireDimensions: [{ dimension: "", minGrade: 4, noShortcomings: true }],
+        requireDimensions: [{
+          dimension: "",
+          minGrade: 4,
+          noShortcomings: true,
+          noDeductionHits: false,
+          maxDeduction: null,
+        }],
       }),
     ]
   })

@@ -258,8 +258,97 @@ def test_defect_exemption_without_dimension_evidence_fails_closed_with_note() ->
     # 豁免未生效：severe tier 仍把分压到 59
     assert result["score"] == 59
     assert result["quality_rules_evidence"]["exemptions_applied"] == []
-    assert any("维度门槛无法核实" in note for note in result["quality_rules_evidence"]["notes"])
+    assert any("无法核实" in note for note in result["quality_rules_evidence"]["notes"])
     assert any(step["step"] == "quality_exemption_skipped" for step in result["steps"])
+
+
+def _exemption(**requirement) -> dict:
+    return {
+        "name": "品牌文字遮挡豁免",
+        "defect": "subject_obscuring_watermark",
+        "defect_source": "image_defects",
+        "when_evidence_contains": ["品牌文字"],
+        "require_dimensions": [{"dimension": "detail_completion", **requirement}],
+    }
+
+
+def test_defect_exemption_max_deduction_met_lifts_hard_defect_cap() -> None:
+    """规则计分门槛（最大扣分）满足时豁免真实生效：severe cap 不再触发。"""
+    contract = _contract(modifiers=_common_modifiers_v2())
+    contract["quality_rules"] = {
+        "enabled": True,
+        "defect_exceptions": [_exemption(max_deduction=5)],
+    }
+    result = aggregate_category_evaluation(
+        contract,
+        _precheck(image_defects=["subject_obscuring_watermark"]),
+        {"deductions": {"detail_completion": 3.0}},
+        track_key="class_one",
+    )
+    assert result["score"] == 97  # 100 - 3 维度扣分；severe cap 59 被豁免解除
+    assert result["quality_rules_evidence"]["exemptions_applied"] == [
+        {
+            "rule": "hard_defect_exemption",
+            "key": "品牌文字遮挡豁免",
+            "defect_key": "subject_obscuring_watermark",
+        }
+    ]
+    assert any(c.get("cap") == "hard_defect_exemption" for c in result["caps"])
+
+
+def test_defect_exemption_max_deduction_exceeded_keeps_cap() -> None:
+    contract = _contract(modifiers=_common_modifiers_v2())
+    contract["quality_rules"] = {
+        "enabled": True,
+        "defect_exceptions": [_exemption(max_deduction=5)],
+    }
+    result = aggregate_category_evaluation(
+        contract,
+        _precheck(image_defects=["subject_obscuring_watermark"]),
+        {"deductions": {"detail_completion": 12.0}},
+        track_key="class_one",
+    )
+    assert result["score"] == 59  # 扣分 12 > 门槛 5，不豁免，severe cap 生效
+    assert result["quality_rules_evidence"]["exemptions_applied"] == []
+
+
+def test_defect_exemption_no_deduction_hits_requires_zero() -> None:
+    contract = _contract(modifiers=_common_modifiers_v2())
+    contract["quality_rules"] = {
+        "enabled": True,
+        "defect_exceptions": [_exemption(no_deduction_hits=True)],
+    }
+    hit = aggregate_category_evaluation(
+        contract,
+        _precheck(image_defects=["subject_obscuring_watermark"]),
+        {"deductions": {"detail_completion": 0.0}},
+        track_key="class_one",
+    )
+    assert hit["quality_rules_evidence"]["exemptions_applied"] != []
+    miss = aggregate_category_evaluation(
+        contract,
+        _precheck(image_defects=["subject_obscuring_watermark"]),
+        {"deductions": {"detail_completion": 1.0}},
+        track_key="class_one",
+    )
+    assert miss["quality_rules_evidence"]["exemptions_applied"] == []
+    assert miss["score"] == 59  # 100-1=99 → severe cap min(99, 59) = 59
+
+
+def test_defect_exemption_dimension_missing_from_result_fails_closed() -> None:
+    contract = _contract(modifiers=_common_modifiers_v2())
+    contract["quality_rules"] = {
+        "enabled": True,
+        "defect_exceptions": [_exemption(max_deduction=5)],
+    }
+    result = aggregate_category_evaluation(
+        contract,
+        _precheck(image_defects=["subject_obscuring_watermark"]),
+        {"deductions": {"color_material": 0.0}},
+        track_key="class_one",
+    )
+    assert result["quality_rules_evidence"]["exemptions_applied"] == []
+    assert any("不在" in note for note in result["quality_rules_evidence"]["notes"])
 
 
 def test_defect_exemption_not_noted_when_evidence_keywords_miss() -> None:
