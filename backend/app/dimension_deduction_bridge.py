@@ -71,6 +71,17 @@ SUPPORTED_PLACEHOLDERS = (
     PREVIOUS_OUTPUT_PLACEHOLDER,
 )
 
+# 手选正文里出现这些版本串，说明该调用B版本自带另一条管线的完整输出契约
+# （美感基座原生契约：八维 grade JSON，见 inspiration_aesthetic_foundation.py）。
+# 它与本桥注入的规则命中输出契约（hit_rules/hit_bonus_rules）是两套
+# 「必须且只能」的互斥 JSON 模式：拼在一起模型只能服从其一，aesthetic_score
+# 失去公式基础——2026-08-25 实测灵感图类目因此坍缩为 50/100 两档。
+# 按契约版本串精确匹配：宁可漏报（坍缩能从分布看出来）也不误杀正常版本。
+CONFLICTING_OUTPUT_CONTRACT_MARKERS = (
+    "inspiration-aesthetic-foundation-v1",
+    "inspiration-aesthetic-foundation-v2",
+)
+
 
 class DimensionDeductionBridgeError(ValueError):
     def __init__(self, code: str, message: str) -> None:
@@ -510,6 +521,27 @@ def operator_prompt_declares_rule_takeover(operator_prompt: Any) -> bool:
     return False
 
 
+def operator_prompt_conflicting_contract(operator_prompt: Any) -> str | None:
+    """Return the foreign output-contract marker in the picked body, if any.
+
+    A body that declares one of ``CONFLICTING_OUTPUT_CONTRACT_MARKERS`` was
+    written for the aesthetic-foundation pipeline, whose response schema cannot
+    coexist with the rule-hit contract this bridge injects.  Detecting it here
+    lets the caller fail closed with an actionable reason instead of sending the
+    model two mutually exclusive "must and may only" JSON schemas.
+    """
+    if operator_prompt is None:
+        return None
+    for attribute in ("system_prompt", "user_prompt"):
+        value = getattr(operator_prompt, attribute, None)
+        if not isinstance(value, str):
+            continue
+        for marker in CONFLICTING_OUTPUT_CONTRACT_MARKERS:
+            if marker in value:
+                return marker
+    return None
+
+
 def _operator_prompt_label(operator_prompt: Any) -> str:
     version = str(getattr(operator_prompt, "version", "") or "").strip()
     return version or "(未命名版本)"
@@ -588,6 +620,23 @@ def _empty_body_refusal_detail(operator_prompt: Any, contract: Any) -> str:
     )
 
 
+def _contract_conflict_refusal_detail(operator_prompt: Any, marker: str) -> str:
+    """Explain why a foundation-contract body cannot run on the rule-hit path."""
+    version = _operator_prompt_label(operator_prompt)
+    return (
+        f"手选调用B「{version}」无法在规则命中管线执行，本次不出分。\n"
+        f"原因：该版本正文自带完整输出契约「{marker}」（八维 grade JSON），"
+        f"与本管线注入的规则命中输出结构（hit_rules/hit_bonus_rules）互斥。"
+        f"两套「必须且只能」的 JSON 结构拼在一起，模型只能服从其一，"
+        f"美感分会失去公式基础（实测坍缩为 50/100 两档）。\n"
+        f"修复办法（二选一）：把该类目的维度计分模式切回美感基座管线，"
+        f"让这个版本按它自己的契约运行；或另选/新建一个为规则命中管线编写的"
+        f"调用B版本——正文只写评分口径与推理引导，输出结构由服务端注入。\n"
+        f"为什么不静默剥离契约段：删改正文等于执行一个运营没写过的提示词，"
+        f"跑出来的分不能归因于「{version}」，会污染版本准确率与候选血缘。"
+    )
+
+
 def build_operator_dimension_deduction_prompt(
     config: dict[str, Any],
     operator_prompt: Any,
@@ -623,6 +672,14 @@ def build_operator_dimension_deduction_prompt(
         raise DimensionDeductionBridgeError(
             "operator_prompt_body_empty",
             _empty_body_refusal_detail(operator_prompt, config),
+        )
+    conflicting = operator_prompt_conflicting_contract(operator_prompt)
+    if conflicting is not None:
+        # A foundation-contract body on the rule-hit path is a silent-collapse
+        # trap, not a runnable prompt.  Refuse before anything reaches the model.
+        raise DimensionDeductionBridgeError(
+            "operator_prompt_contract_conflict",
+            _contract_conflict_refusal_detail(operator_prompt, conflicting),
         )
     unknown = unknown_placeholders(user_template)
     if unknown:

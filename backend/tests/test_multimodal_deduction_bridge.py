@@ -12,12 +12,14 @@ from app.dimension_deduction_bridge import (
     DimensionDeductionBridgeError,
     FALLBACK_WARNING,
     OPERATOR_PROMPT_TEMPLATE_VERSION,
+    CONFLICTING_OUTPUT_CONTRACT_MARKERS,
     SUPPORTED_PLACEHOLDERS,
     call_multimodal_for_dimension_deductions,
     compose_rule_deductions,
     empty_deduction_output,
     foundation_required,
     normalize_dimension_deduction_output,
+    operator_prompt_conflicting_contract,
     operator_prompt_declares_rule_takeover,
 )
 from app.b_aesthetic_foundation import BAestheticFoundationError
@@ -540,6 +542,78 @@ def test_operator_prompt_with_no_body_at_all_fails_closed() -> None:
     # 拒单时一个字节都不发给 provider。
     assert client.system == ""
     assert client.user == ""
+
+
+# --- 互斥输出契约守卫：foundation 正文不得上规则命中管线 ---------------------
+# 2026-08-25 实锤：v13（八维 grade 契约正文）被挂到 bonus-cap 桥上执行，
+# 两套「必须且只能」的 JSON 契约互斥，美感分坍缩为 50/100 两档（灵感图 48%）。
+
+
+def test_foundation_contract_body_fails_closed_on_rule_hit_path() -> None:
+    """v13 式正文（自带八维 grade 输出契约）必须拒单，不能拼给模型瞎猜。"""
+    config = build_inspiration_subcategory_dimensions()["class_one"]
+    client = Client()
+    operator = OperatorPrompt(
+        version="insp-b-v13-tier-budget-20260824",
+        user_prompt=(
+            "八维权重与总分换算（固定执行）……\n"
+            "只输出一个严格 JSON 对象，contract_version 固定为 "
+            "inspiration-aesthetic-foundation-v1。\n\n{{precheck_json}}"
+        ),
+    )
+
+    with pytest.raises(DimensionDeductionBridgeError) as excinfo:
+        asyncio.run(
+            call_multimodal_for_dimension_deductions(
+                "image.jpg", config, client=client, mime_type="image/jpeg",
+                operator_prompt=operator,
+            )
+        )
+
+    assert excinfo.value.code == "operator_prompt_contract_conflict"
+    detail = str(excinfo.value)
+    assert operator.version in detail
+    assert "inspiration-aesthetic-foundation-v1" in detail
+    assert "不出分" in detail
+    # 必须给出两条可行动的修复路径，而不是只说不行。
+    assert "美感基座" in detail
+    assert "规则命中管线" in detail
+    # 拒单时一个字节都不发给 provider。
+    assert client.system == ""
+    assert client.user == ""
+
+
+def test_foundation_contract_in_system_prompt_also_fails_closed() -> None:
+    """契约声明写在 system 正文里同样互斥，同样拒单。"""
+    config = build_inspiration_subcategory_dimensions()["class_one"]
+    client = Client()
+    operator = OperatorPrompt(
+        version="insp-b-v14-good-tier-boundary-20260824",
+        system_prompt="按 inspiration-aesthetic-foundation-v2 契约输出八维 grade。",
+        user_prompt="{{dimension_rules}}",
+    )
+
+    with pytest.raises(DimensionDeductionBridgeError) as excinfo:
+        asyncio.run(
+            call_multimodal_for_dimension_deductions(
+                "image.jpg", config, client=client, mime_type="image/jpeg",
+                operator_prompt=operator,
+            )
+        )
+
+    assert excinfo.value.code == "operator_prompt_contract_conflict"
+    assert client.user == ""
+
+
+def test_rule_hit_native_body_passes_conflict_guard() -> None:
+    """为规则命中管线写的正文（不声明整套输出契约）不受守卫影响。"""
+    assert operator_prompt_conflicting_contract(
+        OperatorPrompt(user_prompt=_TAKEOVER_BODY)
+    ) is None
+    assert operator_prompt_conflicting_contract(None) is None
+    # 守卫清单必须覆盖 foundation 契约的全部现行版本串。
+    assert "inspiration-aesthetic-foundation-v1" in CONFLICTING_OUTPUT_CONTRACT_MARKERS
+    assert "inspiration-aesthetic-foundation-v2" in CONFLICTING_OUTPUT_CONTRACT_MARKERS
 
 
 # --- 兜底拆分：provider 故障 fail-open，输出形状不符 fail-closed -------------
