@@ -96,7 +96,9 @@ export function ReviewPage({ user }: { user: User }) {
   const queryClient = useQueryClient()
   const evaluations = useQuery({
     queryKey: ["evaluations", "review-list"],
-    queryFn: () => api<{ items: EvaluationRecord[] }>("/api/evaluations?limit=1000"),
+    // scope=review 必须带：本端点单页上限 1000 条且按创建时间倒序，
+    // 不过滤时全部待复核样本会被新样本挤出取数窗口，导致工作台四项计数全为 0。
+    queryFn: () => api<{ items: EvaluationRecord[] }>("/api/evaluations?limit=1000&scope=review"),
     refetchInterval: 4000,
   })
   const legacyEvaluationId = evaluations.data?.items.find((item) => item.id === legacyAssetId)?.evaluation.id ?? 0
@@ -271,9 +273,12 @@ export function ReviewPage({ user }: { user: User }) {
       })
     },
     onSuccess: async (_data, variables) => {
+      // 导航触发的定案要按运营点的方向走：点「上一张」定案后必须往回,
+      // 否则会跳到反方向的样本上。非导航触发（三个决定按钮）仍是前进优先。
+      const preferred = pendingNavOffset ?? 1
       const nextEvaluation =
-        filteredAssets[currentIndex + 1]?.evaluation ??
-        filteredAssets[currentIndex - 1]?.evaluation
+        filteredAssets[currentIndex + preferred]?.evaluation ??
+        filteredAssets[currentIndex - preferred]?.evaluation
       setNote("")
       setPendingDecision(null)
       setPendingNavOffset(null)
@@ -301,16 +306,22 @@ export function ReviewPage({ user }: { user: User }) {
   }
 
   /**
-   * 「下一张」入口：翻页即定案，所以先弹确认框让运营明确知道这一步在定案。
+   * 上一张/下一张入口：翻页即定案，所以先弹确认框让运营明确知道这一步在定案。
    * 已定案的样本不再弹框，直接翻页。
    */
-  function requestNavigateForward() {
+  function requestNavigate(offset: number) {
+    if (!hasNavigationTarget(offset)) return
     if (evaluation?.review_stage === "completed") {
-      go(1)
+      go(offset)
       return
     }
-    setPendingNavOffset(1)
+    setPendingNavOffset(offset)
     requestDecision({ decision: "approved", corrected_level: null, reviewNote: note.trim() })
+  }
+
+  function hasNavigationTarget(offset: number) {
+    if (!filteredAssets.length || currentIndex < 0) return false
+    return Boolean(filteredAssets[currentIndex + offset])
   }
 
   function go(offset: number) {
@@ -349,9 +360,9 @@ export function ReviewPage({ user }: { user: User }) {
           <div className="flex flex-wrap items-center gap-2">
             <Button asChild variant="secondary"><Link to={listUrl}><ArrowLeft />返回审核列表</Link></Button>
             <div className="flex items-center border border-[var(--line-strong)] bg-white">
-              <Button variant="ghost" size="icon" className="rounded-none" onClick={() => go(-1)} disabled={currentIndex <= 0} aria-label="上一张"><ArrowLeft /></Button>
+              <Button variant="ghost" size="icon" className="rounded-none" onClick={() => requestNavigate(-1)} disabled={currentIndex <= 0} aria-label="上一张"><ArrowLeft /></Button>
               <span className="font-data min-w-24 border-x border-[var(--line)] px-3 text-center text-xs">{currentIndex >= 0 ? currentIndex + 1 : 0} / {filteredAssets.length}</span>
-              <Button variant="ghost" size="icon" className="rounded-none" onClick={requestNavigateForward} disabled={currentIndex < 0 || currentIndex >= filteredAssets.length - 1} aria-label="下一张"><ArrowRight /></Button>
+              <Button variant="ghost" size="icon" className="rounded-none" onClick={() => requestNavigate(1)} disabled={currentIndex < 0 || currentIndex >= filteredAssets.length - 1} aria-label="下一张"><ArrowRight /></Button>
             </div>
           </div>
         }
@@ -592,6 +603,8 @@ export function ReviewPage({ user }: { user: User }) {
           setPendingDecision(null)
           go(offset)
         }}
+        skipLabel={pendingNavOffset === -1 ? "只看上一条，不定案" : undefined}
+        confirmLabel={pendingNavOffset === -1 ? "确认并回到上一条" : undefined}
         onCancel={() => {
           setPendingNavOffset(null)
           setPendingDecision(null)

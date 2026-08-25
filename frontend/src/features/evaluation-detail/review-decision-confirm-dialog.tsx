@@ -53,6 +53,7 @@ export function ReviewDecisionConfirmDialog({
   onCancel,
   onSkip,
   skipLabel,
+  confirmLabel,
 }: {
   pending: PendingReviewDecision | null
   submitting: boolean
@@ -61,6 +62,11 @@ export function ReviewDecisionConfirmDialog({
   /** 可选：只翻页不定案的出口。导航触发的确认框必须提供，否则运营无法纯浏览。 */
   onSkip?: () => void
   skipLabel?: string
+  /**
+   * 可选：覆盖确认按钮文案。DECISION_COPY 里默认写的是「…并进入下一条」，
+   * 往回翻页时必须覆盖，否则按钮会对运营说谎。
+   */
+  confirmLabel?: string
 }) {
   const copy = pending ? DECISION_COPY[pending.decision] : null
 
@@ -131,7 +137,7 @@ export function ReviewDecisionConfirmDialog({
                   </Button>
                 ) : null}
                 <Button onClick={onConfirm} disabled={submitting}>
-                  {submitting ? "提交中…" : copy.confirmLabel}
+                  {submitting ? "提交中…" : confirmLabel ?? copy.confirmLabel}
                 </Button>
               </div>
             </>

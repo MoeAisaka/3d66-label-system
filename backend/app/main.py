@@ -40,7 +40,7 @@ from pydantic import (
     model_validator,
 )
 from PIL import Image, UnidentifiedImageError
-from sqlalchemy import func, select, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
@@ -4964,17 +4964,36 @@ def _required_baseline_v3_bundle(
 def list_evaluations(
     limit: int = 100,
     offset: int = 0,
+    scope: str | None = None,
     _user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
+    # scope=review：只返回进入过人工复核范围的样本（已建合议面板，或已完成复核）。
+    # 复核工作台四个视图都要求样本带 panel 或已 completed，而本端点单页上限 1000 条、
+    # 按创建时间倒序返回；样本总量远超这个量时，不过滤会把全部待复核样本挤出取数窗口，
+    # 导致工作台四项计数全为 0、运营一条都点不进去。
+    conditions: list[Any] = []
+    if scope == "review":
+        panel_exists = (
+            select(ReviewPanel.id)
+            .where(ReviewPanel.evaluation_id == EvaluationResult.id)
+            .exists()
+        )
+        conditions.append(
+            or_(panel_exists, EvaluationResult.review_stage == "completed")
+        )
+    stmt = select(EvaluationResult)
+    count_stmt = select(func.count()).select_from(EvaluationResult)
+    for condition in conditions:
+        stmt = stmt.where(condition)
+        count_stmt = count_stmt.where(condition)
     results = db.scalars(
-        select(EvaluationResult)
-        .order_by(EvaluationResult.created_at.desc(), EvaluationResult.id.desc())
+        stmt.order_by(EvaluationResult.created_at.desc(), EvaluationResult.id.desc())
         .offset(max(0, offset))
         .limit(min(1000, limit))
     ).all()
     sampling = _review_sampling_decisions(db)
-    total = db.scalar(select(func.count()).select_from(EvaluationResult)) or 0
+    total = db.scalar(count_stmt) or 0
     return {
         "items": [
             _evaluation_asset_payload(result, sampling.get(result.id)) for result in results

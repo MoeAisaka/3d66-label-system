@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import json
+from datetime import timedelta
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, inspect as sa_inspect
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
@@ -18,6 +19,7 @@ from app.models import (
     HumanReview,
     ModelConfig,
     PromptVersion,
+    ReviewPanel,
     SamplingPolicy,
     User,
 )
@@ -295,5 +297,122 @@ def test_legacy_arbitration_rejects_missing_historical_chain() -> None:
         assert db.query(HumanReview).filter_by(
             evaluation_id=result.id
         ).count() == 0
+    finally:
+        _close(engine, db)
+
+
+def _clone_evaluation(
+    db: Session, source: EvaluationResult, *, created_at
+) -> EvaluationResult:
+    """克隆一条 evaluation 用于构造取数窗口场景。
+
+    直接按列复制，避免重复 fixture 里那一大段初始化，也不会因为模型新增必填字段而失效。
+    """
+    # job_id 上有唯一约束，克隆必须各自配一个新 job。
+    # 这里照 fixture 建最小 job：整列复制会把 (root_job_id, technical_attempt)
+    # 这类复合唯一约束的值一起带过来，导致 INSERT 撞 UNIQUE。
+    source_job = db.get(EvaluationJob, source.job_id)
+    assert source_job is not None
+    job = EvaluationJob(
+        asset_id=source_job.asset_id,
+        prompt_a_id=source_job.prompt_a_id,
+        strategy_bundle_id=source_job.strategy_bundle_id,
+        status=source_job.status,
+        stage=source_job.stage,
+        progress=source_job.progress,
+    )
+    db.add(job)
+    db.flush()
+
+    data = {
+        column.key: getattr(source, column.key)
+        for column in sa_inspect(EvaluationResult).columns
+        if column.key not in {"id", "created_at", "job_id"}
+    }
+    clone = EvaluationResult(**data, job_id=job.id, created_at=created_at)
+    db.add(clone)
+    db.flush()
+    return clone
+
+
+def test_evaluations_scope_review_keeps_panel_samples_in_window() -> None:
+    """待复核样本不能被更新的样本挤出取数窗口。
+
+    复核工作台四个视图都要求样本带 panel 或已 completed；而本端点单页上限 1000 条、
+    按创建时间倒序返回。样本总量超过窗口时，不带 scope=review 就会让全部待复核样本
+    取不到，工作台四项计数全为 0、运营一条都点不进去。
+    """
+    engine, db, client, result = _client_with_result(level="L3", needs_review=True)
+    try:
+        base_created_at = result.created_at
+        db.add(ReviewPanel(evaluation_id=result.id))
+        db.flush()
+
+        # 之后又产生了一批更新的样本，都没有进入复核范围
+        newer_ids = [
+            _clone_evaluation(
+                db, result, created_at=base_created_at + timedelta(minutes=offset)
+            ).id
+            for offset in range(1, 4)
+        ]
+        db.commit()
+
+        # 复现原始缺陷：窗口只放得下 2 条时，待复核样本被挤出去
+        unscoped = client.get("/api/evaluations?limit=2")
+        assert unscoped.status_code == 200
+        unscoped_ids = {item["evaluation"]["id"] for item in unscoped.json()["items"]}
+        assert result.id not in unscoped_ids
+
+        # 带 scope=review 后必须取得到，且不夹带无 panel 的新样本
+        scoped = client.get("/api/evaluations?limit=2&scope=review")
+        assert scoped.status_code == 200
+        payload = scoped.json()
+        scoped_ids = {item["evaluation"]["id"] for item in payload["items"]}
+        assert result.id in scoped_ids
+        assert scoped_ids.isdisjoint(newer_ids)
+        # total 也必须跟着过滤，否则前端分页会按错误总数计算
+        assert payload["total"] == 1
+    finally:
+        _close(engine, db)
+
+
+def test_evaluations_scope_review_includes_completed_without_panel() -> None:
+    """已完成复核但没有 panel 的历史样本也属于复核范围。"""
+    engine, db, client, result = _client_with_result(level="L3", needs_review=True)
+    try:
+        result.review_stage = "completed"
+        db.flush()
+        newer = _clone_evaluation(
+            db, result, created_at=result.created_at + timedelta(minutes=5)
+        )
+        newer.review_stage = "initial"
+        db.commit()
+
+        scoped = client.get("/api/evaluations?limit=50&scope=review")
+        assert scoped.status_code == 200
+        payload = scoped.json()
+        scoped_ids = {item["evaluation"]["id"] for item in payload["items"]}
+        assert result.id in scoped_ids
+        assert newer.id not in scoped_ids
+        assert payload["total"] == 1
+    finally:
+        _close(engine, db)
+
+
+def test_evaluations_without_scope_is_unfiltered() -> None:
+    """不传 scope 时行为不变，避免影响其他调用方。"""
+    engine, db, client, result = _client_with_result(level="L3", needs_review=True)
+    try:
+        newer = _clone_evaluation(
+            db, result, created_at=result.created_at + timedelta(minutes=5)
+        )
+        db.commit()
+
+        plain = client.get("/api/evaluations?limit=50")
+        assert plain.status_code == 200
+        payload = plain.json()
+        ids = {item["evaluation"]["id"] for item in payload["items"]}
+        assert {result.id, newer.id} <= ids
+        assert payload["total"] == 2
     finally:
         _close(engine, db)
