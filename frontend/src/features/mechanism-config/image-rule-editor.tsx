@@ -480,6 +480,25 @@ function GroupEditor({
           <div className="mt-2 space-y-2">
             {dimensions.map((dim, idx) => (
               <div key={idx} className="border border-[var(--line)] bg-white px-3 py-3">
+                {(() => {
+                  // 规则状态徽章：让「纯基础分」与「带规则」一眼可辨，
+                  // 不必展开区块逐条数——手动编辑按人的视觉思维组织。
+                  const deductionCount = (dim.deduction_rules ?? []).length
+                  const bonusCount = (dim.bonus_rules ?? []).length
+                  return (
+                    <div className="mb-2 flex items-center gap-2">
+                      {deductionCount + bonusCount === 0 ? (
+                        <span className="rounded-[4px] border border-[#7f991b] bg-[#f0f8c8] px-2 py-0.5 text-[0.68rem] font-semibold text-[#263000]">
+                          纯基础分 · 零规则
+                        </span>
+                      ) : (
+                        <span className="rounded-[4px] border border-[var(--line-strong)] bg-[#fafbf8] px-2 py-0.5 font-data text-[0.68rem] text-[var(--muted)]">
+                          扣分规则 {deductionCount} · 加分规则 {bonusCount}
+                        </span>
+                      )}
+                    </div>
+                  )
+                })()}
                 {isImageRuleDimension(dim) && (() => {
                   const defaults = imageRuleViewDefaults(dim)
                   const duplicateRuleIds = duplicateIds(defaults.deductionRules, defaults.bonusRules)
@@ -505,6 +524,21 @@ function GroupEditor({
                   </label>
                   <IconButton danger title="删除维度" onClick={() => onPatch((n) => { n.subcategory_dimensions[trackKey][groupKey].schema_definition.dimensions.splice(idx, 1) })} />
                 </div>
+                {(dim.deduction_rules ?? []).length === 0 ? (
+                  // 零规则时不摆完整编辑骨架——「无内容」在视觉上就该呈现为小，
+                  // 避免常驻标题被误读成规则还在。
+                  <div className="mt-3 border-t border-dashed border-[var(--line)] pt-2">
+                    <div className="flex items-center justify-between gap-2 bg-[#fafbf8] px-2.5 py-2">
+                      <span className="text-[0.68rem] text-[var(--muted)]">
+                        扣分规则：无 · 纯基础分模式，本维度零扣分
+                      </span>
+                      <Button variant="ghost" size="sm" onClick={() => onPatch((n) => {
+                        const rules = n.subcategory_dimensions[trackKey][groupKey].schema_definition.dimensions[idx].deduction_rules ??= []
+                        rules.push({ rule_id: "", description: "", deduction: 10, tags: [] })
+                      })}><Plus />新增规则</Button>
+                    </div>
+                  </div>
+                ) : (
                 <div className="mt-3 border-t border-dashed border-[var(--line)] pt-2">
                   <div className="mb-2 flex items-center justify-between">
                     <span className="text-[0.68rem] font-semibold">
@@ -516,11 +550,6 @@ function GroupEditor({
                     })}><Plus />新增规则</Button>
                   </div>
                   <div className="space-y-1">
-                    {(dim.deduction_rules ?? []).length === 0 && (
-                      <p className="text-[0.68rem] leading-5 text-[var(--muted)]">
-                        本维度未配置扣分规则（纯基础分模式）：调用B只给美感基础分，本维度零扣分；上方标题与按钮是编辑框架，不代表存在规则。
-                      </p>
-                    )}
                     {(dim.deduction_rules ?? []).map((rule: Json, ruleIdx: number) => (
                       <div key={ruleIdx} className="grid gap-2 sm:grid-cols-[160px_1fr_110px_1fr_auto] sm:items-end">
                         <label className="grid gap-1 text-[0.68rem]"><span>规则标识</span><input className={inputClass} value={rule.rule_id ?? ""} onChange={(e) => onPatch((n) => { n.subcategory_dimensions[trackKey][groupKey].schema_definition.dimensions[idx].deduction_rules[ruleIdx].rule_id = e.target.value })} /></label>
@@ -532,6 +561,7 @@ function GroupEditor({
                     ))}
                   </div>
                 </div>
+                )}
                 {isImageRuleDimension(dim) && <BonusRuleEditor trackKey={trackKey} groupKey={groupKey} dimensionIndex={idx} dimension={dim} onPatch={onPatch} />}
               </div>
             ))}
@@ -589,21 +619,26 @@ function BonusRuleEditor({
   onPatch: (mutator: (next: Editable) => void) => void
 }) {
   const rules: Json[] = Array.isArray(dimension.bonus_rules) ? dimension.bonus_rules : []
+  const addBonusRule = () => onPatch((n) => {
+    const target = n.subcategory_dimensions[trackKey][groupKey].schema_definition.dimensions[dimensionIndex]
+    const next = target.bonus_rules ??= []
+    next.push({ rule_id: "", description: "", bonus: 5, tags: [] })
+  })
+  if (rules.length === 0) {
+    // 与扣分规则一致的紧凑空态：无内容不摆完整骨架。
+    return <div className="mt-3 border-t border-dashed border-[var(--line)] pt-2">
+      <div className="flex items-center justify-between gap-2 bg-[#fafbf8] px-2.5 py-2">
+        <span className="text-[0.68rem] text-[var(--muted)]">加分规则：无</span>
+        <Button variant="ghost" size="sm" onClick={addBonusRule}><Plus />新增加分规则</Button>
+      </div>
+    </div>
+  }
   return <div className="mt-3 border-t border-dashed border-[var(--line)] pt-2">
     <div className="mb-2 flex items-center justify-between">
       <span className="text-[0.68rem] font-semibold">加分规则（调用B逐条判定）</span>
-      <Button variant="ghost" size="sm" onClick={() => onPatch((n) => {
-        const target = n.subcategory_dimensions[trackKey][groupKey].schema_definition.dimensions[dimensionIndex]
-        const next = target.bonus_rules ??= []
-        next.push({ rule_id: "", description: "", bonus: 5, tags: [] })
-      })}><Plus />新增加分规则</Button>
+      <Button variant="ghost" size="sm" onClick={addBonusRule}><Plus />新增加分规则</Button>
     </div>
     <div className="space-y-1">
-      {rules.length === 0 && (
-        <p className="text-[0.68rem] leading-5 text-[var(--muted)]">
-          本维度未配置加分规则。
-        </p>
-      )}
       {rules.map((rule, ruleIdx) => (
         <div key={ruleIdx} className="grid gap-2 sm:grid-cols-[160px_1fr_110px_1fr_auto] sm:items-end">
           <label className="grid gap-1 text-[0.68rem]"><span>规则标识</span><input className={inputClass} value={rule.rule_id ?? ""} onChange={(e) => onPatch((n) => { n.subcategory_dimensions[trackKey][groupKey].schema_definition.dimensions[dimensionIndex].bonus_rules[ruleIdx].rule_id = e.target.value })} /></label>
