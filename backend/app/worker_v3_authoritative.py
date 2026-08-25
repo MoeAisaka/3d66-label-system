@@ -650,9 +650,17 @@ async def evaluate_v3_authoritative(
                     )
                 )
             except DimensionDeductionBridgeError as exc:
-                raise V3AuthoritativeError(
-                    exc.code, f"v3 规则计分调用B输出不符合冻结合同：{exc}"
-                ) from exc
+                prefix = (
+                    "v3 规则计分调用B失败"
+                    if exc.code == "call_b_unavailable"
+                    else "v3 规则计分调用B输出不符合冻结合同"
+                )
+                error = V3AuthoritativeError(exc.code, f"{prefix}：{exc}")
+                # 保留桥接层的重试语义：provider 故障可重试，合同形状错误不可。
+                for attr in ("technical_error_type", "retryable"):
+                    if hasattr(exc, attr):
+                        setattr(error, attr, getattr(exc, attr))
+                raise error from exc
             try:
                 # normalize validates ``track_config``, so the track-level
                 # switch decides; the category-level switch still opts the

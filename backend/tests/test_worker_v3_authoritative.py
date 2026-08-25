@@ -813,7 +813,12 @@ def test_bonus_cap_provider_failure_fails_closed_without_foundation(
                 aesthetic=None,
             )
         )
-    assert excinfo.value.code == "v3_rule_engine_failed"
+    # 桥接层现在更早 fail-closed（call_b_unavailable）：调用B失败不出分，
+    # 不再等 fallback 输出流到后续校验才拒。
+    assert excinfo.value.code == "call_b_unavailable"
+    # provider 故障的可重试语义必须透传到 worker 抛出的异常上。
+    assert getattr(excinfo.value, "retryable", None) is True
+    assert getattr(excinfo.value, "technical_error_type", None) == "network"
     scoring = build_v3_authoritative_error_scoring(excinfo.value)
     assert scoring["score"] is None
     assert scoring["level"] is None

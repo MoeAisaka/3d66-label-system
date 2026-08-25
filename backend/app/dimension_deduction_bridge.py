@@ -899,8 +899,22 @@ async def call_multimodal_for_dimension_deductions(
             image_path=image,
             mime_type=mime_type,
         )
-    except Exception as exc:  # noqa: BLE001 - approved subjective-node fail-open
-        # Provider outage only.  Contract-shape faults are handled below.
+    except Exception as exc:  # noqa: BLE001 - provider outage; shape faults below
+        if foundation_required(contract):
+            # 调用B同时承担美感基础分时（bonus-cap 与纯基础分模式默认如此），
+            # 失败兜底等于系统替模型编一个「赛道基础分+维度满分」的正式分
+            # （class_one 会凭空得 100）。运营需求：调用B输出为空不许瞎给分。
+            # fail-closed 不出分、needs_review，provider 故障保留可重试语义。
+            error = DimensionDeductionBridgeError(
+                "call_b_unavailable",
+                "调用B请求失败，无法产出美感基础分，本条不出分"
+                f"（不按满分兜底）：{type(exc).__name__}: {exc}",
+            )
+            error.technical_error_type = "network"
+            error.retryable = True
+            raise error from exc
+        # 显式 opt-out 美感基础分的旧扣分合同维持已批准的 fail-open：
+        # 调用B只管扣分，失败=不扣分，结果仍带 warning 进人工复审。
         return empty_deduction_output(
             contract,
             warning=FALLBACK_WARNING,

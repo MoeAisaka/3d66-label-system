@@ -140,8 +140,26 @@ def test_bridge_normalizes_rule_hits_and_uses_chinese_prompt() -> None:
     }
 
 
-def test_bridge_provider_failure_returns_empty_hits_and_warning() -> None:
+def test_bridge_provider_failure_fails_closed_when_foundation_required() -> None:
+    """运营需求：调用B输出为空不许瞎给分——失败兜底会凭空给满分。"""
     config = build_inspiration_subcategory_dimensions()["class_one"]
+    with pytest.raises(DimensionDeductionBridgeError) as excinfo:
+        asyncio.run(
+            call_multimodal_for_dimension_deductions(
+                "image.jpg", config, client=Client(fail=True), mime_type="image/jpeg"
+            )
+        )
+    assert excinfo.value.code == "call_b_unavailable"
+    assert "不出分" in str(excinfo.value)
+    # provider 故障保留可重试语义；合同形状错误没有这两个属性。
+    assert excinfo.value.technical_error_type == "network"
+    assert excinfo.value.retryable is True
+
+
+def test_bridge_provider_failure_stays_fail_open_when_foundation_opted_out() -> None:
+    """显式 opt-out 美感基础分的旧扣分合同维持已批准的 fail-open。"""
+    config = dict(build_inspiration_subcategory_dimensions()["class_one"])
+    config["b_aesthetic_foundation"] = {"enabled": False}
     output = asyncio.run(
         call_multimodal_for_dimension_deductions(
             "image.jpg", config, client=Client(fail=True), mime_type="image/jpeg"
@@ -171,21 +189,19 @@ def test_bonus_cap_bridge_normalizes_both_rule_arrays_and_prompt() -> None:
     assert "加分规则" in client.user
 
 
-def test_bonus_cap_provider_failure_returns_both_empty_arrays_and_warning() -> None:
+def test_bonus_cap_provider_failure_fails_closed() -> None:
+    """bonus-cap 默认承担美感基础分：调用B失败必须 fail-closed 不出分。"""
     config = _bonus_cap_config()
-    output = asyncio.run(
-        call_multimodal_for_dimension_deductions(
-            "image.jpg",
-            config,
-            client=BonusCapClient(config, fail=True),
-            mime_type="image/jpeg",
+    with pytest.raises(DimensionDeductionBridgeError) as excinfo:
+        asyncio.run(
+            call_multimodal_for_dimension_deductions(
+                "image.jpg",
+                config,
+                client=BonusCapClient(config, fail=True),
+                mime_type="image/jpeg",
+            )
         )
-    )
-    assert output["warning"] == FALLBACK_WARNING
-    assert all(
-        item == {"hit_rules": [], "hit_bonus_rules": []}
-        for item in output["dimensions"].values()
-    )
+    assert excinfo.value.code == "call_b_unavailable"
 
 
 def test_bonus_cap_bridge_rejects_duplicate_provider_hits() -> None:
@@ -678,7 +694,9 @@ def test_contract_shape_fault_fails_closed_instead_of_full_marks() -> None:
 
 
 def test_provider_outage_records_reason_on_fail_open() -> None:
-    config = build_inspiration_subcategory_dimensions()["class_one"]
+    """fail-open 仅存在于显式 opt-out 基础分的合同；原因仍要留痕。"""
+    config = dict(build_inspiration_subcategory_dimensions()["class_one"])
+    config["b_aesthetic_foundation"] = {"enabled": False}
 
     output = asyncio.run(
         call_multimodal_for_dimension_deductions(
