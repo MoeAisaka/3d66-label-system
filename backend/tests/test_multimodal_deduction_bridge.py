@@ -361,6 +361,30 @@ def test_operator_selected_prompt_owns_body_and_server_injects_rules() -> None:
     assert output["prompt_identity"]["bypassed_operator_prompt_version"] is None
 
 
+def test_response_contract_sample_resists_anchor_copying() -> None:
+    """示例值锚定回归：42 条里 14 条照抄示例 88 后定的两道防线。"""
+    config = _bonus_cap_config()
+    client = Client()
+    operator = OperatorPrompt(user_prompt=_TAKEOVER_BODY)
+    try:
+        asyncio.run(
+            call_multimodal_for_dimension_deductions(
+                "image.jpg", config, client=client, mime_type="image/jpeg",
+                operator_prompt=operator,
+            )
+        )
+    except DimensionDeductionBridgeError:
+        # Client 的 mock 响应是 deduction_v1 形状，bonus-cap 解析必然拒绝；
+        # 本测试只关注请求侧发出的 prompt，响应侧失败不影响断言。
+        pass
+    # 防线一：禁抄声明必须紧贴示例出现。
+    assert "禁止照抄" in client.user
+    assert "独立给出" in client.user
+    # 防线二：示例分值不得落在自然高分带（88 曾被批量照抄）。
+    assert '"aesthetic_score": 88' not in client.user
+    assert '"aesthetic_score": 41' in client.user
+
+
 def test_operator_prompt_may_place_precheck_and_contract_itself() -> None:
     config = build_inspiration_subcategory_dimensions()["class_one"]
     client = Client()

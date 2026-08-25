@@ -446,10 +446,16 @@ def _precheck_text(precheck: dict[str, Any] | None) -> str:
 
 
 def _response_contract_preamble(*, bonus_cap: bool) -> str:
+    # 「禁止照抄示例数值」必须紧贴示例出现：2026-08-25 实测灵感图 42 条里
+    # 14 条直接照抄了示例里的 aesthetic_score（示例值锚定），紧邻声明是
+    # 对这类锚定最有效的位置。
     return (
-        "\n\n输出结构（未命中时 hit_rules 与 hit_bonus_rules 必须为空数组）：\n"
+        "\n\n输出结构（示例中的数值与文字只演示格式，禁止照抄；"
+        "aesthetic_score 必须按当前图片独立给出。"
+        "未命中时 hit_rules 与 hit_bonus_rules 必须为空数组）：\n"
         if bonus_cap
-        else "\n\n输出结构（未命中时 hit_rules 必须为空数组）：\n"
+        else "\n\n输出结构（示例中的数值与文字只演示格式，禁止照抄；"
+        "未命中时 hit_rules 必须为空数组）：\n"
     )
 
 
@@ -463,7 +469,9 @@ def _response_contract_text(
     response_contract = {
         **(
             {
-                "aesthetic_score": 88,
+                # 示例值刻意选在自然高分带之外：88 曾被模型批量照抄
+                # （灵感图 42 条中 14 条），41 若再被照抄能立刻从分布里看出来。
+                "aesthetic_score": 41,
                 "aesthetic_evidence": ["整体可见美感证据"],
                 "aesthetic_confidence": 0.8,
             }
