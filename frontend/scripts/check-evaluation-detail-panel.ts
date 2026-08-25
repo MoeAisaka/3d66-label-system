@@ -442,6 +442,49 @@ const judgementContract = [
     metadata: { node_type: "aesthetic_score" },
   },
   {
+    node_key: "call_b.composition.C1",
+    layer: "B",
+    path: "dimension.composition.hit_rules.C1",
+    label: "构图秩序：主体被裁切",
+    type: "rule_hit",
+    metadata: {
+      node_type: "dimension_rule",
+      dimension_key: "composition",
+      rule_id: "C1",
+      rule_kind: "deduction",
+      editable: true,
+    },
+  },
+  {
+    node_key: "call_b.composition.B1",
+    layer: "B",
+    path: "dimension.composition.hit_bonus_rules.B1",
+    label: "构图秩序：黄金比例构图",
+    type: "rule_hit",
+    metadata: {
+      node_type: "dimension_rule",
+      dimension_key: "composition",
+      rule_id: "B1",
+      rule_kind: "bonus",
+      editable: true,
+    },
+  },
+  {
+    // 合同里可能带上该素材没跑的维度（子类目全集），它们不能出现在面板里
+    node_key: "call_b.offtrack_dim.X1",
+    layer: "B",
+    path: "dimension.offtrack_dim.hit_rules.X1",
+    label: "未执行维度：不该出现的规则",
+    type: "rule_hit",
+    metadata: {
+      node_type: "dimension_rule",
+      dimension_key: "offtrack_dim",
+      rule_id: "X1",
+      rule_kind: "deduction",
+      editable: true,
+    },
+  },
+  {
     node_key: "v3.track_key",
     layer: "V3",
     path: "track_key",
@@ -468,7 +511,23 @@ const judgementInput = {
     hard_defects: ["blurry_grayish"],
     image_defects: [],
   },
-  aesthetic: { aesthetic_score: 86, evidence: ["构图均衡"], dimensions: {} },
+  aesthetic: {
+    aesthetic_score: 86,
+    evidence: ["构图均衡"],
+    dimensions: {
+      composition: {
+        hit_rules: [
+          {
+            rule_id: "C1",
+            deduction: 4,
+            confidence: "high",
+            evidence: "沙发右侧被画面边缘裁掉",
+          },
+        ],
+        hit_bonus_rules: [],
+      },
+    },
+  },
   scoring: {
     track_key: "class_one",
     steps: [{ step: "veto", score_after: 60, note: "高分一票压分" }],
@@ -535,6 +594,37 @@ assert.deepEqual(
 assert.equal(findRow(judgementB, "调用B美感分")?.correction?.currentValue, 86)
 assert.deepEqual(findRow(judgementA, "硬缺陷清单")?.correction?.currentValue, ["blurry_grayish"])
 
+// —— 调用B逐维度规则命中：一条配置规则一行，逐条可纠偏 ——
+const hitRuleRow = findRow(judgementB, "构图秩序：主体被裁切")
+assert.ok(hitRuleRow, "合同收录的维度规则必须逐条成行")
+assert.equal(hitRuleRow.value, "命中 · 扣 4 分 · 置信度 高")
+assert.deepEqual(hitRuleRow.evidence, ["沙发右侧被画面边缘裁掉"])
+assert.ok(hitRuleRow.correction, "命中的维度规则必须可纠偏")
+assert.equal(hitRuleRow.correction.valueKind, "rule_hit")
+assert.equal(hitRuleRow.correction.nodePath, "dimension.composition.hit_rules.C1")
+assert.equal(hitRuleRow.correction.ruleId, "C1", "提交新命中对象时服务端要求 rule_id 一致")
+assert.equal(hitRuleRow.correction.recomputes, true, "维度规则纠偏会触发重放重算")
+assert.deepEqual(
+  hitRuleRow.correction.currentValue,
+  { rule_id: "C1", deduction: 4, confidence: "high", evidence: "沙发右侧被画面边缘裁掉" },
+  "并发校验要用服务端存的原始命中对象",
+)
+
+// 未命中的配置规则也要成行——模型漏判时运营才有落点把它改成命中
+const missRuleRow = findRow(judgementB, "构图秩序：黄金比例构图")
+assert.ok(missRuleRow, "未命中的配置规则也必须成行")
+assert.equal(missRuleRow.value, "未命中")
+assert.ok(missRuleRow.correction, "未命中的规则必须可以纠偏为命中")
+assert.equal(missRuleRow.correction.currentValue, null, "未命中的并发基线是 null")
+assert.equal(missRuleRow.correction.nodePath, "dimension.composition.hit_bonus_rules.B1")
+
+// 合同里带的、但该素材没跑的维度不能出现——提交会被服务端重放拒绝
+assert.equal(
+  findRow(judgementB, "未执行维度：不该出现的规则"),
+  undefined,
+  "模型输出里不存在的维度不能开放纠偏入口",
+)
+
 // 算出来的行不给按钮，只说明该去改哪个上游判断。
 // 不写 `if (!row) continue`：行名写错时必须报错，否则这条断言会静默变成假绿。
 for (const label of ["高分否决", "高分否决封顶"]) {
@@ -572,6 +662,11 @@ const withHistory = buildEvaluationDetailSections({
     { node_path: "aesthetic.aesthetic_score", new_value: 70 },
     { node_path: "aesthetic.aesthetic_score", new_value: 60 },
     { node_path: "production_fields.title", new_value: "北欧客厅" },
+    { node_path: "dimension.composition.hit_rules.C1", new_value: null },
+    {
+      node_path: "dimension.composition.hit_bonus_rules.B1",
+      new_value: { rule_id: "B1", confidence: "medium", evidence: "三分线构图工整" },
+    },
   ],
 })
 assert.equal(
@@ -585,6 +680,16 @@ assert.equal(
   undefined,
   "没纠偏过的行不应显示人工值",
 )
+assert.equal(
+  findRow(withHistory[1], "构图秩序：主体被裁切")?.humanValue,
+  "未命中",
+  "人工撤掉命中（new_value=null）要如实显示为未命中",
+)
+assert.equal(
+  findRow(withHistory[1], "构图秩序：黄金比例构图")?.humanValue,
+  "命中 · 置信度 中：三分线构图工整",
+  "人工补上的命中要带置信度与证据并列展示",
+)
 
 // 弹窗源码层面的诚实性与口径一致
 const dialogSource = readFileSync(
@@ -597,6 +702,16 @@ assert.match(
   "弹窗必须按 recomputes 区分说法，不能一律宣称会重算",
 )
 assert.match(dialogSource, /请至少选一个纠偏理由/, "纠偏理由不能为空，否则纠偏分析无从归因")
+assert.match(
+  dialogSource,
+  /判定为命中时必须写明画面上的可见证据/,
+  "规则命中纠偏必须强制填写可见证据，否则重放会拿到空证据",
+)
+assert.match(
+  dialogSource,
+  /choice === "miss".*value: null/s,
+  "未命中必须提交 null，服务端按 null 删除该命中并重算",
+)
 assert.match(dialogSource, /reasonCodes/, "必须提交结构化归因码供纠偏分析聚合")
 const formSource = readFileSync(
   new URL("../src/pages/review-correction-form.tsx", import.meta.url),

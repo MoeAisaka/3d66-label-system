@@ -41,9 +41,27 @@ export type RowCorrectionSubmit = {
   reasonCodes: string[]
 }
 
+/** rule_hit 的命中状态选项：未命中，或命中并给出人工置信度。
+ * 注意不能写成 tuple 数组——契约脚本按 tuple 字面量识别归因码做同口径校验。 */
+const RULE_HIT_CHOICES: ReadonlyArray<{ value: string; label: string }> = [
+  { value: "miss", label: "未命中" },
+  { value: "high", label: "命中 · 置信度高" },
+  { value: "medium", label: "命中 · 置信度中" },
+  { value: "low", label: "命中 · 置信度低" },
+]
+
+function isRuleHitObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+}
+
 /** 把服务端存的原始值转成输入框里的初始文本 */
 function initialText(target: RowCorrectionTarget): string {
   const raw = target.currentValue
+  if (target.valueKind === "rule_hit") {
+    return isRuleHitObject(raw) && typeof raw.evidence === "string"
+      ? raw.evidence
+      : ""
+  }
   if (raw === null || raw === undefined) return ""
   if (Array.isArray(raw)) {
     return raw.map((item) => String(item ?? "")).filter(Boolean).join("、")
@@ -54,6 +72,16 @@ function initialText(target: RowCorrectionTarget): string {
 
 function initialSelection(target: RowCorrectionTarget): string[] {
   const raw = target.currentValue
+  if (target.valueKind === "rule_hit") {
+    if (isRuleHitObject(raw)) {
+      const confidence = typeof raw.confidence === "string" ? raw.confidence : ""
+      const known = RULE_HIT_CHOICES.some(
+        (choice) => choice.value === confidence && choice.value !== "miss",
+      )
+      return known ? [confidence] : ["high"]
+    }
+    return ["miss"]
+  }
   if (Array.isArray(raw)) return raw.map((item) => String(item ?? "")).filter(Boolean)
   if (typeof raw === "string" && raw.trim()) return [raw.trim()]
   return []
@@ -96,6 +124,23 @@ function parseValue(
         .map((item) => item.trim())
         .filter(Boolean)
       return { ok: true, value: items }
+    }
+    case "rule_hit": {
+      const choice = selection[0]
+      if (!choice) return { ok: false, message: "请选择命中或未命中" }
+      // 未命中即把这条命中从结果里撤掉，服务端按 null 删除并重算
+      if (choice === "miss") return { ok: true, value: null }
+      if (!target.ruleId) {
+        return { ok: false, message: "该规则节点缺少 rule_id，无法提交，请刷新后重试" }
+      }
+      const evidence = text.trim()
+      if (!evidence) {
+        return { ok: false, message: "判定为命中时必须写明画面上的可见证据" }
+      }
+      return {
+        ok: true,
+        value: { rule_id: target.ruleId, confidence: choice, evidence },
+      }
     }
     default: {
       const trimmed = text.trim()
@@ -231,7 +276,44 @@ export function RowCorrectionDialog({
                 <p className="mt-0.5 text-[0.68rem] text-[var(--muted)]">{target.hint}</p>
               )}
               <div className="mt-2">
-                {target?.valueKind === "enum" || target?.valueKind === "multi_enum" ? (
+                {target?.valueKind === "rule_hit" ? (
+                  <div className="space-y-3">
+                    <div className="flex flex-wrap gap-1.5">
+                      {RULE_HIT_CHOICES.map(({ value, label }) => {
+                        const active = selection[0] === value
+                        return (
+                          <button
+                            key={value}
+                            type="button"
+                            onClick={() => setSelection([value])}
+                            aria-pressed={active}
+                            className={`min-h-9 rounded-[4px] border px-3 text-xs font-semibold transition-colors ${
+                              active
+                                ? "border-[#7f991b] bg-[#f0f8c8] text-[#263000]"
+                                : "border-[var(--line-strong)] bg-white hover:bg-[#fafbf8]"
+                            }`}
+                          >
+                            {label}
+                          </button>
+                        )
+                      })}
+                    </div>
+                    {selection[0] !== "miss" && (
+                      <div>
+                        <p className="text-[0.68rem] text-[var(--muted)]">
+                          命中证据：写明画面上可定位的内容，会作为这条命中的证据存入结果。
+                        </p>
+                        <Textarea
+                          id="row-correction-value"
+                          rows={3}
+                          className="mt-1.5"
+                          value={text}
+                          onChange={(event) => setText(event.target.value)}
+                        />
+                      </div>
+                    )}
+                  </div>
+                ) : target?.valueKind === "enum" || target?.valueKind === "multi_enum" ? (
                   <div className="flex flex-wrap gap-1.5">
                     {options.length === 0 && (
                       <p className="text-[0.68rem] text-[var(--muted)]">

@@ -38,6 +38,7 @@ export type RowValueKind =
   | "enum"
   | "multi_enum"
   | "string_list"
+  | "rule_hit"
 
 export type RowCorrectionTarget = {
   /** 服务端 node_type，决定回写分支 */
@@ -45,6 +46,7 @@ export type RowCorrectionTarget = {
     | "call_a_field"
     | "precheck_field"
     | "aesthetic_score"
+    | "dimension_rule"
     | "track"
     | "final_level"
   /** 服务端 node_path */
@@ -56,6 +58,8 @@ export type RowCorrectionTarget = {
   minimum?: number
   maximum?: number
   hint?: string
+  /** rule_hit 专用：提交新命中对象时服务端要求 rule_id 与节点一致 */
+  ruleId?: string
   /** 改完是否会带动分数与等级重算；用于在弹窗里如实告知运营 */
   recomputes: boolean
 }
@@ -281,6 +285,36 @@ function ruleConfidenceLabel(value: unknown): string {
     return mapped[value] ?? value
   }
   return percentLabel(value) ?? "—"
+}
+
+/** 单条规则的模型判定摘要；证据单独展示，这里只拼命中状态、扣/加分与置信度 */
+function ruleHitSummary(
+  hit: unknown,
+  ruleKind: "deduction" | "bonus" | undefined,
+): string {
+  if (!isPlainObject(hit)) return "未命中"
+  const parts = ["命中"]
+  const delta = hit.deduction ?? hit.bonus ?? hit.value
+  if (typeof delta === "number") {
+    parts.push(ruleKind === "bonus" ? `加 ${delta} 分` : `扣 ${delta} 分`)
+  }
+  if (hit.confidence !== undefined) {
+    parts.push(`置信度 ${ruleConfidenceLabel(hit.confidence)}`)
+  }
+  return parts.join(" · ")
+}
+
+/** 人工纠偏后的规则结论；人工值不带扣分数值（重放后由服务端按合同累计） */
+function humanRuleHitSummary(value: unknown): string {
+  if (value === null) return "未命中"
+  if (!isPlainObject(value)) return readableValue(value)
+  const parts = ["命中"]
+  if (value.confidence !== undefined) {
+    parts.push(`置信度 ${ruleConfidenceLabel(value.confidence)}`)
+  }
+  const evidence = typeof value.evidence === "string" ? value.evidence.trim() : ""
+  const head = parts.join(" · ")
+  return evidence ? `${head}：${evidence}` : head
 }
 
 /** 调用A：列出每个生产字段与模型给出的结果，以及决定性信号的证据 */
@@ -587,6 +621,19 @@ export function buildCallBSection(
   const deductions = isPlainObject(dimensionEvidence.deductions)
     ? dimensionEvidence.deductions
     : {}
+
+  // 合同里的维度规则节点按维度归拢。只对模型输出里真实存在的维度开放逐条纠偏：
+  // 合同可能包含该素材没跑的维度（子类目全集），对它们提交会被服务端重放拒绝。
+  const ruleSpecsByDimension = new Map<string, ContractNodeSpec[]>()
+  for (const spec of contractIndex.values()) {
+    if (spec.nodeType !== "dimension_rule" || !spec.dimensionKey || !spec.ruleId) {
+      continue
+    }
+    const list = ruleSpecsByDimension.get(spec.dimensionKey)
+    if (list) list.push(spec)
+    else ruleSpecsByDimension.set(spec.dimensionKey, [spec])
+  }
+
   const dimensionRows: DetailRow[] = []
   for (const [key, rawDimension] of Object.entries(dimensions)) {
     if (!isPlainObject(rawDimension)) continue
@@ -595,6 +642,57 @@ export function buildCallBSection(
       ? rawDimension.hit_bonus_rules
       : []
     const deduction = deductions[key]
+    // 维度标签三级回落：机制自带 label → 调用方传入的映射 → 原始键
+    const schemaLabel = readableValue(rawDimension.label)
+    const hasLabel = Boolean(dimensionLabels[key]) || schemaLabel !== "—"
+    const dimensionLabel = dimensionLabels[key] || (schemaLabel === "—" ? key : schemaLabel)
+    const ruleSpecs = ruleSpecsByDimension.get(key)
+
+    if (ruleSpecs?.length) {
+      // 合同覆盖了该维度：一条配置规则一行，未命中的也列出来——
+      // 模型漏判时运营才有落点把它改成命中。
+      const matchedHits = new Set<string>()
+      for (const spec of ruleSpecs) {
+        const pool = spec.ruleKind === "bonus" ? bonusHits : hits
+        const hit = pool.find(
+          (item) => isPlainObject(item) && item.rule_id === spec.ruleId,
+        ) ?? null
+        if (hit) matchedHits.add(`${spec.ruleKind}:${spec.ruleId}`)
+        const humanValue = humanValues[spec.nodeKey]
+        dimensionRows.push({
+          label: spec.label || `${dimensionLabel}：${spec.ruleId}`,
+          value: ruleHitSummary(hit, spec.ruleKind),
+          tone: hit ? (spec.ruleKind === "bonus" ? "success" : "warning") : "neutral",
+          evidence: isPlainObject(hit) ? stringList(hit.evidence) : undefined,
+          humanValue:
+            humanValue === undefined
+              ? undefined
+              : humanRuleHitSummary(humanValue),
+          correction: correctionTargetFor(spec, hit),
+        })
+      }
+      // 命中了但合同没收录的规则（数据与合同漂移）：宁可只读展示也不静默丢弃。
+      const collectStray = (pool: unknown[], ruleKind: "deduction" | "bonus") => {
+        for (const hit of pool) {
+          if (!isPlainObject(hit)) continue
+          const ruleId = readableValue(hit.rule_id)
+          if (matchedHits.has(`${ruleKind}:${hit.rule_id}`)) continue
+          dimensionRows.push({
+            label: `${dimensionLabel}：${ruleId}`,
+            hint: `${NEW_ITEM_HINT} · 合同未收录该规则`,
+            isNew: true,
+            value: ruleHitSummary(hit, ruleKind),
+            tone: ruleKind === "bonus" ? "success" : "warning",
+            evidence: stringList(hit.evidence),
+          })
+        }
+      }
+      collectStray(hits, "deduction")
+      collectStray(bonusHits, "bonus")
+      continue
+    }
+
+    // 合同未覆盖该维度（旧结果或只读入口）：保持一维度一行的汇总展示
     const evidenceLines: string[] = []
     const collectHits = (rawHits: unknown[], isBonus: boolean) => {
       for (const hit of rawHits) {
@@ -615,11 +713,8 @@ export function buildCallBSection(
     collectHits(hits, false)
     collectHits(bonusHits, true)
     const hitCount = hits.length + bonusHits.length
-    // 维度标签三级回落：机制自带 label → 调用方传入的映射 → 原始键
-    const schemaLabel = readableValue(rawDimension.label)
-    const hasLabel = Boolean(dimensionLabels[key]) || schemaLabel !== "—"
     dimensionRows.push({
-      label: dimensionLabels[key] || (schemaLabel === "—" ? key : schemaLabel),
+      label: dimensionLabel,
       hint: hasLabel ? undefined : NEW_ITEM_HINT,
       isNew: !hasLabel,
       value: hitCount
@@ -932,6 +1027,10 @@ function nodeKeyForPath(path: string): string {
   ) {
     return "call_b.aesthetic_score"
   }
+  const dimensionRule = path.match(
+    /^dimension\.([^.]+)\.hit_(?:bonus_)?rules\.([^.]+)$/,
+  )
+  if (dimensionRule) return `call_b.${dimensionRule[1]}.${dimensionRule[2]}`
   if (path === "track" || path === "track_key" || path === "scoring.track_key") {
     return "v3.track_key"
   }
@@ -987,6 +1086,10 @@ export type ContractNodeSpec = {
   options?: Array<{ value: string; label: string }>
   minimum?: number
   maximum?: number
+  /** dimension_rule 专用：节点归属的维度、规则与加/扣分方向 */
+  dimensionKey?: string
+  ruleId?: string
+  ruleKind?: "deduction" | "bonus"
   readOnly: boolean
   recomputes: boolean
 }
@@ -995,6 +1098,7 @@ const CONTRACT_RUNTIME_TYPES = new Set([
   "call_a_field",
   "precheck_field",
   "aesthetic_score",
+  "dimension_rule",
   "track",
   "final_level",
 ])
@@ -1005,6 +1109,7 @@ function valueKindFromContractType(
 ): RowValueKind {
   const normalized = type.toLowerCase()
   if (normalized === "enum" || normalized === "enumeration") return "enum"
+  if (normalized === "rule_hit") return "rule_hit"
   if (normalized === "integer" || normalized === "int") return "integer"
   if (normalized === "list" || normalized === "array") {
     return hasOptions ? "multi_enum" : "string_list"
@@ -1067,6 +1172,20 @@ export function contractCorrectionIndex(
       options: options.length ? options : undefined,
       minimum: typeof node.minimum === "number" ? node.minimum : undefined,
       maximum: typeof node.maximum === "number" ? node.maximum : undefined,
+      dimensionKey:
+        typeof metadata.dimension_key === "string" && metadata.dimension_key
+          ? metadata.dimension_key
+          : undefined,
+      ruleId:
+        typeof metadata.rule_id === "string" && metadata.rule_id
+          ? metadata.rule_id
+          : undefined,
+      ruleKind:
+        metadata.rule_kind === "bonus"
+          ? "bonus"
+          : metadata.rule_kind === "deduction"
+            ? "deduction"
+            : undefined,
       readOnly: !editable,
       // 与服务端 apply_node_correction 的 downstream_recomputed 严格对齐，
       // 否则弹窗会向运营承诺一次它其实不会做的重算：
@@ -1096,6 +1215,7 @@ function correctionTargetFor(
     minimum: spec.minimum,
     maximum: spec.maximum,
     hint: spec.hint,
+    ruleId: spec.ruleId,
     recomputes: spec.recomputes,
   }
 }
