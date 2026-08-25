@@ -49,6 +49,10 @@ def normalize_b_aesthetic_foundation(payload: Any) -> dict[str, Any]:
             "aesthetic_output_invalid", "调用B美感结果必须是 JSON 对象"
         )
     score = payload.get("aesthetic_score")
+    # 输出契约示例把分值写成描述式占位（防照抄）后，个别模型会把整数写成
+    # 字符串（"75"）。数字字符串无歧义，宽容转换；非数字仍按缺失拒绝。
+    if isinstance(score, str) and score.strip().isdigit():
+        score = int(score.strip())
     if isinstance(score, bool) or not isinstance(score, int):
         raise BAestheticFoundationError(
             "aesthetic_score_missing", "调用B必须返回 0-100 的 aesthetic_score 整数"

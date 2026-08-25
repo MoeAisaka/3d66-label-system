@@ -380,9 +380,13 @@ def test_response_contract_sample_resists_anchor_copying() -> None:
     # 防线一：禁抄声明必须紧贴示例出现。
     assert "禁止照抄" in client.user
     assert "独立给出" in client.user
-    # 防线二：示例分值不得落在自然高分带（88 曾被批量照抄）。
-    assert '"aesthetic_score": 88' not in client.user
-    assert '"aesthetic_score": 41' in client.user
+    # 防线二：示例里不得出现任何具体分值——88 被抄 14/42，换 41 后又被抄
+    # 13/86，只要是数字就会被抄。示例分值必须是描述式占位字符串。
+    import re as _re
+    assert not _re.search(r'"aesthetic_score":\s*\d', client.user), (
+        "输出契约示例出现了具体分值，会被模型照抄成分布尖峰"
+    )
+    assert '"aesthetic_score": "按当前图片独立给出的0-100整数"' in client.user
 
 
 def test_operator_prompt_may_place_precheck_and_contract_itself() -> None:
