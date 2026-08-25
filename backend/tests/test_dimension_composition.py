@@ -204,10 +204,12 @@ def test_bonus_cap_v2_requires_both_rule_arrays_and_at_least_one_rule() -> None:
         validate_subcategory_dimensions(_single_group_config([missing_bonus]))
     assert missing_exc.value.code.endswith("bonus_rules_missing")
 
+    # 扣分与加分规则同时为空是合法的「纯基础分」模式：维度保留只为锚定
+    # 规则命中管线（调用B直接给 aesthetic_score、零命中零扣分），媒介降权、
+    # 赛道封顶、红线、硬伤封顶与等级映射照常执行。运营清空规则即可启用，
+    # 不必置空维度组（那会静默切到美感基座管线）。
     empty = _v2_dimension()
-    with pytest.raises(DimensionCompositionError) as empty_exc:
-        validate_subcategory_dimensions(_single_group_config([empty]))
-    assert empty_exc.value.code.endswith("rules_empty")
+    assert validate_subcategory_dimensions(_single_group_config([empty])) is None
 
 
 def test_bonus_cap_v2_and_grade_fallback_cannot_mix_within_track() -> None:

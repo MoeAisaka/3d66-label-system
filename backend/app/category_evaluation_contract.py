@@ -753,11 +753,11 @@ def validate_dimension_rules(dimension: Any, *, dimension_key: str) -> None:
             "bonus_rules_invalid",
             f"维度 {dimension_key} 的 bonus_rules 必须是数组",
         )
-    if not deduction_rules and not bonus_rules:
-        raise CategoryEvaluationContractError(
-            "rules_empty",
-            f"维度 {dimension_key} 的扣分规则与加分规则不能同时为空",
-        )
+    # 扣分与加分规则允许同时为空：这是「纯基础分」模式——维度保留是为了
+    # 锚定规则命中管线（调用B直接给 aesthetic_score，零命中零扣分），撮合器
+    # 的媒介降权、赛道封顶、红线、硬伤封顶与等级映射照常执行。桥接器对空
+    # 规则输出「- 无」，运营在机制编辑器里清空规则即可启用，不必置空维度组
+    # （置空维度组会静默切换到美感基座管线，正文要求完全不同）。
 
     seen: set[str] = set()
     for kind, rules, model in (
