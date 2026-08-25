@@ -64,6 +64,8 @@ _ALLOWED_REQUIREMENT_FIELDS = frozenset({
     "dimension",
     "min_grade",
     "no_shortcomings",
+    "no_deduction_hits",
+    "max_deduction",
 })
 
 # 不属于本机制的键——一旦出现就报错，并直接告诉它该去哪。
@@ -306,8 +308,12 @@ def _validate_defect_exception(item: dict[str, Any], index: int) -> dict[str, An
                 "defect_exception_requirement_duplicate",
                 f"{position}的维度 {dimension_key} 重复配置",
             )
+        # 两类门槛，各绑定一条评测路径的证据：
+        # - min_grade / no_shortcomings：调用B输出八维档位的路径（1-5 档 + 缺点清单）
+        # - no_deduction_hits / max_deduction：规则计分路径（每维累计扣分现成可得）
+        # 每条 requirement 至少要配一类，否则等于无条件豁免。
         min_grade = requirement.get("min_grade")
-        if (
+        if min_grade is not None and (
             not isinstance(min_grade, int)
             or isinstance(min_grade, bool)
             or not 1 <= min_grade <= 5
@@ -322,10 +328,43 @@ def _validate_defect_exception(item: dict[str, Any], index: int) -> dict[str, An
                 "defect_exception_requirement_flag_invalid",
                 f"{position}的维度 {dimension_key} 的「不能有缺点」必须是真假值",
             )
-        normalized_requirements[dimension_key] = {
-            "min_grade": min_grade,
+        no_deduction_hits = requirement.get("no_deduction_hits", False)
+        if not isinstance(no_deduction_hits, bool):
+            raise QualityRulesError(
+                "defect_exception_requirement_flag_invalid",
+                f"{position}的维度 {dimension_key} 的「未命中扣分规则」必须是真假值",
+            )
+        max_deduction = requirement.get("max_deduction")
+        if max_deduction is not None and (
+            isinstance(max_deduction, bool)
+            or not isinstance(max_deduction, (int, float))
+            or not 0 <= max_deduction <= 100
+        ):
+            raise QualityRulesError(
+                "defect_exception_requirement_deduction_invalid",
+                f"{position}的维度 {dimension_key} 最大扣分必须是 0 到 100 的数值",
+            )
+        if (
+            min_grade is None
+            and not no_shortcomings
+            and not no_deduction_hits
+            and max_deduction is None
+        ):
+            raise QualityRulesError(
+                "defect_exception_requirement_empty",
+                f"{position}的维度 {dimension_key} 至少要配一种门槛"
+                "（最低档位 / 不能有缺点 / 未命中扣分规则 / 最大扣分）",
+            )
+        normalized: dict[str, Any] = {
             "shortcomings_empty": no_shortcomings,
         }
+        if min_grade is not None:
+            normalized["min_grade"] = min_grade
+        if no_deduction_hits:
+            normalized["no_deduction_hits"] = True
+        if max_deduction is not None:
+            normalized["max_deduction"] = float(max_deduction)
+        normalized_requirements[dimension_key] = normalized
 
     return {
         "key": name.strip(),

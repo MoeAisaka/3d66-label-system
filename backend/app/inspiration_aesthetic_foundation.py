@@ -508,9 +508,14 @@ def _precheck_after_narrow_exemptions(
         qualified = True
         for dimension_key, requirement in exemption["foundation_requirements"].items():
             dimension = foundation["dimensions"][dimension_key]
-            if dimension["grade"] < requirement["min_grade"]:
+            min_grade = requirement.get("min_grade")
+            if min_grade is not None and dimension["grade"] < min_grade:
                 qualified = False
             if requirement["shortcomings_empty"] and dimension["shortcomings"]:
+                qualified = False
+            # 规则计分门槛（未命中扣分规则/最大扣分）在本路径没有证据，
+            # 配了就无法核实——fail-closed 不豁免，与聚合路径对称。
+            if requirement.get("no_deduction_hits") or "max_deduction" in requirement:
                 qualified = False
         if not qualified:
             continue

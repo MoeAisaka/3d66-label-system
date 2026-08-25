@@ -10,7 +10,6 @@ import {
   applyImageRuleBinding,
   imageRuleBindingView,
   imageRuleViewDefaults,
-  setAestheticFoundationEnabled,
 } from "./image-rule-contract"
 import type {
   Editable,
@@ -48,11 +47,6 @@ export function ImageRuleEditor({
       busy={busy}
       banner={banner}
       errors={errors}
-      foundationTemplate={
-        selectedRevision?.contract?.aesthetic_foundation
-        ?? runtimeRevision?.contract?.aesthetic_foundation
-        ?? null
-      }
       onDisplayName={(value) => onPatch((next) => { next.display_name = value })}
       onKey={(value) => onPatch((next) => { next.category_key = value })}
       onPatch={onPatch}
@@ -68,7 +62,6 @@ function V3ConfigEditor({
   busy,
   banner,
   errors,
-  foundationTemplate,
   onDisplayName,
   onKey,
   onPatch,
@@ -80,7 +73,6 @@ function V3ConfigEditor({
   busy: boolean
   banner: string | null
   errors: ValidationErrorItem[]
-  foundationTemplate: Json | null
   onDisplayName: (value: string) => void
   onKey: (value: string) => void
   onPatch: (mutator: (next: Editable) => void) => void
@@ -162,7 +154,6 @@ function V3ConfigEditor({
 
       <PromptBindingEditor
         draft={draft}
-        foundationTemplate={foundationTemplate}
         onPatch={onPatch}
       />
       <RedlineEditor draft={draft} onPatch={onPatch} />
@@ -270,11 +261,9 @@ function LevelScaleEditor({
 
 function PromptBindingEditor({
   draft,
-  foundationTemplate,
   onPatch,
 }: {
   draft: Editable
-  foundationTemplate: Json | null
   onPatch: (mutator: (next: Editable) => void) => void
 }) {
   const binding = imageRuleBindingView(draft.contract)
@@ -292,10 +281,9 @@ function PromptBindingEditor({
     return Array.from(new Set(versions)).sort()
   }
   const current = { A: binding.callAVersion, B: binding.callBVersion }
-  const canRestoreFoundation = binding.foundationEnabled || foundationTemplate !== null
 
   return (
-    <FieldCard title="A / B 调用绑定与美感前置基座">
+    <FieldCard title="A / B 调用绑定">
       <p className="mb-3 text-[0.68rem] text-[var(--muted)]">
         这里声明的 A/B 版本就是这份修订会实际执行的版本。维度规则和权重是按某一对 A/B
         标定出来的，换绑等于换掉标定前提，改完请重新跑一轮回归再启用。
@@ -344,31 +332,13 @@ function PromptBindingEditor({
           )
         })}
       </div>
-      <label className="mt-4 flex items-start gap-2 text-xs font-semibold">
-        <input
-          type="checkbox"
-          className="mt-0.5"
-          checked={binding.foundationEnabled}
-          disabled={!canRestoreFoundation}
-          onChange={(event) => onPatch((next) => {
-            setAestheticFoundationEnabled(
-              next.contract,
-              event.target.checked,
-              foundationTemplate,
-            )
-          })}
-        />
-        <span>
-          启用美感前置基座（锚图赛道）
-          <span className="mt-1 block font-normal text-[0.68rem] text-[var(--muted)]">
-            {binding.foundationEnabled
-              ? "关掉就从这份合同里删掉整个 aesthetic_foundation，锚图赛道随之停用。"
-              : canRestoreFoundation
-                ? "从所选修订恢复基座，恢复后 call_b_version 跟随上面的调用 B 版本。"
-                : "所选修订里没有基座内容可恢复。基座含标定过的锚图与分档，界面无法凭空生成，请改从带基座的修订派生。"}
-          </span>
-        </span>
-      </label>
+      {binding.foundationEnabled && (
+        <p className="mt-4 border border-[#e0d9b8] bg-[#fbf8ea] px-3 py-2 text-[0.68rem] text-[#6b5d1f]">
+          这份修订仍带着旧版美感前置基座（遗留形态）。它的能力已拆成下方的独立配置项
+          （锚点图机制、质量规则等），新修订不再需要基座；改绑调用 B 时基座内的
+          call_b_version 会自动跟随，无需手工处理。
+        </p>
+      )}
     </FieldCard>
   )
 }
