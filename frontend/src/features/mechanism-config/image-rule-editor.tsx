@@ -23,6 +23,7 @@ import { levelScaleForEditor } from "./level-scale-model"
 import type { LevelScaleEntry } from "./level-scale-model"
 import { ClassificationMapEditor, MediaPenaltyEditor, RedlineEditor, TrackEditor } from "./image-rule-subeditors"
 import { AnchorMechanismEditor } from "./anchor-mechanism-editor"
+import { QualityRulesEditor } from "./quality-rules-editor"
 
 type Json = JsonObject
 
@@ -170,6 +171,7 @@ function V3ConfigEditor({
         onPatch={onPatch}
       />
       <AnchorMechanismEditor draft={draft} onPatch={onPatch} />
+      <QualityRulesEditor draft={draft} onPatch={onPatch} />
       <TrackEditor draft={draft} onPatch={onPatch} />
       <MediaPenaltyEditor draft={draft} onPatch={onPatch} />
       <DimensionGroupsEditor draft={draft} trackKeys={trackKeys} onPatch={onPatch} />

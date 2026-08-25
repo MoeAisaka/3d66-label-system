@@ -356,3 +356,332 @@ export function prepareImageRulePayload(draft: Editable): Editable {
   }
   return next
 }
+
+/* ------------------------------------------------------------------ *
+ * 质量规则机制（quality-rules-v1）
+ *
+ * 唯一职责，只有两项：
+ *   随手拍限分     snapshot_limit    —— 命中信号时把总分压到上限
+ *   硬伤例外名单   defect_exceptions —— 满足佐证条件时硬伤不触发降级
+ *
+ * 严禁混入其它机制——
+ *   分数阈值   → 合同顶层 level_thresholds / level_scale
+ *   维度与权重 → Call B 的 dimensions
+ *   红线策略   → 顶层 redline_policy
+ *   锚点图片   → anchor_mechanism
+ *
+ * 与 aesthetic_foundation 的关键差异：旧基座把关键词、豁免条数、维度全写死了
+ * （关键词必须精确等于「是随手拍」、豁免必须恰好 1 条），运营改任何一处都被拒。
+ * 本机制只校验结构与取值域，不锁业务内容——这正是拆分要换来的能力。
+ * ------------------------------------------------------------------ */
+
+export const QUALITY_RULES_KEY = "quality_rules"
+export const DEFECT_SOURCES = ["image_defects", "content_defects"] as const
+export const SNAPSHOT_LIMIT_LEVELS = ["L1", "L2", "L3", "L4", "L5"] as const
+const DEFAULT_SNAPSHOT_SIGNAL = "production_fields.reason"
+
+export type DefectSource = (typeof DEFECT_SOURCES)[number]
+export type SnapshotLimitLevel = (typeof SNAPSHOT_LIMIT_LEVELS)[number]
+
+export type SnapshotLimitView = {
+  enabled: boolean
+  name: string
+  signal: string
+  whenReasonContains: string[]
+  /** 与 maxLevel 互斥：配了分数就不配等级。 */
+  maxScore: number | null
+  maxLevel: SnapshotLimitLevel | null
+  dimensionCeilings: Record<string, number>
+}
+
+export type DimensionRequirementView = {
+  dimension: string
+  minGrade: number
+  noShortcomings: boolean
+}
+
+export type DefectExceptionView = {
+  name: string
+  defect: string
+  defectSource: DefectSource
+  whenEvidenceContains: string[]
+  requireDimensions: DimensionRequirementView[]
+}
+
+export type QualityRulesView = {
+  present: boolean
+  enabled: boolean
+  snapshotLimit: SnapshotLimitView | null
+  defectExceptions: DefectExceptionView[]
+}
+
+/** 与后端 _FOREIGN_KEYS 对齐：界面永远不该往质量规则块写这些键。 */
+const QUALITY_RULES_FOREIGN_KEYS = new Set([
+  "score_thresholds",
+  "level_thresholds",
+  "level_scale",
+  "bands",
+  "anchors",
+  "anchor_samples",
+  "anchor_mechanism",
+  "dimensions",
+  "dimension_keys",
+  "dimension_weights",
+  "redline_policy",
+  "redlines",
+  "boundary_policy",
+  "prompt_template",
+  "call_b_version",
+  "calibration_status",
+  "aesthetic_foundation",
+])
+
+function stringList(value: unknown): string[] {
+  if (!Array.isArray(value)) return []
+  return value.filter((item): item is string => typeof item === "string")
+}
+
+function readSnapshotLimit(raw: unknown): SnapshotLimitView | null {
+  if (!isRecord(raw)) return null
+  const ceilings: Record<string, number> = {}
+  const rawCeilings = raw.dimension_ceilings
+  if (isRecord(rawCeilings)) {
+    for (const [key, limit] of Object.entries(rawCeilings)) {
+      if (typeof limit === "number") ceilings[key] = limit
+    }
+  }
+  const maxScore = typeof raw.max_score === "number" ? raw.max_score : null
+  const maxLevel = SNAPSHOT_LIMIT_LEVELS.includes(raw.max_level as SnapshotLimitLevel)
+    ? (raw.max_level as SnapshotLimitLevel)
+    : null
+  return {
+    enabled: raw.enabled !== false,
+    name: typeof raw.name === "string" ? raw.name : "随手拍限分",
+    signal: typeof raw.signal === "string" ? raw.signal : DEFAULT_SNAPSHOT_SIGNAL,
+    whenReasonContains: stringList(raw.when_reason_contains),
+    maxScore,
+    maxLevel,
+    dimensionCeilings: ceilings,
+  }
+}
+
+function readDefectExceptions(raw: unknown): DefectExceptionView[] {
+  if (!Array.isArray(raw)) return []
+  const items: DefectExceptionView[] = []
+  for (const entry of raw) {
+    if (!isRecord(entry)) continue
+    const requirements: DimensionRequirementView[] = []
+    if (Array.isArray(entry.require_dimensions)) {
+      for (const requirement of entry.require_dimensions) {
+        if (!isRecord(requirement)) continue
+        if (typeof requirement.dimension !== "string") continue
+        requirements.push({
+          dimension: requirement.dimension,
+          minGrade: typeof requirement.min_grade === "number" ? requirement.min_grade : 4,
+          noShortcomings: requirement.no_shortcomings === true,
+        })
+      }
+    }
+    items.push({
+      name: typeof entry.name === "string" ? entry.name : "",
+      defect: typeof entry.defect === "string" ? entry.defect : "",
+      defectSource: DEFECT_SOURCES.includes(entry.defect_source as DefectSource)
+        ? (entry.defect_source as DefectSource)
+        : "image_defects",
+      whenEvidenceContains: stringList(entry.when_evidence_contains),
+      requireDimensions: requirements,
+    })
+  }
+  return items
+}
+
+/** 读出质量规则块的界面视图。合同没有本块时 present=false。 */
+export function readQualityRules(contract: unknown): QualityRulesView {
+  const block = isRecord(contract) ? contract[QUALITY_RULES_KEY] : null
+  if (!isRecord(block)) {
+    return { present: false, enabled: false, snapshotLimit: null, defectExceptions: [] }
+  }
+  return {
+    present: true,
+    enabled: block.enabled !== false,
+    snapshotLimit: readSnapshotLimit(block.snapshot_limit),
+    defectExceptions: readDefectExceptions(block.defect_exceptions),
+  }
+}
+
+/** 前端侧隔离守卫：返回混进本块的外来机制键，供界面直接报错。 */
+export function qualityRulesIntruders(contract: unknown): string[] {
+  const block = isRecord(contract) ? contract[QUALITY_RULES_KEY] : null
+  if (!isRecord(block)) return []
+  const found = new Set<string>()
+  const scan = (candidate: unknown) => {
+    if (!isRecord(candidate)) return
+    for (const key of Object.keys(candidate)) {
+      if (QUALITY_RULES_FOREIGN_KEYS.has(key)) found.add(key)
+    }
+  }
+  scan(block)
+  scan(block.snapshot_limit)
+  if (Array.isArray(block.defect_exceptions)) {
+    for (const entry of block.defect_exceptions) scan(entry)
+  }
+  return [...found].sort()
+}
+
+function defaultSnapshotLimitBlock(): Json {
+  return {
+    enabled: true,
+    name: "随手拍限分",
+    signal: DEFAULT_SNAPSHOT_SIGNAL,
+    when_reason_contains: ["是随手拍"],
+    max_score: 59,
+  }
+}
+
+function emptyQualityRulesBlock(): Json {
+  return {
+    enabled: true,
+    snapshot_limit: defaultSnapshotLimitBlock(),
+    defect_exceptions: [],
+  }
+}
+
+/**
+ * 原地修改合同上的质量规则块。
+ *
+ * 必须是原地语义（返回 void）——界面的调用形态是
+ * ``onPatch((next) => { setXxx(next.contract, …) })``，返回值会被丢弃。
+ * 若在此 clone 出新对象再返回，运营的操作会静默失效。
+ */
+function mutateQualityRules(contract: Json, mutate: (block: Json) => void): void {
+  const existing = contract[QUALITY_RULES_KEY]
+  const block = isRecord(existing) ? existing : emptyQualityRulesBlock()
+  mutate(block)
+  contract[QUALITY_RULES_KEY] = block
+}
+
+/** 开关整个质量规则机制。关掉时限分与豁免都不生效。 */
+export function setQualityRulesEnabled(contract: Json, enabled: boolean): void {
+  mutateQualityRules(contract, (block) => {
+    block.enabled = enabled
+  })
+}
+
+/** 单独开关随手拍限分，保留已配的豁免。 */
+export function setSnapshotLimitEnabled(contract: Json, enabled: boolean): void {
+  mutateQualityRules(contract, (block) => {
+    const limit = isRecord(block.snapshot_limit)
+      ? block.snapshot_limit
+      : defaultSnapshotLimitBlock()
+    limit.enabled = enabled
+    block.snapshot_limit = limit
+  })
+}
+
+/** 改随手拍限分的判定关键词。旧基座锁死为「是随手拍」，这里放开。 */
+export function setSnapshotLimitKeywords(contract: Json, keywords: string[]): void {
+  mutateQualityRules(contract, (block) => {
+    const limit = isRecord(block.snapshot_limit)
+      ? block.snapshot_limit
+      : defaultSnapshotLimitBlock()
+    limit.when_reason_contains = keywords.map((item) => item.trim()).filter(Boolean)
+    block.snapshot_limit = limit
+  })
+}
+
+/** 按分数封顶。与按等级封顶互斥，写入时清掉另一侧。 */
+export function setSnapshotLimitMaxScore(contract: Json, maxScore: number): void {
+  mutateQualityRules(contract, (block) => {
+    const limit = isRecord(block.snapshot_limit)
+      ? block.snapshot_limit
+      : defaultSnapshotLimitBlock()
+    limit.max_score = maxScore
+    delete limit.max_level
+    delete limit.dimension_ceilings
+    block.snapshot_limit = limit
+  })
+}
+
+/** 按等级封顶。与按分数封顶互斥，写入时清掉另一侧。 */
+export function setSnapshotLimitMaxLevel(
+  contract: Json,
+  maxLevel: SnapshotLimitLevel,
+): void {
+  mutateQualityRules(contract, (block) => {
+    const limit = isRecord(block.snapshot_limit)
+      ? block.snapshot_limit
+      : defaultSnapshotLimitBlock()
+    limit.max_level = maxLevel
+    delete limit.max_score
+    block.snapshot_limit = limit
+  })
+}
+
+/** 按等级封顶时可选的维度分上限。 */
+export function setSnapshotLimitDimensionCeilings(
+  contract: Json,
+  ceilings: Record<string, number>,
+): void {
+  mutateQualityRules(contract, (block) => {
+    const limit = isRecord(block.snapshot_limit)
+      ? block.snapshot_limit
+      : defaultSnapshotLimitBlock()
+    limit.dimension_ceilings = { ...ceilings }
+    block.snapshot_limit = limit
+  })
+}
+
+function serializeDefectException(item: DefectExceptionView): Json {
+  return {
+    name: item.name.trim(),
+    defect: item.defect.trim(),
+    defect_source: item.defectSource,
+    when_evidence_contains: item.whenEvidenceContains
+      .map((token) => token.trim())
+      .filter(Boolean),
+    require_dimensions: item.requireDimensions.map((requirement) => ({
+      dimension: requirement.dimension.trim(),
+      min_grade: requirement.minGrade,
+      no_shortcomings: requirement.noShortcomings,
+    })),
+  }
+}
+
+/** 整体替换硬伤例外名单。旧基座锁死为恰好 1 条，这里放开条数。 */
+export function setDefectExceptions(
+  contract: Json,
+  exceptions: DefectExceptionView[],
+): void {
+  mutateQualityRules(contract, (block) => {
+    block.defect_exceptions = exceptions.map(serializeDefectException)
+  })
+}
+
+/** 追加一条空白豁免，供界面新建后再填。 */
+export function appendDefectException(contract: Json): void {
+  mutateQualityRules(contract, (block) => {
+    const existing = Array.isArray(block.defect_exceptions)
+      ? block.defect_exceptions
+      : []
+    block.defect_exceptions = [
+      ...existing,
+      serializeDefectException({
+        name: "",
+        defect: "",
+        defectSource: "image_defects",
+        whenEvidenceContains: [],
+        requireDimensions: [{ dimension: "", minGrade: 4, noShortcomings: true }],
+      }),
+    ]
+  })
+}
+
+/** 删除指定下标的豁免。 */
+export function removeDefectException(contract: Json, index: number): void {
+  mutateQualityRules(contract, (block) => {
+    const existing = Array.isArray(block.defect_exceptions)
+      ? block.defect_exceptions
+      : []
+    block.defect_exceptions = existing.filter((_, position) => position !== index)
+  })
+}
