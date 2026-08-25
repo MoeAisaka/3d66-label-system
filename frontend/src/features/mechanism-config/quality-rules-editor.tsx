@@ -289,7 +289,7 @@ export function QualityRulesEditor({
 
           <SubSection
             title="硬伤例外名单"
-            hint="命中硬伤但佐证符合、且指定维度达到档位要求时，这条硬伤不触发降级。条数不限，可以一条都不配。"
+            hint="命中硬伤但佐证符合、且指定维度达到档位要求时，这条硬伤不触发降级。条数不限，可以一条都不配。注意：维度档位要求需要调用B输出八维档位才能核实，走规则计分的评测路径没有这份证据，届时按不豁免处理并在评测明细里说明。"
           >
             {view.defectExceptions.length === 0 && (
               <div className="text-[0.68rem] text-[var(--muted)]">还没有例外规则</div>

@@ -33,6 +33,7 @@ from .level_scale import (
     resolve_level_scale,
     score_to_level,
 )
+from .inspiration_quality_rules import QualityRulesError, load_quality_rules
 from .redline_policy import evaluate_redlines
 
 
@@ -249,6 +250,90 @@ def _track_score_adjustment(
         "bonus": bonus,
         "applied": bool(deduction or bonus),
     }
+
+
+def _load_quality_rules_or_fail(
+    contract: dict[str, Any],
+) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
+    """装载运营可配置的质量规则块；合同没有该块时返回 (None, [])。"""
+    try:
+        loaded = load_quality_rules(contract)
+    except QualityRulesError as exc:
+        raise CategoryEvaluationAggregatorError(
+            f"quality_rules.{exc.code}", str(exc)
+        ) from exc
+    if loaded is None:
+        return None, []
+    return loaded
+
+
+def _score_cap_for_level_threshold(
+    thresholds: list[dict[str, Any]], level: str
+) -> int:
+    """``level`` 档还能容纳的最高整数分（更优档 min_score - 1；最优档为 100）。"""
+    for index, entry in enumerate(thresholds):
+        if entry["level"] == level:
+            if index == 0:
+                return 100
+            return int(thresholds[index - 1]["min_score"]) - 1
+    raise CategoryEvaluationAggregatorError(
+        "quality_rules_cap_level_disabled",
+        f"质量规则封顶等级 {level} 未在等级档位启用",
+    )
+
+
+def _quality_reason_values(precheck: dict[str, Any]) -> list[str]:
+    value = (precheck.get("production_fields") or {}).get("reason")
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, list):
+        return [item for item in value if isinstance(item, str)]
+    return []
+
+
+def _apply_quality_defect_exemptions(
+    precheck: dict[str, Any],
+    exemptions: list[dict[str, Any]],
+) -> tuple[dict[str, Any], list[dict[str, Any]], list[str]]:
+    """按硬伤例外名单过滤 precheck 副本；输入保持只读。
+
+    维度门槛（require_dimensions）依赖八维 grade+shortcomings 证据，本聚合路径
+    的调用B输出是规则命中形状、拿不到这份证据，因此 fail-closed：佐证关键词
+    命中但维度门槛无从核实的豁免**不生效**，只在 notes 里向运营说明原因。
+    """
+    import copy as _copy
+    import json as _json
+
+    adjusted = _copy.deepcopy(precheck)
+    applied: list[dict[str, Any]] = []
+    notes: list[str] = []
+    evidence_text = _json.dumps(
+        precheck.get("decisive_evidence"), ensure_ascii=False, sort_keys=True
+    )
+    for exemption in exemptions:
+        source = exemption["source"]
+        defect_key = exemption["defect_key"]
+        defects = adjusted.get(source)
+        if not isinstance(defects, list) or defect_key not in defects:
+            continue
+        if not any(
+            token in evidence_text
+            for token in exemption["evidence_contains_any"]
+        ):
+            continue
+        if exemption["foundation_requirements"]:
+            notes.append(
+                f"硬伤例外「{exemption['key']}」佐证关键词已命中，但本评测路径"
+                f"没有八维档位输出、维度门槛无法核实，按不豁免处理"
+            )
+            continue
+        adjusted[source] = [item for item in defects if item != defect_key]
+        applied.append({
+            "rule": "hard_defect_exemption",
+            "key": exemption["key"],
+            "defect_key": defect_key,
+        })
+    return adjusted, applied, notes
 
 
 def _apply_hard_defect_penalty(
@@ -590,10 +675,65 @@ def aggregate_category_evaluation(
             "penalty": float(media_penalty),
         })
 
+    # 质量规则（运营可配置块）：软封顶在硬伤扣分/一票压分之前应用，
+    # 硬伤例外先过滤 precheck 再进后续硬伤类节点，与基座路径语义对齐。
+    quality_soft_cap, quality_exemptions = _load_quality_rules_or_fail(contract)
+    quality_evidence: dict[str, Any] = {
+        "soft_cap_applied": False,
+        "exemptions_applied": [],
+        "notes": [],
+    }
+    score_after_quality = score_after_media
+    if quality_soft_cap is not None and any(
+        reason in quality_soft_cap["match_any"]
+        for reason in _quality_reason_values(precheck)
+    ):
+        if "cap_to" in quality_soft_cap:
+            resolved_cap_to = int(quality_soft_cap["cap_to"])
+            cap_note = f"总分压到 {resolved_cap_to} 以内"
+        else:
+            cap_to_level = str(quality_soft_cap["cap_to_level"])
+            resolved_cap_to = _score_cap_for_level_threshold(
+                thresholds, cap_to_level
+            )
+            cap_note = f"总分压到 {cap_to_level} 上界 {resolved_cap_to} 以内"
+            escalation = quality_soft_cap.get("filter_escalation") or {}
+            if escalation.get("dimensions_at_most"):
+                quality_evidence["notes"].append(
+                    "软封顶的维度分档升级条件需要八维档位输出，本评测路径无此证据，未评估升级"
+                )
+        if score_after_quality > resolved_cap_to:
+            score_after_quality = float(resolved_cap_to)
+            quality_evidence["soft_cap_applied"] = True
+            caps.append({
+                "cap": quality_soft_cap["key"],
+                "reason": f"判定理由命中软封顶关键词，{cap_note}",
+            })
+            steps.append(_step(
+                "quality_soft_cap",
+                score_after_quality,
+                f"质量规则软封顶：{cap_note}",
+            ))
+
+    policy_precheck = precheck
+    if quality_exemptions:
+        policy_precheck, applied_exemptions, exemption_notes = (
+            _apply_quality_defect_exemptions(precheck, quality_exemptions)
+        )
+        quality_evidence["exemptions_applied"] = applied_exemptions
+        quality_evidence["notes"].extend(exemption_notes)
+        for item in applied_exemptions:
+            caps.append({
+                "cap": "hard_defect_exemption",
+                "reason": f"硬伤例外「{item['key']}」生效，{item['defect_key']} 不参与硬伤降级",
+            })
+        for note in exemption_notes:
+            steps.append(_step("quality_exemption_skipped", score_after_quality, note))
+
     hard_defect_delta, hard_defect_evidence = _apply_hard_defect_penalty(
-        precheck, contract
+        policy_precheck, contract
     )
-    score_after_hard_defect = score_after_media + hard_defect_delta
+    score_after_hard_defect = score_after_quality + hard_defect_delta
     if hard_defect_evidence["enabled"]:
         steps.append(_step(
             "hard_defect_penalty",
@@ -610,7 +750,7 @@ def aggregate_category_evaluation(
     if contract["common_modifiers"]["format_version"] == COMMON_MODIFIERS_V2_FORMAT_VERSION:
         if veto.get("enabled", True):
             score_after_veto, hard_defect_action = _apply_v2_hard_defect_policy(
-                precheck=precheck,
+                precheck=policy_precheck,
                 veto=veto,
                 score=score_after_hard_defect,
             )
@@ -640,7 +780,7 @@ def aggregate_category_evaluation(
         veto_enabled = veto.get("enabled", True)
         veto_threshold = veto["threshold"]
         veto_cap_to = veto["cap_to"]
-        hard_defects = precheck.get("hard_defects")
+        hard_defects = policy_precheck.get("hard_defects")
         configured_rules = veto.get("rules")
         configured_hard_defects = (
             {rule["key"] for rule in configured_rules}
@@ -709,6 +849,7 @@ def aggregate_category_evaluation(
         "track_adjustment": track_adjustment,
         "hard_defect_penalty": -hard_defect_delta,
         "common_modifier_evidence": common_modifier_evidence,
+        "quality_rules_evidence": quality_evidence,
         "hit_rules": list(redline["hit_rules"]),
         "dimension_evidence": dim_evidence,
         "media_penalty_enabled": bool(media_enabled),

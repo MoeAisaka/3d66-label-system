@@ -26,9 +26,9 @@ function cloneJson<T>(value: T): T {
  *   红线与封顶 → Call A 与顶层 redline_policy
  *
  * 与 aesthetic_foundation 的关键差异：基座含标定过的维度与分档，界面凭空
- * 造不出来，只能从既有修订恢复（见 setAestheticFoundationEnabled 的
- * template 参数）。锚点机制只有图片和等级，所以**不需要 template**，运营
- * 可以从零配起——这正是拆分要换来的能力。
+ * 造不出来（其总开关已随拆分移除，旧修订带的基座只作遗留形态展示）。锚点
+ * 机制只有图片和等级，所以**不需要 template**，运营可以从零配起——这正是
+ * 拆分要换来的能力。
  * ------------------------------------------------------------------ */
 
 export const ANCHOR_MECHANISM_KEY = "anchor_mechanism"
@@ -294,34 +294,6 @@ export function applyImageRuleBinding(
   if (isRecord(foundation)) {
     foundation.call_b_version = next
   }
-}
-
-/**
- * 开关美感前置基座（锚图赛道）。
- *
- * 关掉就是从合同里删掉整个 aesthetic_foundation——worker 侧正是以「合同里有没有
- * 这个块」判断锚图赛道是否激活的。重新开启只能从原修订恢复：基座里的锚图资产、
- * 维度键、分档切点都是标定过的内容，界面凭空造不出来，没有模板时如实拒绝。
- */
-export function setAestheticFoundationEnabled(
-  contract: Json,
-  enabled: boolean,
-  template: Json | null | undefined,
-): boolean {
-  if (!enabled) {
-    delete contract.aesthetic_foundation
-    return true
-  }
-  if (isRecord(contract.aesthetic_foundation)) return true
-  if (!isRecord(template)) return false
-  const restored = cloneJson(template)
-  const bindings = isRecord(contract.prompt_bindings) ? contract.prompt_bindings : {}
-  // 一律对齐当前绑定（含未绑定的 null），否则模板里的旧版本号会留下来，
-  // 直接撞上 aesthetic_foundation_prompt_binding_mismatch。
-  const bound = bindings.call_b_version
-  restored.call_b_version = typeof bound === "string" ? bound : null
-  contract.aesthetic_foundation = restored
-  return true
 }
 
 function isRuleDimension(dimension: Json): boolean {

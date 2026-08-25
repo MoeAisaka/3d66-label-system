@@ -8,7 +8,6 @@ import {
   imageRuleBindingView,
   imageRuleViewDefaults,
   prepareImageRulePayload,
-  setAestheticFoundationEnabled,
 } from "../src/features/mechanism-config/image-rule-contract.ts"
 import { getMechanismEditorPlugin } from "../src/features/mechanism-config/registry.ts"
 import { isNewMechanismDraft } from "../src/features/mechanism-config/types.ts"
@@ -167,35 +166,13 @@ assert.equal(bindingContract.aesthetic_foundation.call_b_version, null)
 assert.equal(imageRuleBindingView(bindingContract).callBVersion, "")
 applyImageRuleBinding(bindingContract, "B", "b-rev4")
 
-// 关基座 = 从合同里删掉整个 aesthetic_foundation，worker 侧正是以此判断锚图赛道。
-const foundationTemplate = JSON.parse(
-  JSON.stringify(bindingContract.aesthetic_foundation),
-)
-assert.equal(setAestheticFoundationEnabled(bindingContract, false, null), true)
-assert.equal("aesthetic_foundation" in bindingContract, false)
-assert.equal(imageRuleBindingView(bindingContract).foundationEnabled, false)
-// 关掉后改 B 不应凭空造出基座
-applyImageRuleBinding(bindingContract, "B", "b-rev6")
-assert.equal("aesthetic_foundation" in bindingContract, false)
-
-// 没有模板时如实拒绝恢复，而不是造一个空基座让后续拒单
-assert.equal(setAestheticFoundationEnabled(bindingContract, true, null), false)
-assert.equal("aesthetic_foundation" in bindingContract, false)
-
-// 从原修订恢复时，基座的 call_b_version 跟随当前绑定
-assert.equal(
-  setAestheticFoundationEnabled(bindingContract, true, foundationTemplate),
-  true,
-)
-assert.equal(bindingContract.aesthetic_foundation.call_b_version, "b-rev6")
-assert.deepEqual(bindingContract.aesthetic_foundation.anchors, [{ asset_id: 1 }])
-// 恢复出来的基座必须是副本，改它不能污染模板
-bindingContract.aesthetic_foundation.anchors[0].asset_id = 99
-assert.deepEqual(foundationTemplate.anchors, [{ asset_id: 1 }])
-
-assert.match(imageEditorSource, /A \/ B 调用绑定与美感前置基座/)
+// 旧基座总开关已拆除：基座能力已拆成锚点图机制、质量规则等独立配置项。
+// 编辑器不得再暴露「启用美感前置基座」入口，带基座的旧修订只展示遗留提示。
+assert.match(imageEditorSource, /A \/ B 调用绑定/)
 assert.match(imageEditorSource, /applyImageRuleBinding/)
-assert.match(imageEditorSource, /setAestheticFoundationEnabled/)
+assert.doesNotMatch(imageEditorSource, /setAestheticFoundationEnabled/)
+assert.doesNotMatch(imageEditorSource, /启用美感前置基座/)
+assert.match(imageEditorSource, /旧版美感前置基座（遗留形态）/)
 // 调用 A 在执行侧是必填，界面必须挡住留空，否则存出来的修订发起时必然被拒单
 assert.match(imageEditorSource, /调用 A 必须绑定一个版本/)
 assert.match(imageEditorSource, /不走调用 B/)
