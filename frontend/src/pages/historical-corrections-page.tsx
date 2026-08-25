@@ -42,7 +42,7 @@ export function HistoricalCorrectionsPage() {
         description="只读解析“已处理样本3d&SU”表格，完成字段映射、去重和确定性分层；不会写入素材、Gold或触发模型。"
         actions={<Button asChild variant="secondary"><Link to="/sample-sets"><ArrowLeft />返回样本与回归</Link></Button>}
       />
-      <div className="mx-auto max-w-[1540px] px-5 py-7 md:px-8 lg:px-10 lg:py-9">
+      <div className="mx-auto shell-content px-5 py-7 md:px-8 lg:px-10 lg:py-9">
         <section className="grid gap-5 border-y border-[var(--line-strong)] bg-white p-5 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-end">
           <div>
             <div className="flex items-center gap-2"><FileXls size={22} /><h2 className="text-lg font-bold">选择历史纠偏表格</h2></div>

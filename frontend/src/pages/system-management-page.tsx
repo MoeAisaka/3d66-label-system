@@ -82,7 +82,7 @@ export function SystemManagementPage({ user }: { user: User }) {
         description="一线审核流程之外的配置、实验和追溯能力集中在这里。生产线默认跟随已确认的类目方案，只有管理员需要进入这些入口。"
         actions={<Badge tone={user.is_admin ? "success" : "neutral"}>{user.is_admin ? "管理员权限" : "只读查看"}</Badge>}
       />
-      <div className="mx-auto max-w-[1540px] px-5 py-8 md:px-8 lg:px-10">
+      <div className="mx-auto shell-content px-5 py-8 md:px-8 lg:px-10">
         {!user.is_admin && (
           <div className="mb-7 flex items-start gap-3 border-y border-[var(--line-strong)] bg-[#fff9e9] px-5 py-4 text-sm leading-6 text-[#6f5513]">
             <GearSix className="mt-0.5 shrink-0" />

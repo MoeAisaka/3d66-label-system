@@ -120,7 +120,7 @@ export function JobsPage() {
           </>
         }
       />
-      <div className="mx-auto max-w-[1540px] px-5 py-7 md:px-8 lg:px-10 lg:py-10">
+      <div className="mx-auto shell-content px-5 py-7 md:px-8 lg:px-10 lg:py-10">
         <div className="mb-5 flex flex-wrap gap-2 text-xs text-[var(--muted)]">
           <span className="border border-[var(--line)] bg-white px-3 py-2">排队 {control.data?.queued_count ?? 0}</span>
           <span className="border border-[var(--line)] bg-white px-3 py-2">运行 {control.data?.processing_count ?? 0}</span>

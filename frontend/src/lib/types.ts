@@ -407,6 +407,8 @@ export type Asset = {
   id: number
   name: string
   mime_type: string
+  /** 内容哈希；锚点图机制用它冻结所选图片的身份（换图必须换哈希） */
+  sha256?: string
   storage_backend?: "local" | "nas_maps" | string
   source_uri?: string | null
   category_key: string

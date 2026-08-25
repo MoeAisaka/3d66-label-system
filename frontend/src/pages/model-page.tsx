@@ -298,7 +298,7 @@ export function ModelPage() {
     return (
       <>
         <PageHeader index="06" title="模型配置" description="模型端点、计价与密钥只能由管理员修改；当前账号仅可查看安全状态。" />
-        <div className="mx-auto max-w-[1180px] px-5 py-8 md:px-8 lg:px-10">
+        <div className="mx-auto shell-content px-5 py-8 md:px-8 lg:px-10">
           <div className="border-y border-[var(--line-strong)] bg-white px-5 py-5 text-sm text-[var(--muted)]">当前账号无配置权限。API Key、完整凭据引用和原始连接异常不会显示在页面中。</div>
           <div className="mt-6 divide-y divide-[var(--line)] border-y border-[var(--line-strong)] bg-white">{(modelConfigs.data?.items ?? []).map((item) => <div key={item.id} className="grid gap-2 px-5 py-4 md:grid-cols-[1fr_auto_auto]"><div><strong>{item.name}</strong><p className="font-data mt-1 text-xs text-[var(--muted)]">{item.model_id}</p></div><Badge>{item.has_api_key ? "密钥已配置" : "未配置密钥"}</Badge><Badge tone={item.benchmark_enabled ? "warning" : "neutral"}>{item.benchmark_enabled ? "横评已启用" : "横评关闭"}</Badge></div>)}</div>
         </div>
@@ -319,7 +319,7 @@ export function ModelPage() {
           </>
         }
       />
-      <div className="mx-auto max-w-[1180px] px-5 py-7 md:px-8 lg:px-10 lg:py-10">
+      <div className="mx-auto shell-content px-5 py-7 md:px-8 lg:px-10 lg:py-10">
         <section className="grid gap-7 border-y border-[var(--line-strong)] bg-white px-5 py-6 lg:grid-cols-[230px_1fr] lg:px-7">
           <div>
             <div className="flex size-10 items-center justify-center rounded-[4px] bg-primary"><PlugsConnected size={21} weight="bold" /></div>

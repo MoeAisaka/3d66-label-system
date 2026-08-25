@@ -26,65 +26,9 @@ import type {
   MaterialUploadResult,
   UploadFileIssue,
 } from "@/lib/types"
-
-type CategoryKey = EvaluationCategoryProfile["category_key"]
-
-type UploadFeedback = {
-  source: string
-  successful: string[]
-  skipped: UploadFileIssue[]
-  failed: UploadFileIssue[]
-}
-
-function fileSize(bytes: number) {
-  if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`
-  return `${(bytes / 1024 / 1024).toFixed(1)} MB`
-}
-
-function fileType(mimeType: string) {
-  return mimeType.split("/")[1]?.toUpperCase().replace("JPEG", "JPG") || "图片"
-}
-
-function snapshotFiles(files: FileList | null) {
-  return files ? Array.from(files) : []
-}
-
-function relativeBrowserFileName(file: File) {
-  const relativePath = (file as File & { webkitRelativePath?: string }).webkitRelativePath
-  const raw = (relativePath || file.name).replaceAll("\\", "/")
-  const parts = raw.split("/").filter((part) => part && part !== "." && part !== "..")
-  const absolute = raw.startsWith("/") || raw.startsWith("//") || /^[A-Za-z]:\//.test(raw) || raw.split("/").includes("..")
-  return (absolute ? parts.at(-1) : parts.join("/")) || "unnamed-file"
-}
-
-function fileSkipReason(file: File, category?: EvaluationCategoryProfile) {
-  const filename = relativeBrowserFileName(file)
-  const parts = filename.split("/")
-  const basename = parts.at(-1)?.toLowerCase() ?? ""
-  if (
-    parts.some((part) => part.startsWith("."))
-    || parts.some((part) => part.toLowerCase() === "__macosx")
-    || basename === "thumbs.db"
-    || basename === "desktop.ini"
-  ) return "隐藏或系统元数据"
-  const suffixIndex = basename.lastIndexOf(".")
-  const suffix = suffixIndex >= 0 ? basename.slice(suffixIndex) : ""
-  const allowedSuffixes = new Set(category?.pipeline_config.allowed_suffixes.map((item) => item.toLowerCase()) ?? [])
-  if (!allowedSuffixes.has(suffix)) return `当前类目不支持 ${suffix || "无扩展名"} 格式`
-  return null
-}
-
-function uploadIssuesFromError(error: unknown, key: "skipped_files" | "failed_files") {
-  if (!(error instanceof ApiError) || !Array.isArray(error.detail?.[key])) return []
-  return error.detail[key].filter((item): item is UploadFileIssue => (
-    Boolean(item)
-    && typeof item === "object"
-    && "filename" in item
-    && typeof item.filename === "string"
-    && "reason" in item
-    && typeof item.reason === "string"
-  ))
-}
+import { evaluationStatus, fileSize, fileSkipReason, fileType, relativeBrowserFileName, snapshotFiles, statusTone, uploadIssuesFromError } from "../features/assets/asset-format"
+import type { CategoryKey, UploadFeedback } from "../features/assets/asset-format"
+import { UploadFeedbackPanel } from "../features/assets/upload-feedback-panel"
 
 export function AssetsPage() {
   const fileInputRef = useRef<HTMLInputElement>(null)
@@ -367,7 +311,7 @@ export function AssetsPage() {
         title="导入与整理素材"
         description="上传、整理和查找素材都在这里完成。一次批量、一个文件夹或一个 ZIP 自动汇总为一个可追溯素材包。"
       />
-      <div className="mx-auto max-w-[1540px] px-5 py-7 md:px-8 lg:px-10 lg:py-10">
+      <div className="mx-auto shell-content px-5 py-7 md:px-8 lg:px-10 lg:py-10">
         <input
           ref={fileInputRef}
           type="file"
@@ -683,67 +627,4 @@ export function AssetsPage() {
       </div>
     </>
   )
-}
-
-function UploadFeedbackPanel({ feedback }: { feedback: UploadFeedback }) {
-  const groups: Array<{
-    key: "successful" | "skipped" | "failed"
-    label: string
-    tone: "success" | "warning" | "danger"
-    items: string[]
-  }> = [
-    { key: "successful", label: "成功", tone: "success", items: feedback.successful },
-    {
-      key: "skipped",
-      label: "跳过",
-      tone: "warning",
-      items: feedback.skipped.map((item) => `${item.filename} · ${item.reason}`),
-    },
-    {
-      key: "failed",
-      label: "失败",
-      tone: "danger",
-      items: feedback.failed.map((item) => `${item.filename} · ${item.reason}`),
-    },
-  ]
-  return (
-    <div className="border-t border-[var(--line)] bg-[#fafbf8] px-5 py-4" aria-live="polite">
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <p className="text-sm font-bold">{feedback.source}处理结果</p>
-        <div className="flex flex-wrap gap-2">
-          {groups.map((group) => <Badge key={group.key} tone={group.tone}>{group.label} {group.items.length}</Badge>)}
-        </div>
-      </div>
-      <div className="mt-3 grid gap-3 lg:grid-cols-3">
-        {groups.map((group) => (
-          <details key={group.key} className="border-t border-[var(--line)] pt-2" open={group.key !== "successful" && group.items.length > 0}>
-            <summary className="cursor-pointer text-xs font-semibold">{group.label}文件（{group.items.length}）</summary>
-            <div className="font-data mt-2 max-h-32 space-y-1 overflow-auto text-[11px] leading-5 text-[var(--muted)]">
-              {group.items.length
-                ? group.items.map((item, index) => <p className="break-all" key={`${item}-${index}`}>{item}</p>)
-                : <p>无</p>}
-            </div>
-          </details>
-        ))}
-      </div>
-    </div>
-  )
-}
-
-function evaluationStatus(value: Asset["evaluation_status"]) {
-  return ({
-    not_evaluated: "未评测",
-    evaluated_old: "仅旧版本",
-    evaluated_current: "当前版本已评测",
-    queued: "已排队",
-    running: "运行中",
-    failed: "失败",
-  } as const)[value ?? "not_evaluated"]
-}
-
-function statusTone(value: Asset["evaluation_status"]) {
-  if (value === "evaluated_current") return "success"
-  if (value === "failed") return "danger"
-  if (value === "queued" || value === "running") return "warning"
-  return "active"
 }

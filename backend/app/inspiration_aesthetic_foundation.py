@@ -14,6 +14,7 @@ from .category_evaluation_aggregator import (
     _trait_to_media_key,
 )
 from .redline_policy import evaluate_redlines
+from .inspiration_quality_rules import load_quality_rules
 from .subcategory_resolver import resolve_subcategory
 from .inspiration_anchor_contract import (
     InspirationAnchorContractError,
@@ -542,7 +543,13 @@ def apply_aesthetic_v3_rules(
     if foundation is None:
         raise AestheticFoundationError("foundation_missing", "非红线样本缺少调用B美感基础结果")
     normalized = validate_aesthetic_output(foundation)
-    soft_cap, exemptions = _validated_quality_rules(contract)
+    # 质量规则优先走可配置的 ``quality_rules`` 块（运营可自行编辑），
+    # 合同没有该块时回落旧基座路径，保证既有合同行为零变化。
+    loaded_quality_rules = load_quality_rules(contract)
+    if loaded_quality_rules is None:
+        soft_cap, exemptions = _validated_quality_rules(contract)
+    else:
+        soft_cap, exemptions = loaded_quality_rules
     frozen = canonical_foundation(normalized)
     working = copy.deepcopy(normalized)
     if _test_mutate_after_freeze:
@@ -568,7 +575,11 @@ def apply_aesthetic_v3_rules(
         final_score = max(0, final_score + penalty)
         if penalty:
             caps.append({"rule": "media_penalty", "media_key": media_key, "delta": penalty, "uncertain": uncertain})
-    if any(reason in soft_cap["match_any"] for reason in _reason_values(precheck)):
+    # soft_cap 允许为 None：运营在 quality_rules 块里关掉随手拍限分时装载器返回 None。
+    # 旧基座路径缺失即抛错、永远返回 dict，所以这个守卫只对新可配置路径生效。
+    if soft_cap is not None and any(
+        reason in soft_cap["match_any"] for reason in _reason_values(precheck)
+    ):
         if "cap_to" in soft_cap:
             capped = min(final_score, int(soft_cap["cap_to"]))
             if capped != final_score:

@@ -732,8 +732,21 @@ const panelSource = readFileSync(
 assert.match(panelSource, /调用A读图产字段、调用B判美感、等级撮合器出最终等级/)
 assert.match(panelSource, /evaluation-detail-panel/)
 
-for (const page of ["review-page.tsx", "baseline-regression-page.tsx"]) {
-  const source = readFileSync(new URL(`../src/pages/${page}`, import.meta.url), "utf8")
+// 校验单位是「页面单元」：页面文件 + 该页拆出去的子模块。
+// 页面过长时结果区会被拆到 features/ 下，接线随之搬走；只读 pages/ 会漏判。
+// 断言强度不变——接线必须存在、且必须来自公共面板。
+const pageUnits: Record<string, string[]> = {
+  "review-page.tsx": ["src/pages/review-page.tsx"],
+  "baseline-regression-page.tsx": [
+    "src/pages/baseline-regression-page.tsx",
+    "src/features/baseline-regression/regression-results.tsx",
+  ],
+}
+
+for (const [page, files] of Object.entries(pageUnits)) {
+  const source = files
+    .map((file) => readFileSync(new URL(`../${file}`, import.meta.url), "utf8"))
+    .join("\n")
   assert.match(
     source,
     /EvaluationDetailPanel/,

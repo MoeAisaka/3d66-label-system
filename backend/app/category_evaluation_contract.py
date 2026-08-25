@@ -28,6 +28,15 @@ from .inspiration_anchor_contract import (
     InspirationAnchorContractError,
     validate_inspiration_anchor_contract,
 )
+from .inspiration_anchor_mechanism import (
+    ANCHOR_MECHANISM_KEY,
+    validate_anchor_mechanism,
+)
+from .inspiration_quality_rules import (
+    CONTRACT_BLOCK_KEY as QUALITY_RULES_KEY,
+    QualityRulesError,
+    validate_quality_rules_block,
+)
 from .redline_policy import (
     RedlinePolicyError,
     validate_redline_policy,
@@ -840,6 +849,28 @@ def validate_category_evaluation_contract(contract: Any) -> None:
         except InspirationAnchorContractError as exc:
             raise CategoryEvaluationContractError(
                 f"aesthetic_foundation.{exc.code}", str(exc)
+            ) from exc
+
+    # 锚点图机制（``anchor-mechanism-v1``）：只承载各等级锚点图片。
+    # 阈值归 level_scale、维度归 Call B、红线封顶归 Call A 与 redline_policy；
+    # validate_anchor_mechanism 内的隔离守卫会拒绝任何混入的外来机制。
+    if ANCHOR_MECHANISM_KEY in contract:
+        try:
+            validate_anchor_mechanism(contract)
+        except InspirationAnchorContractError as exc:
+            raise CategoryEvaluationContractError(
+                f"{ANCHOR_MECHANISM_KEY}.{exc.code}", str(exc)
+            ) from exc
+
+    # 质量规则机制（``quality-rules-v1``）：只承载随手拍限分与硬伤例外名单。
+    # 分档切点归 level_thresholds、八维归 dimensions、红线归 redline_policy、
+    # 锚图归 anchor_mechanism；隔离守卫会拒绝任何混入的外来机制。
+    if QUALITY_RULES_KEY in contract:
+        try:
+            validate_quality_rules_block(contract)
+        except QualityRulesError as exc:
+            raise CategoryEvaluationContractError(
+                f"{QUALITY_RULES_KEY}.{exc.code}", str(exc)
             ) from exc
 
 

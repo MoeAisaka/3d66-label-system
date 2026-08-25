@@ -1,3 +1,19 @@
+/**
+ * 已摘路由的历史页面 —— 仅供审计,请勿重新挂载。
+ *
+ * v3-only 迁移(docs/superpowers/plans/2026-08-05-labellab-v3-only-migration.md 的 Task 5)
+ * 移除了 App.tsx 里的 lazy import 与 route,但刻意保留文件本体,以便审计旧维度合同的编辑逻辑。
+ * ADR-0020(docs/decisions/0020-dimension-manager-and-variable-dimensions.md)状态仍为 Accepted,
+ * 该决策并未废止,因此本文件不是待清理的孤儿页。
+ *
+ * frontend/scripts/check-v3-only-contract.ts 断言 App.tsx 中不得出现 DimensionManagerPage;
+ * 在线的类目维度配置入口是 src/pages/category-evaluation-v3-config-page.tsx。
+ *
+ * 另注:本文件内的 draft / active / published / retired 是维度合同自身的状态词表,
+ * 与「本页已退休」无关。src/lib/dimension-schema.ts 有四个在线页面在用
+ * (sample-sets / review / review-list / review-correction-form),不随本文件一起清理。
+ */
+
 import { useEffect, useMemo, useState } from "react"
 import {
   Check,
@@ -488,7 +504,7 @@ export function DimensionManagerPage() {
         title="维度管理器"
         description="按评测类目开启、关闭或缩减维度范围。可关闭维度测评，对照仅提示词评测的质量表现。"
       />
-      <div className="mx-auto max-w-[1540px] px-5 py-8 md:px-8 lg:px-10">
+      <div className="mx-auto shell-content px-5 py-8 md:px-8 lg:px-10">
         <div className="mb-4"><EvaluationBoundaryNote slot="dimension" /></div>
         <div className="flex items-start gap-3 border-y border-[#d4a53d] bg-[#fff9e9] px-4 py-3 text-sm leading-6 text-[#665016]">
           <WarningCircle className="mt-0.5 shrink-0" size={18} weight="fill" />

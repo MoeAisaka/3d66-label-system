@@ -16,6 +16,9 @@ import { ModelRegistryPage } from "@/pages/model-registry-page"
 import { MigrationsPage } from "@/pages/migrations-page"
 import { UsersPage } from "@/pages/users-page"
 
+const DashboardPage = lazy(() =>
+  import("@/pages/dashboard-page").then((module) => ({ default: module.DashboardPage })),
+)
 const SampleSetsPage = lazy(() =>
   import("@/pages/sample-sets-page").then((module) => ({ default: module.SampleSetsPage })),
 )
@@ -44,25 +47,25 @@ const HistoricalCorrectionsPage = lazy(() =>
   import("@/pages/historical-corrections-page").then((module) => ({ default: module.HistoricalCorrectionsPage })),
 )
 const OptimizationCasesPage = lazy(() =>
-  import("@/pages/workflow-pages").then((module) => ({ default: module.OptimizationCasesPage })),
+  import("@/pages/optimization-cases-page").then((module) => ({ default: module.OptimizationCasesPage })),
 )
 const AutomationControlPage = lazy(() =>
-  import("@/pages/workflow-pages").then((module) => ({ default: module.AutomationControlPage })),
+  import("@/pages/automation-control-page").then((module) => ({ default: module.AutomationControlPage })),
 )
 const ProductionFeedbackPage = lazy(() =>
-  import("@/pages/workflow-pages").then((module) => ({ default: module.ProductionFeedbackPage })),
+  import("@/pages/production-feedback-page").then((module) => ({ default: module.ProductionFeedbackPage })),
 )
 const BenchmarkPage = lazy(() =>
-  import("@/pages/workflow-pages").then((module) => ({ default: module.BenchmarkPage })),
+  import("@/pages/benchmark-page").then((module) => ({ default: module.BenchmarkPage })),
 )
 const AuditEventsPage = lazy(() =>
-  import("@/pages/workflow-pages").then((module) => ({ default: module.AuditEventsPage })),
+  import("@/pages/audit-events-page").then((module) => ({ default: module.AuditEventsPage })),
 )
 const ReleaseWorkspacePage = lazy(() =>
-  import("@/pages/workflow-pages").then((module) => ({ default: module.ReleaseWorkspacePage })),
+  import("@/pages/release-workspace-page").then((module) => ({ default: module.ReleaseWorkspacePage })),
 )
 const CapabilityStatusPage = lazy(() =>
-  import("@/pages/workflow-pages").then((module) => ({ default: module.CapabilityStatusPage })),
+  import("@/pages/capability-status-page").then((module) => ({ default: module.CapabilityStatusPage })),
 )
 const EvaluationPackagePipelinePage = lazy(() =>
   import("@/pages/evaluation-packages-page").then((module) => ({ default: module.EvaluationPackagePipelinePage })),
@@ -141,7 +144,8 @@ export default function App() {
         <Route path="/login" element={<LoginPage user={user} />} />
         {user ? (
           <Route element={<AppShell user={user} />}>
-            <Route index element={<Navigate to="/workflow/incremental" replace />} />
+            <Route index element={<Navigate to="/workflow/dashboard" replace />} />
+            <Route path="workflow/dashboard" element={<Suspense fallback={<RouteLoading />}><DashboardPage /></Suspense>} />
             <Route path="workflow/incremental" element={<Suspense fallback={<RouteLoading />}><IncrementalWorkspacePage /></Suspense>} />
             <Route path="workflow/stock" element={<Suspense fallback={<RouteLoading />}><StockWorkspacePage /></Suspense>} />
             <Route path="workflow/operations" element={<Suspense fallback={<RouteLoading />}><OperationsCenterPage /></Suspense>} />
@@ -210,5 +214,5 @@ function LegacyReviewRedirect() {
 }
 
 function RouteLoading() {
-  return <div className="mx-auto max-w-[1540px] px-5 py-10 md:px-8 lg:px-10"><div className="h-64 animate-pulse border-y border-[var(--line)] bg-white" /></div>
+  return <div className="mx-auto shell-content px-5 py-10 md:px-8 lg:px-10"><div className="h-64 animate-pulse border-y border-[var(--line)] bg-white" /></div>
 }

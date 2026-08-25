@@ -87,7 +87,7 @@ export function IncrementalWorkspacePage() {
         description="新进入、未定性的素材从类目路由进入评测、纠偏、候选回归和人工发布链路。平台内核与存量回归共享，但任务上下文完全隔离。"
         actions={<><WorkflowContextBadge kind="incremental" /><Button asChild variant="secondary"><Link to="/workflow/materials/packages"><Images />导入或整理素材</Link></Button></>}
       />
-      <div className="mx-auto max-w-[1540px] space-y-6 px-5 py-7 md:px-8 lg:px-10 lg:py-9">
+      <div className="mx-auto shell-content space-y-6 px-5 py-7 md:px-8 lg:px-10 lg:py-9">
         <WorkflowStepper workflowLabel="增量素材 → 评测 → 纠偏 → 候选回归 → 发布" steps={steps.slice(0, 5)} />
         <section className="grid gap-px border-y border-[var(--line-strong)] bg-[var(--line)] lg:grid-cols-[minmax(0,1.3fr)_minmax(320px,0.7fr)]">
           <div className="bg-white px-5 py-6 md:px-6">

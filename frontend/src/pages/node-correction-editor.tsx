@@ -140,7 +140,7 @@ export function NodeCorrectionEditor({
   const readOnlyDimensionCount = nodes.filter((node) => node.stage === 4 && node.readOnly).length
 
   return (
-    <section className="mx-auto max-w-[1820px] border-t border-[var(--line-strong)] bg-white" aria-label="节点纠偏工作台">
+    <section className="mx-auto shell-content-wide border-t border-[var(--line-strong)] bg-white" aria-label="节点纠偏工作台">
       <header className="flex flex-wrap items-start justify-between gap-4 border-b border-[var(--line-strong)] px-5 py-5 md:px-7">
         <div>
           <div className="flex items-center gap-2">

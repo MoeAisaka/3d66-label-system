@@ -208,7 +208,7 @@ export function SampleSetsPage() {
         {workspace === "samples" && <Button onClick={() => setCreating((value) => !value)}><FolderSimplePlus />创建样本集</Button>}
       </>}
     />
-    <div className="mx-auto max-w-[1640px] px-5 py-7 md:px-8 lg:px-10 lg:py-9">
+    <div className="mx-auto shell-content-wide px-5 py-7 md:px-8 lg:px-10 lg:py-9">
       <div className="mb-7 flex flex-wrap items-center justify-between gap-4 border-b border-[var(--line-strong)]">
         <div className="flex gap-7">
           <WorkspaceTab active={workspace === "samples"} onClick={() => setWorkspace("samples")}>样本库</WorkspaceTab>

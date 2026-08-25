@@ -35,7 +35,7 @@ export function DashboardPage() {
           </Button>
         }
       />
-      <div className="mx-auto max-w-[1540px] px-5 py-7 md:px-8 lg:px-10 lg:py-10">
+      <div className="mx-auto shell-content px-5 py-7 md:px-8 lg:px-10 lg:py-10">
         <section className="grid border-y border-[var(--line-strong)] sm:grid-cols-2 xl:grid-cols-4">
           {[
             { label: "素材总数", value: data?.asset_count ?? 0, icon: Images, note: "当前电脑" },

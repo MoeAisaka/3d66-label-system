@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -10,6 +11,12 @@ from sqlalchemy import Connection, func, select
 from sqlalchemy.orm import Session
 
 from .audit import canonical_json
+from .external_datasources import (
+    ExternalDatasourceError,
+    compute_live_schema_fingerprint,
+    readonly_connection_factory,
+    resolve_locator_table,
+)
 from .field_demand_contracts import record_asset_version
 from .label_governance import ingest_content_event, route_content_event_to_incremental_package
 from .models import (
@@ -594,3 +601,73 @@ def source_run_payload(run: UpstreamReadRun) -> dict[str, Any]:
         "created_at": run.created_at,
         "updated_at": run.updated_at,
     }
+
+
+def resolve_configured_readonly_source_adapter(
+    contract: UpstreamSourceContract,
+) -> ReadOnlySourceAdapter:
+    """把上游合同登记行解析成可真正读库的只读适配器。
+
+    这是上游取数链路此前唯一的断点：``/api/upstream-source-contracts/{id}/poll``
+    直接返回 503 ``SOURCE_ADAPTER_UNAVAILABLE``，而机制（合同、游标、分页、
+    只读校验、读取运行记录、幂等落库）都已完整。
+
+    与下游影子投影的解析器（``shadow_projection`` 内同名角色）是同一形状，共用
+    ``external_datasources`` 这一层，因此安全口径一致：
+
+    - **连接串与表名都不从合同里取。** 合同的 ``connection_locator`` 只是逻辑
+      引用（``_required`` 禁止其含 ``://``），真实 DSN 与物理表名都配在部署侧。
+      上游合同刻意没有 ``table_name`` 列——那属于部署细节，不该跟着合同行走。
+    - **只读是数据库层强制的。** 连接工厂会把连接切成只读（SQLite 的
+      ``PRAGMA query_only``、PostgreSQL 与 MySQL 的只读事务），所以适配器
+      ``verify_read_only`` 的探测拿到的是真实结果，而不是被绕过的门禁。
+    - **schema 指纹从活库实算。** 适配器的 ``schema_fingerprint`` 是构造参数
+      原样回传，而 :func:`poll_upstream_source` 会拿它和合同登记值比对来检测漂移。
+      若这里把合同登记值传进去，那道比对就变成自证同一、形同废除。
+    """
+    if not contract.read_only:
+        raise ReadOnlySourceError(
+            "SOURCE_CONTRACT_NOT_READ_ONLY",
+            f"合同 {contract.contract_key} 未声明只读，拒绝解析取数适配器",
+        )
+    if contract.adapter_key != "sql":
+        raise ReadOnlySourceError(
+            "SOURCE_ADAPTER_UNAVAILABLE",
+            f"适配器类型 {contract.adapter_key} 尚无运行时实现；当前支持：sql",
+        )
+
+    try:
+        field_mappings = json.loads(contract.field_mappings_json)
+    except (TypeError, ValueError) as exc:
+        raise ReadOnlySourceError(
+            "SOURCE_MAPPING_INVALID", "字段映射不是合法 JSON"
+        ) from exc
+    if not isinstance(field_mappings, Mapping):
+        raise ReadOnlySourceError(
+            "SOURCE_MAPPING_INVALID", "字段映射必须是对象"
+        )
+
+    try:
+        table_name = resolve_locator_table(contract.connection_locator)
+        live_fingerprint = compute_live_schema_fingerprint(
+            contract.connection_locator,
+            contract.secret_reference,
+            table_name=table_name,
+        )
+        connection_factory = readonly_connection_factory(
+            contract.connection_locator, contract.secret_reference
+        )
+    except ExternalDatasourceError as exc:
+        raise ReadOnlySourceError(
+            "SOURCE_ADAPTER_UNAVAILABLE",
+            f"上游来源 {contract.contract_key} 连接不可用：{exc.message}",
+        ) from exc
+
+    return SqlReadOnlySourceAdapter(
+        connection_factory=connection_factory,
+        table_name=table_name,
+        field_mappings={
+            str(logical): str(column) for logical, column in field_mappings.items()
+        },
+        schema_fingerprint=live_fingerprint.lower(),
+    )

@@ -98,7 +98,7 @@ export function ModelRegistryPage() {
         description="以列表维护主模型、调优模型和横评候选。协议、Token、价格、调用限制、思考开关与层级均可独立配置；任务只冻结非密快照。"
         actions={<Button onClick={openCreate}><Plus />新建模型</Button>}
       />
-      <main className="mx-auto max-w-[1540px] px-5 py-8 md:px-8 lg:px-10">
+      <main className="mx-auto shell-content px-5 py-8 md:px-8 lg:px-10">
         <section className="border-y border-[var(--line-strong)] bg-white">
           <div className="flex flex-wrap items-center justify-between gap-4 border-b border-[var(--line)] px-5 py-4">
             <div>
