@@ -633,6 +633,23 @@ def test_foundation_contract_in_system_prompt_also_fails_closed() -> None:
     assert client.user == ""
 
 
+def test_foreign_bridge_placeholder_detects_rule_hit_bodies() -> None:
+    """镜像守卫：规则命中正文不得上美感基座管线（run 91 全拒的根因）。"""
+    from app.dimension_deduction_bridge import foreign_bridge_placeholder
+
+    assert foreign_bridge_placeholder("", "先核验：\n{{dimension_rules}}") == (
+        "{{dimension_rules}}"
+    )
+    assert foreign_bridge_placeholder(
+        "输出按 {{response_contract}}", ""
+    ) == "{{response_contract}}"
+    # foundation 原生正文（无 bridge 占位符）不受影响，{{precheck_json}} 是共享占位符。
+    assert foreign_bridge_placeholder(
+        "八维评分口径……", "{{precheck_json}}"
+    ) is None
+    assert foreign_bridge_placeholder(None, None) is None
+
+
 def test_rule_hit_native_body_passes_conflict_guard() -> None:
     """为规则命中管线写的正文（不声明整套输出契约）不受守卫影响。"""
     assert operator_prompt_conflicting_contract(

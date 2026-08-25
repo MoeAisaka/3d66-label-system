@@ -1963,6 +1963,22 @@ async def evaluate_job(job_id: int) -> None:
                 "{{image_metadata}}", json.dumps(metadata, ensure_ascii=False)
             )
         )
+        # 对称守卫：{{dimension_rules}} / {{response_contract}} 只在规则命中管线
+        # 被替换。声明了它们的 B 版本是为那条管线编写的，在本管线照跑等于把
+        # 字面量发给模型、再按错误的契约解析（run 91 因此 100 条全拒）。
+        # 配置错误重试必然同败，用不可重试的错误码直接拒单。
+        from .dimension_deduction_bridge import foreign_bridge_placeholder
+        mismatched_placeholder = foreign_bridge_placeholder(
+            prompt_b.system_prompt, user_b
+        )
+        if mismatched_placeholder is not None:
+            from .inspiration_aesthetic_foundation import AestheticFoundationError
+            raise AestheticFoundationError(
+                "prompt_pipeline_mismatch",
+                f"手选调用B「{prompt_b.version}」声明了规则命中管线的占位符 "
+                f"{mismatched_placeholder}，不能在当前管线执行。请换用为本管线"
+                "编写的调用B版本，或改用包含维度规则的机制修订（规则命中管线）。",
+            )
         if proposal_text_active:
             if proposal_pdf_input is None:
                 raise RuntimeError("方案文本PDF前处理结果缺失")

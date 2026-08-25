@@ -530,6 +530,24 @@ def operator_prompt_declares_rule_takeover(operator_prompt: Any) -> bool:
     return False
 
 
+def foreign_bridge_placeholder(
+    system_prompt: str | None, user_prompt: str | None
+) -> str | None:
+    """Return the bridge-only placeholder found in a non-bridge Call-B body.
+
+    ``{{dimension_rules}}`` and ``{{response_contract}}`` are substituted only
+    on the rule-hit path.  A hand-picked B version declaring them was written
+    for that path; running it on the foundation/worker path sends the literal
+    placeholders to the model and parses the reply against the wrong contract
+    (run 91: 100/100 rejected as ``top_level_shape_invalid``).  This is the
+    mirror image of ``operator_prompt_conflicting_contract``.
+    """
+    for placeholder in (RULES_PLACEHOLDER, RESPONSE_CONTRACT_PLACEHOLDER):
+        if placeholder in (system_prompt or "") or placeholder in (user_prompt or ""):
+            return placeholder
+    return None
+
+
 def operator_prompt_conflicting_contract(operator_prompt: Any) -> str | None:
     """Return the foreign output-contract marker in the picked body, if any.
 
