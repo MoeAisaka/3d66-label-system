@@ -69,7 +69,9 @@ PROCESSOR_CATALOG: dict[str, dict[str, Any]] = {
         "label": "动图关键帧接触表",
         "input_kinds": ["image"],
         "output_kind": "image",
-        "config_schema": {"max_frames": {"label": "最多抽取帧数", "type": "integer", "min": 2, "max": 24, "default": 8}},
+        # min=1 是刻意的：1 表示只取首帧、不拼接触表——多帧网格会被模型
+        # 误读成「拼图素材」污染构图与呈现完整性判断（2026-08-26 运营需求）。
+        "config_schema": {"max_frames": {"label": "最多抽取帧数（1=只取首帧，不拼多帧网格）", "type": "integer", "min": 1, "max": 24, "default": 1}},
     },
     "document.pdf_extract": {
         "label": "PDF 文本提取",

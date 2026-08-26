@@ -59,6 +59,27 @@ def test_gif_model_preview_is_deterministic_and_keeps_source_animated(tmp_path) 
     assert cached_mime == "image/png"
 
 
+def test_gif_first_frame_mode_produces_single_frame_not_contact_sheet(tmp_path) -> None:
+    """max_frames=1 只取首帧：动图不得拼成多帧网格被模型误读为拼图素材。"""
+    source = tmp_path / "animated.gif"
+    source.write_bytes(_gif_bytes())
+
+    preview, mime_type = prepare_model_image(
+        source,
+        mime_type="image/gif",
+        content_sha256="b" * 64,
+        cache_dir=tmp_path / "derived",
+        max_frames=1,
+    )
+
+    assert mime_type == "image/png"
+    with Image.open(preview) as image:
+        # 单帧原尺寸：8x6，不是 2 列网格的 16x12/16x6
+        assert image.size == (8, 6)
+        # 内容是首帧（红色），不是后续帧
+        assert image.convert("RGB").getpixel((4, 3)) == (255, 0, 0)
+
+
 def test_oversized_static_image_uses_bounded_cached_preview(tmp_path) -> None:
     source = tmp_path / "oversized.png"
     Image.new("RGB", (4200, 32), (12, 34, 56)).save(source, format="PNG")
