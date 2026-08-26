@@ -720,6 +720,40 @@ def test_pure_foundation_missing_evaluation_fails_closed_retryable() -> None:
     assert excinfo.value.retryable is True
 
 
+def test_pure_foundation_scales_to_hundred_dimensions() -> None:
+    """维度体系必须任意可扩展：运营把正文改成 100 维也要全链路兼容。"""
+    config = deepcopy(build_inspiration_subcategory_dimensions()["class_one"])
+    config["common_group"]["schema_definition"]["dimensions"] = [
+        {
+            "key": f"dim_{i:03d}",
+            "label": f"维度{i:03d}",
+            "weight": 0.01,
+            "deduction_rules": [],
+            "bonus_rules": [],
+            "dimension_score_cap": 100,
+            "dimension_deduction_cap": 100,
+        }
+        for i in range(100)
+    ]
+    config["specific_group"]["schema_definition"]["dimensions"] = []
+    client = PureFoundationClient(config)
+    output = asyncio.run(
+        call_multimodal_for_dimension_deductions(
+            "image.jpg", config, client=client, mime_type="image/jpeg"
+        )
+    )
+    assert len(output["dimensions"]) == 100
+    assert all(
+        item["evaluation"] and item["hit_rules"] == []
+        for item in output["dimensions"].values()
+    )
+    # 注入清单与输出契约都按实际维度生成，无数量假设
+    assert client.user.count("dim_0") >= 100
+    composed = compose_rule_deductions(config=config, dimension_output=output)
+    assert sum(composed["deductions"].values()) == 0
+    assert len(composed["deductions"]) == 100
+
+
 def test_foreign_bridge_placeholder_detects_rule_hit_bodies() -> None:
     """镜像守卫：规则命中正文不得上美感基座管线（run 91 全拒的根因）。"""
     from app.dimension_deduction_bridge import foreign_bridge_placeholder
