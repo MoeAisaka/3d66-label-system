@@ -649,6 +649,77 @@ def test_foundation_contract_in_system_prompt_also_fails_closed() -> None:
     assert client.user == ""
 
 
+def _pure_foundation_config() -> dict:
+    """纯基础分：维度保留、规则全空（rev 41 形态）。"""
+    config = deepcopy(build_inspiration_subcategory_dimensions()["class_one"])
+    for dimension in config["common_group"]["schema_definition"]["dimensions"]:
+        dimension["dimension_score_cap"] = 100
+        dimension["deduction_rules"] = []
+        dimension["bonus_rules"] = []
+    return config
+
+
+class PureFoundationClient:
+    """按纯基础分契约作答；with_evaluation=False 模拟漏填逐维评价。"""
+
+    def __init__(self, config: dict, *, with_evaluation: bool = True) -> None:
+        self.config = config
+        self.with_evaluation = with_evaluation
+        self.system = ""
+        self.user = ""
+
+    async def chat_json(self, system: str, user: str, **_kwargs) -> Response:
+        self.system, self.user = system, user
+        dimensions = {}
+        for dimension in self.config["common_group"]["schema_definition"]["dimensions"]:
+            item: dict = {"hit_rules": [], "hit_bonus_rules": []}
+            if self.with_evaluation:
+                item["evaluation"] = f"{dimension['label']}表现具体可定位"
+            dimensions[dimension["key"]] = item
+        return Response(
+            {
+                "aesthetic_score": 74,
+                "aesthetic_evidence": ["整体观察"],
+                "aesthetic_confidence": 0.8,
+                "dimensions": dimensions,
+                "overall_note": "",
+            }
+        )
+
+
+def test_pure_foundation_contract_forces_per_dimension_evaluation() -> None:
+    """维度锚定必须由输出契约保证：正文口径漂移时模型会在维度间摇摆。"""
+    config = _pure_foundation_config()
+    client = PureFoundationClient(config)
+    output = asyncio.run(
+        call_multimodal_for_dimension_deductions(
+            "image.jpg", config, client=client, mime_type="image/jpeg"
+        )
+    )
+    # 契约文本：零规则维度带 evaluation 字段、命中只演示空数组
+    assert '"evaluation"' in client.user
+    assert '"rule_id": "命中的规则ID"' not in client.user
+    # 逐维评价随结构落库
+    for item in output["dimensions"].values():
+        assert item["evaluation"].endswith("表现具体可定位")
+
+
+def test_pure_foundation_missing_evaluation_fails_closed_retryable() -> None:
+    config = _pure_foundation_config()
+    with pytest.raises(DimensionDeductionBridgeError) as excinfo:
+        asyncio.run(
+            call_multimodal_for_dimension_deductions(
+                "image.jpg", config,
+                client=PureFoundationClient(config, with_evaluation=False),
+                mime_type="image/jpeg",
+            )
+        )
+    assert excinfo.value.code == "dimension_evaluation_missing"
+    # 措辞抖动类缺失可重试
+    assert excinfo.value.technical_error_type == "transient_parse"
+    assert excinfo.value.retryable is True
+
+
 def test_foreign_bridge_placeholder_detects_rule_hit_bodies() -> None:
     """镜像守卫：规则命中正文不得上美感基座管线（run 91 全拒的根因）。"""
     from app.dimension_deduction_bridge import foreign_bridge_placeholder

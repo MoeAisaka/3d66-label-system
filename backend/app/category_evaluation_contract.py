@@ -161,6 +161,10 @@ class DimensionDeductionOutput(BaseModel):
     dimension_key: str
     hit_rules: list[DeductionRuleHit] = Field(default_factory=list)
     hit_bonus_rules: list[DeductionRuleHit] = Field(default_factory=list)
+    # 逐维美感评价（一句可定位的中文观察）。纯基础分模式（该维度零规则）下
+    # 由桥接器强制非空——维度锚定必须是契约结构保证的，不能靠正文措辞：
+    # 正文与注入清单的维度口径不一致时，模型会逐样本在两套维度间摇摆。
+    evaluation: str = ""
 
 
 class NodeCorrectionEvidence(BaseModel):

@@ -378,6 +378,22 @@ def normalize_dimension_deduction_output(
                     f"维度 {item.dimension_key} 重复命中 rule_id：{hit.rule_id}",
                 )
             seen_rules.add(hit.rule_id)
+        if (
+            require_foundation
+            and not configured
+            and not configured_bonus
+            and not item.evaluation.strip()
+        ):
+            # 纯基础分模式的维度锚定是契约强制的：零规则维度必须给出逐维评价，
+            # 否则「逐维评估」退化成正文自觉，正文口径漂移时模型会在维度间摇摆。
+            # 措辞抖动类缺失可重试。
+            error = DimensionDeductionBridgeError(
+                "dimension_evaluation_missing",
+                f"维度 {item.dimension_key} 缺少逐维美感评价（纯基础分模式必填）",
+            )
+            error.technical_error_type = "transient_parse"
+            error.retryable = True
+            raise error
         parsed[item.dimension_key] = item
 
     expected_keys = [dimension["key"] for dimension in dimensions]
@@ -397,6 +413,12 @@ def normalize_dimension_deduction_output(
         "dimensions": {
             key: (
                 {
+                    # 逐维评价随命中结构一起落库；空字符串不落，避免旧数据噪音。
+                    **(
+                        {"evaluation": parsed[key].evaluation.strip()}
+                        if parsed[key].evaluation.strip()
+                        else {}
+                    ),
                     "hit_rules": parsed[key].model_dump()["hit_rules"],
                     "hit_bonus_rules": parsed[key].model_dump()["hit_bonus_rules"],
                 }
@@ -480,28 +502,41 @@ def _response_contract_text(
             else {}
         ),
         "dimensions": {
-            dimension["key"]: {
-                "hit_rules": [
-                    {
-                        "rule_id": "命中的规则ID",
-                        "confidence": "high|medium|low",
-                        "evidence": "图中具体证据",
-                    }
-                ],
-                **(
-                    {
-                        "hit_bonus_rules": [
-                            {
-                                "rule_id": "命中的加分规则ID",
-                                "confidence": "high|medium|low",
-                                "evidence": "图中具体证据",
-                            }
-                        ]
-                    }
-                    if bonus_cap
-                    else {}
-                ),
-            }
+            dimension["key"]: (
+                {
+                    # 纯基础分（该维度零规则）：逐维评价进入契约并强制非空——
+                    # 维度锚定必须由输出结构保证；正文口径与注入清单不一致时，
+                    # 模型会逐样本在两套维度间摇摆，自由文本证据锚不住。
+                    # 无规则可命中，命中数组只演示为空。
+                    "evaluation": "该维度内可定位的美感观察（一句中文，优点或不足）",
+                    "hit_rules": [],
+                    **({"hit_bonus_rules": []} if bonus_cap else {}),
+                }
+                if requires_foundation
+                and not (dimension.get("deduction_rules") or dimension.get("bonus_rules"))
+                else {
+                    "hit_rules": [
+                        {
+                            "rule_id": "命中的规则ID",
+                            "confidence": "high|medium|low",
+                            "evidence": "图中具体证据",
+                        }
+                    ],
+                    **(
+                        {
+                            "hit_bonus_rules": [
+                                {
+                                    "rule_id": "命中的加分规则ID",
+                                    "confidence": "high|medium|low",
+                                    "evidence": "图中具体证据",
+                                }
+                            ]
+                        }
+                        if bonus_cap
+                        else {}
+                    ),
+                }
+            )
             for dimension in dimensions
         },
         "overall_note": "整体说明",
