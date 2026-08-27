@@ -502,14 +502,18 @@ function GroupEditor({
                 {isImageRuleDimension(dim) && (() => {
                   const defaults = imageRuleViewDefaults(dim)
                   const duplicateRuleIds = duplicateIds(defaults.deductionRules, defaults.bonusRules)
+                  // 零规则（纯基础分）时两个上限在数学上无影响：维度分恒 100、
+                  // 累计扣分恒 0。字段仍保留（加回规则即恢复作用），但要如实标注，
+                  // 避免运营误以为它们正在限制分数。
+                  const capsInactive = defaults.deductionRules.length === 0 && defaults.bonusRules.length === 0
                   return <div className="mb-3 grid gap-2 border-b border-dashed border-[var(--line)] pb-3 sm:grid-cols-[180px_1fr] sm:items-end">
-                    <label className="grid gap-1 text-[0.68rem]"><span className="font-semibold">维度分数上限</span>
-                      <input type="number" min={0} max={100} step={1} className={numberClass} value={defaults.dimensionScoreCap} onChange={(e) => onPatch((n) => { n.subcategory_dimensions[trackKey][groupKey].schema_definition.dimensions[idx].dimension_score_cap = Number(e.target.value) })} />
+                    <label className="grid gap-1 text-[0.68rem]"><span className={`font-semibold ${capsInactive ? "text-[var(--muted)]" : ""}`}>维度分数上限</span>
+                      <input type="number" min={0} max={100} step={1} className={`${numberClass}${capsInactive ? " text-[var(--muted)]" : ""}`} value={defaults.dimensionScoreCap} onChange={(e) => onPatch((n) => { n.subcategory_dimensions[trackKey][groupKey].schema_definition.dimensions[idx].dimension_score_cap = Number(e.target.value) })} />
                     </label>
-                    <label className="grid gap-1 text-[0.68rem]"><span className="font-semibold">维度累计扣分上限</span>
-                      <input type="number" min={0} max={100} step={1} className={numberClass} value={defaults.dimensionDeductionCap} onChange={(e) => onPatch((n) => { n.subcategory_dimensions[trackKey][groupKey].schema_definition.dimensions[idx].dimension_deduction_cap = Number(e.target.value) })} />
+                    <label className="grid gap-1 text-[0.68rem]"><span className={`font-semibold ${capsInactive ? "text-[var(--muted)]" : ""}`}>维度累计扣分上限</span>
+                      <input type="number" min={0} max={100} step={1} className={`${numberClass}${capsInactive ? " text-[var(--muted)]" : ""}`} value={defaults.dimensionDeductionCap} onChange={(e) => onPatch((n) => { n.subcategory_dimensions[trackKey][groupKey].schema_definition.dimensions[idx].dimension_deduction_cap = Number(e.target.value) })} />
                     </label>
-                    <div className="text-[0.68rem] leading-5 text-[var(--muted)]">分数上限限制最终维度得分；累计扣分上限限制本维度所有命中规则最多扣多少分。{duplicateRuleIds.length > 0 && <span className="ml-2 font-semibold text-[#8d2924]">规则 ID 重复：{duplicateRuleIds.join("、")}</span>}</div>
+                    <div className="text-[0.68rem] leading-5 text-[var(--muted)]">{capsInactive ? "本维度零规则，这两个上限暂不参与计算（维度分恒为满分、累计扣分恒为 0）；加回扣分或加分规则后自动恢复作用。" : "分数上限限制最终维度得分；累计扣分上限限制本维度所有命中规则最多扣多少分。"}{duplicateRuleIds.length > 0 && <span className="ml-2 font-semibold text-[#8d2924]">规则 ID 重复：{duplicateRuleIds.join("、")}</span>}</div>
                   </div>
                 })()}
                 <div className="grid gap-2 sm:grid-cols-[1fr_1fr_110px_auto] sm:items-end">
