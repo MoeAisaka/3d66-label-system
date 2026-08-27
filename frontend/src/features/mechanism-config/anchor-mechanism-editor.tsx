@@ -56,10 +56,14 @@ export function AnchorMechanismEditor({
   const view = readAnchorMechanism(draft.contract)
   const intruders = anchorMechanismIntruders(draft.contract[ANCHOR_MECHANISM_KEY])
 
+  // 关键词走服务端检索：素材库数千条，只拉一页再本地过滤会让页外素材永远搜不到
+  // （运营反馈「素材库里明明有、就是搜不出来」的根因）。
+  const trimmedKeyword = keyword.trim()
   const assets = useQuery({
     queryKey: [
       "anchor-mechanism-assets",
       onlyThisCategory ? draft.category_key : "__all__",
+      trimmedKeyword,
     ],
     queryFn: () =>
       baselineRegressionApi.listAssets(
@@ -67,6 +71,7 @@ export function AnchorMechanismEditor({
         onlyThisCategory ? draft.category_key : undefined,
         0,
         200,
+        trimmedKeyword || undefined,
       ),
     enabled: pickerOpen,
   })
@@ -78,15 +83,9 @@ export function AnchorMechanismEditor({
 
   const candidates = useMemo(() => {
     const items = assets.data?.items ?? []
-    const kw = keyword.trim().toLowerCase()
-    return items.filter((asset) => {
-      if (alreadyUsed.has(asset.id)) return false
-      if (!kw) return true
-      return (
-        asset.name.toLowerCase().includes(kw) || String(asset.id).includes(kw)
-      )
-    })
-  }, [assets.data?.items, keyword, alreadyUsed])
+    // 关键词已由服务端匹配，这里只排除已配为锚点的素材。
+    return items.filter((asset) => !alreadyUsed.has(asset.id))
+  }, [assets.data?.items, alreadyUsed])
 
   function addAnchor(asset: Asset, level: AnchorLevel) {
     const reason = ineligibleReason(asset)
@@ -325,7 +324,11 @@ export function AnchorMechanismEditor({
               )}
               {!assets.isLoading && !assets.isError && candidates.length === 0 && (
                 <p className="text-[0.72rem] text-[var(--muted)]">
-                  没有可选素材。已配为锚点图的素材不会重复出现。
+                  {trimmedKeyword
+                    ? onlyThisCategory
+                      ? `本类目内没有匹配「${trimmedKeyword}」的素材。该图若属于其它类目，请取消勾选「只看本类目素材」再搜。`
+                      : `没有匹配「${trimmedKeyword}」的素材。可按素材名称或资产编号搜索。`
+                    : "没有可选素材。已配为锚点图的素材不会重复出现。"}
                 </p>
               )}
 

@@ -4578,6 +4578,7 @@ def list_assets(
     prompt_a_id: int | None = None,
     prompt_b_id: int | None = None,
     exclude_evaluated_current: bool = False,
+    keyword: str | None = None,
     _user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
@@ -4585,6 +4586,16 @@ def list_assets(
     if category_key is not None:
         _category_profile(db, category_key)
         statement = statement.where(Asset.category_key == category_key)
+    if keyword is not None and keyword.strip():
+        # 服务端检索：素材库有数千条，调用方过去只能拉一页再本地过滤，
+        # 页外素材永远搜不到（锚点图挑选器就因此「搜不到已存在的图」）。
+        # 名称模糊匹配 + 资产编号精确匹配，两者取并集。
+        needle = keyword.strip()
+        escaped = needle.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        conditions = [Asset.original_name.ilike(f"%{escaped}%", escape="\\")]
+        if needle.isdigit():
+            conditions.append(Asset.id == int(needle))
+        statement = statement.where(or_(*conditions))
     if package_id is not None:
         statement = statement.join(
             MaterialPackageItem,

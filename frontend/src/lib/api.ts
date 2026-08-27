@@ -155,6 +155,7 @@ export const baselineRegressionApi = {
     categoryKey?: string,
     offset = 0,
     limit = 200,
+    keyword?: string,
   ) => {
     const params = new URLSearchParams({
       limit: String(limit),
@@ -162,6 +163,8 @@ export const baselineRegressionApi = {
     })
     if (packageId) params.set("package_id", String(packageId))
     if (categoryKey) params.set("category_key", categoryKey)
+    // 关键词交给服务端：素材库数千条，只拉一页再本地过滤会让页外素材永远搜不到。
+    if (keyword && keyword.trim()) params.set("keyword", keyword.trim())
     return api<{ items: Asset[]; total: number }>(`/api/assets?${params.toString()}`)
   },
   listPackages: (categoryKey?: string) => {
