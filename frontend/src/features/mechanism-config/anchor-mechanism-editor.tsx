@@ -193,6 +193,21 @@ export function AnchorMechanismEditor({
             </div>
           </div>
 
+          {view.enabled && view.anchors.length > 0 && (
+            // 锚图是随请求一起发给模型的额外图片，调用B正文若不声明这件事，
+            // 模型会把锚点当成待评图的一部分来评价——运营写正文时必踩的坑。
+            <div className="border border-[#cfd9c4] bg-[#f4f8ef] px-3 py-2 text-[0.72rem] leading-5">
+              <span className="font-semibold">调用B正文需配套说明</span>
+              ：启用后每次请求会发出{" "}
+              <span className="font-data">{view.anchors.length + 1}</span> 张图——
+              前 <span className="font-data">{view.anchors.length}</span> 张是锚点（按
+              {" "}{view.anchors.map((a) => a.level).join("、")} 顺序），
+              <span className="font-semibold">最后一张才是待评图</span>。
+              调用B正文必须写明这一点并要求与锚点做相对比较，否则模型会把锚点当作待评图内容来评价；
+              还应禁止把锚点图的内容写进待评图的证据里。锚点只改变参照系，不改变输出结构。
+            </div>
+          )}
+
           {notice && (
             <div className="border border-[#e0b4b0] bg-[#fdf3f2] px-3 py-2 text-[0.72rem] text-[#8d2924]">
               {notice}

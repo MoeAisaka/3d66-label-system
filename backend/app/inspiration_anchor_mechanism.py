@@ -338,3 +338,52 @@ def anchor_levels_covered(block: object) -> list[str]:
         if isinstance(entry, Mapping) and entry.get("level") in ANCHOR_LEVELS
     }
     return [level for level in ANCHOR_LEVELS if level in covered]
+
+
+# 调用B正文里能证明「已声明锚点参照」的关键信号。锚图是随请求发出的额外图片，
+# 正文若不声明，模型会把锚点当成待评图的一部分来评价——运营写正文必踩的坑，
+# 且要跑完整轮才暴露。这里只做词面检测，不解析语义：宁可漏报也不误伤，
+# 因此任一信号命中即视为已声明。
+ANCHOR_DECLARATION_HINTS = (
+    "锚点",
+    "锚图",
+    "参照图",
+    "anchor",
+)
+
+
+def call_b_declares_anchors(system_prompt: object, user_prompt: object) -> bool:
+    """调用B正文是否声明了锚点参照图的存在。"""
+    for body in (system_prompt, user_prompt):
+        if not isinstance(body, str):
+            continue
+        lowered = body.lower()
+        if any(hint.lower() in lowered for hint in ANCHOR_DECLARATION_HINTS):
+            return True
+    return False
+
+
+def anchor_prompt_mismatch(
+    contract: object, system_prompt: object, user_prompt: object
+) -> str | None:
+    """锚点已启用但调用B正文只字未提时，返回可读的阻断原因。
+
+    返回 ``None`` 表示无冲突（锚点未启用，或正文已声明）。
+    """
+    try:
+        block = validate_anchor_mechanism(contract)
+    except InspirationAnchorContractError:
+        # 合同本身不合法由既有校验负责报错，这里不重复拦截。
+        return None
+    if not block or not block.get("enabled") or not block.get("anchors"):
+        return None
+    if call_b_declares_anchors(system_prompt, user_prompt):
+        return None
+    levels = "、".join(a["level"] for a in block["anchors"])
+    count = len(block["anchors"])
+    return (
+        f"锚点图机制已启用（{count} 张：{levels}），但所选调用B正文没有提到锚点。"
+        f"每次请求会发出 {count + 1} 张图，前 {count} 张是锚点、最后一张才是待评图；"
+        "正文若不声明，模型会把锚点当作待评图内容来评价。"
+        "请改用声明了锚点的调用B版本，或先停用锚点图机制。"
+    )

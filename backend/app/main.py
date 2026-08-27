@@ -11081,6 +11081,26 @@ def baseline_set_detail(
     }
 
 
+def _reject_anchor_prompt_mismatch(contract: Any, prompt_b: Any) -> None:
+    """锚点已启用但调用B正文只字未提时，发起前就拒绝。
+
+    锚图随请求作为额外图片发出。正文若不声明这件事，模型会把锚点当成待评图
+    的一部分来评价，而这要跑完整整一轮、烧掉全部模型调用才会暴露。
+    """
+    from .inspiration_anchor_mechanism import anchor_prompt_mismatch
+
+    reason = anchor_prompt_mismatch(
+        contract,
+        getattr(prompt_b, "system_prompt", None),
+        getattr(prompt_b, "user_prompt", None),
+    )
+    if reason:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "anchor_prompt_mismatch", "message": reason},
+        )
+
+
 @app.post("/api/baseline-sets/{baseline_set_id}/runs")
 def create_baseline_run(
     baseline_set_id: int,
@@ -11298,6 +11318,15 @@ def create_baseline_run(
                 if single_prompt_mode
                 else "当前已发布 A/B 提示词或启用模型配置不完整"
             ),
+        )
+    # 锚点一致性放在所有前置校验之后：它是「配置搭配」问题，不该抢在
+    # 「提示词/模型是否齐备」这类更基础的失败前面改变错误码。
+    if prompt_b is not None:
+        _reject_anchor_prompt_mismatch(
+            frozen_v3_bundle.get("contract")
+            if isinstance(frozen_v3_bundle, dict)
+            else None,
+            prompt_b,
         )
     prompt_rubrics = {prompt_a.rubric_version}
     if prompt_b is not None:
