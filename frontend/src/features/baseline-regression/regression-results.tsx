@@ -686,6 +686,12 @@ export function dimensionSelectionName(selection: BaselineRegressionRun["selecti
       return `${trackNames[track.key] ?? fallbackName}${track.dimension_count}维`
     })
     .join("/")
+  // 首要标识用 rev 号——与机制版本选择器（「rev 9 · 现役」）同一套编号，
+  // 运营才能把「本轮用的维度」和「机制版本列表」直观对上。内部规格串
+  // （inspiration-v3-…）只作括注兜底，历史 run 无 rev 号时单独显示。
+  if (typeof contract.revision === "number") {
+    return `rev ${contract.revision} · ${dimensions}`
+  }
   return `${contract.spec_version} · ${dimensions}`
 }
 
