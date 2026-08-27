@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -207,6 +208,41 @@ def ensure_projected_revision(
     return existing
 
 
+def _reject_retired_aesthetic_foundation(
+    contract: object, parent_contract_json: object = None
+) -> None:
+    """拒绝新候选**引入**已退役的 ``aesthetic_foundation`` 锚点块。
+
+    锚点参照图的现行载体是 ``anchor_mechanism``（anchor-mechanism-v1）：运营可在
+    机制编辑器里自定义 L1-L5 各档锚图，且与调用B输出契约解耦。旧的
+    ``aesthetic_foundation`` 把八维定义、自带阈值、软封顶、硬伤豁免和四张硬编码
+    锚图糅在一起，既无前端编辑入口也无法归因调试，已停止演进。
+
+    只拦「新引入」：父版本本就带该块时放行（否则从历史投影派生候选会被全部拦死，
+    包括仅想改阈值的无关改动）；历史修订与历史结果的读取重放完全不受影响。
+    """
+    if not isinstance(contract, Mapping):
+        return
+    if "aesthetic_foundation" not in contract:
+        return
+    if isinstance(parent_contract_json, str) and parent_contract_json:
+        try:
+            parent_contract = json.loads(parent_contract_json)
+        except ValueError:
+            parent_contract = None
+        if (
+            isinstance(parent_contract, Mapping)
+            and "aesthetic_foundation" in parent_contract
+        ):
+            # 父版本已带该块：属于历史链上的继承，不是新引入。
+            return
+    raise CategoryEvaluationV3RevisionError(
+        "aesthetic_foundation_retired",
+        "aesthetic_foundation（旧美感前置锚点）已退役，新版本请改用 anchor_mechanism "
+        "配置各等级锚点图；历史版本仍可查看与回滚。",
+    )
+
+
 def create_candidate_revision(
     db: Session,
     projected: CategoryEvaluationV3Config,
@@ -264,6 +300,10 @@ def create_candidate_revision(
                     "父版本不在当前现役投影的候选链上",
                 )
             ancestor = next_ancestor
+
+    _reject_retired_aesthetic_foundation(
+        artifacts.contract, getattr(parent, "contract_json", None)
+    )
 
     (
         contract_json,
