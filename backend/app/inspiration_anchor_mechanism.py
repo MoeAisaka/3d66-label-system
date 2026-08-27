@@ -276,6 +276,7 @@ def anchor_mechanism_request(
     *,
     assets_by_id: Mapping[int, object],
     asset_path_resolver: Callable[[object], Path],
+    reference_image_builder: Callable[[Path, str], tuple[Path, str | None]] | None = None,
 ) -> tuple[list[tuple[str, Path, str | None]], int] | None:
     """按锚点机制块装配 Call B 的图片载荷。
 
@@ -319,7 +320,16 @@ def anchor_mechanism_request(
         note = anchor.get("note")
         if note:
             label = f"{label}：{note}"
-        samples.append((label, path, anchor["mime_type"]))
+        send_path, send_mime = path, anchor["mime_type"]
+        if reference_image_builder is not None:
+            # 锚图是参照标尺，发送压缩版即可（原图 sha 已在上面校验过，审计
+            # 与防篡改仍对着原件）。压缩失败时回退原图——成本优化绝不能把
+            # 一整轮评测打挂。
+            try:
+                send_path, send_mime = reference_image_builder(path, digest)
+            except Exception:  # noqa: BLE001 - 回退原图，绝不因优化失败拒评
+                send_path, send_mime = path, anchor["mime_type"]
+        samples.append((label, send_path, send_mime))
 
     samples.append(("待评图片（禁止把锚点图等级直接当作输出）", target, target_mime))
     return samples, len(samples)

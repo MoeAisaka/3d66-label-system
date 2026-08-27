@@ -2073,6 +2073,7 @@ async def evaluate_job(job_id: int) -> None:
                 anchor_mechanism_payload = None
                 if anchor_mechanism_assets is not None:
                     from .inspiration_anchor_mechanism import anchor_mechanism_request
+                    from .media import prepare_anchor_reference_image
                     anchor_mechanism_payload = anchor_mechanism_request(
                         proposal_contract,
                         model_image_path,
@@ -2080,6 +2081,18 @@ async def evaluate_job(job_id: int) -> None:
                         assets_by_id=anchor_mechanism_assets,
                         asset_path_resolver=lambda anchor_asset: resolve_asset_path(
                             anchor_asset, settings
+                        ),
+                        # 锚图占单样本图片 token 约八成；发送长边 800 的压缩参照版
+                        # （实测 token 省 63%）。缓存按原图 sha 键控，装载器已先
+                        # 校验原图 sha，审计链不变。
+                        reference_image_builder=lambda path, sha: (
+                            prepare_anchor_reference_image(
+                                path,
+                                content_sha256=sha,
+                                cache_dir=settings.upload_dir
+                                / ".derived"
+                                / "anchor-reference",
+                            )
                         ),
                     )
                 if anchor_mechanism_payload is not None:

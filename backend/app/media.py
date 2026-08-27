@@ -713,3 +713,68 @@ def render_proposal_pdf_pages_high_fidelity(
     finally:
         document.close()
     return rendered
+
+
+ANCHOR_REFERENCE_MAX_EDGE = 800
+ANCHOR_REFERENCE_JPEG_QUALITY = 82
+
+
+def prepare_anchor_reference_image(
+    source_path: Path,
+    *,
+    content_sha256: str,
+    cache_dir: Path,
+    max_edge: int = ANCHOR_REFERENCE_MAX_EDGE,
+) -> tuple[Path, str]:
+    """Return a bounded JPEG rendition of one anchor reference image.
+
+    锚点图是每次调用B都重复发送的参照图，占单样本图片 token 的约八成
+    （五锚实测 8174 token，压到长边 800 后 3064，省 63%）。参照用途只需要
+    看清构图、光线、色彩与完成度，不需要原始分辨率。
+
+    缓存按**原图** sha256 键控：调用方必须先对原图完成 sha 校验（审计链
+    与防篡改仍然对着原件），本函数只负责生成与复用发送用的压缩版。
+    小于目标边长的图不放大，但同样重编码为 JPEG，保证发出的 mime 一致。
+    """
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    preview_path = cache_dir / f"{content_sha256}-anchor{max_edge}.jpg"
+    if preview_path.is_file() and preview_path.stat().st_size > 0:
+        return preview_path, "image/jpeg"
+
+    try:
+        with Image.open(source_path) as image:
+            rgb = image.convert("RGB")
+            width, height = rgb.size
+            scale = max_edge / max(width, height)
+            if scale < 1:
+                rgb = rgb.resize(
+                    (max(1, int(width * scale)), max(1, int(height * scale))),
+                    Image.LANCZOS,
+                )
+    except (OSError, UnidentifiedImageError) as exc:
+        raise RuntimeError("锚点图无法生成压缩参照版") from exc
+
+    temporary_path: str | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            dir=cache_dir,
+            prefix=f".{content_sha256}.",
+            suffix=".tmp",
+            delete=False,
+        ) as temporary:
+            temporary_path = temporary.name
+        rgb.save(
+            temporary_path,
+            format="JPEG",
+            quality=ANCHOR_REFERENCE_JPEG_QUALITY,
+            optimize=True,
+        )
+        os.replace(temporary_path, preview_path)
+    except OSError as exc:
+        if temporary_path:
+            try:
+                Path(temporary_path).unlink()
+            except OSError:
+                pass
+        raise RuntimeError("锚点图压缩参照版写入失败") from exc
+    return preview_path, "image/jpeg"
