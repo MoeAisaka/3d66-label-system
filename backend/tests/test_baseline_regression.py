@@ -2477,6 +2477,121 @@ def test_cancel_jobs_scoped_to_run_spares_other_runs() -> None:
         engine.dispose()
 
 
+def test_job_control_lists_active_runs_for_scoped_cancel_entry() -> None:
+    """control 接口要报出活跃 run 清单，前端才能提供按 run 的取消入口。
+
+    没有这份清单时运营只有全局「取消全部」可点，队列一卡就跨 run 连废
+    （2026-08-27 run124 的 250 条就是这样零执行全灭的）。
+    """
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    db = Session(engine, expire_on_commit=False)
+    user = User(
+        username="active-runs-view",
+        password_hash="unused",
+        display_name="活跃清单测试员",
+    )
+    asset_a = Asset(
+        original_name="active-a-L2.jpg",
+        stored_name="active-a-L2.jpg",
+        mime_type="image/jpeg",
+        size_bytes=10,
+        sha256="c" * 64,
+        status="uploaded",
+    )
+    asset_b = Asset(
+        original_name="active-b-L2.jpg",
+        stored_name="active-b-L2.jpg",
+        mime_type="image/jpeg",
+        size_bytes=10,
+        sha256="d" * 64,
+        status="uploaded",
+    )
+    model = ModelConfig(
+        name="test",
+        provider="doubao",
+        base_url="https://example.test",
+        api_path="/chat",
+        model_id="model",
+        active=True,
+    )
+    prompt_a = PromptVersion(
+        stage="A",
+        name="A",
+        version="active-A1",
+        system_prompt="classification prompt",
+        user_prompt="classify",
+        rubric_version="R1",
+        status="published",
+    )
+    prompt_b = PromptVersion(
+        stage="B",
+        name="B",
+        version="active-B1",
+        system_prompt="aesthetic prompt",
+        user_prompt="evaluate",
+        rubric_version="R1",
+        status="published",
+    )
+    db.add_all([user, asset_a, asset_b, model, prompt_a, prompt_b])
+    add_active_v3_contract(db)
+    db.commit()
+
+    app.dependency_overrides[get_db] = lambda: (yield db)
+    app.dependency_overrides[current_user] = lambda: user
+    client = TestClient(app)
+    try:
+        set_a = client.post(
+            "/api/baseline-sets",
+            json={
+                "name": "活跃清单集A",
+                "default_expected_level": "L2",
+                "items": [{"asset_id": asset_a.id}],
+            },
+        ).json()
+        set_b = client.post(
+            "/api/baseline-sets",
+            json={
+                "name": "活跃清单集B",
+                "default_expected_level": "L2",
+                "items": [{"asset_id": asset_b.id}],
+            },
+        ).json()
+        run_a = client.post(f"/api/baseline-sets/{set_a['id']}/runs").json()
+        run_b = client.post(f"/api/baseline-sets/{set_b['id']}/runs").json()
+
+        control = client.get("/api/jobs/control").json()
+        active_runs = control["active_runs"]
+        assert [(entry["kind"], entry["run_id"]) for entry in active_runs] == [
+            ("baseline", run_a["id"]),
+            ("baseline", run_b["id"]),
+        ]
+        first = active_runs[0]
+        assert first["created_by"] == "active-runs-view"
+        assert first["total"] == 1
+        assert first["completed"] == 0
+        assert first["active_jobs"] == 1
+        assert first["category_key"]
+
+        # 取消其中一轮后，清单只剩另一轮——入口与队列现实保持一致。
+        client.post(
+            "/api/jobs/control/cancel",
+            json={"baseline_run_ids": [run_a["id"]]},
+        )
+        remaining = client.get("/api/jobs/control").json()["active_runs"]
+        assert [(entry["kind"], entry["run_id"]) for entry in remaining] == [
+            ("baseline", run_b["id"]),
+        ]
+    finally:
+        app.dependency_overrides.clear()
+        db.close()
+        engine.dispose()
+
+
 def test_completed_update_does_not_revive_canceled_job(
     monkeypatch, tmp_path
 ) -> None:

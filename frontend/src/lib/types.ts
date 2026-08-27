@@ -1443,12 +1443,24 @@ export type Job = {
   finished_at: string | null
 }
 
+export type ActiveRunScope = {
+  kind: "baseline" | "prompt"
+  run_id: number
+  category_key?: string
+  created_by?: string
+  name?: string
+  total: number
+  completed: number
+  active_jobs: number
+}
+
 export type JobControl = {
   paused: boolean
   queued_count: number
   processing_count: number
   paused_count: number
   active_count: number
+  active_runs: ActiveRunScope[]
   updated_at: string
 }
 

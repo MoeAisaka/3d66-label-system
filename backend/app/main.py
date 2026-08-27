@@ -5347,12 +5347,81 @@ def get_job_control(
             select(EvaluationJob.status, func.count(EvaluationJob.id)).group_by(EvaluationJob.status)
         ).all()
     )
+    active_statuses = ("queued", "processing", "paused")
+    # 活跃 run 清单：让前端能提供按 run 的取消入口，而不是只有全局取消。
+    # 全局取消跨 run 连废过两次（2026-08-23 run50-54、2026-08-27 run124）。
+    active_runs: list[dict[str, Any]] = []
+    baseline_rows = db.execute(
+        select(
+            BaselineRegressionRun.id,
+            BaselineRegressionRun.category_key,
+            BaselineRegressionRun.created_by,
+            BaselineRegressionRun.total,
+            BaselineRegressionRun.completed,
+            func.count(EvaluationJob.id),
+        )
+        .join(
+            BaselineRegressionItem,
+            BaselineRegressionItem.run_id == BaselineRegressionRun.id,
+        )
+        .join(
+            EvaluationJob,
+            EvaluationJob.baseline_regression_item_id == BaselineRegressionItem.id,
+        )
+        .where(EvaluationJob.status.in_(active_statuses))
+        .group_by(BaselineRegressionRun.id)
+        .order_by(BaselineRegressionRun.id)
+    ).all()
+    for run_id, category_key, created_by, total, completed, active_jobs in baseline_rows:
+        active_runs.append(
+            {
+                "kind": "baseline",
+                "run_id": run_id,
+                "category_key": category_key,
+                "created_by": created_by,
+                "total": total,
+                "completed": completed,
+                "active_jobs": active_jobs,
+            }
+        )
+    prompt_rows = db.execute(
+        select(
+            PromptRegressionRun.id,
+            PromptRegressionRun.name,
+            PromptRegressionRun.total,
+            PromptRegressionRun.completed,
+            func.count(EvaluationJob.id),
+        )
+        .join(
+            PromptRegressionItem,
+            PromptRegressionItem.run_id == PromptRegressionRun.id,
+        )
+        .join(
+            EvaluationJob,
+            EvaluationJob.regression_item_id == PromptRegressionItem.id,
+        )
+        .where(EvaluationJob.status.in_(active_statuses))
+        .group_by(PromptRegressionRun.id)
+        .order_by(PromptRegressionRun.id)
+    ).all()
+    for run_id, name, total, completed, active_jobs in prompt_rows:
+        active_runs.append(
+            {
+                "kind": "prompt",
+                "run_id": run_id,
+                "name": name,
+                "total": total,
+                "completed": completed,
+                "active_jobs": active_jobs,
+            }
+        )
     return {
         "paused": control.paused,
         "queued_count": counts.get("queued", 0),
         "processing_count": counts.get("processing", 0),
         "paused_count": counts.get("paused", 0),
-        "active_count": sum(counts.get(status, 0) for status in ("queued", "processing", "paused")),
+        "active_count": sum(counts.get(status, 0) for status in active_statuses),
+        "active_runs": active_runs,
         "updated_at": control.updated_at,
     }
 

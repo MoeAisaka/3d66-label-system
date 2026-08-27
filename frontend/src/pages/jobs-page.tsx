@@ -13,7 +13,7 @@ import { PageHeader } from "@/components/app-shell"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { api } from "@/lib/api"
-import type { Job, JobControl } from "@/lib/types"
+import type { ActiveRunScope, Job, JobControl } from "@/lib/types"
 
 const stageLabels: Record<string, string> = {
   single: "单提示词完整评测",
@@ -58,12 +58,17 @@ export function JobsPage() {
     refetchInterval: 2000,
   })
   const action = useMutation({
-    mutationFn: (name: "pause" | "resume" | "cancel") =>
+    mutationFn: ({ name, payload }: {
+      name: "pause" | "resume" | "cancel"
+      payload?: { baseline_run_ids?: number[]; prompt_run_ids?: number[] }
+    }) =>
       api<{ ok: boolean; affected: number; scope?: string }>(
         `/api/jobs/control/${name}`,
-        { method: "POST" },
+        payload
+          ? { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) }
+          : { method: "POST" },
       ),
-    onSuccess: async (data, name) => {
+    onSuccess: async (data, { name }) => {
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ["jobs"] }),
         queryClient.invalidateQueries({ queryKey: ["job-control"] }),
@@ -77,21 +82,47 @@ export function JobsPage() {
   })
 
   const activeCount = control.data?.active_count ?? 0
+  const activeRuns = control.data?.active_runs ?? []
   const isPaused = control.data?.paused ?? false
+
+  function cancelRun(run: ActiveRunScope) {
+    const label = run.kind === "baseline"
+      ? `回归 #${run.run_id}（${run.category_key ?? ""} · ${run.created_by ?? ""}）`
+      : `提示词回归 #${run.run_id}（${run.name ?? ""}）`
+    if (
+      window.confirm(
+        `确定取消${label}吗？\n\n` +
+          `已完成的 ${run.completed}/${run.total} 条结果会保留，` +
+          `未完成的 ${run.active_jobs} 个任务会判失败，取消后不可继续。\n` +
+          `其他正在进行的回归不受影响。`,
+      )
+    ) {
+      action.mutate({
+        name: "cancel",
+        payload: run.kind === "baseline"
+          ? { baseline_run_ids: [run.run_id] }
+          : { prompt_run_ids: [run.run_id] },
+      })
+    }
+  }
 
   function cancelAll() {
     // 这个按钮没有 run 作用域：它会把当时所有排队中与进行中的任务判失败，
-    // 跨 run、跨基准集一并击穿。要只停某一轮回归，请用回归详情页的「取消本轮」。
-    if (
-      window.confirm(
-        `确定取消全部未完成任务吗？\n\n` +
-          `这会取消当前所有正在进行的回归（共 ${activeCount} 个未完成任务），` +
-          `不限于某一轮。已完成的评测结果会保留，取消后不可继续。\n\n` +
-          `若只想停止某一轮回归，请到该轮回归的详情页使用「取消本轮」。`,
-      )
-    ) {
-      action.mutate("cancel")
+    // 跨 run、跨基准集一并击穿（2026-08-23 run50-54、2026-08-27 run124 都是这样连废的）。
+    // 所以要求输入「全部」二字确认，防止把它当成「停掉眼前这一轮」的快捷键。
+    const runCount = activeRuns.length
+    const answer = window.prompt(
+      `⚠️ 全局取消：这会取消当前所有正在进行的回归` +
+        `（${runCount > 0 ? `共 ${runCount} 轮、` : ""}${activeCount} 个未完成任务），不限于某一轮。\n\n` +
+        `只想停某一轮，请取消此弹窗，改用上方对应回归行里的「取消这一轮」。\n\n` +
+        `确认全局取消请输入：全部`,
+    )
+    if (answer === null) return
+    if (answer.trim() !== "全部") {
+      toast.error("未输入「全部」，已放弃全局取消")
+      return
     }
+    action.mutate({ name: "cancel" })
   }
 
   return (
@@ -103,11 +134,11 @@ export function JobsPage() {
         actions={
           <>
             {isPaused ? (
-              <Button onClick={() => action.mutate("resume")} disabled={!activeCount || action.isPending}>
+              <Button onClick={() => action.mutate({ name: "resume" })} disabled={!activeCount || action.isPending}>
                 <Play weight="fill" />恢复全部
               </Button>
             ) : (
-              <Button variant="secondary" onClick={() => action.mutate("pause")} disabled={!activeCount || action.isPending}>
+              <Button variant="secondary" onClick={() => action.mutate({ name: "pause" })} disabled={!activeCount || action.isPending}>
                 <Pause weight="fill" />暂停全部
               </Button>
             )}
@@ -126,6 +157,40 @@ export function JobsPage() {
           <span className="border border-[var(--line)] bg-white px-3 py-2">运行 {control.data?.processing_count ?? 0}</span>
           <span className="border border-[var(--line)] bg-white px-3 py-2">暂停 {control.data?.paused_count ?? 0}</span>
         </div>
+        {activeRuns.length > 0 && (
+          <div className="mb-5 border border-[var(--line-strong)] bg-white">
+            <div className="border-b border-[var(--line)] bg-[#fafbf8] px-4 py-2 text-xs font-semibold text-[var(--muted)]">
+              进行中的回归 · 取消只影响所选的那一轮
+            </div>
+            {activeRuns.map((run) => (
+              <div
+                key={`${run.kind}-${run.run_id}`}
+                className="flex flex-wrap items-center justify-between gap-3 border-b border-[var(--line)] px-4 py-3 last:border-0"
+              >
+                <div className="flex flex-wrap items-center gap-3 text-sm">
+                  <Badge tone="active">{run.kind === "baseline" ? "存量回归" : "提示词回归"}</Badge>
+                  <span className="font-data text-xs">#{run.run_id}</span>
+                  <span className="text-xs text-[var(--muted)]">
+                    {run.kind === "baseline"
+                      ? `${run.category_key ?? ""} · ${run.created_by ?? ""}`
+                      : run.name ?? ""}
+                  </span>
+                  <span className="font-data text-xs text-[var(--muted)]">
+                    进度 {run.completed}/{run.total} · 未完成 {run.active_jobs}
+                  </span>
+                </div>
+                <Button
+                  variant="secondary"
+                  disabled={action.isPending}
+                  onClick={() => cancelRun(run)}
+                  data-testid={`cancel-run-${run.kind}-${run.run_id}`}
+                >
+                  <XCircle weight="bold" />取消这一轮
+                </Button>
+              </div>
+            ))}
+          </div>
+        )}
         <div className="overflow-x-auto border-y border-[var(--line-strong)] bg-white scrollbar-thin">
           {jobs.data?.items.length ? (
             <table className="w-full min-w-[1120px] border-collapse text-left text-sm">
