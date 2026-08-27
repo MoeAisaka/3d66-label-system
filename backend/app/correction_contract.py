@@ -818,7 +818,25 @@ def _v3_nodes(v3_bundle: Mapping[str, Any] | None) -> list[dict[str, Any]]:
             }
         )
 
+    # 等级阈值有两套字段：旧 level_thresholds 与新 level_scale（现行合同用后者，
+    # 旧字段为 null）。此前只认旧字段，导致新合同下「最终等级」节点整个不生成，
+    # 复核页那一行没有纠偏按钮——运营反馈「纠偏改不了等级」的根因。
     thresholds = contract.get("level_thresholds")
+    if not (isinstance(thresholds, (list, Mapping)) and thresholds):
+        scale = contract.get("level_scale")
+        if isinstance(scale, Mapping):
+            levels_raw = scale.get("levels")
+            if isinstance(levels_raw, list) and levels_raw:
+                thresholds = [
+                    {
+                        "level": item.get("level"),
+                        "min_score": item.get("min_score"),
+                    }
+                    for item in levels_raw
+                    if isinstance(item, Mapping)
+                    and item.get("level")
+                    and item.get("enabled", True)
+                ]
     if isinstance(thresholds, (list, Mapping)) and thresholds:
         threshold_value = deepcopy(thresholds)
         threshold_type = "list" if isinstance(thresholds, list) else "object"

@@ -352,3 +352,64 @@ def test_wrong_aesthetic_node_path_is_rejected(stored_result) -> None:
             corrector="operator",
         )
     assert "node_path_invalid" in str(getattr(excinfo.value, "detail", excinfo.value))
+
+
+def test_final_level_node_generated_from_level_scale() -> None:
+    """新合同用 level_scale（旧 level_thresholds 为 null）时也必须给出等级节点。
+
+    只认旧字段会让「最终等级」那一行没有纠偏按钮——运营反馈的
+    「纠偏改不了等级」正是这个根因。
+    """
+    from app.correction_contract import _v3_nodes
+
+    bundle = {
+        "contract": {
+            "spec_version": "1",
+            "level_thresholds": None,
+            "level_scale": {
+                "version": "category-level-scale-v1",
+                "levels": [
+                    {"level": "L1", "min_score": 90, "enabled": True},
+                    {"level": "L2", "min_score": 75, "enabled": True},
+                    {"level": "L3", "min_score": 61, "enabled": True},
+                    {"level": "L4", "min_score": 50, "enabled": True},
+                    {"level": "L5", "min_score": 0, "enabled": True},
+                ],
+            },
+        }
+    }
+    by_type = {
+        (node.get("metadata") or {}).get("node_type"): node
+        for node in _v3_nodes(bundle)
+    }
+    final_level = by_type.get("final_level")
+    assert final_level is not None, "level_scale 合同必须生成最终等级纠偏节点"
+    assert final_level["node_key"] == "v3.final_level"
+    assert final_level["path"] == "scoring.level"
+    assert final_level["options"] == ["L1", "L2", "L3", "L4", "L5"]
+    assert by_type.get("v3_thresholds") is not None, "阈值只读节点同样要给出"
+
+
+def test_final_level_node_skips_disabled_levels() -> None:
+    """关闭的档位不进选项，避免运营纠偏到一个机制已停用的等级。"""
+    from app.correction_contract import _v3_nodes
+
+    bundle = {
+        "contract": {
+            "spec_version": "1",
+            "level_scale": {
+                "version": "category-level-scale-v1",
+                "levels": [
+                    {"level": "L1", "min_score": 90, "enabled": True},
+                    {"level": "L2", "min_score": 75, "enabled": False},
+                    {"level": "L3", "min_score": 0, "enabled": True},
+                ],
+            },
+        }
+    }
+    final_level = next(
+        node
+        for node in _v3_nodes(bundle)
+        if (node.get("metadata") or {}).get("node_type") == "final_level"
+    )
+    assert final_level["options"] == ["L1", "L3"]
