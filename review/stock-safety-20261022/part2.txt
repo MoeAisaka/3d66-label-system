@@ -1,0 +1,571 @@
+第二段（最后一段）。请结合第一段和GitHub上下文一次性复审。
+
+===== FILE backend/app/safety_regression_api.py =====
+from __future__ import annotations
+
+import json
+from typing import Literal
+from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, ConfigDict, Field
+from sqlalchemy import select, func
+from sqlalchemy.orm import Session
+from sqlalchemy.exc import IntegrityError
+from .authz import has_permission, require_categories
+from .config import get_settings
+from .database import get_db
+from .safety_rules import DEFAULT_RULES, SafetyError
+from .safety_provider import provider_configuration
+from .safety_regression import (SafetyRun, SafetyRuleVersion, SafetyItem, SafetyAttempt, SafetyReview, SafetyResult, SafetyReference, SafetyStatistics,
+    create_round, control, review_item, retry_item, recompute, item_payload, item_payloads, statistics, update_reference)
+
+
+class TextSample(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    content: str = Field(min_length=1, max_length=2000)
+    name: str = Field(default="", max_length=500)
+    reference: Literal["pass", "reject", "review"] | None = None
+
+
+class CreateSafetyRound(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    request_id: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_-]+$")
+    name: str = Field(min_length=1, max_length=160)
+    category_key: str = Field(min_length=1, max_length=40)
+    kind: Literal["image", "text"]
+    service: str = Field(min_length=1, max_length=100)
+    rules: dict = Field(default_factory=lambda: json.loads(json.dumps(DEFAULT_RULES)))
+    baseline_set_id: int | None = Field(default=None, ge=1)
+    asset_ids: list[int] = Field(default_factory=list, max_length=10000)
+    texts: list[TextSample] = Field(default_factory=list, max_length=10000)
+
+
+class ReviewSafetyItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    result_id: str
+    expected_revision: int = Field(ge=0)
+    patch: dict
+    reason: str = Field(min_length=1, max_length=4000)
+
+
+class ReferenceRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    verdict: Literal["pass", "reject", "review"]
+    expected_revision: int = Field(ge=0)
+    confirmed: Literal[True]
+
+
+class RecomputeRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    expected_revision: int = Field(ge=1)
+    rules: dict
+    confirmed: Literal[True]
+
+
+def build_safety_regression_router(current_user):
+    router = APIRouter(tags=["stock-safety-regression"])
+    def writable(user, category):
+        if not has_permission(user, "reviews:write"): raise HTTPException(403, "需要该业务纠偏权限")
+        require_categories(user, {category})
+
+    def run_row(db, run_id):
+        row = db.get(SafetyRun, run_id)
+        if not row: raise HTTPException(404, "安全审核回归不存在")
+        return row
+
+    def item_row(db, run_id, item_id):
+        row = db.get(SafetyItem, item_id)
+        if not row or row.run_id != run_id: raise HTTPException(404, "样本不属于本轮")
+        return row
+
+    def summary(run):
+        return {"id": run.id, "name": run.name, "category_key": run.category_key, "status": run.status,
+            "config": json.loads(run.config_json), "rule_revision": run.rule_revision, "created_at": run.created_at}
+
+    def execute(db, operation):
+        try: value = operation(); db.commit(); return value
+        except (SafetyError, IntegrityError) as exc:
+            db.rollback(); raise HTTPException(409, exc.code if isinstance(exc, SafetyError) else "request_conflict") from None
+
+    @router.get("/api/safety-regressions/capabilities")
+    def capabilities(user=Depends(current_user)):
+        return {**provider_configuration(), "default_rules": DEFAULT_RULES, "mixed_inputs": False,
+            "human_review_required": False, "actual_cost": None}
+
+    @router.post("/api/safety-regressions")
+    def create(payload: CreateSafetyRound, user=Depends(current_user), db: Session = Depends(get_db)):
+        writable(user, payload.category_key)
+        if not provider_configuration()["configured"]: raise HTTPException(503, "阿里安全审核凭据尚未配置")
+        asset_ids = payload.asset_ids
+        if payload.baseline_set_id:
+            if asset_ids or payload.texts: raise HTTPException(422, "基准集与手工输入只选一种")
+            from .models import BaselineSet, BaselineSetItem
+            baseline = db.get(BaselineSet, payload.baseline_set_id)
+            if not baseline or baseline.category_key != payload.category_key: raise HTTPException(409, "基准集类目不一致")
+            asset_ids = list(db.scalars(select(BaselineSetItem.asset_id).where(BaselineSetItem.baseline_set_id == baseline.id).order_by(BaselineSetItem.id)))
+        return execute(db, lambda: summary(create_round(db, request_id=payload.request_id, name=payload.name,
+            category=payload.category_key, kind=payload.kind, service=payload.service, rules=payload.rules,
+            asset_ids=asset_ids, texts=[s.model_dump() for s in payload.texts], actor=user.username, settings=get_settings())))
+
+    @router.get("/api/safety-regressions")
+    def listing(category_key: str | None = None, offset: int = Query(0, ge=0), limit: int = Query(50, ge=1, le=100),
+                user=Depends(current_user), db: Session = Depends(get_db)):
+        q = select(SafetyRun)
+        if category_key: q = q.where(SafetyRun.category_key == category_key)
+        total = db.scalar(select(func.count()).select_from(q.subquery()))
+        return {"total": total, "items": [summary(r) for r in db.scalars(q.order_by(SafetyRun.created_at.desc()).offset(offset).limit(limit))]}
+
+    @router.get("/api/safety-regressions/{run_id}")
+    def detail(run_id: str, offset: int = Query(0, ge=0), limit: int = Query(24, ge=1, le=100),
+               user=Depends(current_user), db: Session = Depends(get_db)):
+        run = run_row(db, run_id)
+        items = db.scalars(select(SafetyItem).where(SafetyItem.run_id == run_id).order_by(SafetyItem.id).offset(offset).limit(limit)).all()
+        rules = db.scalar(select(SafetyRuleVersion).where(SafetyRuleVersion.run_id == run_id, SafetyRuleVersion.revision == run.rule_revision))
+        return {**summary(run), "current_rules": json.loads(rules.rules_json),
+            "statistics": statistics(db, run_id), "items": item_payloads(db, items, run)}
+
+    @router.post("/api/safety-regressions/{run_id}/control/{action}")
+    def change_status(run_id: str, action: Literal["pause", "resume", "cancel"], user=Depends(current_user), db: Session = Depends(get_db)):
+        writable(user, run_row(db, run_id).category_key)
+        return execute(db, lambda: summary(control(db, run_id, action)))
+
+    @router.post("/api/safety-regressions/{run_id}/recompute")
+    def recalculate(run_id: str, payload: RecomputeRequest, user=Depends(current_user), db: Session = Depends(get_db)):
+        writable(user, run_row(db, run_id).category_key)
+        return execute(db, lambda: summary(recompute(db, run_id, rules=payload.rules, expected_revision=payload.expected_revision, actor=user.username)))
+
+    @router.post("/api/safety-regressions/{run_id}/items/{item_id}/review")
+    def review(run_id: str, item_id: str, payload: ReviewSafetyItem, user=Depends(current_user), db: Session = Depends(get_db)):
+        writable(user, run_row(db, run_id).category_key); item = item_row(db, run_id, item_id)
+        def operation():
+            review_item(db, item.id, actor=user.username, **payload.model_dump()); return item_payload(db, item)
+        return execute(db, operation)
+
+    @router.post("/api/safety-regressions/{run_id}/items/{item_id}/reference")
+    def reference(run_id: str, item_id: str, payload: ReferenceRequest, user=Depends(current_user), db: Session = Depends(get_db)):
+        writable(user, run_row(db, run_id).category_key); item = item_row(db, run_id, item_id)
+        def operation():
+            update_reference(db, item.id, actor=user.username, **payload.model_dump()); return item_payload(db, item)
+        return execute(db, operation)
+
+    @router.post("/api/safety-regressions/{run_id}/items/{item_id}/retry")
+    def retry(run_id: str, item_id: str, user=Depends(current_user), db: Session = Depends(get_db)):
+        writable(user, run_row(db, run_id).category_key); item = item_row(db, run_id, item_id)
+        def operation(): retry_item(db, item.id); return item_payload(db, item)
+        return execute(db, operation)
+
+    @router.get("/api/safety-regressions/{run_id}/items/{item_id}/history")
+    def history(run_id: str, item_id: str, offset: int = Query(0, ge=0), limit: int = Query(20, ge=1, le=100),
+                user=Depends(current_user), db: Session = Depends(get_db)):
+        item_row(db, run_id, item_id)
+        attempts = db.scalars(select(SafetyAttempt).where(SafetyAttempt.item_id == item_id)
+            .order_by(SafetyAttempt.sequence_no.desc()).offset(offset).limit(limit)).all()
+        reviews = db.scalars(select(SafetyReview).where(SafetyReview.item_id == item_id)
+            .order_by(SafetyReview.revision.desc()).offset(offset).limit(limit)).all()
+        results = db.scalars(select(SafetyResult).where(SafetyResult.item_id == item_id)
+            .order_by(SafetyResult.created_at.desc()).offset(offset).limit(limit)).all()
+        references = db.scalars(select(SafetyReference).where(SafetyReference.item_id == item_id)
+            .order_by(SafetyReference.revision.desc()).offset(offset).limit(limit)).all()
+        return {"attempts": [{"id": a.id, "sequence": a.sequence_no, "status": a.status, "raw": json.loads(a.raw_json) if a.raw_json else None,
+            "error": a.error_code, "usage_state": a.usage_state, "created_at": a.created_at} for a in attempts],
+            "reviews": [{"revision": r.revision, "result_id": r.result_id, "patch": json.loads(r.patch_json),
+                "reason": r.reason, "actor": r.actor, "created_at": r.created_at} for r in reviews],
+            "results": [{"id": r.id, "attempt_id": r.attempt_id, "rule_revision": r.rule_revision,
+                "result": json.loads(r.result_json), "created_at": r.created_at} for r in results],
+            "references": [{"revision": r.revision, "verdict": r.verdict, "actor": r.actor, "created_at": r.created_at} for r in references]}
+
+    @router.get("/api/safety-regressions/{run_id}/versions")
+    def versions(run_id: str, offset: int = Query(0, ge=0), limit: int = Query(20, ge=1, le=100),
+                 user=Depends(current_user), db: Session = Depends(get_db)):
+        run_row(db, run_id)
+        rules = db.scalars(select(SafetyRuleVersion).where(SafetyRuleVersion.run_id == run_id)
+            .order_by(SafetyRuleVersion.revision.desc()).offset(offset).limit(limit)).all()
+        saved = db.scalars(select(SafetyStatistics).where(SafetyStatistics.run_id == run_id)
+            .order_by(SafetyStatistics.created_at.desc()).offset(offset).limit(limit)).all()
+        return {"rules": [{"revision": r.revision, "rules": json.loads(r.rules_json), "actor": r.actor, "created_at": r.created_at} for r in rules],
+            "statistics": [{"id": r.id, "statistics": json.loads(r.statistics_json), "created_at": r.created_at} for r in saved]}
+
+    return router
+
+===== FILE backend/app/migrations/safety_regression_137.py =====
+"""Stock safety ledger, isolated from incremental switches and business tables."""
+def migrate(connection):
+    from ..safety_regression import (SafetyRun, SafetyRuleVersion, SafetyItem, SafetyAttempt,
+        SafetyResult, SafetyReview, SafetyReference, SafetyStatistics)
+    models = (SafetyRun, SafetyRuleVersion, SafetyItem, SafetyAttempt, SafetyResult, SafetyReview, SafetyReference, SafetyStatistics)
+    if connection.dialect.name == 'mysql':
+        from .mysql_baseline import mysql_metadata
+        metadata = mysql_metadata()
+        for model in models: metadata.tables[model.__tablename__].create(connection, checkfirst=True)
+    else:
+        for model in models: model.__table__.create(connection, checkfirst=True)
+
+===== FILE frontend/src/pages/safety-regression-page.tsx =====
+import { useRef, useState } from "react"
+import { useSearchParams } from "react-router-dom"
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
+import { toast } from "sonner"
+import { PageHeader } from "@/components/app-shell"
+import { Button } from "@/components/ui/button"
+import { Card } from "@/components/ui/card"
+import { SecondaryDrawer } from "@/components/workspace-page"
+import { StockExportPanel } from "@/components/stock-export-panel"
+import { StockWritePanel } from "@/components/stock-write-panel"
+import { useAccess } from "@/lib/access"
+import { api } from "@/lib/api"
+
+type Verdict = "pass" | "reject" | "review"
+type Result = { verdict: Verdict; risk_level?: string; guards?: string[]; reasons?: unknown[] }
+type Item = { item_id: string; asset_id: number; name: string; status: string; result_id?: string; error?: string;
+  raw?: Result; effective?: Result; provider_raw?: unknown; human?: { revision: number; reason: string };
+  reference?: { revision: number; verdict: Verdict }; input: { content?: string } }
+type Run = { id: string; name: string; category_key: string; status: string; rule_revision: number;
+  config: { kind: "text" | "image"; service: string }; current_rules: unknown;
+  statistics: { total: number; completed: number; failed: number; reviewed: number; confirmed_requests: number;
+    uncertain_requests: number; accuracy: number | null; effective_accuracy: number | null; reference_count: number;
+    verdicts: Record<Verdict, number>; execution_finished: boolean }; items: Item[] }
+const verdicts: Record<Verdict, string> = { pass: "通过", reject: "不通过", review: "待人工判断" }
+const statuses: Record<string, string> = { queued: "排队中", sending: "审核中", completed: "执行完成", failed: "执行失败", running: "后台执行中", paused: "已暂停", cancelled: "已取消" }
+const control = "h-10 w-full min-w-0 rounded-xl border border-input bg-background px-3 text-sm"
+const defaultRules = { risk_levels: { high: "reject", medium: "review", low: "review", none: "pass" }, labels: {} }
+const formatRate = (value: number | null | undefined) => value == null ? "无参考依据" : `${(value * 100).toFixed(1)}%`
+const reasonText = (value: unknown) => typeof value === "string" ? value : value && typeof value === "object" ?
+  String((value as { description?: string; label?: string }).description || (value as { label?: string }).label || "风险原因详见原始响应") : "风险原因待核实"
+
+export function SafetyRegressionPage() {
+  const [search, setSearch] = useSearchParams(); const runId = search.get("run") || ""
+  const [category, setCategory] = useState("model_3d_su"); const [kind, setKind] = useState<"image" | "text">("image")
+  const [service, setService] = useState("postImageCheckByVL"); const [name, setName] = useState("阿里安全审核验证")
+  const [source, setSource] = useState("baseline"); const [setId, setSetId] = useState(search.get("set") || "")
+  const [input, setInput] = useState(""); const [rulesText, setRulesText] = useState(JSON.stringify(defaultRules, null, 2))
+  const [offset, setOffset] = useState(0); const [reviewing, setReviewing] = useState<Item | null>(null)
+  const [verdict, setVerdict] = useState<Verdict>("review"); const [reason, setReason] = useState("")
+  const [inspecting, setInspecting] = useState<Item | null>(null); const [recalculating, setRecalculating] = useState(false)
+  const [recalculationRules, setRecalculationRules] = useState(""); const launchIdentity = useRef({ signature: "", id: "" })
+  const [referenceVerdict, setReferenceVerdict] = useState<Verdict>("review"); const [showVersions, setShowVersions] = useState(false)
+  const access = useAccess(); const client = useQueryClient()
+  const categories = useQuery({ queryKey: ["evaluation-categories"], queryFn: () => api<{ items: { category_key: string; display_name: string }[] }>("/api/evaluation-categories") })
+  const caps = useQuery({ queryKey: ["safety-capabilities"], queryFn: () => api<{ configured: boolean; text_services: Record<string, number>; image_services: string[] }>("/api/safety-regressions/capabilities") })
+  const rounds = useQuery({ queryKey: ["safety-rounds"], queryFn: () => api<{ items: Run[] }>("/api/safety-regressions?limit=100") })
+  const detail = useQuery({ queryKey: ["safety-detail", runId, offset], enabled: !!runId, refetchInterval: 5000,
+    queryFn: () => api<Run>(`/api/safety-regressions/${runId}?offset=${offset}&limit=24`) })
+  const history = useQuery({ queryKey: ["safety-history", runId, inspecting?.item_id], enabled: !!inspecting,
+    queryFn: () => api<unknown>(`/api/safety-regressions/${runId}/items/${inspecting!.item_id}/history`) })
+  const versions = useQuery({ queryKey: ["safety-versions", runId], enabled: !!runId && showVersions,
+    queryFn: () => api<unknown>(`/api/safety-regressions/${runId}/versions`) })
+  const writable = access.can("reviews:write", detail.data?.category_key || category)
+  const refresh = () => { void client.invalidateQueries({ queryKey: ["safety-detail"] }); void client.invalidateQueries({ queryKey: ["safety-rounds"] }) }
+  const mutation = useMutation({ mutationFn: ({ path, body }: { path: string; body?: unknown }) => api<unknown>(path, { method: "POST", ...(body ? { body: JSON.stringify(body) } : {}) }),
+    onSuccess: () => { setReviewing(null); setInspecting(null); setRecalculating(false); refresh(); void client.invalidateQueries({ queryKey: ["safety-versions"] }); toast.success("已保存，已有结果和历史记录保留") }, onError: (e: Error) => toast.error(e.message) })
+  const launch = useMutation({ mutationFn: async () => {
+    const sources = source === "baseline" ? { baseline_set_id: Number(setId) } : kind === "image" ? { asset_ids: input.split(/[\s,，]+/).filter(Boolean).map(Number) } :
+      { texts: input.trimStart().startsWith("[") ? JSON.parse(input) as unknown[] : input.split("\n").filter(line => line.trim()).map(content => ({ content })) }
+    const body = { name, kind, category_key: category, service, rules: JSON.parse(rulesText) as unknown, ...sources }
+    const signature = JSON.stringify(body)
+    if (signature !== launchIdentity.current.signature) launchIdentity.current = { signature, id: crypto.randomUUID() }
+    return api<Run>("/api/safety-regressions", { method: "POST", body: JSON.stringify({ ...body, request_id: launchIdentity.current.id }) })
+  }, onSuccess: run => { launchIdentity.current = { signature: "", id: "" }; setSearch({ run: run.id }); setOffset(0); refresh() }, onError: (e: Error) => toast.error(e.message) })
+
+  return <>
+    <PageHeader index="03" title="阿里安全审核存量回归" description="图片与文本分轮验证。固定样本、输入和审核规则，后台执行；人工纠偏可选，执行完成不代表业务验收通过。"
+      actions={runId && <><StockExportPanel source="safety" runId={runId} /><StockWritePanel source="safety" runId={runId} categoryKey={detail.data?.category_key} /></>} />
+    <div className="mx-auto shell-content space-y-6 px-page py-7 lg:py-10">
+      <Card className="p-6 space-y-5">
+        <h2 className="text-xl font-semibold">发起安全审核验证</h2>
+        {caps.data && !caps.data.configured && <p role="status" className="rounded-xl bg-muted p-3 text-sm">阿里安全审核凭据尚未配置，暂不能发起真实调用。请由管理员在服务端配置。</p>}
+        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+          <label className="space-y-2 text-sm">本轮名称<input className={control} value={name} maxLength={160} onChange={e => setName(e.target.value)} /></label>
+          <label className="space-y-2 text-sm">所属类目<select className={control} value={category} onChange={e => setCategory(e.target.value)}>{categories.data?.items.map(c => <option key={c.category_key} value={c.category_key}>{c.display_name}</option>)}</select></label>
+          <label className="space-y-2 text-sm">审核内容<select className={control} value={kind} onChange={e => { const k = e.target.value as "image" | "text"; setKind(k); setService(k === "image" ? "postImageCheckByVL" : "comment_detection_pro"); setInput("") }}><option value="image">图片</option><option value="text">文本</option></select></label>
+          <label className="space-y-2 text-sm">审核服务<select className={control} value={service} onChange={e => setService(e.target.value)}>{(kind === "image" ? caps.data?.image_services || ["postImageCheckByVL"] : Object.keys(caps.data?.text_services || { comment_detection_pro: 600 })).map(value => <option key={value} value={value}>{value}{kind === "text" ? `（最多 ${caps.data?.text_services[value] || 600} 字）` : ""}</option>)}</select></label>
+          <label className="space-y-2 text-sm">样本来源<select className={control} value={source} onChange={e => setSource(e.target.value)}><option value="baseline">现有基准集</option><option value="manual">{kind === "image" ? "已导入的素材 ID" : "手工输入文本"}</option></select></label>
+          {source === "baseline" && <label className="space-y-2 text-sm">基准集 ID<input className={control} type="number" min={1} value={setId} onChange={e => setSetId(e.target.value)} /></label>}
+        </div>
+        {source === "manual" && <label className="block space-y-2 text-sm"><span>{kind === "image" ? "素材 ID（逗号或空格分隔）" : "每行一条文本；需要换行或参考答案时，可填 JSON 数组：content、name、reference（pass/reject/review）"}</span><textarea className="w-full rounded-xl border p-3" rows={5} value={input} onChange={e => setInput(e.target.value)} /></label>}
+        <p className="text-sm text-muted-foreground">图片可先在素材管理上传，再通过基准集或素材 ID 选择。本轮不做查重，不截断文本。服务商内部规则版本暂无法固定，平台会固定服务与本轮判定规则。</p>
+        <details className="rounded-xl border p-4"><summary className="cursor-pointer text-sm font-medium">调整本轮判定规则</summary><p className="my-3 text-sm text-muted-foreground">默认高风险不通过，中低风险待人工判断，无风险通过。未知或矛盾返回会保留待核查标记。</p><textarea aria-label="本轮判定规则 JSON" className="w-full rounded-xl border p-3 font-mono text-sm" rows={10} value={rulesText} onChange={e => setRulesText(e.target.value)} /></details>
+        <div className="flex justify-end"><Button disabled={!access.can("reviews:write", category) || !caps.data?.configured || launch.isPending || (source === "baseline" ? !setId : !input.trim())} onClick={() => launch.mutate()}>固定样本并开始审核</Button></div>
+      </Card>
+      <Card className="p-6 space-y-4">
+        <label className="block space-y-2 text-sm">查看已有轮次<select className={control} value={runId} onChange={e => { setSearch(e.target.value ? { run: e.target.value } : {}); setOffset(0) }}><option value="">请选择一轮</option>{rounds.data?.items.map(r => <option key={r.id} value={r.id}>{r.name} · {r.config.kind === "image" ? "图片" : "文本"} · {statuses[r.status] || r.status}</option>)}</select></label>
+        {(rounds.error || detail.error || caps.error) && <p role="alert">{rounds.error?.message || detail.error?.message || caps.error?.message}</p>}
+        {detail.data && <>
+          <div className="flex flex-wrap items-center justify-between gap-3"><h2 className="text-xl font-semibold">{detail.data.name} · {statuses[detail.data.status] || detail.data.status}</h2><div className="flex flex-wrap gap-2">
+            {["running", "paused"].includes(detail.data.status) && <><Button variant="secondary" disabled={!writable || mutation.isPending} onClick={() => mutation.mutate({ path: `/api/safety-regressions/${runId}/control/${detail.data!.status === "paused" ? "resume" : "pause"}` })}>{detail.data.status === "paused" ? "继续" : "暂停"}</Button><Button variant="secondary" disabled={!writable || mutation.isPending} onClick={() => { if (window.confirm("停止新审核和自动写出，保留已在途的响应及历史。确认取消？")) mutation.mutate({ path: `/api/safety-regressions/${runId}/control/cancel` }) }}>取消本轮</Button></>}
+            <Button variant="secondary" disabled={!writable} onClick={() => { setRecalculationRules(JSON.stringify(detail.data!.current_rules, null, 2)); setRecalculating(true) }}>复用原响应重算规则</Button>
+            <Button variant="secondary" onClick={() => setShowVersions(true)}>规则与统计历史</Button>
+          </div></div>
+          <div className="grid grid-cols-2 gap-3 lg:grid-cols-5">{[["审核完成", detail.data.statistics.completed], ["执行失败", detail.data.statistics.failed], ["通过", detail.data.statistics.verdicts.pass], ["不通过", detail.data.statistics.verdicts.reject], ["待人工判断", detail.data.statistics.verdicts.review]].map(([label, value]) => <div key={label} className="rounded-xl bg-muted p-4"><p className="text-sm text-muted-foreground">{label}</p><p className="mt-2 text-xl font-semibold">{value}</p></div>)}</div>
+          <p className="text-sm text-muted-foreground">共 {detail.data.statistics.total} 条，人工已复核 {detail.data.statistics.reviewed} 条。有效参考答案 {detail.data.statistics.reference_count} 条；原始结果准确率 {formatRate(detail.data.statistics.accuracy)}，人工修订后 {formatRate(detail.data.statistics.effective_accuracy)}。</p>
+          <p className="text-sm text-muted-foreground">已确认响应 {detail.data.statistics.confirmed_requests} 次，调用或计费待核实 {detail.data.statistics.uncertain_requests} 次。预计和实际费用均尚未核定，不自动执行预算停机。暂停会停止新审核和自动写出，保留在途响应。</p>
+          <div className="grid gap-4 lg:grid-cols-2 xl:grid-cols-3">{detail.data.items.map(item => <Card key={item.item_id} className="min-w-0 space-y-3 p-4">
+            {detail.data!.config.kind === "image" ? <img src={`/api/assets/${item.asset_id}/file`} className="aspect-video w-full rounded-xl bg-muted object-contain" loading="lazy" alt={item.name} /> : <p className="max-h-40 overflow-auto whitespace-pre-wrap break-words rounded-xl bg-muted p-3 text-sm">{item.input.content || item.name}</p>}
+            <p className="break-all font-medium">{item.name}</p><p className="text-sm">{statuses[item.status] || item.status}{item.effective && ` · ${verdicts[item.effective.verdict]}`}{item.human && " · 人工已确认"}</p>
+            {item.human?.reason && <p className="break-words text-sm">人工意见：{item.human.reason}</p>}
+            {!!item.effective?.reasons?.length && <ul className="list-disc space-y-1 pl-5 text-sm text-muted-foreground">{item.effective.reasons.map((value, i) => <li key={i} className="break-words">{reasonText(value)}</li>)}</ul>}
+            {!!item.raw?.guards?.length && <p className="text-sm text-muted-foreground">返回内容存在缺失、未知值或矛盾，请核对原响应后判断。</p>}
+            {item.error && <p className="break-all text-sm">执行诊断：{item.error}</p>}
+            <div className="flex flex-wrap gap-2"><Button variant="secondary" size="sm" onClick={() => { setInspecting(item); setReferenceVerdict(item.reference?.verdict || "review") }}>结果与历史</Button><Button variant="secondary" size="sm" disabled={!writable || !item.result_id} onClick={() => { setReviewing(item); setVerdict(item.effective?.verdict || "review"); setReason("") }}>人工纠偏</Button>{item.status === "failed" && <Button variant="secondary" size="sm" disabled={!writable || mutation.isPending || detail.data!.status === "cancelled"} onClick={() => mutation.mutate({ path: `/api/safety-regressions/${runId}/items/${item.item_id}/retry` })}>单独补跑</Button>}</div>
+          </Card>)}</div>
+          <div className="flex flex-wrap items-center justify-end gap-3"><span>{detail.data.statistics.total ? Math.floor(offset / 24) + 1 : 0} / {Math.ceil(detail.data.statistics.total / 24)} 页</span><Button variant="secondary" disabled={!offset} onClick={() => setOffset(Math.max(0, offset - 24))}>上一页</Button><Button variant="secondary" disabled={offset + 24 >= detail.data.statistics.total} onClick={() => setOffset(offset + 24)}>下一页</Button></div>
+        </>}
+      </Card>
+    </div>
+    <SecondaryDrawer open={!!reviewing} onOpenChange={open => { if (!open) setReviewing(null) }} title="人工纠偏" description="只修改确认的字段，保留阿里原响应和历史。">
+      {reviewing && <div className="space-y-4"><p className="break-all">{reviewing.name}</p><label className="block space-y-2">人工结论<select className={control} value={verdict} onChange={e => setVerdict(e.target.value as Verdict)}>{Object.entries(verdicts).map(([key, value]) => <option value={key} key={key}>{value}</option>)}</select></label><label className="block space-y-2">修改依据<textarea className="w-full rounded-xl border p-3" rows={4} maxLength={4000} value={reason} onChange={e => setReason(e.target.value)} /></label><Button disabled={mutation.isPending || !reason.trim()} onClick={() => mutation.mutate({ path: `/api/safety-regressions/${runId}/items/${reviewing.item_id}/review`, body: { result_id: reviewing.result_id, expected_revision: reviewing.human?.revision || 0, patch: { verdict }, reason } })}>确认修改</Button>
+        <p className="text-sm text-muted-foreground">人工结论不会被后续 AI 或规则重算覆盖。已确认的写出计划会按其配置继续投递。</p></div>}
+    </SecondaryDrawer>
+    <SecondaryDrawer open={!!inspecting} onOpenChange={open => { if (!open) setInspecting(null) }} title="审核结果与历史" description="原始响应、规则判定与人工结论分别保留。" size="wide">
+      <div className="space-y-4">{inspecting && <><p className="break-all">{inspecting.name}</p><section className="space-y-3 rounded-xl border p-4"><h3 className="font-semibold">本轮人工参考答案</h3><p className="text-sm text-muted-foreground">参考答案用于准确率统计，与实际审核结果和人工纠偏分别保存。确认后生成新版本并保留原统计。</p><select aria-label="参考答案结论" className={control} value={referenceVerdict} onChange={e => setReferenceVerdict(e.target.value as Verdict)}>{Object.entries(verdicts).map(([key, value]) => <option key={key} value={key}>{value}</option>)}</select><Button variant="secondary" disabled={!writable || mutation.isPending} onClick={() => { if (window.confirm(`确认将本条参考答案更新为“${verdicts[referenceVerdict]}”？保留旧版本与原统计。`)) mutation.mutate({ path: `/api/safety-regressions/${runId}/items/${inspecting.item_id}/reference`, body: { verdict: referenceVerdict, expected_revision: inspecting.reference?.revision || 0, confirmed: true } }) }}>确认参考答案新版本</Button></section><pre className="whitespace-pre-wrap break-all rounded-xl bg-muted p-4 text-xs">{JSON.stringify({ original: inspecting.raw, effective: inspecting.effective, reference: inspecting.reference, provider: inspecting.provider_raw }, null, 2)}</pre><h3 className="font-semibold">历史执行及修改记录</h3><pre className="whitespace-pre-wrap break-all rounded-xl bg-muted p-4 text-xs">{history.error?.message || JSON.stringify(history.data, null, 2) || "读取中…"}</pre></>}</div>
+    </SecondaryDrawer>
+    <SecondaryDrawer open={showVersions} onOpenChange={setShowVersions} title="规则与统计历史" description="规则、结果和参考答案变更前的统计会保留，不覆盖旧记录。" size="wide"><pre className="whitespace-pre-wrap break-all rounded-xl bg-muted p-4 text-xs">{versions.error?.message || JSON.stringify(versions.data, null, 2) || "读取中…"}</pre></SecondaryDrawer>
+    <SecondaryDrawer open={recalculating} onOpenChange={setRecalculating} title="复用原响应重算规则" description="不重新请求阿里，不改动人工确认过的字段；保留原统计和结果版本。">
+      <div className="space-y-4"><textarea aria-label="重算判定规则 JSON" className="w-full rounded-xl border p-3 font-mono text-sm" rows={15} value={recalculationRules} onChange={e => setRecalculationRules(e.target.value)} /><Button disabled={mutation.isPending} onClick={() => { try { mutation.mutate({ path: `/api/safety-regressions/${runId}/recompute`, body: { rules: JSON.parse(recalculationRules) as unknown, expected_revision: detail.data?.rule_revision, confirmed: true } }) } catch { toast.error("请填写合法的规则 JSON") } }}>确认生成新结果版本</Button></div>
+    </SecondaryDrawer>
+  </>
+}
+
+===== FILE backend/tests/test_safety_regression.py =====
+import copy
+import hashlib
+import json
+from types import SimpleNamespace
+import pytest
+from sqlalchemy import create_engine, select
+from sqlalchemy.orm import Session
+from app.database import Base
+from app.models import Asset
+from app.safety_rules import DEFAULT_RULES, SafetyError
+from app.safety_regression import (SafetyRun, SafetyItem, SafetyAttempt, create_round, control,
+    review_item, recompute, item_payload, statistics, update_reference)
+from app.safety_worker import tick
+
+
+@pytest.fixture
+def setup(tmp_path):
+    engine = create_engine("sqlite:///" + str(tmp_path / "safety.db"))
+    Base.metadata.create_all(engine)
+    settings = SimpleNamespace(data_dir=tmp_path, upload_dir=tmp_path / "uploads")
+    settings.upload_dir.mkdir()
+    with Session(engine) as db: yield engine, db, settings
+    engine.dispose()
+
+
+def make(db, settings, request="safety-test", texts=None):
+    return create_round(db, request_id=request, name="安全审核测试", category="space_image", kind="text",
+        service="comment_detection_pro", rules=DEFAULT_RULES, asset_ids=[], texts=texts or [{"content": "hello"}],
+        actor="tester", settings=settings)
+
+
+class Provider:
+    region = "cn-shanghai"
+    calls = 0
+    def moderate_text(self, content, request_id, service):
+        self.calls += 1
+        return {"Code": 200, "RequestId": "real-raw", "Future": ["retained"], "Data": {
+            "DataId": request_id, "RiskLevel": "high", "Result": [{"Label": "risk", "Confidence": 90}]}}
+
+
+def run_tick(engine, settings, provider):
+    return tick(engine, settings=settings, provider=provider, authorize=lambda db, run: True)
+
+
+def test_freezes_inputs_reuses_id_and_never_touches_incremental(setup):
+    engine, db, settings = setup
+    run = make(db, settings); db.commit()
+    assert make(db, settings).id == run.id
+    with pytest.raises(SafetyError, match="request_conflict"): make(db, settings, texts=[{"content": "different"}])
+    db.rollback()
+    item = db.scalar(select(SafetyItem)); frozen = item.input_snapshot_json
+    asset = db.get(Asset, item.asset_id); asset.source_uri = "https://other.invalid/changed"
+    db.commit()
+    p = Provider(); run_tick(engine, settings, p); db.expire_all()
+    doc = item_payload(db, item)
+    assert doc["status"] == "completed" and doc["raw"]["verdict"] == "reject"
+    assert doc["provider_raw"]["Future"] == ["retained"] and item.input_snapshot_json == frozen
+    assert json.loads(run.config_json)["region"] == "cn-shanghai"
+
+
+def test_manual_patch_survives_new_rules_and_reference_is_separate(setup):
+    engine, db, settings = setup
+    run = make(db, settings); db.commit(); p = Provider(); run_tick(engine, settings, p); db.expire_all()
+    item = db.scalar(select(SafetyItem)); doc = item_payload(db, item)
+    review_item(db, item.id, result_id=doc["result_id"], expected_revision=0,
+        patch={"verdict": "pass"}, reason="已人工检查", actor="tester"); db.commit()
+    assert statistics(db, run.id)["accuracy"] is None
+    rules = copy.deepcopy(DEFAULT_RULES); rules["risk_levels"]["high"] = "review"
+    recompute(db, run.id, rules=rules, expected_revision=1, actor="tester"); db.commit()
+    doc = item_payload(db, item)
+    assert doc["raw"]["verdict"] == "review" and doc["effective"]["verdict"] == "pass"
+    assert doc["human"]["patch"] == {"verdict": "pass"} and p.calls == 1
+    update_reference(db, item.id, verdict="pass", expected_revision=0, actor="tester", confirmed=True); db.commit()
+    assert statistics(db, run.id)["accuracy"] == 0
+    assert statistics(db, run.id)["effective_accuracy"] == 1
+    with pytest.raises(SafetyError, match="reference_revision_conflict"):
+        update_reference(db, item.id, verdict="reject", expected_revision=0, actor="tester", confirmed=True)
+
+
+def test_pause_and_cancel_preserve_inflight_but_prevent_next_claim(setup):
+    engine, db, settings = setup
+    run = make(db, settings, texts=[{"content": "a"}, {"content": "b"}]); db.commit()
+    class Pausing(Provider):
+        def moderate_text(self, *args):
+            with Session(engine) as other: control(other, run.id, "pause"); other.commit()
+            return super().moderate_text(*args)
+    p = Pausing(); run_tick(engine, settings, p)
+    assert not run_tick(engine, settings, p)
+    db.expire_all(); assert statistics(db, run.id)["completed"] == 1
+    control(db, run.id, "resume"); db.commit()
+    run_tick(engine, settings, Provider()); db.expire_all()
+    assert statistics(db, run.id)["execution_finished"]
+
+
+def test_finite_retries_record_uncertain_usage_instead_of_fake_free_success(setup):
+    engine, db, settings = setup
+    run = make(db, settings); db.commit()
+    class Failure(Provider):
+        def moderate_text(self, *args): raise SafetyError("provider_transport_uncertain", retryable=True, submitted=True)
+    for _ in range(4):
+        for i in db.scalars(select(SafetyItem)): i.next_attempt_at = ""
+        db.commit(); run_tick(engine, settings, Failure()); db.expire_all()
+    assert len(db.scalars(select(SafetyAttempt)).all()) == 3
+    stats = statistics(db, run.id)
+    assert stats["failed"] == 1 and stats["uncertain_requests"] == 3 and stats["actual_cost"] is None
+
+
+def test_mixed_input_and_silent_truncation_are_rejected(setup):
+    _, db, settings = setup
+    with pytest.raises(SafetyError, match="mixed_safety_inputs"):
+        create_round(db, request_id="bad", name="bad", category="space_image", kind="image",
+            service="postImageCheckByVL", rules=DEFAULT_RULES, asset_ids=[1], texts=[{"content": "text"}],
+            actor="tester", settings=settings)
+    with pytest.raises(SafetyError, match="text_exceeds_service_limit"):
+        make(db, settings, texts=[{"content": "a" * 601}])
+
+
+def test_interrupted_intent_is_not_lost_and_cancelled_round_does_not_resubmit(setup):
+    engine, db, settings = setup
+    run = make(db, settings); db.commit()
+    item = db.scalar(select(SafetyItem)); item.status = 'sending'; item.attempt_count = 1
+    db.add(SafetyAttempt(id='interrupted', item_id=item.id, sequence_no=1, status='sending',
+        usage_state='uncertain', created_at='2026-10-22T00:00:00+00:00'))
+    db.commit(); control(db, run.id, 'cancel'); db.commit()
+    provider = Provider(); run_tick(engine, settings, provider); db.expire_all()
+    assert not run_tick(engine, settings, provider) and provider.calls == 0
+    assert statistics(db, run.id)['uncertain_requests'] == 1
+    assert db.get(SafetyAttempt, 'interrupted').error_code == 'worker_interrupted'
+
+
+def test_image_retry_and_original_delivery_use_frozen_copy(setup):
+    from PIL import Image
+    from app.safety_regression import retry_item
+    from app.stock_writes import freeze_artifact
+    engine, db, settings = setup
+    path = settings.upload_dir / 'original.png'; Image.new('RGB', (8, 8)).save(path)
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    asset = Asset(original_name='image', stored_name=path.name, mime_type='image/png', size_bytes=path.stat().st_size,
+        sha256=digest, category_key='space_image')
+    db.add(asset); db.flush()
+    run = create_round(db, request_id='image', name='image', category='space_image', kind='image', service='postImageCheckByVL',
+        rules=DEFAULT_RULES, asset_ids=[asset.id], texts=[], actor='tester', settings=settings)
+    db.commit()
+    class ImageProvider(Provider):
+        fail = True
+        def moderate_image(self, image_path, request_id, service):
+            assert hashlib.sha256(image_path.read_bytes()).hexdigest() == digest
+            if self.fail: raise SafetyError('provider_http_403')
+            return self.moderate_text('', request_id, service)
+    p = ImageProvider(); run_tick(engine, settings, p); db.expire_all()
+    path.unlink(); item = db.scalar(select(SafetyItem)); retry_item(db, item.id); db.commit()
+    p.fail = False; run_tick(engine, settings, p); db.expire_all()
+    assert item.status == 'completed'
+    descriptor = freeze_artifact(settings, SimpleNamespace(source_kind='safety'), {'file_source':'original'}, item_payload(db, item))
+    assert descriptor['sha256'] == digest
+
+
+def test_four_hundred_sample_statistics_use_batched_reads(setup):
+    import time
+    from sqlalchemy import event
+    engine, db, settings = setup
+    run = make(db, settings, texts=[{'content': f'sample {i}'} for i in range(400)]); db.commit()
+    statements = []
+    def record(*args): statements.append(args[2])
+    event.listen(engine, 'before_cursor_execute', record)
+    start = time.perf_counter()
+    try: result = statistics(db, run.id)
+    finally: event.remove(engine, 'before_cursor_execute', record)
+    assert result['total'] == 400 and result['accuracy'] is None
+    assert len(statements) < 40
+    print({'samples': 400, 'statistics_sql_count': len(statements), 'elapsed_seconds': round(time.perf_counter()-start, 3)})
+
+===== FILE backend/tests/test_safety_api.py =====
+import json
+from sqlalchemy import select
+from tests.test_employee_access import context
+from app.models import Asset, RuntimeOutboxEvent
+from app.module_api import owner
+from app.safety_regression import SafetyRun, SafetyItem, SafetyAttempt, SafetyResult
+from app.stock_exports import now
+
+
+def test_employee_cookie_permissions_foreign_assets_and_machine_surface(context, monkeypatch):
+    sessions, login, _ = context
+    # Fixture-only strings, never actual credentials or a provider call.
+    monkeypatch.setenv('ALIBABA_CLOUD_ACCESS_KEY_ID', 'fixture-id')
+    monkeypatch.setenv('ALIBABA_CLOUD_ACCESS_KEY_SECRET', 'fixture-secret')
+    payload = {'request_id': 'api-safety', 'name': '接口权限测试', 'category_key': 'model_3d_su',
+        'kind': 'text', 'service': 'comment_detection_pro', 'texts': [{'content': 'fixture'}]}
+    viewer, _ = login('viewer', [])
+    assert viewer.post('/api/safety-regressions', json=payload).status_code == 403
+    wrong, _ = login('category_manager', ['space_image'])
+    assert wrong.post('/api/safety-regressions', json=payload).status_code == 403
+    operator, _ = login('category_manager', ['model_3d_su'])
+    response = operator.post('/api/safety-regressions', json=payload)
+    assert response.status_code == 200, response.text
+    assert 'fixture-secret' not in response.text
+    assert operator.post('/api/safety-regressions', json=payload).status_code == 200
+    assert operator.post('/api/safety-regressions', json=payload | {'incremental_enabled': True}).status_code == 422
+    assert operator.post('/api/safety-regressions', json=payload, headers={'Origin': 'https://attacker.invalid'}).status_code == 403
+    assert owner('/api/safety-regressions') == 'stock'
+    with sessions() as db:
+        item = db.scalar(select(SafetyItem))
+        aid = item.asset_id
+        asset = db.get(Asset, aid); asset.category_key = 'space_image'; db.commit()
+    assert operator.post('/api/safety-regressions/api-safety/control/pause').status_code == 403
+    assert viewer.get('/api/safety-regressions/api-safety').status_code == 200
+    monkeypatch.delenv('ALIBABA_CLOUD_ACCESS_KEY_SECRET')
+    assert not viewer.get('/api/safety-regressions/capabilities').json()['configured']
+    assert operator.post('/api/safety-regressions', json=payload | {'request_id': 'unconfigured'}).status_code == 503
+
+
+def test_safety_result_snapshot_and_manual_priority_integrate_with_writer(context, monkeypatch):
+    from app.stock_writes import create_plan, confirm_plan, scan_plan, StockWriteItem
+    from app.safety_regression import create_round, review_item, item_payload
+    from app.safety_rules import DEFAULT_RULES
+    from app.config import get_settings
+    sessions, login, _ = context
+    operator, user_id = login('product_rd', [])
+    from app.models import User
+    with sessions() as db:
+        user = db.get(User, user_id)
+        run = create_round(db, request_id='write-safety', name='写出安全审核', category='model_3d_su', kind='text',
+            service='comment_detection_pro', rules=DEFAULT_RULES, asset_ids=[], texts=[{'content': 'fixture'}],
+            actor=user.username, settings=get_settings())
+        item = db.scalar(select(SafetyItem)); item.status = 'completed'; item.attempt_count = 1
+        a = SafetyAttempt(id='safety-a', item_id=item.id, sequence_no=1, status='completed',
+            raw_json='{"Code":200,"Data":{"RiskLevel":"none","Result":[{"Label":"nonLabel"}]}}', created_at=now(), usage_state='confirmed')
+        db.add(a); db.flush()
+        result = SafetyResult(id='safety-result', item_id=item.id, attempt_id=a.id, rule_revision=1,
+            result_json='{"verdict":"pass","reasons":[]}', created_at=now())
+        db.add(result); db.flush()
+        plan = create_plan(db, source_kind='safety', run_id=run.id, selection={}, result_mode='effective', actor=user.username,
+            targets=[{'name':'fixture','url':'http://192.168.1.31:9988/receive'}]); db.flush()
+        confirm_plan(db, plan.id, expected_revision=plan.revision, actor=user.username)
+        review_item(db,item.id,result_id=result.id,expected_revision=0,patch={'verdict':'reject'},reason='人工检查',actor=user.username)
+        scan_plan(db,plan.id); db.flush()
+        rows = db.scalars(select(StockWriteItem).order_by(StockWriteItem.id)).all()
+        assert len(rows)==2 and rows[-1].status=='queued' and rows[-1].human_revision==1
+        doc=json.loads(rows[-1].document_json)
+        assert doc['effective']['verdict']=='reject' and doc['raw']['verdict']=='pass'
+        assert doc['result_configuration']['rule_revision']==1
+        db.commit()
+    assert operator.get('/api/stock-writes/plans?source_kind=safety&run_id=write-safety').status_code==200

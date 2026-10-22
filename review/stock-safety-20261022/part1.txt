@@ -1,0 +1,754 @@
+请对阿里图片/文本安全审核存量回归做一轮独立代码复审，固定候选 351143a3da0b144c2be550642c831182fe80317a（未部署、无真实付费调用）。要求：图片或文本分轮；样本/输入/服务参数冻结；规则可映射重算但原始响应和历史保留；人工确认字段最高，未确认字段沿用AI；后台持久化/暂停取消保留在途/三次有限重试并记录计费不确定；手动补跑；原始与有效结果/人工参考答案分开；无依据不报准确率。复用通用导出和多下游写出，不触碰增量开关、真实业务表、机器/MCP权限。人工纠偏可选。默认高风险reject、中低review、none pass；未知/矛盾返回不得默认为pass。规则labels只增加严格程度，放宽应调risk_levels。SDK3.6.8使用官方call_api保留新字段，运行时关闭隐藏重试；内网图片使用官方临时OSS上传，短期凭据不持久化。官方服务内部策略版本不可冻结，已明确未知。凭据尚未提供；本地模拟验证不是供应商付费验证。目前24项新测试通过，400合成样本统计27条SQL约0.026秒，33项旧导出写出集成通过；当前追加历史接口和文件缓存变动正做Linux/MySQL隔离验证。请找真实可达P0/P1反例，给触发、后果、最小修法和必要测试；不要泛泛重构。明确实际读过哪些文件，不能访问的全库请注明，不能声称全库逐行通过。我分两段贴源码，请第一段仅回“收到，等第二段”，第二段后一次性输出最终复审。
+
+===== FILE backend/app/safety_rules.py =====
+"""Deterministic, versionable interpretation of Ali moderation responses.
+
+The unmodified provider body remains separate from this interpretation. A
+missing/unknown risk level can never acquire a passing verdict by accident.
+"""
+from __future__ import annotations
+
+import copy
+import math
+
+VERDICTS = {"pass", "reject", "review"}
+RISK_LEVELS = {"high", "medium", "low", "none"}
+DEFAULT_RULES = {
+    "risk_levels": {"high": "reject", "medium": "review", "low": "review", "none": "pass"},
+    "labels": {},
+}
+SEVERITY = {"pass": 0, "review": 1, "reject": 2}
+
+
+class SafetyError(ValueError):
+    def __init__(self, code, *, retryable=False, raw=None, submitted=False):
+        self.code = code
+        self.retryable = retryable
+        self.raw = raw
+        self.submitted = submitted
+        super().__init__(code)
+
+
+def validate_rules(rules):
+    if not isinstance(rules, dict) or set(rules) != {"risk_levels", "labels"}:
+        raise SafetyError("invalid_safety_rules")
+    levels, labels = rules["risk_levels"], rules["labels"]
+    if not isinstance(levels, dict) or set(levels) != RISK_LEVELS or any(not isinstance(v, str) or v not in VERDICTS for v in levels.values()):
+        raise SafetyError("invalid_risk_mapping")
+    if not isinstance(labels, dict) or len(labels) > 200:
+        raise SafetyError("invalid_label_rules")
+    for label, rule in labels.items():
+        if not isinstance(label, str) or not label or len(label) > 100 or not isinstance(rule, dict):
+            raise SafetyError("invalid_label_rule")
+        if set(rule) != {"verdict", "min_confidence"} or not isinstance(rule["verdict"], str) or rule["verdict"] not in VERDICTS:
+            raise SafetyError("invalid_label_rule")
+        score = rule["min_confidence"]
+        if type(score) not in (int, float) or not math.isfinite(score) or not 0 <= score <= 100:
+            raise SafetyError("invalid_confidence_threshold")
+    return copy.deepcopy(rules)
+
+
+def field(obj, *names, default=None):
+    present = [obj[n] for n in names if n in obj]
+    if present and any(value != present[0] for value in present[1:]):
+        raise SafetyError("conflicting_provider_fields")
+    return present[0] if present else default
+
+
+def interpret(raw, rules, *, data_id=None):
+    rules = validate_rules(rules)
+    if not isinstance(raw, dict):
+        raise SafetyError("invalid_provider_body")
+    code = field(raw, "Code", "code")
+    if type(code) is not int or code != 200:
+        raise SafetyError("provider_error_" + (str(code) if type(code) is int else "unknown"),
+                          raw=raw, retryable=code in {429, 500, 502, 503, 504, 581, 588}, submitted=True)
+    data = field(raw, "Data", "data")
+    if not isinstance(data, dict):
+        raise SafetyError("invalid_provider_data", raw=raw, submitted=True)
+    echoed = field(data, "DataId", "dataId")
+    if data_id is not None and echoed is not None and echoed != data_id:
+        raise SafetyError("provider_data_id_mismatch", raw=raw, submitted=True)
+    level = field(data, "RiskLevel", "riskLevel")
+    entries = field(data, "Result", "result")
+    guards, reasons, decisions = [], [], []
+    if not isinstance(level, str) or level not in RISK_LEVELS:
+        guards.append("unknown_or_missing_risk_level")
+    else:
+        decisions.append(rules["risk_levels"][level])
+    if not isinstance(entries, list) or not entries:
+        guards.append("missing_detection_results")
+        entries = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            guards.append("invalid_detection_result")
+            continue
+        label = field(entry, "Label", "label")
+        score = field(entry, "Confidence", "confidence")
+        if not isinstance(label, str) or not label:
+            guards.append("missing_label")
+            continue
+        valid_score = type(score) in (int, float) and math.isfinite(score) and 0 <= score <= 100
+        if score is not None and not valid_score:
+            guards.append("invalid_confidence")
+        reason = {"label": label, "confidence": score,
+                  "description": field(entry, "Description", "description", default=""),
+                  "risk_words": field(entry, "RiskWords", "Riskwords", "riskWords"),
+                  "risk_positions": field(entry, "RiskPositions", "riskPositions"),
+                  "customized_hit": field(entry, "CustomizedHit", "customizedHit")}
+        reasons.append(reason)
+        if label in rules["labels"]:
+            rule = rules["labels"][label]
+            if valid_score and score >= rule["min_confidence"]:
+                decisions.append(rule["verdict"])
+            elif not valid_score:
+                guards.append("label_threshold_requires_confidence")
+        if level == "none" and label not in {"nonLabel", "nonLabel_lib", "ugc"}:
+            # A contradictory body is not silently trusted as clean content.
+            guards.append("risk_label_with_none_level")
+    if guards:
+        decisions.append("review")
+    return {"verdict": max(decisions or ["review"], key=SEVERITY.get),
+            "risk_level": level, "reasons": reasons, "guards": sorted(set(guards)),
+            "request_id": field(raw, "RequestId", "requestId"), "data_id": echoed}
+
+===== FILE backend/app/safety_provider.py =====
+"""Ali Green 2022-03-02 adapter; credentials stay exclusively server-side.
+
+Use the official SDK's raw call_api to retain newly added response fields that
+the generated typed response wrappers would otherwise discard. dataId is a
+correlation ID, not a promise of provider-side billing idempotency.
+"""
+from __future__ import annotations
+
+import json
+import os
+import re
+from pathlib import Path
+from urllib.parse import urlsplit
+
+from .safety_rules import SafetyError, field
+
+REGIONS = {"cn-shanghai", "cn-beijing", "cn-hangzhou", "cn-shenzhen"}
+TEXT_SERVICES = {"comment_detection_pro": 600, "chat_detection_pro": 600,
+                 "nickname_detection_pro": 600, "ad_compliance_detection_pro": 600,
+                 "ugc_moderation_byllm_pro": 2000, "ugc_moderation_byllm": 2000}
+IMAGE_SERVICES = {"postImageCheckByVL"}
+MAX_IMAGE_BYTES = 20 * 1024 * 1024
+
+
+def provider_configuration():
+    return {"configured": bool(os.environ.get("ALIBABA_CLOUD_ACCESS_KEY_ID") and
+                                os.environ.get("ALIBABA_CLOUD_ACCESS_KEY_SECRET")),
+            "region": os.environ.get("ALIYUN_SAFETY_REGION", "cn-shanghai"),
+            "text_services": TEXT_SERVICES, "image_services": sorted(IMAGE_SERVICES),
+            "provider_policy_version": None, "actual_unit_price": None}
+
+
+def _runtime():
+    from darabonba.runtime import RuntimeOptions
+    return RuntimeOptions(autoretry=False, max_attempts=1, connect_timeout=10000,
+                          read_timeout=60000, ignore_ssl=False)
+
+
+class AliSafetyProvider:
+    def __init__(self, *, client=None, region=None, upload=None):
+        self.region = region or provider_configuration()["region"]
+        if self.region not in REGIONS:
+            raise SafetyError("unsupported_aliyun_region")
+        if client is None:
+            if not provider_configuration()["configured"]:
+                raise SafetyError("aliyun_credentials_unconfigured")
+            from alibabacloud_green20220302.client import Client
+            from alibabacloud_tea_openapi.utils_models import Config
+            self.client = Client(Config(
+                access_key_id=os.environ["ALIBABA_CLOUD_ACCESS_KEY_ID"],
+                access_key_secret=os.environ["ALIBABA_CLOUD_ACCESS_KEY_SECRET"],
+                security_token=os.environ.get("ALIBABA_CLOUD_SECURITY_TOKEN"),
+                endpoint=f"green-cip.{self.region}.aliyuncs.com", region_id=self.region))
+        else:
+            self.client = client
+        self.upload = upload or self._upload
+
+    def _call(self, action, body):
+        from alibabacloud_tea_openapi.utils_models import Params, OpenApiRequest
+        params = Params(action=action, version="2022-03-02", protocol="HTTPS", pathname="/",
+                        method="POST", auth_type="AK", style="RPC", req_body_type="formData", body_type="json")
+        submitted = action in {"ImageModeration", "TextModerationPlus"}
+        try:
+            response = self.client.call_api(params, OpenApiRequest(body=body), _runtime())
+        except Exception as exc:
+            # Do not persist SDK exception strings/headers: they can contain AKs,
+            # signed URLs or user content. The attempt ledger stores this code.
+            status = getattr(exc, "status_code", None)
+            if status in {400, 401, 403, 404}:
+                raise SafetyError("provider_http_" + str(status), submitted=submitted) from None
+            raise SafetyError("provider_transport_uncertain", retryable=True, submitted=submitted) from None
+        raw = response.get("body") if isinstance(response, dict) else None
+        if not isinstance(raw, dict):
+            raise SafetyError("invalid_provider_body", submitted=submitted)
+        return raw
+
+    def moderate_text(self, content, request_id, service):
+        if service not in TEXT_SERVICES:
+            raise SafetyError("unsupported_text_service")
+        self._request_id(request_id)
+        if not isinstance(content, str) or not content.strip():
+            raise SafetyError("empty_text")
+        if len(content) > TEXT_SERVICES[service]:
+            raise SafetyError("text_exceeds_service_limit")
+        return self._call("TextModerationPlus", {"Service": service,
+            "ServiceParameters": json.dumps({"content": content, "dataId": request_id}, ensure_ascii=False)})
+
+    @staticmethod
+    def _request_id(request_id):
+        if not isinstance(request_id, str) or not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", request_id):
+            raise SafetyError("invalid_safety_request_id")
+
+    def moderate_image(self, path: Path, request_id, service):
+        from PIL import Image, UnidentifiedImageError
+        if service not in IMAGE_SERVICES:
+            raise SafetyError("unsupported_image_service")
+        self._request_id(request_id)
+        try:
+            if not 0 < path.stat().st_size <= MAX_IMAGE_BYTES:
+                raise SafetyError("invalid_image_size")
+            with Image.open(path) as image:
+                if image.width > 16384 or image.height > 16384 or image.width * image.height > 250_000_000:
+                    raise SafetyError("image_dimensions_exceeded")
+                if image.format not in {"JPEG", "PNG", "WEBP", "BMP", "GIF", "TIFF"}:
+                    raise SafetyError("unsupported_image_format")
+                suffix = {"JPEG": "jpg", "PNG": "png", "WEBP": "webp", "BMP": "bmp", "GIF": "gif", "TIFF": "tiff"}[image.format]
+                image.verify()
+        except (OSError, UnidentifiedImageError, Image.DecompressionBombError):
+            raise SafetyError("invalid_image") from None
+        token_raw = self._call("DescribeUploadToken", {})
+        if field(token_raw, "Code", "code") != 200:
+            raise SafetyError("upload_token_unavailable", retryable=True)
+        token = field(token_raw, "Data", "data")
+        if not isinstance(token, dict):
+            raise SafetyError("invalid_upload_token")
+        endpoint = field(token, "OssInternetEndPoint", "ossInternetEndPoint")
+        bucket = field(token, "BucketName", "bucketName")
+        prefix = field(token, "FileNamePrefix", "fileNamePrefix")
+        parsed = urlsplit(endpoint or "")
+        if (parsed.scheme != "https" or parsed.username or parsed.password or parsed.port or parsed.path not in {"", "/"}
+            or parsed.query or parsed.fragment or not re.fullmatch(r"oss-cn-[a-z0-9-]+\.aliyuncs\.com", parsed.hostname or "")
+            or not isinstance(bucket, str) or not re.fullmatch(r"[a-z0-9][a-z0-9-]{1,61}[a-z0-9]", bucket)
+            or not isinstance(prefix, str) or not prefix or ".." in prefix or prefix.startswith("/") or len(prefix) > 500):
+            raise SafetyError("invalid_upload_token")
+        object_name = prefix.rstrip("/") + "/" + request_id + "." + suffix
+        try:
+            self.upload(token=token, endpoint=endpoint, bucket=bucket, object_name=object_name, path=path)
+        except SafetyError:
+            raise
+        except Exception:
+            raise SafetyError("temporary_upload_failed", retryable=True) from None
+        return self._call("ImageModeration", {"Service": service, "ServiceParameters": json.dumps({
+            "ossBucketName": bucket, "ossObjectName": object_name, "dataId": request_id})})
+
+    @staticmethod
+    def _upload(*, token, endpoint, bucket, object_name, path):
+        import oss2
+        auth = oss2.StsAuth(field(token, "AccessKeyId", "accessKeyId"),
+                           field(token, "AccessKeySecret", "accessKeySecret"),
+                           field(token, "SecurityToken", "securityToken"))
+        oss2.Bucket(auth, endpoint, bucket, connect_timeout=30).put_object_from_file(object_name, str(path))
+
+===== FILE backend/app/safety_regression.py =====
+"""Durable image OR text moderation rounds, isolated from business writes."""
+from __future__ import annotations
+
+import hashlib
+import json
+import re
+import uuid
+from pathlib import Path
+from sqlalchemy import ForeignKey, Integer, String, Text, UniqueConstraint, select, func
+from sqlalchemy.orm import Mapped, Session, mapped_column
+from .database import Base, reserve_sqlite_immediate_transaction
+from .safety_provider import TEXT_SERVICES, IMAGE_SERVICES, REGIONS, provider_configuration
+from .safety_rules import SafetyError, VERDICTS, validate_rules, interpret
+from .stock_exports import canonical, now
+
+
+class SafetyRun(Base):
+    __tablename__ = "safety_regression_runs"
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    name: Mapped[str] = mapped_column(String(160))
+    category_key: Mapped[str] = mapped_column(String(40), index=True)
+    status: Mapped[str] = mapped_column(String(24), index=True)
+    config_json: Mapped[str] = mapped_column(Text)
+    request_hash: Mapped[str] = mapped_column(String(64))
+    rule_revision: Mapped[int] = mapped_column(Integer, default=1)
+    created_by: Mapped[str] = mapped_column(String(80))
+    created_at: Mapped[str] = mapped_column(String(40))
+    last_dispatched: Mapped[str] = mapped_column(String(40), default="", server_default="")
+
+
+class SafetyRuleVersion(Base):
+    __tablename__ = "safety_rule_versions"
+    __table_args__ = (UniqueConstraint("run_id", "revision", name="uq_safety_rule_revision"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    run_id: Mapped[str] = mapped_column(ForeignKey("safety_regression_runs.id", ondelete="RESTRICT"), index=True)
+    revision: Mapped[int] = mapped_column(Integer)
+    rules_json: Mapped[str] = mapped_column(Text)
+    actor: Mapped[str] = mapped_column(String(80))
+    created_at: Mapped[str] = mapped_column(String(40))
+
+
+class SafetyItem(Base):
+    __tablename__ = "safety_regression_items"
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    run_id: Mapped[str] = mapped_column(ForeignKey("safety_regression_runs.id", ondelete="RESTRICT"), index=True)
+    asset_id: Mapped[int] = mapped_column(ForeignKey("assets.id", ondelete="RESTRICT"), index=True)
+    original_name: Mapped[str] = mapped_column(String(500))
+    input_snapshot_json: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(24), index=True)
+    error_code: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0)
+    next_attempt_at: Mapped[str] = mapped_column(String(40), default="", server_default="")
+
+
+class SafetyAttempt(Base):
+    __tablename__ = "safety_attempts"
+    __table_args__ = (UniqueConstraint("item_id", "sequence_no", name="uq_safety_attempt_sequence"),)
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    item_id: Mapped[str] = mapped_column(ForeignKey("safety_regression_items.id", ondelete="RESTRICT"), index=True)
+    sequence_no: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(24), index=True)
+    raw_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error_code: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    usage_state: Mapped[str] = mapped_column(String(24), default="not_submitted")
+    created_at: Mapped[str] = mapped_column(String(40))
+    finished_at: Mapped[str | None] = mapped_column(String(40), nullable=True)
+
+
+class SafetyResult(Base):
+    __tablename__ = "safety_results"
+    __table_args__ = (UniqueConstraint("attempt_id", "rule_revision", name="uq_safety_result_rule"),)
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    item_id: Mapped[str] = mapped_column(ForeignKey("safety_regression_items.id", ondelete="RESTRICT"), index=True)
+    attempt_id: Mapped[str] = mapped_column(ForeignKey("safety_attempts.id", ondelete="RESTRICT"), index=True)
+    rule_revision: Mapped[int] = mapped_column(Integer)
+    result_json: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[str] = mapped_column(String(40))
+
+
+class SafetyReview(Base):
+    __tablename__ = "safety_reviews"
+    __table_args__ = (UniqueConstraint("item_id", "revision", name="uq_safety_review_revision"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    item_id: Mapped[str] = mapped_column(ForeignKey("safety_regression_items.id", ondelete="RESTRICT"), index=True)
+    result_id: Mapped[str] = mapped_column(ForeignKey("safety_results.id", ondelete="RESTRICT"))
+    revision: Mapped[int] = mapped_column(Integer)
+    patch_json: Mapped[str] = mapped_column(Text)
+    reason: Mapped[str] = mapped_column(Text)
+    actor: Mapped[str] = mapped_column(String(80))
+    created_at: Mapped[str] = mapped_column(String(40))
+
+
+class SafetyReference(Base):
+    __tablename__ = "safety_references"
+    __table_args__ = (UniqueConstraint("item_id", "revision", name="uq_safety_reference_revision"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    item_id: Mapped[str] = mapped_column(ForeignKey("safety_regression_items.id", ondelete="RESTRICT"), index=True)
+    revision: Mapped[int] = mapped_column(Integer)
+    verdict: Mapped[str] = mapped_column(String(24))
+    actor: Mapped[str] = mapped_column(String(80))
+    created_at: Mapped[str] = mapped_column(String(40))
+
+
+class SafetyStatistics(Base):
+    __tablename__ = "safety_statistics"
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    run_id: Mapped[str] = mapped_column(ForeignKey("safety_regression_runs.id", ondelete="RESTRICT"), index=True)
+    statistics_json: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[str] = mapped_column(String(40))
+
+
+def locked_run(db, run_id):
+    reserve_sqlite_immediate_transaction(db)
+    row = db.scalar(select(SafetyRun).where(SafetyRun.id == run_id).with_for_update().execution_options(populate_existing=True))
+    if row is None: raise SafetyError("safety_round_not_found")
+    return row
+
+
+def create_round(db, *, request_id, name, category, kind, service, rules, asset_ids, texts, actor, settings):
+    from .models import Asset
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", request_id): raise SafetyError("invalid_request_id")
+    if not name.strip() or len(name) > 160: raise SafetyError("invalid_round_name")
+    if kind not in {"text", "image"}: raise SafetyError("invalid_input_kind")
+    if kind == "image" and texts or kind == "text" and texts and asset_ids: raise SafetyError("mixed_safety_inputs")
+    if service not in (TEXT_SERVICES if kind == "text" else IMAGE_SERVICES): raise SafetyError("unsupported_service")
+    rules = validate_rules(rules)
+    region = provider_configuration()["region"]
+    if region not in REGIONS: raise SafetyError("unsupported_aliyun_region")
+    if not 0 < len(asset_ids) + len(texts) <= 10000 or len(set(asset_ids)) != len(asset_ids):
+        raise SafetyError("invalid_sample_count")
+    for text in texts:
+        if not isinstance(text.get("content"), str) or not text["content"].strip(): raise SafetyError("empty_text")
+        if len(text["content"]) > TEXT_SERVICES[service]: raise SafetyError("text_exceeds_service_limit")
+        if text.get("reference") is not None and text["reference"] not in VERDICTS: raise SafetyError("invalid_reference")
+    request_hash = hashlib.sha256(canonical(dict(name=name, category=category, kind=kind, service=service,
+        rules=rules, asset_ids=asset_ids, texts=texts, actor=actor, region=region)).encode()).hexdigest()
+    reserve_sqlite_immediate_transaction(db)
+    old = db.get(SafetyRun, request_id)
+    if old:
+        if old.request_hash != request_hash: raise SafetyError("request_conflict")
+        return old
+    samples = []
+    for asset_id in asset_ids:
+        asset = db.get(Asset, asset_id)
+        if not asset or asset.category_key != category: raise SafetyError("sample_category_mismatch")
+        if (kind == "image" and not asset.mime_type.startswith("image/")) or (kind == "text" and asset.mime_type != "text/plain"):
+            raise SafetyError("sample_type_mismatch")
+        samples.append((asset, {k: getattr(asset, k) for k in
+            ("stored_name", "storage_backend", "source_uri", "sha256", "mime_type", "size_bytes")}, None))
+    for ordinal, text in enumerate(texts, 1):
+        content = text["content"].encode("utf-8"); digest = hashlib.sha256(content).hexdigest()
+        stored_name = "safety-text-" + uuid.uuid4().hex + ".txt"
+        settings.upload_dir.mkdir(parents=True, exist_ok=True)
+        with (settings.upload_dir / stored_name).open("xb") as file: file.write(content)
+        asset = Asset(original_name=text.get("name") or f"文本 {ordinal}", stored_name=stored_name,
+            mime_type="text/plain", size_bytes=len(content), sha256=digest, category_key=category)
+        db.add(asset); db.flush()
+        samples.append((asset, {"content": text["content"], "sha256": digest, "mime_type": "text/plain",
+            "stored_name": stored_name, "storage_backend": "local", "source_uri": None, "size_bytes": len(content)}, text.get("reference")))
+    run = SafetyRun(id=request_id, name=name, category_key=category, status="running", request_hash=request_hash,
+        config_json=canonical({"kind": kind, "service": service, "region": region, "provider": "aliyun-green-20220302",
+            "provider_policy_version": None, "initial_rules": rules}), rule_revision=1, created_by=actor, created_at=now())
+    db.add(run); db.flush()
+    db.add(SafetyRuleVersion(run_id=run.id, revision=1, rules_json=canonical(rules), actor=actor, created_at=now()))
+    for asset, snapshot, reference in samples:
+        item = SafetyItem(id=uuid.uuid4().hex, run_id=run.id, asset_id=asset.id, original_name=asset.original_name,
+            input_snapshot_json=canonical(snapshot), status="queued", attempt_count=0)
+        db.add(item); db.flush()
+        if reference: db.add(SafetyReference(item_id=item.id, revision=1, verdict=reference, actor=actor, created_at=now()))
+    db.flush(); return run
+
+
+def latest(db, model, item_id, order):
+    return db.scalar(select(model).where(model.item_id == item_id).order_by(order.desc()).limit(1))
+
+
+def item_payloads(db, items, run=None):
+    """Bounded batch reads keep 400-sample polling independent of N+1 SQL."""
+    if not items: return []
+    run = run or db.get(SafetyRun, items[0].run_id)
+    ids = [item.id for item in items]
+    seq = select(SafetyAttempt.item_id, func.max(SafetyAttempt.sequence_no).label('seq')).where(
+        SafetyAttempt.item_id.in_(ids)).group_by(SafetyAttempt.item_id).subquery()
+    attempts = {a.item_id: a for a in db.scalars(select(SafetyAttempt).join(seq,
+        (seq.c.item_id == SafetyAttempt.item_id) & (seq.c.seq == SafetyAttempt.sequence_no)))}
+    results = {r.item_id: r for r in db.scalars(select(SafetyResult).where(
+        SafetyResult.attempt_id.in_([a.id for a in attempts.values()]), SafetyResult.rule_revision == run.rule_revision))}
+    reviews = {}
+    for review in db.scalars(select(SafetyReview).where(SafetyReview.item_id.in_(ids)).order_by(SafetyReview.revision)):
+        reviews.setdefault(review.item_id, []).append(review)
+    refs = {}
+    for reference in db.scalars(select(SafetyReference).where(SafetyReference.item_id.in_(ids)).order_by(SafetyReference.revision)):
+        refs[reference.item_id] = reference
+    rules = db.scalar(select(SafetyRuleVersion.rules_json).where(SafetyRuleVersion.run_id == run.id,
+        SafetyRuleVersion.revision == run.rule_revision))
+    configuration = {"provider": json.loads(run.config_json), "rule_revision": run.rule_revision, "rules": json.loads(rules)}
+    documents = []
+    for item in items:
+        attempt, result, reference = attempts.get(item.id), results.get(item.id), refs.get(item.id)
+        history = reviews.get(item.id, [])
+        raw = json.loads(result.result_json) if result else None
+        merged = {}
+        for review in history: merged.update(json.loads(review.patch_json))
+        effective = {**(raw or {}), **merged}
+        review = history[-1] if history else None
+        documents.append({"item_id": item.id, "asset_id": item.asset_id, "name": item.original_name, "status": item.status,
+            "input": json.loads(item.input_snapshot_json), "error": item.error_code,
+            "attempt_count": item.attempt_count, "latest_attempt_id": attempt.id if attempt else None,
+            "result_id": result.id if result else None, "rule_revision": run.rule_revision,
+            "result_configuration": configuration,
+            "provider_raw": json.loads(attempt.raw_json) if attempt and attempt.raw_json else None,
+            "raw": raw, "effective": effective if raw is not None or merged else None,
+            "human": {"revision": review.revision, "patch": merged, "reason": review.reason,
+                "actor": review.actor, "created_at": review.created_at} if review else None,
+            "reference": {"revision": reference.revision, "verdict": reference.verdict,
+                "actor": reference.actor, "created_at": reference.created_at} if reference else None})
+    return documents
+
+
+def item_payload(db, item):
+    return item_payloads(db, [item])[0]
+
+
+def review_item(db, item_id, *, result_id, expected_revision, patch, reason, actor):
+    item = db.get(SafetyItem, item_id)
+    if item is None: raise SafetyError("safety_item_not_found")
+    locked_run(db, item.run_id)
+    doc = item_payload(db, item)
+    if result_id != doc["result_id"] or result_id is None: raise SafetyError("result_version_conflict")
+    if expected_revision != (doc["human"]["revision"] if doc["human"] else 0): raise SafetyError("review_revision_conflict")
+    if not isinstance(patch, dict) or not patch or set(patch) - {"verdict", "reasons"}: raise SafetyError("invalid_review_patch")
+    if "verdict" in patch and (not isinstance(patch["verdict"], str) or patch["verdict"] not in VERDICTS): raise SafetyError("invalid_verdict")
+    if "reasons" in patch and (not isinstance(patch["reasons"], list) or len(patch["reasons"]) > 100 or
+            any(not isinstance(r, str) or len(r) > 1000 for r in patch["reasons"])): raise SafetyError("invalid_review_reasons")
+    if not reason.strip() or len(reason) > 4000: raise SafetyError("review_reason_required")
+    row = SafetyReview(item_id=item_id, result_id=result_id, revision=expected_revision + 1,
+        patch_json=canonical(patch), reason=reason, actor=actor, created_at=now())
+    db.add(row); db.flush(); return row
+
+
+def update_reference(db, item_id, *, verdict, expected_revision, actor, confirmed):
+    item = db.get(SafetyItem, item_id)
+    if item is None: raise SafetyError("safety_item_not_found")
+    locked_run(db, item.run_id)
+    reference = latest(db, SafetyReference, item_id, SafetyReference.revision)
+    if expected_revision != (reference.revision if reference else 0): raise SafetyError("reference_revision_conflict")
+    if not confirmed or verdict not in VERDICTS: raise SafetyError("reference_confirmation_required")
+    archive_statistics(db, item.run_id)
+    row = SafetyReference(item_id=item_id, revision=expected_revision + 1, verdict=verdict, actor=actor, created_at=now())
+    db.add(row); db.flush(); return row
+
+
+def control(db, run_id, action):
+    run = locked_run(db, run_id)
+    if action == "pause" and run.status in {"running", "paused"}: run.status = "paused"
+    elif action == "resume" and run.status in {"paused", "running"}: run.status = "running"
+    elif action == "cancel": run.status = "cancelled"
+    else: raise SafetyError("invalid_round_action")
+    return run
+
+
+def retry_item(db, item_id):
+    item = db.get(SafetyItem, item_id)
+    if item is None: raise SafetyError("safety_item_not_found")
+    run = locked_run(db, item.run_id)
+    if run.status == "cancelled" or item.status != "failed": raise SafetyError("item_not_retryable")
+    item.status = "queued"; item.error_code = None; item.next_attempt_at = ""
+    # Each explicit supplement permits one more bounded group of three attempts.
+    if run.status == "completed": run.status = "running"
+
+
+def recompute(db, run_id, *, rules, expected_revision, actor):
+    rules = validate_rules(rules); run = locked_run(db, run_id)
+    if run.rule_revision != expected_revision: raise SafetyError("rule_revision_conflict")
+    archive_statistics(db, run_id)
+    run.rule_revision += 1
+    db.add(SafetyRuleVersion(run_id=run_id, revision=run.rule_revision, rules_json=canonical(rules), actor=actor, created_at=now()))
+    for item in db.scalars(select(SafetyItem).where(SafetyItem.run_id == run_id)):
+        attempt = latest(db, SafetyAttempt, item.id, SafetyAttempt.sequence_no)
+        if not attempt or attempt.status != "completed" or not attempt.raw_json: continue
+        result = interpret(json.loads(attempt.raw_json), rules, data_id=attempt.id)
+        db.add(SafetyResult(id=uuid.uuid4().hex, item_id=item.id, attempt_id=attempt.id,
+            rule_revision=run.rule_revision, result_json=canonical(result), created_at=now()))
+    db.flush(); return run
+
+
+def statistics(db, run_id):
+    counts = {"total": 0, "completed": 0, "failed": 0, "reviewed": 0,
+              "reference_count": 0, "raw_matches": 0, "effective_matches": 0}
+    verdicts = {v: 0 for v in VERDICTS}
+    for _, doc in source_rows(db, run_id):
+        counts["total"] += 1
+        if doc["status"] in {"completed", "failed"}: counts[doc["status"]] += 1
+        counts["reviewed"] += bool(doc["human"])
+        effective = doc["effective"] or {}; raw = doc["raw"] or {}
+        if effective.get("verdict") in VERDICTS: verdicts[effective["verdict"]] += 1
+        if doc["reference"] and raw.get("verdict") in VERDICTS:
+            counts["reference_count"] += 1
+            counts["raw_matches"] += raw["verdict"] == doc["reference"]["verdict"]
+            counts["effective_matches"] += effective.get("verdict") == doc["reference"]["verdict"]
+    usage = dict(db.execute(select(SafetyAttempt.usage_state, func.count()).join(SafetyItem)
+        .where(SafetyItem.run_id == run_id).group_by(SafetyAttempt.usage_state)).all())
+    total = counts["reference_count"]
+    return {**counts, "verdicts": verdicts, "accuracy": counts["raw_matches"] / total if total else None,
+        "effective_accuracy": counts["effective_matches"] / total if total else None,
+        "execution_finished": counts["completed"] + counts["failed"] == counts["total"],
+        "confirmed_requests": usage.get("confirmed", 0), "uncertain_requests": usage.get("uncertain", 0),
+        "expected_requests": counts["total"], "actual_cost": None, "estimated_cost": None,
+        "rule_revision": db.get(SafetyRun, run_id).rule_revision, "computed_at": now()}
+
+
+def archive_statistics(db, run_id):
+    db.add(SafetyStatistics(id=uuid.uuid4().hex, run_id=run_id, statistics_json=canonical(statistics(db, run_id)), created_at=now()))
+
+
+def source_rows(db, run_id, item_id=None):
+    run = db.get(SafetyRun, run_id)
+    if not run: return
+    q = select(SafetyItem).where(SafetyItem.run_id == run_id).order_by(SafetyItem.id)
+    if item_id is not None: q = q.where(SafetyItem.id == str(item_id))
+    cursor = ""
+    while True:
+        rows = db.scalars(q.where(SafetyItem.id > cursor).limit(100)).all()
+        if not rows: return
+        for document in item_payloads(db, rows, run): yield run, document
+        cursor = rows[-1].id
+
+===== FILE backend/app/safety_worker.py =====
+"""Opt-in, durable, round-robin moderation worker; no business delivery calls."""
+from contextlib import contextmanager
+from datetime import datetime, timezone, timedelta
+import hashlib
+import json
+import logging
+import os
+import re
+import shutil
+from pathlib import Path
+from types import SimpleNamespace
+import uuid
+from sqlalchemy import select, text, create_engine
+from sqlalchemy.orm import Session
+from sqlalchemy.pool import NullPool
+from .safety_rules import SafetyError, interpret
+from .safety_regression import (SafetyRun, SafetyItem, SafetyAttempt, SafetyResult, SafetyRuleVersion,
+    locked_run, latest, now, canonical)
+from .safety_provider import MAX_IMAGE_BYTES, AliSafetyProvider, TEXT_SERVICES
+
+
+@contextmanager
+def safety_lock(engine, root):
+    if engine.dialect.name == "mysql":
+        lock_engine = create_engine(engine.url, poolclass=NullPool)
+        try:
+            with lock_engine.connect() as connection:
+                acquired = connection.execute(text("SELECT GET_LOCK('stock-safety-worker',0)")).scalar() == 1
+                def checkpoint():
+                    if connection.execute(text("SELECT IS_USED_LOCK('stock-safety-worker')=CONNECTION_ID()")).scalar() != 1:
+                        raise RuntimeError("safety worker lost lock")
+                try: yield checkpoint if acquired else None
+                finally:
+                    if acquired and not connection.invalidated:
+                        try: connection.execute(text("SELECT RELEASE_LOCK('stock-safety-worker')"))
+                        except Exception: pass
+        finally: lock_engine.dispose()
+    elif engine.dialect.name == "sqlite":
+        from .cover_worker import scheduler_lock
+        with scheduler_lock(engine, Path(root) / "stock-safety-worker") as acquired:
+            yield (lambda: None) if acquired else None
+    else: raise RuntimeError("unverified safety locking backend")
+
+
+def authorized(db, run):
+    from .models import User
+    from .authz import has_permission, writable_categories
+    user = db.scalar(select(User).where(User.username == run.created_by).execution_options(populate_existing=True))
+    allowed = writable_categories(user) if user else []
+    return bool(user and user.is_active and has_permission(user, "reviews:write") and (allowed is None or run.category_key in allowed))
+
+
+def frozen_input(item, config, settings):
+    from .nas_storage import resolve_asset_path, NasStorageError
+    snapshot = json.loads(item.input_snapshot_json)
+    digest = snapshot.get("sha256", "")
+    if not isinstance(digest, str) or not re.fullmatch('[0-9a-f]{64}', digest): raise SafetyError("input_checksum_missing")
+    root = settings.data_dir / "stock-safety" / "inputs"; root.mkdir(parents=True, exist_ok=True)
+    destination = root / digest
+    try:
+        if destination.exists():
+            data = destination.read_bytes()
+        elif config["kind"] == "text" and "content" in snapshot:
+            data = snapshot["content"].encode("utf-8")
+        else:
+            source = resolve_asset_path(SimpleNamespace(**snapshot), settings)
+            with source.open("rb") as file: data = file.read(MAX_IMAGE_BYTES + 1)
+        if len(data) > MAX_IMAGE_BYTES: raise SafetyError("input_too_large")
+        if hashlib.sha256(data).hexdigest() != digest: raise SafetyError("input_snapshot_changed")
+        if not destination.exists():
+            if shutil.disk_usage(root).free < len(data) + 512 * 1024**2: raise SafetyError("input_disk_space_low")
+            temporary = root / ("." + uuid.uuid4().hex + ".part")
+            try:
+                with temporary.open("xb") as file: file.write(data); file.flush(); os.fsync(file.fileno())
+                os.replace(temporary, destination)
+            finally: temporary.unlink(missing_ok=True)
+        if config["kind"] == "text": return data.decode("utf-8")
+        return destination
+    except (OSError, NasStorageError, UnicodeError): raise SafetyError("input_unavailable") from None
+
+
+def finish(db, attempt_id, raw, error):
+    attempt = db.get(SafetyAttempt, attempt_id)
+    item = db.get(SafetyItem, attempt.item_id); run = locked_run(db, item.run_id)
+    if attempt.status != "sending": return
+    if raw is not None: attempt.raw_json = canonical(raw)
+    attempt.finished_at = now()
+    if error:
+        attempt.status = "failed"; attempt.error_code = error.code
+        attempt.usage_state = ("confirmed" if isinstance(raw, dict) and raw.get("Code", raw.get("code")) == 200
+            else "responded_error" if raw is not None else "uncertain" if error.submitted else "not_submitted")
+        item.error_code = error.code
+        item.status = "queued" if error.retryable and attempt.sequence_no % 3 != 0 else "failed"
+        item.next_attempt_at = (datetime.now(timezone.utc) + timedelta(seconds=10 * (attempt.sequence_no % 3 + 1))).isoformat()
+    else:
+        rules = db.scalar(select(SafetyRuleVersion).where(SafetyRuleVersion.run_id == run.id, SafetyRuleVersion.revision == run.rule_revision))
+        try: result = interpret(raw, json.loads(rules.rules_json), data_id=attempt.id)
+        except SafetyError as exc:
+            finish(db, attempt_id, raw, exc); return
+        attempt.status = "completed"; attempt.usage_state = "confirmed"
+        item.status = "completed"; item.error_code = None
+        db.add(SafetyResult(id=uuid.uuid4().hex, item_id=item.id, attempt_id=attempt.id,
+            rule_revision=run.rule_revision, result_json=canonical(result), created_at=now()))
+    db.flush()
+    unfinished = db.scalar(select(SafetyItem.id).where(SafetyItem.run_id == run.id, SafetyItem.status.in_(["queued", "sending"])).limit(1))
+    if not unfinished and run.status == "running": run.status = "completed"
+
+
+def tick(engine, *, settings, provider=None, authorize=authorized):
+    from .models import Asset
+    with safety_lock(engine, settings.data_dir) as checkpoint:
+        if checkpoint is None: return False
+        with Session(engine) as db:
+            # The exclusive scheduler lease proves any old sending intent was
+            # interrupted. A safety read can be retried, with uncertain billing
+            # recorded; it must not be reported as a free or successful call.
+            orphan = db.scalar(select(SafetyAttempt).where(SafetyAttempt.status == "sending").limit(1))
+            if orphan:
+                checkpoint(); finish(db, orphan.id, None, SafetyError("worker_interrupted", retryable=True, submitted=True)); db.commit(); return True
+            run = db.scalar(select(SafetyRun).where(SafetyRun.status == "running",
+                select(SafetyItem.id).where(SafetyItem.run_id == SafetyRun.id, SafetyItem.status == "queued",
+                    SafetyItem.next_attempt_at <= now()).exists()).order_by(SafetyRun.last_dispatched, SafetyRun.id).limit(1))
+            if not run:
+                settled = db.scalar(select(SafetyRun).where(SafetyRun.status == "running", ~select(SafetyItem.id).where(
+                    SafetyItem.run_id == SafetyRun.id, SafetyItem.status.in_(["queued", "sending"])).exists()).limit(1))
+                if settled:
+                    settled = locked_run(db, settled.id)
+                    if settled.status == "running": settled.status = "completed"
+                    db.commit(); return True
+                return False
+            run = locked_run(db, run.id)
+            if run.status != "running": return False
+            if not authorize(db, run): run.status = "paused"; db.commit(); return False
+            item = db.scalar(select(SafetyItem).where(SafetyItem.run_id == run.id, SafetyItem.status == "queued",
+                SafetyItem.next_attempt_at <= now()).order_by(SafetyItem.id).with_for_update().limit(1))
+            if item is None: return False
+            asset = db.get(Asset, item.asset_id)
+            if not asset or asset.category_key != run.category_key:
+                item.status = "failed"; item.error_code = "sample_category_changed"; db.commit(); return True
+            checkpoint()
+            config = json.loads(run.config_json)
+            item.attempt_count += 1; item.status = "sending"; run.last_dispatched = now()
+            attempt = SafetyAttempt(id=uuid.uuid4().hex, item_id=item.id, sequence_no=item.attempt_count,
+                status="sending", usage_state="uncertain", created_at=now())
+            db.add(attempt); db.commit()
+            raw, error = None, None
+            try:
+                source = frozen_input(item, config, settings)
+                adapter = provider or AliSafetyProvider(region=config["region"])
+                if adapter.region != config["region"]: raise SafetyError("provider_region_changed")
+                checkpoint()
+                raw = (adapter.moderate_text(source, attempt.id, config["service"]) if config["kind"] == "text"
+                    else adapter.moderate_image(source, attempt.id, config["service"]))
+            except SafetyError as exc: error = exc; raw = exc.raw
+            except Exception: error = SafetyError("provider_transport_uncertain", retryable=True, submitted=True)
+            checkpoint(); db.expire_all(); finish(db, attempt.id, raw, error); db.commit(); return True
+
+
+if __name__ == "__main__":
+    if os.environ.get("STOCK_SAFETY_ENABLED") != "1": raise SystemExit("STOCK_SAFETY_ENABLED=1 required")
+    from .config import get_settings
+    from .database import engine
+    import time
+    while True:
+        busy = False
+        try: busy = tick(engine, settings=get_settings())
+        except Exception: logging.error("安全审核任务中断，保留执行记录等待恢复")
+        time.sleep(.1 if busy else 2)

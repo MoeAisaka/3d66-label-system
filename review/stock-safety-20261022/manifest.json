@@ -1,0 +1,21 @@
+{
+  "candidate": "351143a3da0b144c2be550642c831182fe80317a",
+  "base_candidate": "bf5d192ffb4032218d20f725f908bb5b1f1cb416",
+  "base_context": "https://github.com/MoeAisaka/3d66-label-system/blob/8138d72caf83cd85dd772fbf43ce906f3780c59b/review/20261022/index.json",
+  "source_note": "Full repository context is the indexed base source packs plus candidate.patch. Older physical files may differ.",
+  "schema": 137,
+  "deployed": false,
+  "parts": [
+    {
+      "name": "part1.txt",
+      "sha256": "5a0ad6b3d4cb22bffc9a988d9d9965a87efe72a467bbe431472009c9ac2868e1",
+      "bytes": 43637
+    },
+    {
+      "name": "part2.txt",
+      "sha256": "03a8f14481c5a634932bacf36e19ee976b0a6ae1cdfb8a31c4482182163b41a0",
+      "bytes": 46529
+    }
+  ],
+  "patch_sha256": "bba70e4b3de0de59b7f976ce6806d8038ab1ebd8b4838a9a5f8665ecffd07faa"
+}
