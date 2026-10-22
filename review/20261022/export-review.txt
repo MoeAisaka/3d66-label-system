@@ -1,0 +1,729 @@
+请对通用存量回归导出进行一轮独立代码复审，固定候选bf5d192ffb4032218d20f725f908bb5b1f1cb416。不是生图执行重审。用户已确认：Excel/JSON，生图图片ZIP；全部筛选分页；发起固定结果版本；原始与人工结果分开、人工优先可选；后台任务可恢复，关闭页面不影响；下载包30天、核心快照长期、按原版本重建；不删除旧包；不做业务下游写入。代码尚未部署。新增schema135紧随生图134，源码schema门一致；API通过main注册，employee_access明确开放results:export/read（当前平台全员工可读），机器/MCP不自动开放；module_api将stock-exports归属stock。新API受STOCK_EXPORT_ENABLED=1开关，独立python -m app.stock_export_worker。MySQL连接是READ COMMITTED；主读取查询同语句捕获可变结果/人工记录，原生原始结果重建用冻结workflow快照及执行attempt，不重新调用模型。本地8核心、真实Cookie及迁移可达性、前端构建通过；Linux/MySQL135与真实页面仍在核验。请按全库上下文找实际可达P0/P1反例：事务/版本一致性、人工优先、原始证据、断点恢复、并发、文件安全、Excel格式与大字段、全分页/容量、权限/路由/迁移。只给具体触发、后果、最小修法和应补检查。区分确认与疑点，不泛泛重构/新审批。说明实际读取了哪些文件，访问不了全库就如实写，不声称全库逐行通过。
+
+
+===== FILE backend/app/stock_exports.py =====
+"""Immutable result snapshots and durable, rebuildable download jobs.
+
+No model calls or business writes. Snapshots outlive the 30-day download files.
+"""
+from __future__ import annotations
+from datetime import datetime,timezone,timedelta
+import hashlib,json,os,re,uuid,zipfile
+from pathlib import Path
+from sqlalchemy import ForeignKey,String,Text,Integer,BigInteger,UniqueConstraint,select,func,and_
+from sqlalchemy.orm import Mapped,Session,mapped_column,aliased
+from .database import Base
+
+def now():return datetime.now(timezone.utc).isoformat()
+def canonical(value):return json.dumps(value,ensure_ascii=False,sort_keys=True,separators=(',',':'))
+
+class ExportError(ValueError):pass
+
+class StockExportSnapshot(Base):
+    __tablename__='stock_export_snapshots'
+    id:Mapped[str]=mapped_column(String(64),primary_key=True)
+    source_kind:Mapped[str]=mapped_column(String(24))
+    run_id:Mapped[str]=mapped_column(String(64),index=True)
+    category_key:Mapped[str]=mapped_column(String(40),index=True)
+    selection_json:Mapped[str]=mapped_column(Text)
+    result_mode:Mapped[str]=mapped_column(String(24))
+    config_json:Mapped[str]=mapped_column(Text)
+    digest:Mapped[str]=mapped_column(String(64))
+    total:Mapped[int]=mapped_column(Integer)
+    created_by:Mapped[str]=mapped_column(String(80))
+    created_at:Mapped[str]=mapped_column(String(40))
+
+class StockExportItem(Base):
+    __tablename__='stock_export_items'
+    __table_args__=(UniqueConstraint('snapshot_id','ordinal',name='uq_stock_export_item_ordinal'),)
+    id:Mapped[int]=mapped_column(primary_key=True)
+    snapshot_id:Mapped[str]=mapped_column(ForeignKey('stock_export_snapshots.id',ondelete='RESTRICT'),index=True)
+    ordinal:Mapped[int]=mapped_column(Integer)
+    document_json:Mapped[str]=mapped_column(Text)
+
+class StockExportJob(Base):
+    __tablename__='stock_export_jobs'
+    id:Mapped[str]=mapped_column(String(64),primary_key=True)
+    snapshot_id:Mapped[str]=mapped_column(ForeignKey('stock_export_snapshots.id',ondelete='RESTRICT'),index=True)
+    format:Mapped[str]=mapped_column(String(24))
+    status:Mapped[str]=mapped_column(String(24),index=True)
+    file_name:Mapped[str|None]=mapped_column(String(120),nullable=True)
+    file_sha256:Mapped[str|None]=mapped_column(String(64),nullable=True)
+    file_bytes:Mapped[int]=mapped_column(BigInteger,default=0)
+    missing_files:Mapped[int]=mapped_column(Integer,default=0)
+    error_code:Mapped[str|None]=mapped_column(String(80),nullable=True)
+    created_by:Mapped[str]=mapped_column(String(80))
+    created_at:Mapped[str]=mapped_column(String(40))
+    expires_at:Mapped[str|None]=mapped_column(String(40),nullable=True)
+
+def _cover_rows(db,run_id):
+    from .cover_regression import CoverRegressionRun as Run,CoverRegressionItem as Item,CoverRegressionReview as Review
+    from .cover_attempts import CoverGenerationAttempt as Attempt
+    latest=(select(Attempt.sample_key,func.max(Attempt.sequence_no).label('seq')).join(Item,Item.id==Attempt.sample_key)
+            .where(Item.run_id==run_id).group_by(Attempt.sample_key).subquery())
+    success=(select(Attempt.sample_key,func.max(Attempt.sequence_no).label('seq')).join(Item,Item.id==Attempt.sample_key)
+             .where(Item.run_id==run_id,Attempt.state=='succeeded').group_by(Attempt.sample_key).subquery())
+    revisions=(select(Review.item_id,func.max(Review.revision).label('rev')).join(Item,Item.id==Review.item_id)
+               .where(Item.run_id==run_id).group_by(Review.item_id).subquery())
+    current=aliased(Attempt);raw=aliased(Attempt);human_image=aliased(Attempt)
+    q=(select(Item,Run,current,raw,Review,human_image).join(Run,Run.id==Item.run_id)
+       .outerjoin(latest,latest.c.sample_key==Item.id).outerjoin(current,and_(current.sample_key==Item.id,current.sequence_no==latest.c.seq))
+       .outerjoin(success,success.c.sample_key==Item.id).outerjoin(raw,and_(raw.sample_key==Item.id,raw.sequence_no==success.c.seq))
+       .outerjoin(revisions,revisions.c.item_id==Item.id).outerjoin(Review,and_(Review.item_id==Item.id,Review.revision==revisions.c.rev))
+       .outerjoin(human_image,human_image.id==Review.attempt_id).where(Run.id==run_id).order_by(Item.id))
+    for item,run,current,raw,review,human_image in db.execute(q):
+        def result(a):return {'attempt_id':a.id,**json.loads(a.result_json)} if a and a.result_json else None
+        human=({'revision':review.revision,'verdict':review.verdict,'reason':review.reason,'actor':review.actor,
+                'created_at':review.created_at,'image':result(human_image)} if review else None)
+        yield run,{'item_id':item.id,'asset_id':item.asset_id,'name':item.original_name,
+            'status':current.state if current else ('input_error' if item.input_error else 'freezing'),
+            'input':json.loads(item.input_snapshot_json),'input_error':item.input_error,
+            'latest_attempt_id':current.id if current else None,'error':current.error_code if current else item.input_error,
+            'raw':result(raw),'human':human,'reference':None,'effective':result(human_image) if review else result(raw)}
+
+def _baseline_rows(db,run_id):
+    from .models import BaselineRegressionRun as Run,BaselineRegressionItem as Item,BaselineTruthRevision as Truth,Asset,BaselineSetItem,EvaluationResult,ProductionRun
+    revisions=(select(Truth.baseline_set_item_id,func.max(Truth.revision).label('rev'))
+               .where(Truth.source_baseline_run_id==int(run_id)).group_by(Truth.baseline_set_item_id).subquery())
+    q=(select(Item,Run,Asset,BaselineSetItem,Truth,EvaluationResult,ProductionRun).join(Run,Run.id==Item.run_id).join(Asset,Asset.id==Item.asset_id)
+       .join(BaselineSetItem,BaselineSetItem.id==Item.baseline_set_item_id)
+       .outerjoin(EvaluationResult,EvaluationResult.id==Item.evaluation_id).outerjoin(ProductionRun,ProductionRun.id==Item.production_run_id)
+       .outerjoin(revisions,revisions.c.baseline_set_item_id==Item.baseline_set_item_id)
+       .outerjoin(Truth,and_(Truth.baseline_set_item_id==Item.baseline_set_item_id,Truth.revision==revisions.c.rev))
+       .where(Run.id==int(run_id)).order_by(Item.id))
+    for item,run,asset,sample,truth,evaluation,production in db.execute(q):
+        snapshot=json.loads(item.result_snapshot_json or '{}')
+        raw=snapshot.get('normalized_result') or {'level':snapshot.get('predicted_level'),'score':snapshot.get('authoritative_score')}
+        history=json.loads(evaluation.correction_history_json or '[]') if evaluation else []
+        events=[e for e in history if isinstance(e,dict) and e.get('corrector') and e.get('corrector_confidence') is None and not e.get('corrector_policy')]
+        human={'revision':evaluation.review_revision,'events':events} if events else None
+        raw_error=None
+        if human and production:
+            # Workflow corrections mutate the read model. Reconstruct the raw
+            # normalized result only from immutable execution attempts, never
+            # relabel that corrected read model as the original model output.
+            try:
+                from .workflow_result_finalizer import _latest_node_outputs,reduce_native_workflow_result,NativeResultFinalizationError
+                from .workflow_snapshot_store import read_run_snapshot_document
+                manifest=read_run_snapshot_document(production)['workflow']['manifest']
+                raw=reduce_native_workflow_result(manifest,_latest_node_outputs(db,production),model_execution_mode=production.model_execution_mode)
+            except (NativeResultFinalizationError,KeyError,ValueError):
+                raw=None;raw_error='original_execution_evidence_unavailable'
+        effective=(json.loads(evaluation.normalized_result_json) if evaluation and evaluation.normalized_result_json else
+            {**(raw or {}),'level':evaluation.level,'score':evaluation.score} if evaluation and human else raw)
+        yield run,{'item_id':str(item.id),'asset_id':item.asset_id,'name':asset.original_name,'status':item.status,
+            'input':json.loads(sample.asset_snapshot_json or '{}'),'error':item.error_message,
+            'raw':raw,'read_model_snapshot':snapshot,'human':human,'effective':effective,
+            'raw_unavailable_reason':raw_error,
+            'raw_responses':{'a':evaluation.raw_response_a,'b':evaluation.raw_response_b} if evaluation else None,
+            'reference':{'expected_level':item.expected_level,'expected_result':json.loads(item.expected_result_json or '{}'),
+                         'contract':item.truth_contract_key,'current_revision':{'revision':truth.revision,'result':json.loads(truth.expected_result_json),
+                             'hash':truth.canonical_hash} if truth else None},
+            'evaluation_id':item.evaluation_id,'production_run_id':item.production_run_id}
+
+def freeze_results(db:Session,*,source_kind:str,run_id:str,selection:dict,result_mode:str,actor:str):
+    if result_mode not in {'effective','raw'}:raise ExportError('invalid_result_mode')
+    if set(selection)-{'status','reviewed','q'}:raise ExportError('unknown_filter')
+    if not isinstance(selection.get('q',''),str) or len(selection.get('q',''))>200:raise ExportError('invalid_filter')
+    if 'reviewed' in selection and type(selection['reviewed']) is not bool:raise ExportError('invalid_filter')
+    if selection.get('status') is not None and not isinstance(selection['status'],str):raise ExportError('invalid_filter')
+    if source_kind not in {'cover','baseline'}:raise ExportError('unsupported_source')
+    from .cover_regression import CoverRegressionRun
+    from .models import BaselineRegressionRun
+    try:run=db.get(CoverRegressionRun if source_kind=='cover' else BaselineRegressionRun,run_id if source_kind=='cover' else int(run_id))
+    except ValueError:raise ExportError('invalid_run_id')
+    if run is None:raise ExportError('run_not_found')
+    config=({'baseline_set_id':run.baseline_set_id,'generation':json.loads(run.config_json)} if source_kind=='cover' else
+            {'baseline_set_id':run.baseline_set_id,'workflow_version_id':run.workflow_version_id,'execution_engine':run.execution_engine,
+             'execution_hash':hashlib.sha256(run.execution_snapshot_json.encode()).hexdigest()})
+    snap=StockExportSnapshot(id=uuid.uuid4().hex,source_kind=source_kind,run_id=str(run_id),category_key=run.category_key,
+        selection_json=canonical(selection),result_mode=result_mode,config_json=canonical(config),digest='',total=0,created_by=actor,created_at=now())
+    db.add(snap);db.flush();digest=hashlib.sha256()
+    rows=_cover_rows(db,run_id) if source_kind=='cover' else _baseline_rows(db,run_id)
+    for _,doc in rows:
+        if selection.get('status') and doc['status']!=selection['status']:continue
+        if 'reviewed' in selection and (doc['human'] is not None)!=selection['reviewed']:continue
+        query=selection.get('q','').casefold()
+        if query and query not in (doc['name']+' '+doc['item_id']+' '+str(doc['asset_id'])).casefold():continue
+        if result_mode=='raw':doc['effective']=doc['raw']
+        document=canonical(doc);digest.update(document.encode());digest.update(b'\n');snap.total+=1
+        db.add(StockExportItem(snapshot_id=snap.id,ordinal=snap.total,document_json=document))
+        if snap.total%100==0:db.flush()
+    if snap.total==0:raise ExportError('no_matching_results')
+    snap.digest=digest.hexdigest();db.flush();return snap
+
+def create_export(db,*,snapshot_id,format,actor):
+    snap=db.get(StockExportSnapshot,snapshot_id)
+    if snap is None:raise ExportError('snapshot_not_found')
+    if format not in {'json','xlsx','images_zip'}:raise ExportError('unsupported_format')
+    if format=='images_zip' and snap.source_kind!='cover':raise ExportError('images_require_generation')
+    job=StockExportJob(id=uuid.uuid4().hex,snapshot_id=snapshot_id,format=format,status='queued',created_by=actor,created_at=now())
+    db.add(job);db.flush();return job
+
+def documents(db,snapshot_id):
+    cursor=0
+    while True:
+        rows=db.scalars(select(StockExportItem).where(StockExportItem.snapshot_id==snapshot_id,StockExportItem.ordinal>cursor)
+            .order_by(StockExportItem.ordinal).limit(100)).all()
+        if not rows:return
+        for row in rows:
+            cursor=row.ordinal;yield json.loads(row.document_json)
+
+def snapshot_payload(snap):
+    header={k:getattr(snap,k) for k in ('id','source_kind','run_id','category_key','result_mode','created_at','digest','total')}
+    header.update(selection=json.loads(snap.selection_json),configuration=json.loads(snap.config_json))
+    return header
+
+def json_file(file,db,snap):
+    header=snapshot_payload(snap)
+    file.write((canonical({'snapshot':header})[:-1]+',"items":[').encode())
+    for i,doc in enumerate(documents(db,snap.id)):
+        if i:file.write(b',')
+        file.write(canonical(doc).encode())
+    file.write(b']}')
+
+def execute_export(db,job_id,*,settings):
+    """Caller holds the export scheduler lock; restart reuses frozen rows only."""
+    job=db.get(StockExportJob,job_id)
+    if not job or job.status not in {'queued','running'}:return job
+    snap=db.get(StockExportSnapshot,job.snapshot_id)
+    job.status='running';job.error_code=None;db.commit()
+    root=Path(settings.data_dir)/'stock-exports';root.mkdir(parents=True,exist_ok=True)
+    ext={'json':'json','xlsx':'xlsx','images_zip':'zip'}[job.format]
+    name=f'{job.id}.{ext}';target=root/name;temporary=root/(name+'.part')
+    missing=0
+    try:
+        import shutil
+        required=(db.scalar(select(func.sum(func.length(StockExportItem.document_json))).where(StockExportItem.snapshot_id==snap.id)) or 0)*4
+        if job.format=='images_zip':
+            for doc in documents(db,snap.id):
+                digest=(doc['effective'] or {}).get('sha256','')
+                if re.fullmatch('[0-9a-f]{64}',digest):
+                    path=Path(settings.data_dir)/'stock-images'/'outputs'/(digest+'.png')
+                    if path.is_file():required+=path.stat().st_size
+        if shutil.disk_usage(root).free < required+512*1024*1024:raise ExportError('insufficient_export_space')
+        if job.format=='json':
+            with temporary.open('wb') as file:json_file(file,db,snap)
+        elif job.format=='xlsx':
+            from .stock_export_xlsx import write_xlsx
+            write_xlsx(temporary,lambda:documents(db,snap.id),metadata=snapshot_payload(snap))
+        else:
+            with zipfile.ZipFile(temporary,'w',compression=zipfile.ZIP_DEFLATED,allowZip64=True) as z:
+                with z.open('results.json','w',force_zip64=True) as file:json_file(file,db,snap)
+                import tempfile,shutil
+                with tempfile.SpooledTemporaryFile(max_size=2*1024*1024) as file:
+                    file.write(b'[')
+                    for i,doc in enumerate(documents(db,snap.id)):
+                        record={'item_id':doc['item_id'],'file':None,'error':None}
+                        result=doc['effective'] or {};digest=result.get('sha256','')
+                        path=Path(settings.data_dir)/'stock-images'/'outputs'/(digest+'.png')
+                        if not re.fullmatch('[0-9a-f]{64}',digest) or not path.is_file():record['error']='image_missing';missing+=1
+                        elif _file_hash(path)!=digest:record['error']='image_checksum_changed';missing+=1
+                        else:
+                            record['file']=f'images/{i+1}-{digest}.png';z.write(path,record['file'])
+                        if i:file.write(b',')
+                        file.write(canonical(record).encode())
+                    file.write(b']')
+                    file.seek(0)
+                    with z.open('files.json','w',force_zip64=True) as destination:shutil.copyfileobj(file,destination)
+        with temporary.open('r+b') as file:os.fsync(file.fileno());checksum=hashlib.file_digest(file,'sha256').hexdigest()
+        temporary.replace(target)
+        job.file_name=name;job.file_bytes=target.stat().st_size;job.file_sha256=checksum;job.missing_files=missing
+        job.status='succeeded';job.expires_at=(datetime.now(timezone.utc)+timedelta(days=30)).isoformat()
+    except Exception as exc:
+        job.status='failed';job.error_code=str(exc) if isinstance(exc,ExportError) else 'export_failed'
+        import logging
+        logging.getLogger(__name__).exception('Stock export failed: %s',job.id)
+    finally:temporary.unlink(missing_ok=True)
+    db.commit();return job
+
+def _file_hash(path):
+    with path.open('rb') as file:return hashlib.file_digest(file,'sha256').hexdigest()
+
+def expire_packages(db,*,settings):
+    count=0;root=(Path(settings.data_dir)/'stock-exports').resolve()
+    for job in db.scalars(select(StockExportJob).where(StockExportJob.status=='succeeded',StockExportJob.expires_at<=now())):
+        if job.file_name:
+            path=(root/job.file_name).resolve()
+            if not path.is_relative_to(root):raise ExportError('invalid_stored_path')
+            path.unlink(missing_ok=True)
+        job.status='expired';count+=1
+    db.commit();return count
+
+===== FILE backend/app/stock_export_api.py =====
+from __future__ import annotations
+import json,os,re
+from pathlib import Path
+from typing import Literal
+from fastapi import APIRouter,Depends,HTTPException
+from fastapi.responses import FileResponse
+from pydantic import BaseModel,ConfigDict,Field
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+from .authz import has_permission
+from .config import get_settings
+from .database import get_db
+from .stock_exports import (StockExportSnapshot,StockExportJob,ExportError,freeze_results,create_export,now)
+
+class ExportRequest(BaseModel):
+    model_config=ConfigDict(extra='forbid')
+    source_kind:Literal['cover','baseline']
+    run_id:str=Field(min_length=1,max_length=64)
+    result_mode:Literal['effective','raw']='effective'
+    format:Literal['json','xlsx','images_zip']='xlsx'
+    selection:dict=Field(default_factory=dict)
+
+class RebuildRequest(BaseModel):
+    model_config=ConfigDict(extra='forbid')
+    format:Literal['json','xlsx','images_zip']='xlsx'
+
+def job_payload(db,job):
+    snap=db.get(StockExportSnapshot,job.snapshot_id)
+    available=job.status=='succeeded' and bool(job.expires_at and job.expires_at>now())
+    return {'id':job.id,'snapshot_id':job.snapshot_id,'format':job.format,'status':'expired' if job.status=='succeeded' and not available else job.status,
+        'total':snap.total,'result_mode':snap.result_mode,'selection':json.loads(snap.selection_json),
+        'frozen_at':snap.created_at,'digest':snap.digest,'file_bytes':job.file_bytes,'missing_files':job.missing_files,
+        'error_code':job.error_code,'created_at':job.created_at,'expires_at':job.expires_at,
+        'download_url':f'/api/stock-exports/{job.id}/file' if available else None}
+
+def build_stock_export_router(current_user):
+    router=APIRouter()
+    def permission(user):
+        if not has_permission(user,'results:export'):raise HTTPException(403,'没有导出权限')
+    def enabled():
+        if os.environ.get('STOCK_EXPORT_ENABLED')!='1':raise HTTPException(503,'通用导出后台尚未启用')
+    def job_row(db,id):
+        row=db.get(StockExportJob,id)
+        if row is None:raise HTTPException(404,'导出任务不存在')
+        return row
+
+    @router.get('/api/stock-exports/capabilities')
+    def capabilities(user=Depends(current_user)):
+        return {'enabled':os.environ.get('STOCK_EXPORT_ENABLED')=='1','formats':['xlsx','json','images_zip'],'retention_days':30}
+
+    @router.post('/api/stock-exports')
+    def launch(payload:ExportRequest,user=Depends(current_user),db:Session=Depends(get_db)):
+        permission(user);enabled()
+        try:
+            snap=freeze_results(db,source_kind=payload.source_kind,run_id=payload.run_id,selection=payload.selection,
+                result_mode=payload.result_mode,actor=user.username)
+            job=create_export(db,snapshot_id=snap.id,format=payload.format,actor=user.username)
+            from .audit import append_audit_event
+            append_audit_event(db,category='baseline',action='stock_export_requested',subject_type='stock_export_snapshot',
+                subject_id=snap.id,actor=user.username,payload={'source_kind':snap.source_kind,'run_id':snap.run_id,'total':snap.total,'digest':snap.digest,'format':job.format})
+            db.commit();return job_payload(db,job)
+        except ExportError as exc:
+            db.rollback();raise HTTPException(422,str(exc)) from exc
+
+    @router.get('/api/stock-exports')
+    def listing(source_kind:Literal['cover','baseline'],run_id:str,user=Depends(current_user),db:Session=Depends(get_db)):
+        rows=db.scalars(select(StockExportJob).join(StockExportSnapshot).where(StockExportSnapshot.source_kind==source_kind,
+            StockExportSnapshot.run_id==run_id).order_by(StockExportJob.created_at.desc()).limit(30)).all()
+        return {'items':[job_payload(db,row) for row in rows]}
+
+    @router.get('/api/stock-exports/{job_id}')
+    def detail(job_id:str,user=Depends(current_user),db:Session=Depends(get_db)):
+        return job_payload(db,job_row(db,job_id))
+
+    @router.post('/api/stock-exports/{job_id}/rebuild')
+    def rebuild(job_id:str,payload:RebuildRequest,user=Depends(current_user),db:Session=Depends(get_db)):
+        permission(user);enabled()
+        try:
+            previous=job_row(db,job_id)
+            job=create_export(db,snapshot_id=previous.snapshot_id,format=payload.format,actor=user.username)
+            db.commit();return job_payload(db,job)
+        except ExportError as exc:
+            db.rollback();raise HTTPException(422,str(exc)) from exc
+
+    @router.get('/api/stock-exports/{job_id}/file')
+    def download(job_id:str,user=Depends(current_user),db:Session=Depends(get_db)):
+        job=job_row(db,job_id)
+        if job.status=='expired' or (job.expires_at and job.expires_at<=now()):raise HTTPException(410,'下载包已过期，可按原版本重建')
+        if job.status!='succeeded' or not job.file_name:raise HTTPException(409,'下载包尚未生成')
+        if not re.fullmatch(r'[0-9a-f]{32}\.(json|xlsx|zip)',job.file_name):raise HTTPException(409,'文件记录异常')
+        path=Path(get_settings().data_dir)/'stock-exports'/job.file_name
+        if not path.is_file():raise HTTPException(410,'下载包不存在，可按原版本重建')
+        media={'json':'application/json','xlsx':'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet','images_zip':'application/zip'}[job.format]
+        return FileResponse(path,filename=f'{job.snapshot_id}.{path.suffix.lstrip(".")}',media_type=media,headers={'Cache-Control':'private, no-store'})
+    return router
+
+===== FILE backend/app/stock_export_worker.py =====
+"""Separate durable download worker; never runs inside an HTTP background task."""
+from contextlib import contextmanager
+from pathlib import Path
+import os,time
+from sqlalchemy import create_engine,select,text
+from sqlalchemy.pool import NullPool
+from sqlalchemy.orm import Session
+from .stock_exports import StockExportJob,execute_export,expire_packages
+
+@contextmanager
+def export_lock(engine,root):
+    if engine.dialect.name=='mysql':
+        lock_engine=create_engine(engine.url,poolclass=NullPool)
+        try:
+            with lock_engine.connect() as c:
+                acquired=c.execute(text("SELECT GET_LOCK('stock-export-worker',0)")).scalar()==1
+                try:yield acquired
+                finally:
+                    if acquired:c.execute(text("SELECT RELEASE_LOCK('stock-export-worker')"))
+        finally:lock_engine.dispose()
+    elif engine.dialect.name=='sqlite':
+        # The existing SQLite helper locks its supplied directory. Its MySQL
+        # branch is deliberately not reused, so long exports never block GPU work.
+        from .cover_worker import scheduler_lock
+        with scheduler_lock(engine,root/'export-worker') as acquired:yield acquired
+    else:raise RuntimeError('unverified export locking backend')
+
+def tick(engine,*,settings):
+    with export_lock(engine,Path(settings.data_dir)) as acquired:
+        if not acquired:return False
+        with Session(engine) as db:
+            expire_packages(db,settings=settings)
+            job=db.scalar(select(StockExportJob).where(StockExportJob.status.in_(['queued','running']))
+                .order_by(StockExportJob.created_at,StockExportJob.id).limit(1))
+            if job is None:return False
+            execute_export(db,job.id,settings=settings);return True
+
+if __name__=='__main__':
+    if os.environ.get('STOCK_EXPORT_ENABLED')!='1':raise SystemExit('STOCK_EXPORT_ENABLED=1 required')
+    from .database import engine
+    from .config import get_settings
+    import logging
+    while True:
+        try:tick(engine,settings=get_settings())
+        except Exception:logging.exception('导出后台处理失败，保留任务等待恢复')
+        time.sleep(2)
+
+===== FILE backend/app/stock_export_xlsx.py =====
+"""Streaming OOXML export. Large JSON is split losslessly into numbered cells."""
+import json,re,zipfile
+from xml.sax.saxutils import escape
+
+NS='http://schemas.openxmlformats.org/spreadsheetml/2006/main'
+BAD=re.compile(r'[\x00-\x08\x0b\x0c\x0e-\x1f]')
+
+def chunks(text,limit=30000):
+    # Excel counts UTF-16 units, not Python Unicode code points.
+    current=[];size=0
+    for ch in text:
+        n=2 if ord(ch)>0xffff else 1
+        if size+n>limit:
+            yield ''.join(current);current=[];size=0
+        current.append(ch);size+=n
+    if current or not text:yield ''.join(current)
+
+def cell(value):
+    # Explicit inline strings never execute formulas, including chunk boundaries
+    # starting with '='. Prefixing a quote would corrupt lossless JSON reassembly.
+    value=BAD.sub('',str(value))
+    return '<c t="inlineStr"><is><t xml:space="preserve">'+escape(value)+'</t></is></c>'
+
+def write_xlsx(path,documents,metadata=None):
+    """documents is a repeatable iterable factory; only one row stays in memory."""
+    fields=set()
+    for d in documents():
+        if isinstance(d['effective'],dict):fields.update(d['effective'])
+    fields=sorted(fields)
+    expanded=len(fields)<=16380
+    names=[]
+    with zipfile.ZipFile(path,'w',compression=zipfile.ZIP_DEFLATED,allowZip64=True) as z:
+        def sheets(title,headers,rows):
+            stream=None;number=0;part=0
+            try:
+                for row in rows:
+                    if stream is None or number>=1_000_000:
+                        if stream:stream.write(b'</sheetData></worksheet>');stream.close()
+                        part+=1;names.append(title if part==1 else title+str(part))
+                        stream=z.open(f'xl/worksheets/sheet{len(names)}.xml','w',force_zip64=True)
+                        stream.write((f'<?xml version="1.0" encoding="UTF-8"?><worksheet xmlns="{NS}"><sheetViews><sheetView workbookViewId="0"><pane ySplit="1" topLeftCell="A2" state="frozen"/></sheetView></sheetViews><sheetData><row>'+''.join(cell(x) for x in headers)+'</row>').encode())
+                        number=1
+                    stream.write(('<row>'+''.join(cell(x) for x in row)+'</row>').encode('utf-8'));number+=1
+            finally:
+                if stream:stream.write(b'</sheetData></worksheet>');stream.close()
+        def summary():
+            for d in documents():
+                def preview(value):
+                    value=value if isinstance(value,str) else json.dumps(value,ensure_ascii=False,separators=(',',':'))
+                    return value if len(value.encode('utf-16-le'))<=60000 else '完整内容见“完整字段”表'
+                values=[(d['effective'] or {}).get(k) for k in fields] if expanded else [d['effective']]
+                yield (d['item_id'],d['name'],d['status'],d['human'] is not None,*(preview(v) for v in values))
+        def detail():
+            for d in documents():
+                # ensure_ascii also preserves XML-disallowed control characters.
+                parts=list(chunks(json.dumps(d,ensure_ascii=True,separators=(',',':'))))
+                for i,p in enumerate(parts):yield (d['item_id'],i+1,len(parts),p)
+        sheets('结果',['样本ID','素材名称','执行状态','有人工修订',*(['结果.'+k for k in fields] if expanded else ['当前结果（完整字段见明细）'])],summary())
+        sheets('完整字段',['样本ID','片段序号','片段总数','完整JSON片段（按序拼接）'],detail())
+        if metadata:
+            sheets('导出版本',['项目','内容'],((k,json.dumps(v,ensure_ascii=True)) for k,v in metadata.items()))
+        if not names:raise ValueError('empty workbook')
+        z.writestr('[Content_Types].xml','<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'+''.join(f'<Override PartName="/xl/worksheets/sheet{i}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>' for i in range(1,len(names)+1))+'</Types>')
+        z.writestr('_rels/.rels','<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>')
+        z.writestr('xl/workbook.xml',f'<?xml version="1.0"?><workbook xmlns="{NS}" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets>'+''.join(f'<sheet name="{n}" sheetId="{i}" r:id="rId{i}"/>' for i,n in enumerate(names,1))+'</sheets></workbook>')
+        z.writestr('xl/_rels/workbook.xml.rels','<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'+''.join(f'<Relationship Id="rId{i}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet{i}.xml"/>' for i in range(1,len(names)+1))+'</Relationships>')
+
+===== FILE backend/app/migrations/stock_exports_135.py =====
+"""Add result snapshot and download-job tables without changing old exports."""
+def migrate(connection):
+    from ..stock_exports import StockExportSnapshot,StockExportItem,StockExportJob
+    if connection.dialect.name=='mysql':
+        from .mysql_baseline import mysql_metadata
+        metadata=mysql_metadata()
+        for name in ('stock_export_snapshots','stock_export_items','stock_export_jobs'):
+            metadata.tables[name].create(connection,checkfirst=True)
+    else:
+        for model in (StockExportSnapshot,StockExportItem,StockExportJob):model.__table__.create(connection,checkfirst=True)
+
+===== FILE frontend/src/components/stock-export-panel.tsx =====
+import { useState } from "react"
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
+import { toast } from "sonner"
+import { Button } from "@/components/ui/button"
+import { SecondaryDrawer } from "@/components/workspace-page"
+import { api } from "@/lib/api"
+
+type Job = { id: string; snapshot_id: string; format: string; status: string; total: number; result_mode: string;
+  frozen_at: string; expires_at: string | null; file_bytes: number; missing_files: number; error_code: string | null; download_url: string | null }
+const labels: Record<string, string> = { queued: "等待导出", running: "正在导出", succeeded: "可以下载", failed: "导出失败", expired: "下载包已过期" }
+
+export function StockExportPanel({ source, runId }: { source: "cover" | "baseline"; runId: string }) {
+  const [open, setOpen] = useState(false)
+  const [format, setFormat] = useState("xlsx")
+  const [mode, setMode] = useState("effective")
+  const [status, setStatus] = useState("")
+  const [reviewed, setReviewed] = useState("")
+  const [query, setQuery] = useState("")
+  const client = useQueryClient()
+  const capabilities = useQuery({ queryKey: ["stock-export-capabilities"], enabled: open,
+    queryFn: () => api<{ enabled: boolean }>("/api/stock-exports/capabilities") })
+  const jobs = useQuery({ queryKey: ["stock-exports", source, runId], enabled: open,
+    queryFn: () => api<{ items: Job[] }>(`/api/stock-exports?source_kind=${source}&run_id=${encodeURIComponent(runId)}`),
+    refetchInterval: open ? 3000 : false })
+  const mutation = useMutation({ mutationFn: ({ id }: { id?: string }) => api<Job>(id ? `/api/stock-exports/${id}/rebuild` : "/api/stock-exports", {
+    method: "POST", body: JSON.stringify(id ? { format } : { source_kind: source, run_id: runId, format, result_mode: mode,
+      selection: { ...(status ? { status } : {}), ...(reviewed ? { reviewed: reviewed === "yes" } : {}), ...(query.trim() ? { q: query.trim() } : {}) } }) }),
+    onSuccess: () => { toast.success("已建立后台导出任务，关闭页面不影响执行"); void client.invalidateQueries({ queryKey: ["stock-exports", source, runId] }) },
+    onError: (e: Error) => toast.error(e.message) })
+  const control = "h-10 w-full rounded-xl border border-input bg-background px-3 text-sm"
+  return <>
+    <Button variant="secondary" size="sm" onClick={() => setOpen(true)}>通用结果导出</Button>
+    <SecondaryDrawer open={open} onOpenChange={setOpen} size="wide" title="导出存量回归结果" description="后台执行，按固定版本生成文件。">
+      <div className="space-y-5">
+      <p className="text-sm text-muted-foreground">按下方范围导出全部分页。发起后固定结果、人工修订及输入版本，后续修改不影响本次文件。</p>
+      <div className="grid gap-4 sm:grid-cols-2">
+        <label className="space-y-2 text-sm">文件格式<select aria-label="文件格式" className={control} value={format} onChange={e => setFormat(e.target.value)}>
+          <option value="xlsx">Excel 表格</option><option value="json">JSON 完整结果</option>{source === "cover" && <option value="images_zip">图片 ZIP ＋样本清单</option>}</select></label>
+        <label className="space-y-2 text-sm">结果选择<select aria-label="结果选择" className={control} value={mode} onChange={e => setMode(e.target.value)}>
+          <option value="effective">人工修订优先，其余使用原始结果</option><option value="raw">仅采用原始结果</option></select></label>
+        <label className="space-y-2 text-sm">执行状态<select aria-label="执行状态" className={control} value={status} onChange={e => setStatus(e.target.value)}><option value="">全部状态</option>
+          {source === "cover" ? <><option value="succeeded">生成成功</option><option value="failed">生成失败</option><option value="needs_review">任务待核实</option><option value="input_error">输入不可用</option><option value="freezing">准备输入</option><option value="running">生成中</option><option value="queued">网关排队</option><option value="submitted">已提交</option><option value="ready">等待提交</option><option value="prepared">中台排队</option></> : <><option value="completed">执行完成</option><option value="failed">执行失败</option><option value="queued">排队中</option></>}</select></label>
+        <label className="space-y-2 text-sm">人工修订<select aria-label="人工修订" className={control} value={reviewed} onChange={e => setReviewed(e.target.value)}><option value="">全部</option><option value="yes">有人工修订</option><option value="no">无人工修订</option></select></label>
+        <label className="space-y-2 text-sm sm:col-span-2">按素材名称、样本 ID 或素材 ID 筛选<input aria-label="按素材名称、样本 ID 或素材 ID 筛选" className={control} value={query} maxLength={200} onChange={e => setQuery(e.target.value)} placeholder="留空导出全部" /></label>
+      </div>
+      <p className="text-sm text-muted-foreground">无需逐条人工复核。文件会保留执行状态与人工意见；缺失结果不会标为通过。图片包会附带缺失文件清单。</p>
+      {capabilities.data && !capabilities.data.enabled && <p className="text-sm">通用导出后台尚未启用。</p>}
+      <div className="flex justify-end"><Button disabled={!capabilities.data?.enabled || mutation.isPending} onClick={() => mutation.mutate({})}>固定当前结果并导出</Button></div>
+      <div className="border-t pt-4 space-y-3">
+        <h3 className="font-semibold">最近导出任务</h3>
+        <p className="text-sm text-muted-foreground">下载包保留 30 天，结果快照长期保留。“按原版本重建”使用原筛选和原结果，仅按上方选择更换文件格式。</p>
+        {jobs.data?.items.map(job => <div key={job.id} className="rounded-xl border p-3 flex flex-wrap items-center justify-between gap-3">
+          <div className="min-w-0 text-sm space-y-1"><p>{labels[job.status] || job.status} · {job.format === "images_zip" ? "图片 ZIP" : job.format.toUpperCase()} · {job.total} 条</p>
+            <p className="text-muted-foreground">固定于 {new Date(job.frozen_at).toLocaleString()} · {job.result_mode === "raw" ? "原始结果" : "人工优先"}</p>
+            {job.expires_at && <p className="text-muted-foreground">文件有效至 {new Date(job.expires_at).toLocaleString()}</p>}
+            {job.missing_files > 0 && <p>有 {job.missing_files} 个图片文件未打包，详见包内清单</p>}
+            {job.error_code && <p>导出未完成，可按原版本重新生成文件。</p>}
+          </div>
+          <div className="flex flex-wrap gap-2">{job.download_url && <Button variant="secondary" size="sm" asChild><a href={job.download_url}>下载</a></Button>}
+            {!["queued", "running"].includes(job.status) && <Button variant="secondary" size="sm" disabled={!capabilities.data?.enabled || mutation.isPending} onClick={() => mutation.mutate({ id: job.id })}>按原版本重建</Button>}</div>
+        </div>)}
+        {jobs.data?.items.length === 0 && <p className="text-sm text-muted-foreground">暂无导出记录</p>}
+      </div>
+      </div>
+    </SecondaryDrawer>
+  </>
+}
+
+===== FILE backend/tests/test_stock_exports.py =====
+import hashlib,io,json,zipfile
+from datetime import datetime,timezone,timedelta
+from sqlalchemy import select
+import pytest
+from tests.test_cover_regression import setup,make
+from app.cover_regression import CoverRegressionItem,review_item,regenerate_item
+from app.cover_attempts import CoverGenerationAttempt
+from app.stock_exports import (freeze_results,create_export,execute_export,expire_packages,
+    StockExportItem,StockExportSnapshot,StockExportJob,ExportError)
+
+
+def ready(db,settings,set_id):
+    run=make(db,settings,set_id)
+    item=db.scalar(select(CoverRegressionItem))
+    a=db.scalar(select(CoverGenerationAttempt));a.state='succeeded'
+    image=next((settings.data_dir/'stock-images'/'inputs').iterdir()).read_bytes()
+    digest=hashlib.sha256(image).hexdigest()
+    target=settings.data_dir/'stock-images'/'outputs'/(digest+'.png')
+    target.parent.mkdir(parents=True);target.write_bytes(image)
+    a.result_json=json.dumps({'sha256':digest,'width':8,'height':8,'size_bytes':len(image)})
+    a.gateway_unsettled=False;db.commit()
+    return run,item,a,digest
+
+
+def test_snapshot_freezes_human_and_raw_versions_and_rebuilds_after_expiry(setup):
+    db,settings,sid=setup;run,item,old,digest=ready(db,settings,sid)
+    review_item(db,item_id=item.id,attempt_id=old.id,expected_revision=0,verdict='adopt',reason='human',actor='tester');db.commit()
+    newer=regenerate_item(db,item_id=item.id,input_directory=settings.data_dir/'stock-images'/'inputs')
+    newer.state='succeeded';newer.result_json='{"sha256":"'+ 'e'*64 +'"}';db.commit()
+    snap=freeze_results(db,source_kind='cover',run_id=run.id,selection={},result_mode='effective',actor='tester')
+    db.commit();frozen=db.scalar(select(StockExportItem).where(StockExportItem.snapshot_id==snap.id))
+    doc=json.loads(frozen.document_json)
+    assert doc['human']['revision']==1 and doc['effective']['attempt_id']==old.id
+    assert doc['raw']['attempt_id']==newer.id and doc['effective']['sha256']==digest
+    before=frozen.document_json
+    review_item(db,item_id=item.id,attempt_id=newer.id,expected_revision=1,verdict='uncertain',reason='changed later',actor='tester');db.commit()
+    job=create_export(db,snapshot_id=snap.id,format='json',actor='tester');db.commit()
+    execute_export(db,job.id,settings=settings)
+    assert job.status=='succeeded'
+    data=json.loads((settings.data_dir/'stock-exports'/job.file_name).read_text())
+    assert data['items'][0]==doc and frozen.document_json==before
+    job.expires_at=(datetime.now(timezone.utc)-timedelta(seconds=1)).isoformat();db.commit()
+    assert expire_packages(db,settings=settings)==1
+    assert db.get(StockExportSnapshot,snap.id) and db.get(StockExportItem,frozen.id)
+    rebuilt=create_export(db,snapshot_id=snap.id,format='json',actor='tester');db.commit()
+    execute_export(db,rebuilt.id,settings=settings)
+    assert json.loads((settings.data_dir/'stock-exports'/rebuilt.file_name).read_text())==data
+
+
+def test_all_pages_filters_and_missing_images_are_explicit(setup):
+    db,settings,sid=setup;run,item,a,digest=ready(db,settings,sid)
+    for i in range(2005):
+        # Snapshot writer has no old 2000-row cap or page-dependent input.
+        db.add(CoverRegressionItem(id=f'additional-{i}',run_id=run.id,baseline_item_id=100+i,
+            asset_id=item.asset_id,original_name=f'pending-{i}.png',input_snapshot_json='{}'))
+    db.commit()
+    all_rows=freeze_results(db,source_kind='cover',run_id=run.id,selection={},result_mode='raw',actor='tester');db.commit()
+    assert all_rows.total==2006
+    snap=freeze_results(db,source_kind='cover',run_id=run.id,selection={'status':'succeeded'},result_mode='effective',actor='tester');db.commit()
+    assert snap.total==1
+    job=create_export(db,snapshot_id=snap.id,format='images_zip',actor='tester');db.commit()
+    (settings.data_dir/'stock-images'/'outputs'/(digest+'.png')).unlink()
+    execute_export(db,job.id,settings=settings)
+    assert job.status=='succeeded' and job.missing_files==1
+    with zipfile.ZipFile(settings.data_dir/'stock-exports'/job.file_name) as z:
+        assert 'results.json' in z.namelist() and json.loads(z.read('files.json'))[0]['error']=='image_missing'
+
+
+def test_export_restart_preserves_same_snapshot_and_other_packages(setup):
+    db,settings,sid=setup;run,item,a,_=ready(db,settings,sid)
+    snap=freeze_results(db,source_kind='cover',run_id=run.id,selection={},result_mode='raw',actor='tester');db.commit()
+    first=create_export(db,snapshot_id=snap.id,format='json',actor='tester');db.commit();execute_export(db,first.id,settings=settings)
+    original=(settings.data_dir/'stock-exports'/first.file_name).read_bytes()
+    second=create_export(db,snapshot_id=snap.id,format='xlsx',actor='tester');db.commit()
+    second.status='running';db.commit() # interrupted worker's persisted job
+    execute_export(db,second.id,settings=settings)
+    assert second.status=='succeeded' and (settings.data_dir/'stock-exports'/first.file_name).read_bytes()==original
+    with zipfile.ZipFile(settings.data_dir/'stock-exports'/second.file_name) as z:
+        import xml.etree.ElementTree as ET
+        for name in z.namelist():
+            if name.endswith('.xml') or name.endswith('.rels'):ET.fromstring(z.read(name))
+        text=z.read('xl/worksheets/sheet2.xml').decode()
+        assert 'effective' in text and 'raw' in text
+
+
+def test_rejects_unknown_filter_and_mode_and_wrong_format(setup):
+    db,settings,sid=setup;run,_,_,_=ready(db,settings,sid)
+    with pytest.raises(ExportError,match='unknown_filter'):
+        freeze_results(db,source_kind='cover',run_id=run.id,selection={'page':1},result_mode='raw',actor='tester')
+    with pytest.raises(ExportError,match='invalid_result_mode'):
+        freeze_results(db,source_kind='cover',run_id=run.id,selection={},result_mode='whatever',actor='tester')
+
+
+def test_baseline_reference_is_separate_from_actual_human_correction(setup):
+    from app.models import BaselineRegressionRun,BaselineRegressionItem,BaselineSetItem,EvaluationResult
+    db,settings,sid=setup
+    sample=db.scalar(select(BaselineSetItem))
+    run=BaselineRegressionRun(baseline_set_id=sid,sequence_no=1,category_key='space_image',
+        strategy_snapshot_json='{}',execution_snapshot_json='{}',baseline_set_fingerprint='b'*64,status='completed',total=1)
+    db.add(run);db.flush()
+    evaluation=EvaluationResult(asset_id=sample.asset_id,job_id=999,precheck_json='{}',scoring_json='{}',
+        raw_response_a='{"level":"L4"}',level='L1',score=95,review_revision=1,
+        model_id='fixture',prompt_a_version=1,prompt_b_version=1,rubric_version='fixture',engine_version='fixture',
+        correction_history_json='[{"corrector":"tester","old_value":"L4","new_value":"L1"}]')
+    db.add(evaluation);db.flush()
+    item=BaselineRegressionItem(run_id=run.id,baseline_set_item_id=sample.id,asset_id=sample.asset_id,
+        evaluation_id=evaluation.id,status='completed',expected_level='L2',expected_result_json='{"level":"L2"}',
+        result_snapshot_json='{"predicted_level":"L4","authoritative_score":30}')
+    db.add(item);db.commit()
+    snap=freeze_results(db,source_kind='baseline',run_id=str(run.id),selection={},result_mode='effective',actor='tester');db.commit()
+    doc=next(__import__('app.stock_exports',fromlist=['documents']).documents(db,snap.id))
+    assert doc['raw']['level']=='L4' and doc['effective']['level']=='L1'
+    assert doc['reference']['expected_level']=='L2' and doc['human']['revision']==1
+    raw=freeze_results(db,source_kind='baseline',run_id=str(run.id),selection={},result_mode='raw',actor='tester');db.commit()
+    assert next(__import__('app.stock_exports',fromlist=['documents']).documents(db,raw.id))['effective']['level']=='L4'
+
+
+def test_xlsx_long_json_round_trips_control_characters_and_formula_prefix(tmp_path):
+    from app.stock_export_xlsx import write_xlsx
+    import xml.etree.ElementTree as ET
+    doc={'item_id':'=formula','name':'=SUM(1,2)','status':'completed','human':None,
+         'raw':{'title':'🪑'*18000+'\x01'+ '='*35000},'effective':{'title':'x'*50000}}
+    path=tmp_path/'long.xlsx';write_xlsx(path,lambda:iter([doc]))
+    with zipfile.ZipFile(path) as z:
+        root=ET.fromstring(z.read('xl/worksheets/sheet2.xml'))
+        rows=root.findall('{*}sheetData/{*}row')[1:]
+        texts=[''.join(row.findall('{*}c')[-1].itertext()) for row in rows]
+        assert json.loads(''.join(texts))==doc
+        assert all(len(t.encode('utf-16-le'))<=60000 for t in texts)
+        assert b'<f>' not in z.read('xl/worksheets/sheet1.xml')
+
+
+def test_zip_contains_the_frozen_image_and_manifest(setup):
+    db,settings,sid=setup;run,item,a,digest=ready(db,settings,sid)
+    snap=freeze_results(db,source_kind='cover',run_id=run.id,selection={},result_mode='effective',actor='tester');db.commit()
+    job=create_export(db,snapshot_id=snap.id,format='images_zip',actor='tester');db.commit();execute_export(db,job.id,settings=settings)
+    assert job.status=='succeeded' and job.missing_files==0
+    with zipfile.ZipFile(settings.data_dir/'stock-exports'/job.file_name) as z:
+        manifest=json.loads(z.read('files.json'))
+        assert hashlib.sha256(z.read(manifest[0]['file'])).hexdigest()==digest
+
+
+def test_low_disk_fails_without_deleting_core_images_or_other_packages(setup,monkeypatch):
+    from types import SimpleNamespace
+    db,settings,sid=setup;run,item,a,digest=ready(db,settings,sid)
+    snap=freeze_results(db,source_kind='cover',run_id=run.id,selection={},result_mode='raw',actor='tester');db.commit()
+    job=create_export(db,snapshot_id=snap.id,format='images_zip',actor='tester');db.commit()
+    monkeypatch.setattr('shutil.disk_usage',lambda path:SimpleNamespace(free=0))
+    execute_export(db,job.id,settings=settings)
+    assert job.status=='failed' and job.error_code=='insufficient_export_space'
+    assert (settings.data_dir/'stock-images'/'outputs'/(digest+'.png')).is_file()
+    assert not list((settings.data_dir/'stock-exports').glob('*.part'))
+
+===== FILE backend/tests/test_stock_export_api.py =====
+from sqlalchemy import select
+from tests.test_employee_access import context
+from app.models import Asset,BaselineSet,BaselineSetItem
+from app.cover_regression import create_round
+from app.cover_gateway import CoverParameters
+from app.config import get_settings
+from app.module_api import owner
+
+def test_real_cookie_export_is_read_access_and_remains_stock_only(context,monkeypatch):
+    sessions,login,_=context
+    monkeypatch.setenv('STOCK_EXPORT_ENABLED','1')
+    with sessions() as db:
+        asset=db.scalar(select(Asset).where(Asset.category_key=='model_3d_su'))
+        b=BaselineSet(name='export-api',category_key=asset.category_key,default_expected_level='L1',fingerprint='a'*64)
+        db.add(b);db.flush()
+        db.add(BaselineSetItem(baseline_set_id=b.id,asset_id=asset.id,asset_snapshot_json='{}'));db.flush()
+        create_round(db,baseline_set_id=b.id,prompt='synthetic only',parameters=CoverParameters(),actor='fixture',settings=get_settings(),request_id='export-api-round');db.commit()
+    viewer,_=login('viewer',[])
+    response=viewer.post('/api/stock-exports',json={'source_kind':'cover','run_id':'export-api-round','format':'json'})
+    assert response.status_code==200,response.text
+    job=response.json();assert job['status']=='queued' and job['total']==1 and not job['download_url']
+    assert viewer.get(f'/api/stock-exports/{job["id"]}/file').status_code==409
+    assert viewer.post(f'/api/stock-exports/{job["id"]}/rebuild',json={'format':'xlsx'}).status_code==200
+    assert viewer.post('/api/stock-exports',json={'source_kind':'cover','run_id':'export-api-round','incremental_enabled':True}).status_code==422
+    assert viewer.post('/api/stock-exports',headers={'Origin':'https://attacker.invalid'},json={'source_kind':'cover','run_id':'export-api-round'}).status_code==403
+    monkeypatch.delenv('STOCK_EXPORT_ENABLED')
+    assert viewer.post('/api/stock-exports',json={'source_kind':'cover','run_id':'export-api-round'}).status_code==503
+    assert owner('/api/stock-exports/anything/file')=='stock'

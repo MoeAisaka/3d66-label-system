@@ -1,6 +1,7 @@
 {
-  "base": "ed15722",
-  "note": "Source-only fixed review snapshot. MCP release candidate; cover generation remains WIP. No production data or environment files.",
+  "fixed_candidate": "bf5d192ffb4032218d20f725f908bb5b1f1cb416",
+  "purpose": "Source-only whole-repository context for stock export review. Not a deployment branch.",
+  "files": 1244,
   "parts": [
     {
       "name": "source-01.txt",
@@ -41,20 +42,21 @@
         "backend/app/benchmarking.py",
         "backend/app/bounded_runtime.py",
         "backend/app/candidate_rebase.py",
-        "backend/app/category_evaluation_aggregator.py",
+        "backend/app/category_evaluation_aggregator.py"
+      ],
+      "bytes": 540089,
+      "sha256": "e9317e2019831ffe8c512c8f03f0fa1551c93f5596389c3fc374882009345f6d"
+    },
+    {
+      "name": "source-02.txt",
+      "files": [
         "backend/app/category_evaluation_contract.py",
         "backend/app/category_evaluation_preview_api.py",
         "backend/app/category_evaluation_v3_config_api.py",
         "backend/app/category_evaluation_v3_projection_guard.py",
         "backend/app/category_evaluation_v3_revisions.py",
         "backend/app/category_pipeline.py",
-        "backend/app/classification_level_map.py"
-      ],
-      "sha256": "c88b18b81418e471378d115d980717698e719ba7e075dca1e6c69c177c6dc6a2"
-    },
-    {
-      "name": "source-02.txt",
-      "files": [
+        "backend/app/classification_level_map.py",
         "backend/app/config.py",
         "backend/app/connector_adapter_registry.py",
         "backend/app/connector_contracts.py",
@@ -73,7 +75,14 @@
         "backend/app/cover_gateway.py",
         "backend/app/cover_regression.py",
         "backend/app/cover_regression_api.py",
-        "backend/app/cover_worker.py",
+        "backend/app/cover_worker.py"
+      ],
+      "bytes": 545892,
+      "sha256": "ce6c394c6b524e687f7e31f69aced0644346467525ad894218b719da84e94944"
+    },
+    {
+      "name": "source-03.txt",
+      "files": [
         "backend/app/daily_review_api.py",
         "backend/app/daily_review_quota.py",
         "backend/app/daily_review_selector.py",
@@ -95,13 +104,7 @@
         "backend/app/dimension_route_registry.py",
         "backend/app/dimension_router.py",
         "backend/app/dimension_schema_registry.py",
-        "backend/app/dingtalk_identity.py"
-      ],
-      "sha256": "4b91674b43263cc93843688e410c441439b5e2d4230a1b2a96d6d8ca46eed2c1"
-    },
-    {
-      "name": "source-03.txt",
-      "files": [
+        "backend/app/dingtalk_identity.py",
         "backend/app/doubao.py",
         "backend/app/doubao_endpoint_models.py",
         "backend/app/doubao_endpoints.py",
@@ -115,7 +118,14 @@
         "backend/app/employee_identity_worker.py",
         "backend/app/employee_lifecycle.py",
         "backend/app/evaluation_component_catalog.py",
-        "backend/app/evaluation_components.py",
+        "backend/app/evaluation_components.py"
+      ],
+      "bytes": 544980,
+      "sha256": "27d31ff28bf9ab0902e21af0fd5328123f0bb7601444deb35efb07134318c8bb"
+    },
+    {
+      "name": "source-04.txt",
+      "files": [
         "backend/app/evaluation_components_api.py",
         "backend/app/evaluation_credentials.py",
         "backend/app/evaluation_mechanism_migration.py",
@@ -141,17 +151,18 @@
         "backend/app/historical_corrections.py",
         "backend/app/identity_logging.py",
         "backend/app/image_first_seen_provider.py",
-        "backend/app/incremental_admission.py"
-      ],
-      "sha256": "1aa0f832eb13df72d43c75941ab14572078cc27b56ad80d03e61c9293ac7c73c"
-    },
-    {
-      "name": "source-04.txt",
-      "files": [
+        "backend/app/incremental_admission.py",
         "backend/app/incremental_automation.py",
         "backend/app/incremental_autorun.py",
         "backend/app/incremental_capacity.py",
-        "backend/app/incremental_capacity_observer.py",
+        "backend/app/incremental_capacity_observer.py"
+      ],
+      "bytes": 537145,
+      "sha256": "d9ade0331e2eb15b8443bd367337dae43706d6f76d68312a1c01fb36d3efc48b"
+    },
+    {
+      "name": "source-05.txt",
+      "files": [
         "backend/app/incremental_correction.py",
         "backend/app/incremental_correction_analysis.py",
         "backend/app/incremental_correction_analysis_api.py",
@@ -182,19 +193,20 @@
         "backend/app/inspiration_factory_contract.py",
         "backend/app/inspiration_factory_delivery.py",
         "backend/app/inspiration_factory_failure.py",
-        "backend/app/inspiration_factory_identity.py",
+        "backend/app/inspiration_factory_identity.py"
+      ],
+      "bytes": 536892,
+      "sha256": "573b808469e016fdc0be6830450b52de7c688b596c4be3b441677ba28ba1ab2a"
+    },
+    {
+      "name": "source-06.txt",
+      "files": [
         "backend/app/inspiration_factory_intake.py",
         "backend/app/inspiration_factory_projection.py",
         "backend/app/inspiration_factory_transport.py",
         "backend/app/inspiration_metadata_bounds.py",
         "backend/app/inspiration_metadata_generation.py",
-        "backend/app/inspiration_original_retention.py"
-      ],
-      "sha256": "84d61e958be45c9c460d39014048aff3b06adc2990ae2643590cfd7c012ec2c0"
-    },
-    {
-      "name": "source-05.txt",
-      "files": [
+        "backend/app/inspiration_original_retention.py",
         "backend/app/inspiration_production_fields.py",
         "backend/app/inspiration_quality_metrics.py",
         "backend/app/inspiration_quality_rules.py",
@@ -220,17 +232,19 @@
         "backend/app/lossless_image_transport.py",
         "backend/app/macos_deploy.py"
       ],
-      "sha256": "06847c48087fdda002ff2ebf0d9e788b104340f4dd761f1cc7eb9272227865b2"
-    },
-    {
-      "name": "source-06.txt",
-      "files": [
-        "backend/app/main.py"
-      ],
-      "sha256": "cd51130dae10364722592379f5e9e3cd972a3f024815728f39e54e2780978821"
+      "bytes": 506544,
+      "sha256": "967ae443117eeafc9ad2f263f445b348bd57e2df294263e9b8b76a86af3e1486"
     },
     {
       "name": "source-07.txt",
+      "files": [
+        "backend/app/main.py"
+      ],
+      "bytes": 763772,
+      "sha256": "7524c89d28216df2a03d9903753fd7d412a4eb0c568448f5a3fee0f2f9d191e0"
+    },
+    {
+      "name": "source-08.txt",
       "files": [
         "backend/app/mechanism_authoring_policy.py",
         "backend/app/mechanism_profiles.py",
@@ -238,22 +252,29 @@
         "backend/app/media.py",
         "backend/app/migration.py",
         "backend/app/migrations/__init__.py",
-        "backend/app/migrations/cover_regression_133.py",
         "backend/app/migrations/employee_access_132.py",
         "backend/app/migrations/module_runtime.py",
         "backend/app/migrations/mysql_baseline.py",
         "backend/app/migrations/mysql_invariants.py",
-        "backend/app/migrations/personal_mcp_134.py",
         "backend/app/migrations/postgres_baseline.py",
         "backend/app/migrations/postgres_invariants.py"
       ],
-      "sha256": "fd2af9209d5bfd8de8d9b4ada0a1521d0c344e6cfb12c61b918cb1c607ac95a5"
+      "bytes": 216919,
+      "sha256": "5403c24c7d1a105dfb10c3b4c8ee9e3213dbcadf208b8ef08cbebaeb1914c9b6"
     },
     {
-      "name": "source-08.txt",
+      "name": "source-09.txt",
       "files": [
-        "backend/app/migrations/runner.py",
+        "backend/app/migrations/runner.py"
+      ],
+      "bytes": 573763,
+      "sha256": "e75ac2e2ea88347d5d422d4c5499f567f8f98baf362f517f948ec6619c27ffce"
+    },
+    {
+      "name": "source-10.txt",
+      "files": [
         "backend/app/migrations/snapshot_inline_nullable.py",
+        "backend/app/migrations/stock_exports_135.py",
         "backend/app/migrations/unique_constraints_129.py",
         "backend/app/migrations/upgrade_v3_to_rule_deduction.py",
         "backend/app/migrations/wide_material_130.py",
@@ -261,13 +282,7 @@
         "backend/app/model_3d_su_legacy_projection.py",
         "backend/app/model_3d_su_strict_release.py",
         "backend/app/model_3d_su_upstream_gate_release.py",
-        "backend/app/model_media_usage.py"
-      ],
-      "sha256": "d7918483b98178d2c1a8eda88bab1bb40745782d1ec33cc75aa8e7fdb6445142"
-    },
-    {
-      "name": "source-09.txt",
-      "files": [
+        "backend/app/model_media_usage.py",
         "backend/app/model_media_usage_api.py",
         "backend/app/model_pricing.py",
         "backend/app/model_quota.py",
@@ -275,7 +290,14 @@
         "backend/app/models.py",
         "backend/app/module_api.py",
         "backend/app/module_runtime.py",
-        "backend/app/mysql_importer.py",
+        "backend/app/mysql_importer.py"
+      ],
+      "bytes": 546353,
+      "sha256": "8c4b9be2018384ea61dc846389901e4edf2e575939f24841197cdabf626c5231"
+    },
+    {
+      "name": "source-11.txt",
+      "files": [
         "backend/app/mysql_integration.py",
         "backend/app/mysql_reconciliation.py",
         "backend/app/mysql_schema_clone.py",
@@ -284,13 +306,7 @@
         "backend/app/native_acceptance_cohort.py",
         "backend/app/native_baseline_incident.py",
         "backend/app/native_baseline_regression.py",
-        "backend/app/native_source_run_discovery.py"
-      ],
-      "sha256": "c0f4b59c84e206e6ee1d72b86d1b06dfa10878ed99753fc9731f20d0cb770bb7"
-    },
-    {
-      "name": "source-10.txt",
-      "files": [
+        "backend/app/native_source_run_discovery.py",
         "backend/app/native_workflow_migration.py",
         "backend/app/new_server_acceptance.py",
         "backend/app/new_server_capacity.py",
@@ -300,7 +316,14 @@
         "backend/app/optimization_case_insert.py",
         "backend/app/optimizer.py",
         "backend/app/outbox_delivery_tick.py",
-        "backend/app/p0e_canary_api.py",
+        "backend/app/p0e_canary_api.py"
+      ],
+      "bytes": 535569,
+      "sha256": "454b9ebdcaabc6a9c4d9755295dab742141bbe7b3b4c93a7f3c31d40176e25b8"
+    },
+    {
+      "name": "source-12.txt",
+      "files": [
         "backend/app/p0e_canary_run.py",
         "backend/app/p0e_candidate_package.py",
         "backend/app/p0e_image_freeze.py",
@@ -332,13 +355,7 @@
         "backend/app/proposal_text_seed.py",
         "backend/app/provider_http_pool.py",
         "backend/app/quality_assets.py",
-        "backend/app/queue_scheduler.py"
-      ],
-      "sha256": "ce3e8362d07d37336e00816186e9028d30aa7c18346a63c3599c499be6131bfd"
-    },
-    {
-      "name": "source-11.txt",
-      "files": [
+        "backend/app/queue_scheduler.py",
         "backend/app/readiness_monitor.py",
         "backend/app/readiness_observation.py",
         "backend/app/readonly_sources.py",
@@ -347,7 +364,14 @@
         "backend/app/redline_policy.py",
         "backend/app/regression.py",
         "backend/app/release_fee_verification.py",
-        "backend/app/release_window.py",
+        "backend/app/release_window.py"
+      ],
+      "bytes": 548059,
+      "sha256": "4b08fa473fc11311f73038d2d8ed9ff8a717716dfad0189c01c3201d3a97a5b5"
+    },
+    {
+      "name": "source-13.txt",
+      "files": [
         "backend/app/review_panel.py",
         "backend/app/review_sampling.py",
         "backend/app/risk_review.py",
@@ -377,14 +401,19 @@
         "backend/app/source_recovery.py",
         "backend/app/source_recovery_api.py",
         "backend/app/source_recovery_models.py",
-        "backend/app/stock_lab.py",
-        "backend/app/stock_lab_api.py"
+        "backend/app/stock_export_api.py",
+        "backend/app/stock_export_worker.py",
+        "backend/app/stock_export_xlsx.py",
+        "backend/app/stock_exports.py"
       ],
-      "sha256": "5afd457153d55cb3f209c051d791b433025649c5800aa489f1983759b5e9daff"
+      "bytes": 535940,
+      "sha256": "e563cd535bd569658e4277f659fd9f52e2a31cb5231508cf9b1f9c1e5e8c4c1d"
     },
     {
-      "name": "source-12.txt",
+      "name": "source-14.txt",
       "files": [
+        "backend/app/stock_lab.py",
+        "backend/app/stock_lab_api.py",
         "backend/app/strategy_bundle.py",
         "backend/app/strict_prompt_contracts.py",
         "backend/app/strict_prompt_release.py",
@@ -404,7 +433,14 @@
         "backend/app/volcengine_billing.py",
         "backend/app/wide_material.py",
         "backend/app/wide_material_models.py",
-        "backend/app/windows_deploy.py",
+        "backend/app/windows_deploy.py"
+      ],
+      "bytes": 448230,
+      "sha256": "75b937577d675340c58c200b2a153e8f5cd146cc6b90adb89c8fae19565ea725"
+    },
+    {
+      "name": "source-15.txt",
+      "files": [
         "backend/app/worker.py",
         "backend/app/worker_capacity.py",
         "backend/app/worker_group.py",
@@ -414,33 +450,35 @@
         "backend/app/worker_v3_shadow.py",
         "backend/app/worker_v3_shadow_prompt.py",
         "backend/app/workflow_assets.py",
-        "backend/app/workflow_assets_api.py"
-      ],
-      "sha256": "bb4d351ca710e4dafcfe5b025d9c53f216047acf66db809cf0543d51cea21b33"
-    },
-    {
-      "name": "source-13.txt",
-      "files": [
+        "backend/app/workflow_assets_api.py",
         "backend/app/workflow_case_aggregation.py",
         "backend/app/workflow_composer_runtime.py",
         "backend/app/workflow_conditions.py",
         "backend/app/workflow_connector_executor.py",
         "backend/app/workflow_correction.py",
-        "backend/app/workflow_external_wait.py",
+        "backend/app/workflow_external_wait.py"
+      ],
+      "bytes": 482547,
+      "sha256": "3ccf783e823c8703f63646de0a6f2b1dadd8b73b2444b17201dbc9b0d57951ff"
+    },
+    {
+      "name": "source-16.txt",
+      "files": [
         "backend/app/workflow_fixture_executor.py",
         "backend/app/workflow_foreach_executor.py",
         "backend/app/workflow_manager_seed.py",
         "backend/app/workflow_model_budget.py",
         "backend/app/workflow_model_executor.py",
         "backend/app/workflow_node_executors.py",
-        "backend/app/workflow_prompt_execution.py"
+        "backend/app/workflow_prompt_execution.py",
+        "backend/app/workflow_registry.py"
       ],
-      "sha256": "86aba248afc870e5b941157056181d15bc7d5839f9003ede60dcecf62ddd1bb0"
+      "bytes": 544790,
+      "sha256": "1ceaf342c12894fe28d45cc3d992d60198d729ee6b9ed8299e8053c5586d10cc"
     },
     {
-      "name": "source-14.txt",
+      "name": "source-17.txt",
       "files": [
-        "backend/app/workflow_registry.py",
         "backend/app/workflow_registry_api.py",
         "backend/app/workflow_result_contract.py",
         "backend/app/workflow_result_finalizer.py",
@@ -466,7 +504,14 @@
         "backend/tests/fixtures_redline_policy_v101.json",
         "backend/tests/incremental_mechanism_fixtures.py",
         "backend/tests/test_account_permissions.py",
-        "backend/tests/test_adaptive_admission.py",
+        "backend/tests/test_adaptive_admission.py"
+      ],
+      "bytes": 541771,
+      "sha256": "f96f836a090b48f06fab421ca653dfa5501b1ae38696e460e2cce3f407a593e3"
+    },
+    {
+      "name": "source-18.txt",
+      "files": [
         "backend/tests/test_adaptive_correction_three_lanes.py",
         "backend/tests/test_adaptive_dimension_contract.py",
         "backend/tests/test_admission_ceiling.py",
@@ -481,13 +526,7 @@
         "backend/tests/test_asset_keyword_search.py",
         "backend/tests/test_asset_version_and_tag_contract_models.py",
         "backend/tests/test_audit_event_keys.py",
-        "backend/tests/test_automation_api.py"
-      ],
-      "sha256": "9e2c4c8a9d057b74a6c84890e8af7baca153a81761ff1667cc02dd3ff582a3d5"
-    },
-    {
-      "name": "source-15.txt",
-      "files": [
+        "backend/tests/test_automation_api.py",
         "backend/tests/test_automation_batching.py",
         "backend/tests/test_automation_candidate_pipeline.py",
         "backend/tests/test_automation_card_endpoint_route.py",
@@ -528,7 +567,14 @@
         "backend/tests/test_batch_job_runtime.py",
         "backend/tests/test_batch_online_fallback_budget.py",
         "backend/tests/test_batch_overload_does_not_hold_ramp.py",
-        "backend/tests/test_batch_recovery_idle_capacity.py",
+        "backend/tests/test_batch_recovery_idle_capacity.py"
+      ],
+      "bytes": 544162,
+      "sha256": "11f4857c96b03c77e4144e654acf3622d1d46df7e6841d04716f0fd6a193eef4"
+    },
+    {
+      "name": "source-19.txt",
+      "files": [
         "backend/tests/test_batch_submission_fairness.py",
         "backend/tests/test_batch_submission_mysql.py",
         "backend/tests/test_batch_submission_pacing.py",
@@ -553,13 +599,7 @@
         "backend/tests/test_category_evaluation_v3_config_api.py",
         "backend/tests/test_category_evaluation_v3_revisions.py",
         "backend/tests/test_category_pipeline.py",
-        "backend/tests/test_category_service_class.py"
-      ],
-      "sha256": "87cfade4966d61557d1e89cafd51c20bc4af272c218580a0aaff0983468f825a"
-    },
-    {
-      "name": "source-16.txt",
-      "files": [
+        "backend/tests/test_category_service_class.py",
         "backend/tests/test_category_worker_pipeline.py",
         "backend/tests/test_claim_lock_ordering.py",
         "backend/tests/test_classification_level_map.py",
@@ -587,7 +627,14 @@
         "backend/tests/test_correction_replay_factory_projection.py",
         "backend/tests/test_correction_schema_field_labels.py",
         "backend/tests/test_correction_table_view.py",
-        "backend/tests/test_correction_view.py",
+        "backend/tests/test_correction_view.py"
+      ],
+      "bytes": 547537,
+      "sha256": "e1ac74a6ab76f5dafe602755c06985a6002d48822d84af6435930a179c0917b6"
+    },
+    {
+      "name": "source-20.txt",
+      "files": [
         "backend/tests/test_correction_view_batch.py",
         "backend/tests/test_cover_attempts.py",
         "backend/tests/test_cover_gateway.py",
@@ -627,13 +674,7 @@
         "backend/tests/test_dimension_routing.py",
         "backend/tests/test_dimension_schema.py",
         "backend/tests/test_dimension_strategy_binding.py",
-        "backend/tests/test_docker_secret_storage.py"
-      ],
-      "sha256": "f339011efcfd64343516b9fa4fb96a0eecf73e91eadd23bca6ce3484080b1534"
-    },
-    {
-      "name": "source-17.txt",
-      "files": [
+        "backend/tests/test_docker_secret_storage.py",
         "backend/tests/test_doubao_endpoints.py",
         "backend/tests/test_doubao_multi_image_text.py",
         "backend/tests/test_doubao_prefix_cache_order.py",
@@ -648,7 +689,14 @@
         "backend/tests/test_evaluation_component_catalog.py",
         "backend/tests/test_evaluation_components.py",
         "backend/tests/test_evaluation_components_api.py",
-        "backend/tests/test_evaluation_mechanism_migration.py",
+        "backend/tests/test_evaluation_mechanism_migration.py"
+      ],
+      "bytes": 537215,
+      "sha256": "0ebfcb35975c28f9d007979b4d03a8abf5c068fa1531fa551b03e7a5ad6cf26f"
+    },
+    {
+      "name": "source-21.txt",
+      "files": [
         "backend/tests/test_evaluation_packages.py",
         "backend/tests/test_evaluation_production.py",
         "backend/tests/test_factory_allowance_settlement.py",
@@ -698,17 +746,18 @@
         "backend/tests/test_incremental_campaign_20260909.py",
         "backend/tests/test_incremental_capacity.py",
         "backend/tests/test_incremental_capacity_feed.py",
-        "backend/tests/test_incremental_capacity_observer.py"
-      ],
-      "sha256": "19aa2d6a31b1b8348e146c84d9862f26511b3478b6e9f876678ed9f4d4c013bf"
-    },
-    {
-      "name": "source-18.txt",
-      "files": [
+        "backend/tests/test_incremental_capacity_observer.py",
         "backend/tests/test_incremental_case_ingress.py",
         "backend/tests/test_incremental_continuous.py",
         "backend/tests/test_incremental_correction_analysis.py",
-        "backend/tests/test_incremental_correction_analysis_api.py",
+        "backend/tests/test_incremental_correction_analysis_api.py"
+      ],
+      "bytes": 548949,
+      "sha256": "727d0385dc0c791a4c3cb7b8eae87f4260ce193293e7106aabcea20d82f3b3c7"
+    },
+    {
+      "name": "source-22.txt",
+      "files": [
         "backend/tests/test_incremental_correction_api.py",
         "backend/tests/test_incremental_correction_continuity.py",
         "backend/tests/test_incremental_correction_queue.py",
@@ -754,7 +803,14 @@
         "backend/tests/test_inspiration_metadata_bounds.py",
         "backend/tests/test_inspiration_metadata_feedback.py",
         "backend/tests/test_inspiration_metadata_freeze.py",
-        "backend/tests/test_inspiration_metadata_generation.py",
+        "backend/tests/test_inspiration_metadata_generation.py"
+      ],
+      "bytes": 549049,
+      "sha256": "c4b21a6ebef1f13b892a570382878b4eed0730ec0855649af32f463ea133e054"
+    },
+    {
+      "name": "source-23.txt",
+      "files": [
         "backend/tests/test_inspiration_metadata_runtime.py",
         "backend/tests/test_inspiration_original_retention.py",
         "backend/tests/test_inspiration_production_candidate.py",
@@ -766,13 +822,7 @@
         "backend/tests/test_inspiration_seed_persistence.py",
         "backend/tests/test_inspiration_semantic_consistency.py",
         "backend/tests/test_inspiration_terminal_failure.py",
-        "backend/tests/test_invocation_review.py"
-      ],
-      "sha256": "6da8a645063db48608ecdd49dfd5b104b9ca5f3258d4940c1e5d07f10c78ed1c"
-    },
-    {
-      "name": "source-19.txt",
-      "files": [
+        "backend/tests/test_invocation_review.py",
         "backend/tests/test_job_controls.py",
         "backend/tests/test_jobs_listing_paging.py",
         "backend/tests/test_joint_model_workflow.py",
@@ -812,19 +862,20 @@
         "backend/tests/test_mechanism_release_gate.py",
         "backend/tests/test_media.py",
         "backend/tests/test_media_penalty_toggle.py",
-        "backend/tests/test_memory_capacity_profiles.py",
+        "backend/tests/test_memory_capacity_profiles.py"
+      ],
+      "bytes": 549473,
+      "sha256": "66dc22c0dc94fea45158f14738fd19fdcfb668837a4942c7aed4e01ab0a64ad6"
+    },
+    {
+      "name": "source-24.txt",
+      "files": [
         "backend/tests/test_migration.py",
         "backend/tests/test_migration_branch_convergence.py",
         "backend/tests/test_model_3d_su_seed.py",
         "backend/tests/test_model_3d_su_semantic_slice.py",
         "backend/tests/test_model_3d_su_strict_release.py",
-        "backend/tests/test_model_media_settlement.py"
-      ],
-      "sha256": "4c8c58afa6de4d7ff89df2248b0ffb959c217ba01d4a89adcad2d5c985312421"
-    },
-    {
-      "name": "source-20.txt",
-      "files": [
+        "backend/tests/test_model_media_settlement.py",
         "backend/tests/test_model_media_usage.py",
         "backend/tests/test_model_media_usage_api.py",
         "backend/tests/test_model_media_usage_migration.py",
@@ -846,7 +897,14 @@
         "backend/tests/test_mysql_application_smoke.py",
         "backend/tests/test_mysql_downstream_privilege.py",
         "backend/tests/test_mysql_fixture.py",
-        "backend/tests/test_mysql_importer.py",
+        "backend/tests/test_mysql_importer.py"
+      ],
+      "bytes": 529543,
+      "sha256": "10dc627f56a3c0ef77cc266180c04d82530c1f64c0482dda1ffa92c2af0ad386"
+    },
+    {
+      "name": "source-25.txt",
+      "files": [
         "backend/tests/test_mysql_integration.py",
         "backend/tests/test_mysql_invariants.py",
         "backend/tests/test_mysql_native_workflow_smoke.py",
@@ -873,10 +931,11 @@
         "backend/tests/test_native_workflow_capacity_probe.py",
         "backend/tests/test_native_workflow_equivalence.py"
       ],
-      "sha256": "16936fc51a203a7d55767c18a556d3a557b114e2714e773b1007d6e871cf9819"
+      "bytes": 374335,
+      "sha256": "0276c886b2721b04e8f0d1414cb00930540c2dfc8f179a8657652567b7401cc5"
     },
     {
-      "name": "source-21.txt",
+      "name": "source-26.txt",
       "files": [
         "backend/tests/test_native_workflow_real_regression.py",
         "backend/tests/test_native_workflow_scheduling_drift.py",
@@ -896,20 +955,21 @@
         "backend/tests/test_p0e_safe_import.py",
         "backend/tests/test_paid_acceptance_guard.py",
         "backend/tests/test_paired_regression.py",
-        "backend/tests/test_personal_mcp.py",
+        "backend/tests/test_personal_mcp.py"
+      ],
+      "bytes": 539434,
+      "sha256": "b28ad05e8acdc24e693b9e63f0fcd3f2ab1bdd84a77ce09f9e3d9396448685dc"
+    },
+    {
+      "name": "source-27.txt",
+      "files": [
         "backend/tests/test_phase_b_automation.py",
         "backend/tests/test_pool_feedback_index.py",
         "backend/tests/test_postgres_application_smoke.py",
         "backend/tests/test_postgres_importer.py",
         "backend/tests/test_postgres_integration.py",
         "backend/tests/test_postgres_invariants.py",
-        "backend/tests/test_postgres_reconciliation.py"
-      ],
-      "sha256": "2702fc762516bd809be5f7d9e00e0ed8f9cdaa0bfd032fca2d1f4b956c6b815f"
-    },
-    {
-      "name": "source-22.txt",
-      "files": [
+        "backend/tests/test_postgres_reconciliation.py",
         "backend/tests/test_postgres_schema.py",
         "backend/tests/test_prepare_new_server.py",
         "backend/tests/test_prepared_media_memo.py",
@@ -947,7 +1007,14 @@
         "backend/tests/test_qwen_score_audit.py",
         "backend/tests/test_r7_maintenance_pacing.py",
         "backend/tests/test_r7_observability.py",
-        "backend/tests/test_r7_provider_requeue.py",
+        "backend/tests/test_r7_provider_requeue.py"
+      ],
+      "bytes": 546632,
+      "sha256": "3611f504970053fb8b69bc2d9119c17db118d997a771768b99806df87dcc85ef"
+    },
+    {
+      "name": "source-28.txt",
+      "files": [
         "backend/tests/test_ramp_slot_feedback.py",
         "backend/tests/test_readiness_monitor.py",
         "backend/tests/test_readonly_source_resolver.py",
@@ -974,13 +1041,7 @@
         "backend/tests/test_runtime_capacity_config.py",
         "backend/tests/test_runtime_dead_letter_replay.py",
         "backend/tests/test_runtime_foundation_migration.py",
-        "backend/tests/test_runtime_long_tail_mysql.py"
-      ],
-      "sha256": "65b8c703ff333706664fba9225b16bf226a3394f5814268e2b374471e7b5d918"
-    },
-    {
-      "name": "source-23.txt",
-      "files": [
+        "backend/tests/test_runtime_long_tail_mysql.py",
         "backend/tests/test_runtime_long_tail_scheduling.py",
         "backend/tests/test_runtime_outbox.py",
         "backend/tests/test_runtime_queue_fault_matrix.py",
@@ -1002,7 +1063,14 @@
         "backend/tests/test_semantic_tag_contracts.py",
         "backend/tests/test_semantic_tag_fact_governance.py",
         "backend/tests/test_semantic_tag_mapping.py",
-        "backend/tests/test_semantic_tag_quality.py",
+        "backend/tests/test_semantic_tag_quality.py"
+      ],
+      "bytes": 547302,
+      "sha256": "5c24819cc45c4aabbb094978dcbfd560acf353def3756cdac6c9f132b5c360d7"
+    },
+    {
+      "name": "source-29.txt",
+      "files": [
         "backend/tests/test_server_backup.py",
         "backend/tests/test_server_backup_scripts.py",
         "backend/tests/test_server_deployment_contract.py",
@@ -1027,18 +1095,14 @@
         "backend/tests/test_sqlite_claim_transaction.py",
         "backend/tests/test_sqlite_history_migration_cli.py",
         "backend/tests/test_staged_reviews.py",
+        "backend/tests/test_stock_export_api.py",
+        "backend/tests/test_stock_exports.py",
         "backend/tests/test_stock_lab.py",
         "backend/tests/test_stock_mechanism_selection.py",
         "backend/tests/test_storage_archive.py",
         "backend/tests/test_strategy_bundle.py",
         "backend/tests/test_strict_prompt_contracts.py",
-        "backend/tests/test_strict_prompt_release.py"
-      ],
-      "sha256": "4fe62d858b07ba1f77c6ae3fdad328fd8b98f83c9f7dceab08e0e98185cc7076"
-    },
-    {
-      "name": "source-24.txt",
-      "files": [
+        "backend/tests/test_strict_prompt_release.py",
         "backend/tests/test_structured_baseline_sets.py",
         "backend/tests/test_subcategory_resolver.py",
         "backend/tests/test_tag_demand_contract_api.py",
@@ -1047,7 +1111,14 @@
         "backend/tests/test_three_d_readiness.py",
         "backend/tests/test_three_d_shadow_consumption_flow.py",
         "backend/tests/test_three_d_workflow_fixture.py",
-        "backend/tests/test_truth_metric_groups.py",
+        "backend/tests/test_truth_metric_groups.py"
+      ],
+      "bytes": 547726,
+      "sha256": "5d90a7a4e95c3f4fa592ca47c12fa831a5835fc3c3232b34e14331168f28146a"
+    },
+    {
+      "name": "source-30.txt",
+      "files": [
         "backend/tests/test_tuning_model_registry.py",
         "backend/tests/test_unified_label_platform.py",
         "backend/tests/test_unique_constraints_129.py",
@@ -1083,14 +1154,15 @@
         "backend/tests/test_workflow_correction.py",
         "backend/tests/test_workflow_correction_blob_snapshot.py",
         "backend/tests/test_workflow_external_wait.py",
-        "backend/tests/test_workflow_external_wait_migration.py",
-        "backend/tests/test_workflow_fixture_executor.py"
+        "backend/tests/test_workflow_external_wait_migration.py"
       ],
-      "sha256": "5c1f570c74ac6ff5eefaf874a47bca4abea55a780ed054c70dbca678364f8f33"
+      "bytes": 509910,
+      "sha256": "abc8c211faf3c67e06d59ac14d3700c321e71d2911efcefe56bb22306ea7f1ec"
     },
     {
-      "name": "source-25.txt",
+      "name": "source-31.txt",
       "files": [
+        "backend/tests/test_workflow_fixture_executor.py",
         "backend/tests/test_workflow_foreach_executor.py",
         "backend/tests/test_workflow_foreach_migration.py",
         "backend/tests/test_workflow_manager_seed.py",
@@ -1107,7 +1179,14 @@
         "backend/tests/test_workflow_runtime_models.py",
         "backend/tests/test_workflow_runtime_recovery.py",
         "backend/tests/test_workflow_short_circuit.py",
-        "backend/tests/test_workflow_short_circuit_levels.py",
+        "backend/tests/test_workflow_short_circuit_levels.py"
+      ],
+      "bytes": 543652,
+      "sha256": "79b74fa295ee8a99caa06ec10e89210e42c2eb5ee7b54f1f7f762a5cec90144d"
+    },
+    {
+      "name": "source-32.txt",
+      "files": [
         "backend/tests/test_workflow_snapshot_backfill.py",
         "backend/tests/test_workflow_snapshot_compaction.py",
         "backend/tests/test_workflow_snapshot_store.py",
@@ -1133,14 +1212,9 @@
         "frontend/src/components/route-error-state.tsx",
         "frontend/src/components/runtime-run-drawer.tsx",
         "frontend/src/components/semantic-quality-drawer.tsx",
+        "frontend/src/components/stock-export-panel.tsx",
         "frontend/src/components/table-preferences.tsx",
-        "frontend/src/components/tag-demand-contract-drawer.tsx"
-      ],
-      "sha256": "b1b621e595f3287e15bf319743750c6dc29f129aa6ef9677ffeef78a00f9fb32"
-    },
-    {
-      "name": "source-26.txt",
-      "files": [
+        "frontend/src/components/tag-demand-contract-drawer.tsx",
         "frontend/src/components/ui/async-state.tsx",
         "frontend/src/components/ui/badge.tsx",
         "frontend/src/components/ui/button.tsx",
@@ -1198,7 +1272,14 @@
         "frontend/src/features/baseline-regression/metrics-drawer.tsx",
         "frontend/src/features/baseline-regression/native-correction-summary.ts",
         "frontend/src/features/baseline-regression/real-model-evidence.tsx",
-        "frontend/src/features/baseline-regression/real-model-execution.ts",
+        "frontend/src/features/baseline-regression/real-model-execution.ts"
+      ],
+      "bytes": 545748,
+      "sha256": "9324f878ebae17e37a593279ecb4d4b1ac8be5b1b5cbb9c6990ac11ca3a7f22f"
+    },
+    {
+      "name": "source-33.txt",
+      "files": [
         "frontend/src/features/baseline-regression/regression-overview.tsx",
         "frontend/src/features/baseline-regression/regression-page-shared.tsx",
         "frontend/src/features/baseline-regression/regression-results.tsx",
@@ -1240,13 +1321,7 @@
         "frontend/src/features/failure-console/api.ts",
         "frontend/src/features/failure-console/dead-letter-panel.tsx",
         "frontend/src/features/failure-console/invocation-review-panel.tsx",
-        "frontend/src/features/failure-console/picked-selection.ts"
-      ],
-      "sha256": "3ca8d064c839769418f51ca0bcb2fe67093557391256cf069243ad8e1bc4ba95"
-    },
-    {
-      "name": "source-27.txt",
-      "files": [
+        "frontend/src/features/failure-console/picked-selection.ts",
         "frontend/src/features/incremental-automation/automation-panel.tsx",
         "frontend/src/features/incremental-automation/observability-panel.tsx",
         "frontend/src/features/incremental-automation/operations-panel.tsx",
@@ -1265,7 +1340,14 @@
         "frontend/src/features/incremental-correction/submission-gate.ts",
         "frontend/src/features/incremental-correction/types.ts",
         "frontend/src/features/incremental-dashboard/coverage.ts",
-        "frontend/src/features/mechanism-config/anchor-mechanism-editor.tsx",
+        "frontend/src/features/mechanism-config/anchor-mechanism-editor.tsx"
+      ],
+      "bytes": 530555,
+      "sha256": "3026bdc46a694a3da9f4bf5a371e40d46f70f662dcbb224e0ff42c6f98251bf8"
+    },
+    {
+      "name": "source-34.txt",
+      "files": [
         "frontend/src/features/mechanism-config/image-rule-contract.ts",
         "frontend/src/features/mechanism-config/image-rule-editor.tsx",
         "frontend/src/features/mechanism-config/image-rule-subeditors.tsx",
@@ -1319,10 +1401,11 @@
         "frontend/src/features/workflow-manager/vision-input-policy-editor.tsx",
         "frontend/src/features/workflow-manager/vision-input-policy-model.ts"
       ],
-      "sha256": "c1cf04f2886b01b2447f5cc6feb771433f34857e5987752e532989e8a4b47586"
+      "bytes": 534493,
+      "sha256": "60c1601a632beb9a0442f6895ae12876a15ff7cdfa6a40cebde894241e8d4943"
     },
     {
-      "name": "source-28.txt",
+      "name": "source-35.txt",
       "files": [
         "frontend/src/index.css",
         "frontend/src/lib/access.ts",
@@ -1363,18 +1446,19 @@
         "frontend/src/pages/correction-analysis-page.tsx",
         "frontend/src/pages/cover-regression-page.tsx",
         "frontend/src/pages/daily-review-page.tsx",
-        "frontend/src/pages/dashboard-page.tsx",
+        "frontend/src/pages/dashboard-page.tsx"
+      ],
+      "bytes": 547306,
+      "sha256": "4a995cd20efb4a7f58d8bae640a66e574ce7d05ebb96bc5350efe1b7e27bc0f1"
+    },
+    {
+      "name": "source-36.txt",
+      "files": [
         "frontend/src/pages/dimension-manager-page.tsx",
         "frontend/src/pages/doubao-endpoints-page.tsx",
         "frontend/src/pages/evaluation-packages-page.tsx",
         "frontend/src/pages/failure-console-page.tsx",
-        "frontend/src/pages/historical-corrections-page.tsx"
-      ],
-      "sha256": "316ec424e0cff856acdbca4d1ed9b86947b83b054e38a02cb38db6f1bdd731bc"
-    },
-    {
-      "name": "source-29.txt",
-      "files": [
+        "frontend/src/pages/historical-corrections-page.tsx",
         "frontend/src/pages/incremental-correction-page.tsx",
         "frontend/src/pages/incremental-dashboard-page.tsx",
         "frontend/src/pages/incremental-workspace-page.tsx",
@@ -1395,7 +1479,14 @@
         "frontend/src/pages/prompts-page.tsx",
         "frontend/src/pages/quality-assets-page.tsx",
         "frontend/src/pages/release-workspace-page.tsx",
-        "frontend/src/pages/review-correction-form.tsx",
+        "frontend/src/pages/review-correction-form.tsx"
+      ],
+      "bytes": 523662,
+      "sha256": "42f4a136f8abb1dec55953803b362eddfebd27a861e83371eff22b69af3f6b36"
+    },
+    {
+      "name": "source-37.txt",
+      "files": [
         "frontend/src/pages/review-list.tsx",
         "frontend/src/pages/review-page.tsx",
         "frontend/src/pages/rule-module-page.tsx",
@@ -1404,20 +1495,16 @@
         "frontend/src/pages/users-page.tsx",
         "frontend/src/pages/workflow-composer-page.tsx",
         "frontend/src/pages/workflow-shared.tsx",
-        "frontend/src/styles/visual-controls.css"
-      ],
-      "sha256": "3db261c4f660a4a699173205dda559c93b58e0ad76cfe738f8194e5ce4a77a2c"
-    },
-    {
-      "name": "source-30.txt",
-      "files": [
+        "frontend/src/styles/visual-controls.css",
         "frontend/src/styles/visual-font-faces.css",
         "frontend/src/styles/visual-motion.css",
         "frontend/src/styles/visual-typography.css",
         "frontend/src/styles/workspace-layout.css",
-        "frontend/src/vite-env.d.ts"
+        "frontend/src/vite-env.d.ts",
+        "scripts/module_release.py"
       ],
-      "sha256": "9e5574bf32a0b924258b398a70bf72e4ca37815f3d66efecddeab406d95f753b"
+      "bytes": 501119,
+      "sha256": "b8a47df9e8bd137206c417c0111d9a0663271df12538bd3c4902e22e29c3cc1a"
     }
   ]
 }
