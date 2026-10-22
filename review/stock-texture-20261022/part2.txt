@@ -1,0 +1,725 @@
+第2段（共三段）。请等第三段再评审。
+
+===== FILE backend/app/texture_regression.py =====
+"""Texture stock coordinator. Native model and Ali ledgers remain authoritative.
+
+This ledger only freezes samples, joins independent checks, and versions human
+decisions. It never writes grading results or changes an incremental binding.
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+import re
+import uuid
+from datetime import datetime, timezone
+
+from sqlalchemy import ForeignKey, Integer, String, Text, Boolean, UniqueConstraint, select, func
+from sqlalchemy.orm import Mapped, mapped_column
+
+from .database import Base, reserve_sqlite_immediate_transaction
+from .texture_audit import TextureAuditError, freeze_policy, reduce_checks
+
+
+def canonical(value): return json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":"), allow_nan=False)
+def digest(value): return hashlib.sha256(canonical(value).encode()).hexdigest()
+def now(): return datetime.now(timezone.utc).isoformat()
+
+
+class TextureRun(Base):
+    __tablename__ = "texture_regression_runs"
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    name: Mapped[str] = mapped_column(String(160))
+    category_key: Mapped[str] = mapped_column(String(40), index=True)
+    source_set_id: Mapped[int] = mapped_column(ForeignKey("baseline_sets.id", ondelete="RESTRICT"))
+    native_run_id: Mapped[int | None] = mapped_column(ForeignKey("baseline_regression_runs.id", ondelete="RESTRICT"), nullable=True)
+    safety_run_id: Mapped[str | None] = mapped_column(ForeignKey("safety_regression_runs.id", ondelete="RESTRICT"), nullable=True)
+    status: Mapped[str] = mapped_column(String(24), index=True)
+    request_hash: Mapped[str] = mapped_column(String(64))
+    config_json: Mapped[str] = mapped_column(Text)
+    error_code: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    settlement_pending: Mapped[bool] = mapped_column(Boolean, default=True, server_default="1")
+    created_by: Mapped[str] = mapped_column(String(80))
+    created_at: Mapped[str] = mapped_column(String(40))
+    last_dispatched: Mapped[str] = mapped_column(String(40), default="", server_default="")
+
+
+class TextureItem(Base):
+    __tablename__ = "texture_regression_items"
+    __table_args__ = (UniqueConstraint("run_id", "source_item_id", name="uq_texture_run_source"),)
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    run_id: Mapped[str] = mapped_column(ForeignKey("texture_regression_runs.id", ondelete="RESTRICT"), index=True)
+    source_item_id: Mapped[int] = mapped_column(ForeignKey("baseline_set_items.id", ondelete="RESTRICT"))
+    asset_id: Mapped[int] = mapped_column(ForeignKey("assets.id", ondelete="RESTRICT"))
+    original_name: Mapped[str] = mapped_column(String(500))
+    input_snapshot_json: Mapped[str] = mapped_column(Text)
+    preparation_json: Mapped[str] = mapped_column(Text, default="{}", server_default="{}")
+    collected_source_hash: Mapped[str] = mapped_column(String(64), default="", server_default="")
+    status: Mapped[str] = mapped_column(String(24), index=True)
+    error_code: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    native_item_id: Mapped[int | None] = mapped_column(ForeignKey("baseline_regression_items.id", ondelete="RESTRICT"), nullable=True)
+    production_run_id: Mapped[int | None] = mapped_column(ForeignKey("production_runs.id", ondelete="RESTRICT"), nullable=True, index=True)
+    safety_item_id: Mapped[str | None] = mapped_column(ForeignKey("safety_regression_items.id", ondelete="RESTRICT"), nullable=True)
+
+
+class TextureResult(Base):
+    __tablename__ = "texture_regression_results"
+    __table_args__ = (UniqueConstraint("item_id", "revision", name="uq_texture_result_revision"),)
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    item_id: Mapped[str] = mapped_column(ForeignKey("texture_regression_items.id", ondelete="RESTRICT"), index=True)
+    revision: Mapped[int] = mapped_column(Integer)
+    evidence_hash: Mapped[str] = mapped_column(String(64))
+    result_json: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[str] = mapped_column(String(40))
+
+
+class TextureReview(Base):
+    __tablename__ = "texture_regression_reviews"
+    __table_args__ = (UniqueConstraint("item_id", "revision", name="uq_texture_review_revision"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    item_id: Mapped[str] = mapped_column(ForeignKey("texture_regression_items.id", ondelete="RESTRICT"), index=True)
+    result_id: Mapped[str] = mapped_column(ForeignKey("texture_regression_results.id", ondelete="RESTRICT"))
+    revision: Mapped[int] = mapped_column(Integer)
+    patch_json: Mapped[str] = mapped_column(Text)
+    reason: Mapped[str] = mapped_column(Text)
+    actor: Mapped[str] = mapped_column(String(80))
+    created_at: Mapped[str] = mapped_column(String(40))
+
+
+class TextureReference(Base):
+    __tablename__ = "texture_regression_references"
+    __table_args__ = (UniqueConstraint("item_id", "revision", name="uq_texture_reference_revision"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    item_id: Mapped[str] = mapped_column(ForeignKey("texture_regression_items.id", ondelete="RESTRICT"), index=True)
+    revision: Mapped[int] = mapped_column(Integer)
+    verdict: Mapped[str] = mapped_column(String(24))
+    actor: Mapped[str] = mapped_column(String(80))
+    created_at: Mapped[str] = mapped_column(String(40))
+
+
+class TextureStatistics(Base):
+    __tablename__ = "texture_regression_statistics"
+    __table_args__ = (UniqueConstraint("run_id", "revision", name="uq_texture_stats_revision"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    run_id: Mapped[str] = mapped_column(ForeignKey("texture_regression_runs.id", ondelete="RESTRICT"), index=True)
+    revision: Mapped[int] = mapped_column(Integer)
+    summary_json: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[str] = mapped_column(String(40))
+
+
+def locked_run(db, run_id):
+    row = db.scalar(select(TextureRun).where(TextureRun.id == run_id).with_for_update().execution_options(populate_existing=True))
+    if row is None: raise TextureAuditError("texture_run_not_found")
+    return row
+
+
+def import_samples(db, *, request_id, samples, actor):
+    """Register existing uploaded/table/connector assets without inventing truth."""
+    from .models import BaselineSet, BaselineSetItem, Asset
+    from .texture_mechanism import CATEGORY
+    if not isinstance(samples, list) or not 0 < len(samples) <= 10000: raise TextureAuditError("invalid_sample_count")
+    if len({sample.get("asset_id") for sample in samples}) != len(samples): raise TextureAuditError("duplicate_texture_sample")
+    fingerprint = digest({"samples": samples, "actor": actor})
+    name = "贴图审核导入-" + request_id
+    old = db.scalar(select(BaselineSet).where(BaselineSet.name == name).with_for_update())
+    if old:
+        if old.fingerprint != fingerprint or old.created_by != actor: raise TextureAuditError("request_conflict")
+        return old
+    baseline = BaselineSet(category_key=CATEGORY, name=name, description="贴图审核导入；缺少参考结论不参与准确率统计。",
+        default_expected_level="L1", fingerprint=fingerprint, created_by=actor)
+    db.add(baseline); db.flush()
+    for sample in samples:
+        asset_id = sample.get("asset_id")
+        if type(asset_id) is not int or asset_id <= 0: raise TextureAuditError("invalid_texture_asset_id")
+        asset = db.get(Asset, asset_id)
+        if not asset or asset.category_key != CATEGORY: raise TextureAuditError("texture_input_scope_mismatch")
+        reference = sample.get("reference")
+        if reference is not None and (not isinstance(reference, str) or reference not in {"pass", "reject", "review"}):
+            raise TextureAuditError("invalid_reference")
+        inputs = {key: sample[key] for key in ("original_asset_id", "preview_asset_id", "classification") if sample.get(key) is not None}
+        db.add(BaselineSetItem(baseline_set_id=baseline.id, asset_id=asset.id, expected_level=None,
+            truth_contract_key="texture-review.v1", expected_result_json=canonical({"verdict": reference}),
+            asset_snapshot_json=canonical({"workflow_input": inputs})))
+    db.flush(); return baseline
+
+
+def create_round(db, *, request_id, name, baseline_set_id, model_registry_id, selected_rules,
+                 safety_selected, safety_rules, partial_scope_confirmed, actor, workflow_version_id=None):
+    from .models import Asset, BaselineSet
+    from .baseline_truth import resolve_effective_baseline_truth
+    from .texture_mechanism import CATEGORY, create_mechanism
+    from .safety_rules import validate_rules
+    from .safety_provider import provider_configuration
+    if not isinstance(request_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", request_id):
+        raise TextureAuditError("invalid_request_id")
+    if not isinstance(name, str) or not name.strip() or len(name) > 160: raise TextureAuditError("invalid_round_name")
+    if type(safety_selected) is not bool or type(partial_scope_confirmed) is not bool: raise TextureAuditError("invalid_scope_confirmation")
+    if workflow_version_id is not None:
+        from .texture_mechanism import managed_mechanism
+        mechanism, policy, chosen_model_id, model_node_id = managed_mechanism(db, workflow_version_id)
+        if (model_registry_id is not None and model_registry_id != chosen_model_id
+            or selected_rules is not None and selected_rules != policy["selected_rules"]):
+            raise TextureAuditError("managed_mechanism_override_forbidden")
+        model_registry_id = chosen_model_id
+    else:
+        policy = freeze_policy(selected_rules); model_node_id = "texture_model"
+    rules = validate_rules(safety_rules) if safety_selected else None
+    config = {"policy": policy, "model_registry_id": model_registry_id, "safety_selected": safety_selected,
+        "safety_rules": rules, "safety_region": provider_configuration()["region"] if safety_selected else None,
+        "partial_scope_confirmed": partial_scope_confirmed, "model_node_id": model_node_id,
+        "source_workflow_version_id": workflow_version_id}
+    request_hash = digest({"name": name, "source": baseline_set_id, "config": config, "actor": actor})
+    reserve_sqlite_immediate_transaction(db)
+    old = db.get(TextureRun, request_id)
+    if old:
+        if old.request_hash != request_hash: raise TextureAuditError("request_conflict")
+        return old
+    baseline = db.scalar(select(BaselineSet).where(BaselineSet.id == baseline_set_id).with_for_update())
+    if baseline is None or baseline.category_key != CATEGORY: raise TextureAuditError("texture_sample_scope_mismatch")
+    if not 0 < len(baseline.items) <= 10000: raise TextureAuditError("invalid_sample_count")
+    if workflow_version_id is None: mechanism = create_mechanism(db, policy=policy, model_registry_id=model_registry_id, actor=actor)
+    config["workflow_version_id"] = mechanism.id
+    config["workflow_hash"] = mechanism.canonical_hash
+    run = TextureRun(id=request_id, name=name, category_key=CATEGORY, source_set_id=baseline.id, status="running",
+        request_hash=request_hash, config_json=canonical(config), created_by=actor, created_at=now())
+    db.add(run); db.flush()
+
+    def asset_snapshot(asset_id):
+        asset = db.get(Asset, asset_id)
+        if not asset or asset.category_key != CATEGORY: raise TextureAuditError("texture_input_scope_mismatch")
+        return {k: getattr(asset, k) for k in ("id", "stored_name", "storage_backend", "source_uri", "sha256", "mime_type", "size_bytes")}
+
+    for source in baseline.items:
+        truth = resolve_effective_baseline_truth(db, source)
+        inputs = truth.workflow_input
+        preview_id = inputs.get("preview_asset_id", source.asset_id)
+        original_id = inputs.get("original_asset_id", source.asset_id)
+        if type(preview_id) is not int or type(original_id) is not int: raise TextureAuditError("invalid_texture_asset_id")
+        classification = inputs.get("classification")
+        if classification is not None and not isinstance(classification, (str, dict)): raise TextureAuditError("invalid_classification")
+        item = TextureItem(id=uuid.uuid4().hex, run_id=run.id, source_item_id=source.id, asset_id=source.asset_id,
+            original_name=source.asset.original_name, status="freezing", input_snapshot_json=canonical({
+                "preview": asset_snapshot(preview_id), "original_file": asset_snapshot(original_id), "classification": classification,
+                "source_item_id": source.id, "reference": truth.expected_result.get("verdict")}))
+        db.add(item); db.flush()
+        reference = truth.expected_result.get("verdict")
+        if isinstance(reference, str) and reference in {"pass", "reject", "review"}:
+            db.add(TextureReference(item_id=item.id, revision=1, verdict=reference, actor=actor, created_at=now()))
+    db.flush(); return run
+
+
+def latest(db, model, item_id):
+    return db.scalar(select(model).where(model.item_id == item_id).order_by(model.revision.desc()).limit(1))
+
+
+_UNLOADED = object()
+
+
+def collect_item(db, item, *, run=None, native=_UNLOADED, safety_fact=_UNLOADED, old=_UNLOADED, config=None):
+    """Version a combined fact without repeating either provider invocation."""
+    from .models import BaselineRegressionItem
+    from .safety_regression import SafetyItem, item_payload
+    run = run or locked_run(db, item.run_id); config = config or json.loads(run.config_json)
+    preparation = json.loads(item.preparation_json)
+    if native is _UNLOADED: native = db.get(BaselineRegressionItem, item.native_item_id) if item.native_item_id else None
+    native_snapshot = json.loads(native.result_snapshot_json or "{}") if native else {}
+    business = native_snapshot.get("normalized_result", {})
+    checks = business.get("raw_checks", []) if isinstance(business, dict) else []
+    safety = None
+    if config["safety_selected"]:
+        if safety_fact is _UNLOADED:
+            safety_item = db.get(SafetyItem, item.safety_item_id) if item.safety_item_id else None
+            safety_fact = item_payload(db, safety_item) if safety_item else None
+        raw = safety_fact.get("raw") if safety_fact else None
+        safety = {"status": "completed" if safety_fact and safety_fact["status"] == "completed" and raw else "incomplete",
+            "verdict": raw.get("verdict") if raw else None, "reasons": raw.get("reasons", []) if raw else [],
+            "result_id": safety_fact.get("result_id") if safety_fact else None,
+            "error": safety_fact.get("error") if safety_fact else "safety_input_unavailable"}
+    combined = reduce_checks(config["policy"], checks, available_inputs=preparation.get("available_inputs", []), safety=safety,
+        partial_scope_confirmed=config["partial_scope_confirmed"])
+    combined["native_item_id"] = item.native_item_id
+    combined["production_run_id"] = item.production_run_id
+    combined["safety_item_id"] = item.safety_item_id
+    combined["input_errors"] = preparation.get("errors", {})
+    combined["business_evidence"] = {"model_node": native_snapshot.get("workflow_node_outputs", {}).get(config["model_node_id"]),
+        "runtime": native_snapshot.get("workflow_runtime")}
+    combined["safety_evidence"] = {"raw": safety_fact.get("provider_raw"), "configuration": safety_fact.get("result_configuration")} if isinstance(safety_fact, dict) else None
+    signature = digest(combined)
+    if old is _UNLOADED: old = latest(db, TextureResult, item.id)
+    pending = native and native.status not in {"completed", "failed", "manual_required"}
+    pending_safety = config["safety_selected"] and safety_fact and safety_fact["status"] in {"freezing", "queued", "sending"}
+    item.status = "running" if pending or pending_safety else "completed" if combined["execution_complete"] else "incomplete"
+    if old and old.evidence_hash == signature: return old
+    row = TextureResult(id=uuid.uuid4().hex, item_id=item.id, revision=old.revision + 1 if old else 1,
+        evidence_hash=signature, result_json=canonical(combined), created_at=now())
+    db.add(row)
+    db.flush(); return row
+
+
+def collect_round(db, run):
+    """Batch child reads and skip unchanged evidence; bounded to 100 samples."""
+    from .models import BaselineRegressionItem
+    from .safety_regression import SafetyItem, item_payloads
+    cursor = ""; changed = False; config = json.loads(run.config_json)
+    while True:
+        items = db.scalars(select(TextureItem).where(TextureItem.run_id == run.id, TextureItem.id > cursor,
+            TextureItem.status != "freezing").order_by(TextureItem.id).limit(100)).all()
+        if not items: break
+        native = {row.id: row for row in db.scalars(select(BaselineRegressionItem).where(
+            BaselineRegressionItem.id.in_([i.native_item_id for i in items if i.native_item_id])))}
+        safety_items = db.scalars(select(SafetyItem).where(SafetyItem.id.in_([i.safety_item_id for i in items if i.safety_item_id]))).all()
+        safety = {doc["item_id"]: doc for doc in item_payloads(db, safety_items)}
+        revisions = select(TextureResult.item_id, func.max(TextureResult.revision).label("rev")).where(
+            TextureResult.item_id.in_([i.id for i in items])).group_by(TextureResult.item_id).subquery()
+        old = {row.item_id: row for row in db.scalars(select(TextureResult).join(revisions,
+            (revisions.c.item_id == TextureResult.item_id) & (revisions.c.rev == TextureResult.revision)))}
+        for item in items:
+            child = native.get(item.native_item_id); moderation = safety.get(item.safety_item_id)
+            source_hash = digest({"native_status": child.status if child else None,
+                "native_result": child.result_snapshot_json if child else None,
+                "safety": moderation, "preparation": item.preparation_json, "configuration": config})
+            if item.collected_source_hash == source_hash: continue
+            collect_item(db, item, run=run, config=config, native=child, safety_fact=moderation, old=old.get(item.id))
+            item.collected_source_hash = source_hash; changed = True
+        cursor = items[-1].id
+    return changed
+
+
+def recompute(db, run_id, *, safety_rules=None, expected_safety_revision=None, confirmed=False, actor):
+    """Reinterpret saved Ali labels and join existing native facts; never call AI."""
+    if confirmed is not True: raise TextureAuditError("recompute_confirmation_required")
+    run = locked_run(db, run_id)
+    archive_statistics(db, run.id)
+    if safety_rules is not None:
+        if not run.safety_run_id: raise TextureAuditError("safety_not_executed")
+        from .safety_regression import recompute as recompute_safety
+        recompute_safety(db, run.safety_run_id, rules=safety_rules, expected_revision=expected_safety_revision, actor=actor)
+    collect_round(db, run)
+    from .audit import append_audit_event
+    append_audit_event(db, category="baseline", action="texture_results_recomputed", subject_type="texture_regression",
+        subject_id=run.id, actor=actor, payload={"safety_mapping_changed": safety_rules is not None,
+            "provider_calls_requested": 0, "native_run_id": run.native_run_id, "safety_run_id": run.safety_run_id})
+    db.flush(); return run
+
+
+def source_rows(db, run_id, item_id=None, item_ids=None):
+    run = db.get(TextureRun, str(run_id))
+    if run is None: return
+    cursor = ""
+    query = select(TextureItem).where(TextureItem.run_id == run.id)
+    if item_id is not None: query = query.where(TextureItem.id == str(item_id))
+    if item_ids is not None: query = query.where(TextureItem.id.in_(item_ids))
+    while True:
+        items = db.scalars(query.where(TextureItem.id > cursor).order_by(TextureItem.id).limit(100)).all()
+        if not items: return
+        ids = [item.id for item in items]
+        def newest(model):
+            revisions = select(model.item_id, func.max(model.revision).label("rev")).where(model.item_id.in_(ids)).group_by(model.item_id).subquery()
+            return {row.item_id: row for row in db.scalars(select(model).join(revisions,
+                (revisions.c.item_id == model.item_id) & (revisions.c.rev == model.revision)))}
+        results, references = newest(TextureResult), newest(TextureReference)
+        histories = {}
+        for review in db.scalars(select(TextureReview).where(TextureReview.item_id.in_(ids)).order_by(TextureReview.revision)):
+            histories.setdefault(review.item_id, []).append(review)
+        configuration = json.loads(run.config_json)
+        for item in items:
+            result = results.get(item.id); raw = json.loads(result.result_json) if result else None
+            history = histories.get(item.id, []); merged = {}
+            for review in history: merged.update(json.loads(review.patch_json))
+            human = history[-1] if history else None; reference = references.get(item.id)
+            yield run, {"item_id": item.id, "asset_id": item.asset_id, "name": item.original_name, "status": item.status,
+                "input": {**json.loads(item.input_snapshot_json)["original_file"],
+                    "texture_inputs": json.loads(item.input_snapshot_json)}, "input_preparation": json.loads(item.preparation_json),
+                "error": item.error_code, "result_id": result.id if result else None, "raw": raw,
+                "effective": {**(raw or {}), **merged} if raw is not None else None,
+                "human": {"revision": human.revision, "patch": merged, "reason": human.reason, "actor": human.actor,
+                    "created_at": human.created_at} if human else None,
+                "reference": {"revision": reference.revision, "verdict": reference.verdict} if reference else None,
+                "result_configuration": {"texture": configuration,
+                    "safety": (raw.get("safety_evidence") or {}).get("configuration") if raw else None}}
+        cursor = items[-1].id
+
+
+def review_item(db, item_id, *, result_id, expected_revision, patch, reason, actor):
+    item = db.get(TextureItem, item_id)
+    if item is None: raise TextureAuditError("texture_item_not_found")
+    locked_run(db, item.run_id)
+    doc = next(source_rows(db, item.run_id, item.id))[1]
+    if not result_id or doc["result_id"] != result_id: raise TextureAuditError("result_version_conflict")
+    if expected_revision != (doc["human"]["revision"] if doc["human"] else 0): raise TextureAuditError("review_revision_conflict")
+    if not isinstance(patch, dict) or not patch or set(patch) - {"verdict", "reasons"}: raise TextureAuditError("invalid_review_patch")
+    if "verdict" in patch and (not isinstance(patch["verdict"], str) or patch["verdict"] not in {"pass", "reject", "review"}):
+        raise TextureAuditError("invalid_review_verdict")
+    if "reasons" in patch and (not isinstance(patch["reasons"], list) or len(patch["reasons"]) > 100
+        or any(not isinstance(v, str) or len(v) > 1000 for v in patch["reasons"])): raise TextureAuditError("invalid_review_reasons")
+    if not isinstance(reason, str) or not reason.strip() or len(reason) > 4000: raise TextureAuditError("review_reason_required")
+    row = TextureReview(item_id=item.id, result_id=result_id, revision=expected_revision + 1,
+        patch_json=canonical(patch), reason=reason, actor=actor, created_at=now())
+    db.add(row); db.flush(); return row
+
+
+def statistics(db, run_id):
+    summary = {"total": 0, "execution_complete": 0, "human_reviewed": 0, "reference_count": 0,
+        "raw": {"pass": 0, "reject": 0, "review": 0}, "effective": {"pass": 0, "reject": 0, "review": 0},
+        "raw_correct": 0, "effective_correct": 0, "compared": 0, "incomplete": 0, "result_versions": []}
+    for _, doc in source_rows(db, run_id):
+        summary["total"] += 1
+        summary["human_reviewed"] += bool(doc["human"])
+        summary["reference_count"] += bool(doc["reference"])
+        summary["result_versions"].append({"item_id": doc["item_id"], "result_id": doc["result_id"],
+            "human_revision": doc["human"]["revision"] if doc["human"] else 0,
+            "reference_revision": doc["reference"]["revision"] if doc["reference"] else 0})
+        complete = bool(doc["raw"] and doc["raw"].get("execution_complete"))
+        summary["execution_complete"] += complete; summary["incomplete"] += not complete
+        for mode in ("raw", "effective"):
+            verdict = (doc.get(mode) or {}).get("verdict")
+            if verdict in summary[mode]: summary[mode][verdict] += 1
+        if complete and doc["reference"]:
+            summary["compared"] += 1
+            for mode in ("raw", "effective"):
+                summary[mode + "_correct"] += doc[mode]["verdict"] == doc["reference"]["verdict"]
+    for mode in ("raw", "effective"):
+        summary[mode + "_accuracy"] = summary[mode + "_correct"] / summary["compared"] if summary["compared"] else None
+    summary["reference_coverage"] = summary["compared"] / summary["total"] if summary["total"] else 0
+    return summary
+
+
+def usage(db, run_id):
+    from .models import BaselineRegressionRun, WorkflowModelInvocation
+    from .safety_regression import SafetyAttempt, SafetyItem
+    run = db.get(TextureRun, run_id)
+    native = db.get(BaselineRegressionRun, run.native_run_id) if run.native_run_id else None
+    plan = json.loads(native.execution_snapshot_json).get("real_execution_budget") if native else None
+    summary = {"expected_model_requests": plan.get("expected_requests") if plan else None,
+        "expected_model_cost_micros": plan.get("expected_cost_micros") if plan else None,
+        "model_requests": 0, "model_tokens": 0, "model_ledger_cost_micros": 0, "model_uncertain_requests": 0,
+        "safety_confirmed_requests": 0, "safety_uncertain_requests": 0, "safety_cost_micros": None,
+        "billing_confirmed_cost_micros": None, "cost_basis": "model_invocation_ledger_not_supplier_invoice"}
+    if native:
+        counts = db.execute(select(WorkflowModelInvocation.status, func.count(), func.sum(WorkflowModelInvocation.total_tokens),
+            func.sum(WorkflowModelInvocation.actual_cost_micros)).where(WorkflowModelInvocation.baseline_run_id == native.id)
+            .group_by(WorkflowModelInvocation.status)).all()
+        for status, count, tokens, cost in counts:
+            if status != "rejected": summary["model_requests"] += count
+            summary["model_tokens"] += int(tokens or 0); summary["model_ledger_cost_micros"] += int(cost or 0)
+        summary["model_uncertain_requests"] = db.scalar(select(func.count(WorkflowModelInvocation.id)).where(
+            WorkflowModelInvocation.baseline_run_id == native.id, WorkflowModelInvocation.status.in_(["reserved", "failed"]),
+            WorkflowModelInvocation.total_tokens == 0)) or 0
+    if run.safety_run_id:
+        counts = dict(db.execute(select(SafetyAttempt.usage_state, func.count()).join(SafetyItem).where(
+            SafetyItem.run_id == run.safety_run_id).group_by(SafetyAttempt.usage_state)).all())
+        summary["safety_confirmed_requests"] = counts.get("confirmed", 0)
+        summary["safety_uncertain_requests"] = counts.get("uncertain", 0) + counts.get("responded_error", 0)
+    return summary
+
+
+def archive_statistics(db, run_id):
+    previous = db.scalar(select(TextureStatistics).where(TextureStatistics.run_id == run_id).order_by(TextureStatistics.revision.desc()).limit(1))
+    summary = canonical(statistics(db, run_id))
+    if previous and previous.summary_json == summary: return previous
+    row = TextureStatistics(run_id=run_id, revision=previous.revision + 1 if previous else 1,
+        summary_json=summary, created_at=now())
+    db.add(row); db.flush(); return row
+
+
+def update_reference(db, item_id, *, verdict, expected_revision, actor, confirmed):
+    item = db.get(TextureItem, item_id)
+    if not item: raise TextureAuditError("texture_item_not_found")
+    locked_run(db, item.run_id)
+    if confirmed is not True: raise TextureAuditError("reference_confirmation_required")
+    if not isinstance(verdict, str) or verdict not in {"pass", "reject", "review"}: raise TextureAuditError("invalid_reference")
+    old = latest(db, TextureReference, item.id)
+    if expected_revision != (old.revision if old else 0): raise TextureAuditError("reference_revision_conflict")
+    archive_statistics(db, item.run_id)
+    row = TextureReference(item_id=item.id, revision=expected_revision + 1, verdict=verdict, actor=actor, created_at=now())
+    db.add(row); db.flush(); return row
+
+
+def control(db, run_id, action):
+    from .safety_regression import control as control_safety
+    run = locked_run(db, run_id)
+    if action == "pause" and run.status == "running": run.status = "paused"
+    elif action == "resume" and run.status in {"paused", "blocked"}: run.status = "running"; run.error_code = None
+    elif action == "cancel" and run.status in {"running", "paused"}: run.status = "cancelled"
+    else: raise TextureAuditError("invalid_control_state")
+    run.settlement_pending = True
+    if run.safety_run_id:
+        from .safety_regression import SafetyRun
+        child = db.get(SafetyRun, run.safety_run_id)
+        if child.status in {"running", "paused"}: control_safety(db, child.id, action)
+    # Leave native run statuses and active leases intact. New claims are gated
+    # by this parent; already leased results can settle normally.
+    db.flush(); return run
+
+
+def retry_item(db, item_id):
+    from .models import ProductionRun, BaselineRegressionItem
+    from .workflow_runtime import retry_failed_run_from_checkpoint
+    from .safety_regression import SafetyItem, retry_item as retry_safety
+    item = db.get(TextureItem, item_id)
+    if not item: raise TextureAuditError("texture_item_not_found")
+    # Parent -> native child, matching claims and category ownership checks.
+    run = locked_run(db, item.run_id)
+    child = db.scalar(select(ProductionRun).where(ProductionRun.id == item.production_run_id)
+        .with_for_update().execution_options(populate_existing=True)) if item.production_run_id else None
+    if run.status == "cancelled": raise TextureAuditError("texture_round_cancelled")
+    changed = False
+    if child and child.status == "failed":
+        retry_failed_run_from_checkpoint(db, child.id, actor=run.created_by, restart_transport_window=True)
+        native = db.get(BaselineRegressionItem, item.native_item_id); native.status = "queued"
+        changed = True
+    moderation = db.get(SafetyItem, item.safety_item_id) if item.safety_item_id else None
+    if moderation and moderation.status == "failed": retry_safety(db, moderation.id); changed = True
+    if not changed: raise TextureAuditError("no_retryable_texture_checks")
+    item.status = "running"; item.collected_source_hash = ""
+    if run.status == "completed": run.status = "running"
+    db.flush()
+
+===== FILE backend/app/texture_worker.py =====
+"""Prepare fixed inputs, launch existing native/Ali jobs, join their evidence."""
+from __future__ import annotations
+
+import hashlib
+import json
+import logging
+import os
+from pathlib import Path
+import re
+import shutil
+from types import SimpleNamespace
+import uuid
+
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from .texture_audit import TextureAuditError
+from .texture_regression import TextureRun, TextureItem, collect_item, collect_round, locked_run, canonical, now, digest
+from .safety_worker import safety_lock, authorized
+
+MAX_ORIGINAL = 128 * 1024**2
+MAX_PREVIEW = 20 * 1024**2
+
+
+def frozen_file(snapshot, settings, limit):
+    from .nas_storage import resolve_asset_path, NasStorageError
+    checksum = snapshot.get("sha256", "")
+    if not isinstance(checksum, str) or not re.fullmatch(r"[0-9a-f]{64}", checksum):
+        raise TextureAuditError("input_checksum_missing")
+    root = settings.data_dir / "stock-texture" / "inputs"
+    root.mkdir(parents=True, exist_ok=True)
+    destination = root / checksum
+    temporary = root / ("." + uuid.uuid4().hex + ".part")
+    try:
+        if not destination.exists():
+            source = resolve_asset_path(SimpleNamespace(**snapshot), settings)
+            if source.stat().st_size > limit: raise TextureAuditError("input_too_large")
+            if shutil.disk_usage(root).free < source.stat().st_size + 512 * 1024**2:
+                raise TextureAuditError("input_disk_space_low")
+            sha = hashlib.sha256(); total = 0
+            with source.open("rb") as reader, temporary.open("xb") as writer:
+                for block in iter(lambda: reader.read(512 * 1024), b""):
+                    total += len(block)
+                    if total > limit: raise TextureAuditError("input_too_large")
+                    sha.update(block); writer.write(block)
+                writer.flush(); os.fsync(writer.fileno())
+            if sha.hexdigest() != checksum: raise TextureAuditError("input_snapshot_changed")
+            os.replace(temporary, destination)
+        if destination.stat().st_size > limit: raise TextureAuditError("input_too_large")
+        sha = hashlib.sha256()
+        with destination.open("rb") as reader:
+            for block in iter(lambda: reader.read(512 * 1024), b""): sha.update(block)
+        if sha.hexdigest() != checksum: raise TextureAuditError("input_snapshot_changed")
+        return destination
+    except (OSError, NasStorageError): raise TextureAuditError("input_unavailable") from None
+    finally: temporary.unlink(missing_ok=True)
+
+
+def prepare_inputs(snapshot, settings):
+    from PIL import Image, UnidentifiedImageError
+    result = {"available_inputs": [], "errors": {}, "original_metadata": None}
+    for role, limit in (("preview", MAX_PREVIEW), ("original_file", MAX_ORIGINAL)):
+        try:
+            path = frozen_file(snapshot[role], settings, limit)
+            try:
+                with Image.open(path) as image:
+                    if image.width > 16384 or image.height > 16384 or image.width * image.height > 250_000_000:
+                        raise TextureAuditError("image_dimensions_too_large")
+                    if image.format not in {"JPEG", "PNG", "WEBP", "BMP", "GIF", "TIFF"}:
+                        raise TextureAuditError("original_format_not_inspectable")
+                    image.verify()
+                    metadata = {"format": image.format, "width": image.width, "height": image.height, "mode": image.mode}
+            except (OSError, ValueError, UnidentifiedImageError, Image.DecompressionBombError):
+                raise TextureAuditError("image_not_inspectable") from None
+            result["available_inputs"].append(role)
+            if role == "original_file": result["original_metadata"] = metadata
+            if role in {"preview", "original_file"}:
+                # A content-addressed private upload alias makes the existing
+                # native media executor read the frozen copy, not live NAS.
+                # Equal bytes can belong to distinct samples with different
+                # classifications or references. Keep their native baseline
+                # asset identities distinct while sharing the SHA cache.
+                source_id = snapshot.get("source_item_id")
+                if type(source_id) is not int or source_id <= 0:
+                    raise TextureAuditError("input_identity_missing")
+                name = "texture-frozen-" + str(source_id) + "-" + snapshot[role]["sha256"] + ".img"
+                alias = settings.upload_dir / name; alias.parent.mkdir(parents=True, exist_ok=True)
+                if not alias.exists():
+                    try: os.link(path, alias)
+                    except OSError: shutil.copyfile(path, alias)
+                with alias.open("rb") as reader:
+                    if hashlib.file_digest(reader, "sha256").hexdigest() != snapshot[role]["sha256"]:
+                        raise TextureAuditError("frozen_alias_changed")
+                mime = {"JPEG": "image/jpeg", "PNG": "image/png", "WEBP": "image/webp", "BMP": "image/bmp", "GIF": "image/gif", "TIFF": "image/tiff"}[metadata["format"]]
+                result[role + "_alias"] = {"stored_name": name, "storage_backend": "local", "source_uri": None,
+                    "sha256": snapshot[role]["sha256"], "mime_type": mime, "size_bytes": path.stat().st_size,
+                    "width": metadata["width"], "height": metadata["height"]}
+        except TextureAuditError as exc:
+            result["errors"][role] = str(exc)
+            if role in result["available_inputs"]: result["available_inputs"].remove(role)
+    classification = snapshot.get("classification")
+    if (isinstance(classification, str) and classification.strip()) or (isinstance(classification, dict) and classification):
+        result["available_inputs"].append("classification")
+    else: result["errors"]["classification"] = "classification_missing"
+    return result
+
+
+def launch_children(db, run):
+    from .models import Asset, BaselineSet, BaselineSetItem, WorkflowVersion, BaselineRegressionItem
+    from .native_baseline_regression import create_native_baseline_run
+    from .safety_regression import create_round as create_safety, SafetyItem
+    if run.native_run_id: return
+    config = json.loads(run.config_json)
+    if config["safety_selected"]:
+        from .safety_provider import provider_configuration
+        if provider_configuration()["region"] != config["safety_region"]:
+            raise TextureAuditError("safety_region_changed")
+    items = db.scalars(select(TextureItem).where(TextureItem.run_id == run.id).order_by(TextureItem.id)).all()
+    ready = [item for item in items if "preview" in json.loads(item.preparation_json).get("available_inputs", [])]
+    if not ready:
+        for item in items: collect_item(db, item)
+        run.status = "completed"; db.flush(); return
+    baseline = BaselineSet(category_key=run.category_key, name="贴图固定输入 · " + run.id,
+        description="存量审核专用固定副本，无人工参考时 verdict 为 null，不计算准确率。",
+        default_expected_level="L1", fingerprint=digest([json.loads(i.input_snapshot_json) for i in items]), created_by=run.created_by)
+    db.add(baseline); db.flush()
+    controlled = {}; prepared_assets = {}; sample_to_item = {}
+    for item in ready:
+        source = json.loads(item.input_snapshot_json); preparation = json.loads(item.preparation_json)
+        def frozen_asset(alias):
+            asset = db.scalar(select(Asset).where(Asset.stored_name == alias["stored_name"]))
+            if asset is None:
+                asset = Asset(original_name=item.original_name, category_key=run.category_key, **alias)
+                db.add(asset); db.flush()
+            elif asset.category_key != run.category_key or asset.sha256 != alias["sha256"]:
+                raise TextureAuditError("frozen_asset_conflict")
+            return asset
+        preview_asset = frozen_asset(preparation["preview_alias"])
+        # Detail checks use the readable original, not a downscaled preview.
+        # Non-image/layered originals remain unavailable to visual rules.
+        asset = frozen_asset(preparation.get("original_file_alias", preparation["preview_alias"]))
+        prepared_assets[item.id] = preview_asset.id
+        reference = source.get("reference")
+        if not isinstance(reference, str) or reference not in {"pass", "reject", "review"}: reference = None
+        sample = BaselineSetItem(baseline_set_id=baseline.id, asset_id=asset.id, expected_level=None,
+            expected_result_json=canonical({"verdict": reference}), truth_contract_key="texture-review.v1",
+            asset_snapshot_json=canonical({"workflow_input": {"classification": source.get("classification")}}))
+        db.add(sample); db.flush(); sample_to_item[sample.id] = item
+        controlled[sample.id] = {"texture_audit_context": {"available_inputs": preparation["available_inputs"],
+            "partial_scope_confirmed": config["partial_scope_confirmed"], "original_metadata": preparation.get("original_metadata")}}
+    native = create_native_baseline_run(db, baseline_set=baseline, workflow_version=db.get(WorkflowVersion, config["workflow_version_id"]),
+        actor=run.created_by, idempotency_key="texture-native-" + run.id, model_execution_mode=config.get("model_execution_mode", "real"),
+        real_execution_confirmed=True, controlled_item_contexts=controlled)
+    run.native_run_id = native.id
+    for child in db.scalars(select(BaselineRegressionItem).where(BaselineRegressionItem.run_id == native.id)):
+        item = sample_to_item[child.baseline_set_item_id]
+        item.native_item_id = child.id; item.production_run_id = child.production_run_id; item.status = "running"
+    if config["safety_selected"]:
+        safety = create_safety(db, request_id="texture-" + digest(run.id)[:55], name=run.name, category=run.category_key,
+            kind="image", service="postImageCheckByVL", rules=config["safety_rules"], asset_ids=sorted(set(prepared_assets.values())),
+            texts=[], actor=run.created_by, settings=None)
+        run.safety_run_id = safety.id
+        by_asset = {asset: [] for asset in prepared_assets.values()}
+        for item in ready: by_asset[prepared_assets[item.id]].append(item)
+        for child in db.scalars(select(SafetyItem).where(SafetyItem.run_id == safety.id)):
+            for item in by_asset[child.asset_id]: item.safety_item_id = child.id
+    db.flush()
+
+
+def tick(engine, *, settings, authorize=authorized):
+    with safety_lock(engine, settings.data_dir, name="stock-texture-worker") as checkpoint:
+        if checkpoint is None: return False
+        with Session(engine) as db:
+            run = db.scalar(select(TextureRun).where((TextureRun.status == "running") |
+                (TextureRun.status.in_(["paused", "cancelled"]) & TextureRun.settlement_pending.is_(True)))
+                .order_by(TextureRun.last_dispatched, TextureRun.id).limit(1))
+            if not run: return False
+            run = locked_run(db, run.id)
+            if run.status in {"paused", "cancelled"}:
+                from .models import ProductionStepAttempt
+                from .safety_regression import SafetyItem
+                changed = collect_round(db, run)
+                inflight = db.scalar(select(ProductionStepAttempt.id).join(TextureItem,
+                    TextureItem.production_run_id == ProductionStepAttempt.run_id).where(TextureItem.run_id == run.id,
+                    ProductionStepAttempt.status.in_(["leased", "running"])).limit(1))
+                sending = db.scalar(select(SafetyItem.id).where(SafetyItem.run_id == run.safety_run_id, SafetyItem.status == "sending").limit(1)) if run.safety_run_id else None
+                run.settlement_pending = bool(inflight or sending); run.last_dispatched = now()
+                db.commit(); return changed
+            if not authorize(db, run): run.status = "paused"; db.commit(); return True
+            item = db.scalar(select(TextureItem).where(TextureItem.run_id == run.id, TextureItem.status == "freezing")
+                .order_by(TextureItem.id).limit(1))
+            run.last_dispatched = now()
+            if item:
+                item_id = item.id; run_id = run.id; source = json.loads(item.input_snapshot_json)
+                db.commit(); prepared = prepare_inputs(source, settings); checkpoint()
+                db.expire_all(); run = locked_run(db, run_id); item = db.get(TextureItem, item_id)
+                item.preparation_json = canonical(prepared)
+                item.status = "cancelled" if run.status == "cancelled" else "ready"
+                db.commit(); return True
+            checkpoint()
+            try:
+                launch_children(db, run)
+            except ValueError as exc:
+                run_id = run.id; db.rollback(); run = locked_run(db, run_id)
+                code = getattr(exc, "code", str(exc))
+                run.error_code = code if isinstance(code, str) and re.fullmatch(r"[A-Za-z0-9_.-]{1,100}", code) else "texture_launch_failed"
+                run.status = "blocked"; db.commit(); return True
+            changed = collect_round(db, run)
+            if not db.scalar(select(TextureItem.id).where(TextureItem.run_id == run.id, TextureItem.status.in_(["freezing", "ready", "running"])).limit(1)):
+                run.status = "completed"
+            db.commit(); return changed
+
+
+if __name__ == "__main__":
+    if os.environ.get("STOCK_TEXTURE_ENABLED") != "1": raise SystemExit("STOCK_TEXTURE_ENABLED=1 required")
+    from .config import get_settings
+    from .database import engine
+    import time
+    while True:
+        try: busy = tick(engine, settings=get_settings())
+        except Exception: logging.error("贴图审核协调任务中断，保留记录等待核对"); busy = False
+        time.sleep(.2 if busy else 2)
+
+===== FILE backend/app/texture_runtime.py =====
+"""Gate new native claims while retaining already leased texture results."""
+from sqlalchemy import select, or_
+
+from .texture_regression import TextureItem, TextureRun
+
+
+def claim_predicate():
+    from .models import ProductionRun
+    return or_(ProductionRun.category_key.is_(None), ProductionRun.category_key != "texture",
+        ~select(TextureItem.id).join(TextureRun, TextureRun.id == TextureItem.run_id).where(
+            TextureItem.production_run_id == ProductionRun.id, TextureRun.status != "running").exists())
+
+
+def claim_allowed(db, production_run_id):
+    from .safety_worker import authorized
+    parent_id = db.scalar(select(TextureItem.run_id).where(TextureItem.production_run_id == production_run_id))
+    if parent_id is None: return True
+    # Claims take the texture parent before the normal native run lock, matching
+    # controls/retries and category ownership checks. A claim committed before
+    # pause is already in flight and may still finish.
+    parent = db.scalar(select(TextureRun).where(TextureRun.id == parent_id).with_for_update()
+        .execution_options(populate_existing=True))
+    return bool(parent and parent.status == "running" and authorized(db, parent))

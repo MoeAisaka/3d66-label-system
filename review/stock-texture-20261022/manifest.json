@@ -1,0 +1,27 @@
+{
+  "candidate": "f1ab10b17c22cb4fb369d1ce2e2b738fbb86be3c",
+  "task_base": "32d9d2fb18b328f63cd32d2868da02f6bf24a585",
+  "context_base": "bf5d192ffb4032218d20f725f908bb5b1f1cb416",
+  "base_context": "https://github.com/MoeAisaka/3d66-label-system/blob/8138d72caf83cd85dd772fbf43ce906f3780c59b/review/20261022/index.json",
+  "note": "Indexed base source packs plus cumulative candidate.patch reconstruct code; no private Git history.",
+  "schema": 138,
+  "deployed": false,
+  "parts": [
+    {
+      "name": "part1.txt",
+      "bytes": 33690,
+      "sha256": "e401d3f1d3802764b38433fe7009613a3e6cac6bc56fac7527387c4dc3034596"
+    },
+    {
+      "name": "part2.txt",
+      "bytes": 46060,
+      "sha256": "411a5add5eb15be262d6defac16fcf8325c582ab76345ce728b98e006776ca67"
+    },
+    {
+      "name": "part3.txt",
+      "bytes": 89815,
+      "sha256": "16ad542bd33e28759f1fb8bb467c296949d03954e2c79fea39da72a9c3732c87"
+    }
+  ],
+  "patch_sha256": "02fd43ce2e97f328677bb863d333732b2e730b14ccd0b4b9e5e2fe14d7d0c16a"
+}
