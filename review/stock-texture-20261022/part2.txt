@@ -113,6 +113,43 @@ def locked_run(db, run_id):
     return row
 
 
+def baseline_asset_ids(db, baseline_id):
+    """Resolve all explicit input roles from the current reference revision."""
+    from .models import BaselineSetItem, BaselineTruthRevision
+    from .baseline_truth import effective_truth_from_latest
+    items = db.scalars(select(BaselineSetItem).where(BaselineSetItem.baseline_set_id == baseline_id)
+        .order_by(BaselineSetItem.id).with_for_update()).all()
+    revisions = select(BaselineTruthRevision.baseline_set_item_id.label("item_id"),
+        func.max(BaselineTruthRevision.revision).label("rev")).where(
+            BaselineTruthRevision.baseline_set_item_id.in_([item.id for item in items]))
+    revisions = revisions.group_by(BaselineTruthRevision.baseline_set_item_id).subquery()
+    latest = {row.baseline_set_item_id: row for row in db.scalars(select(BaselineTruthRevision).join(revisions,
+        (revisions.c.item_id == BaselineTruthRevision.baseline_set_item_id) & (revisions.c.rev == BaselineTruthRevision.revision)))}
+    identifiers = set()
+    for item in items:
+        inputs = effective_truth_from_latest(item, latest.get(item.id)).workflow_input
+        identifiers.add(item.asset_id)
+        for key in ("original_asset_id", "preview_asset_id"):
+            identity = inputs.get(key)
+            if identity is not None:
+                if type(identity) is not int or identity <= 0: raise TextureAuditError("invalid_texture_asset_id")
+                identifiers.add(identity)
+    return sorted(identifiers)
+
+
+def frozen_asset_ids(db, run_id, item_id=None):
+    query = select(TextureItem.asset_id, TextureItem.input_snapshot_json).where(TextureItem.run_id == run_id)
+    if item_id is not None: query = query.where(TextureItem.id == str(item_id))
+    identifiers = set()
+    for primary, encoded in db.execute(query):
+        identifiers.add(primary); snapshot = json.loads(encoded)
+        for role in ("preview", "original_file"):
+            identity = snapshot[role].get("id")
+            if type(identity) is not int or identity <= 0: raise TextureAuditError("invalid_texture_asset_id")
+            identifiers.add(identity)
+    return sorted(identifiers)
+
+
 def import_samples(db, *, request_id, samples, actor):
     """Register existing uploaded/table/connector assets without inventing truth."""
     from .models import BaselineSet, BaselineSetItem, Asset
@@ -353,6 +390,7 @@ def review_item(db, item_id, *, result_id, expected_revision, patch, reason, act
     if "reasons" in patch and (not isinstance(patch["reasons"], list) or len(patch["reasons"]) > 100
         or any(not isinstance(v, str) or len(v) > 1000 for v in patch["reasons"])): raise TextureAuditError("invalid_review_reasons")
     if not isinstance(reason, str) or not reason.strip() or len(reason) > 4000: raise TextureAuditError("review_reason_required")
+    archive_statistics(db, item.run_id)
     row = TextureReview(item_id=item.id, result_id=result_id, revision=expected_revision + 1,
         patch_json=canonical(patch), reason=reason, actor=actor, created_at=now())
     db.add(row); db.flush(); return row

@@ -20,7 +20,7 @@ index 4b75565..6eaffa0 100644
          return _normalize_design_case_workflow_input(value)
      if truth_contract_key == DESIGN_CASE_DIMENSION_TRUTH_CONTRACT:
 diff --git a/backend/app/employee_access.py b/backend/app/employee_access.py
-index 3a79289..96214a9 100644
+index 3a79289..b87235c 100644
 --- a/backend/app/employee_access.py
 +++ b/backend/app/employee_access.py
 @@ -33,6 +33,9 @@ _allow("POST", ["/api/published-labels/export", "/api/sample-sets/{sample_set_id
@@ -51,7 +51,22 @@ index 3a79289..96214a9 100644
  _allow("POST", ["/api/cover-regressions/{run_id}/control/{action}"], "reviews:write", "cover_run")
  _allow("POST", ["/api/cover-regressions/{run_id}/items/{item_id}/review",
      "/api/cover-regressions/{run_id}/items/{item_id}/regenerate",
-@@ -137,7 +151,72 @@ def _evaluation(db: Session, identity) -> set[str | None]:
+@@ -128,6 +142,14 @@ def _asset_categories(db: Session, ids: list[int]) -> set[str | None]:
+     return {r.category_key for r in rows}
+ 
+ 
++def _texture_asset_categories(db, identifiers):
++    # All roles share one ascending asset lock order, including large imports.
++    ids = sorted(set(identifiers)); categories = set()
++    for offset in range(0, len(ids), 5000):
++        categories |= _asset_categories(db, ids[offset:offset + 5000])
++    return categories
++
++
+ def _evaluation(db: Session, identity) -> set[str | None]:
+     row = _row(db, m.EvaluationResult, identity)
+     categories = {_row(db, m.Asset, row.asset_id).category_key}
+@@ -137,7 +159,79 @@ def _evaluation(db: Session, identity) -> set[str | None]:
  
  
  def object_categories(db: Session, resolver: str, params: dict, body: dict) -> set[str | None]:
@@ -63,6 +78,9 @@ index 3a79289..96214a9 100644
 +            from .cover_regression import CoverRegressionItem
 +            from .safety_regression import SafetyItem
 +            from .texture_regression import TextureItem
++            if kind == 'texture':
++                from .texture_regression import frozen_asset_ids
++                return {run.category_key} | _texture_asset_categories(db, frozen_asset_ids(db, run.id))
 +            model=TextureItem if kind=='texture' else SafetyItem if kind=='safety' else m.BaselineRegressionItem if kind=='baseline' else CoverRegressionItem
 +            categories=set(db.scalars(select(m.Asset.category_key).join(model,model.asset_id==m.Asset.id)
 +                .where(model.run_id==run.id).order_by(m.Asset.id).with_for_update()).all())
@@ -74,6 +92,9 @@ index 3a79289..96214a9 100644
 +            plan=_row(db,StockWritePlan,target.plan_id)
 +            _row(db,StockWriteTarget,target.id)
 +            item=_row(db,StockWriteItem,item.id)
++            if plan.source_kind == 'texture':
++                from .texture_regression import frozen_asset_ids
++                return {plan.category_key} | _texture_asset_categories(db, frozen_asset_ids(db, plan.run_id, item.source_item_id))
 +            return {plan.category_key} | _asset_categories(db,[item.asset_id])
 +        if params.get('plan_id') is not None:
 +            plan=_row(db,StockWritePlan,str(raw_params['plan_id']))
@@ -91,19 +112,20 @@ index 3a79289..96214a9 100644
 +        if body.get('samples'):
 +            identifiers = [sample.get(key) for sample in body['samples'] if isinstance(sample, dict)
 +                for key in ('asset_id', 'original_asset_id', 'preview_asset_id') if sample.get(key) is not None]
-+            return {CATEGORY} | _asset_categories(db, identifiers)
++            return {CATEGORY} | _texture_asset_categories(db, identifiers)
 +        baseline = _row(db, m.BaselineSet, body.get('baseline_set_id'))
-+        return {CATEGORY, baseline.category_key} | set(db.scalars(select(m.Asset.category_key).join(m.BaselineSetItem)
-+            .where(m.BaselineSetItem.baseline_set_id == baseline.id).order_by(m.Asset.id).with_for_update()).all())
++        from .texture_regression import baseline_asset_ids
++        return {CATEGORY, baseline.category_key} | _texture_asset_categories(db, baseline_asset_ids(db, baseline.id))
 +    if resolver in {'texture_run', 'texture_item'}:
 +        from .texture_regression import TextureRun, TextureItem
 +        run = _row(db, TextureRun, str(raw_params.get('run_id')))
 +        if resolver == 'texture_item':
 +            item = _row(db, TextureItem, str(raw_params.get('item_id')))
 +            if item.run_id != run.id: raise HTTPException(404, '样本不属于本轮')
-+            return {run.category_key} | _asset_categories(db, [item.asset_id])
-+        return {run.category_key} | set(db.scalars(select(m.Asset.category_key).join(TextureItem)
-+            .where(TextureItem.run_id == run.id).order_by(m.Asset.id).with_for_update()).all())
++            from .texture_regression import frozen_asset_ids
++            return {run.category_key} | _texture_asset_categories(db, frozen_asset_ids(db, run.id, item.id))
++        from .texture_regression import frozen_asset_ids
++        return {run.category_key} | _texture_asset_categories(db, frozen_asset_ids(db, run.id))
 +    if resolver == 'safety_create':
 +        categories = {body.get('category_key')}
 +        if body.get('asset_ids'): categories |= _asset_categories(db, body['asset_ids'])
@@ -2427,10 +2449,10 @@ index 0000000..e4bf71b
 +        time.sleep(.05 if busy else 2)
 diff --git a/backend/app/stock_writes.py b/backend/app/stock_writes.py
 new file mode 100644
-index 0000000..71113d5
+index 0000000..5f62a80
 --- /dev/null
 +++ b/backend/app/stock_writes.py
-@@ -0,0 +1,562 @@
+@@ -0,0 +1,568 @@
 +"""Opt-in stock delivery: immutable intent, per-target history and reconciliation.
 +
 +This ledger is deliberately separate from production outbox/activation. A stock
@@ -2913,7 +2935,13 @@ index 0000000..71113d5
 +            continue
 +        from .models import Asset
 +        asset=db.get(Asset,row.asset_id)
-+        if not query and (not asset or asset.category_key!=plan.category_key):
++        source_scope_ok = bool(asset and asset.category_key == plan.category_key)
++        if not query and source_scope_ok and plan.source_kind == 'texture':
++            from .texture_regression import frozen_asset_ids
++            ids = frozen_asset_ids(db, plan.run_id, row.source_item_id)
++            categories = db.scalars(select(Asset.category_key).where(Asset.id.in_(ids)).order_by(Asset.id).with_for_update()).all()
++            source_scope_ok = bool(ids and len(categories) == len(ids) and all(category == plan.category_key for category in categories))
++        if not query and not source_scope_ok:
 +            row.status='uncertain' if is_uncertain else 'failed';row.error_code='source_category_changed'
 +            row.available_at=(datetime.now(timezone.utc)+timedelta(days=36500)).isoformat();db.commit();return True
 +        if not is_uncertain:
@@ -3339,10 +3367,10 @@ index 0000000..a216d09
 +        manifest=manifest, created_by=actor, enforce_authoring_policy=True)
 diff --git a/backend/app/texture_regression.py b/backend/app/texture_regression.py
 new file mode 100644
-index 0000000..fe7d14b
+index 0000000..e50821b
 --- /dev/null
 +++ b/backend/app/texture_regression.py
-@@ -0,0 +1,473 @@
+@@ -0,0 +1,511 @@
 +"""Texture stock coordinator. Native model and Ali ledgers remain authoritative.
 +
 +This ledger only freezes samples, joins independent checks, and versions human
@@ -3453,6 +3481,43 @@ index 0000000..fe7d14b
 +    row = db.scalar(select(TextureRun).where(TextureRun.id == run_id).with_for_update().execution_options(populate_existing=True))
 +    if row is None: raise TextureAuditError("texture_run_not_found")
 +    return row
++
++
++def baseline_asset_ids(db, baseline_id):
++    """Resolve all explicit input roles from the current reference revision."""
++    from .models import BaselineSetItem, BaselineTruthRevision
++    from .baseline_truth import effective_truth_from_latest
++    items = db.scalars(select(BaselineSetItem).where(BaselineSetItem.baseline_set_id == baseline_id)
++        .order_by(BaselineSetItem.id).with_for_update()).all()
++    revisions = select(BaselineTruthRevision.baseline_set_item_id.label("item_id"),
++        func.max(BaselineTruthRevision.revision).label("rev")).where(
++            BaselineTruthRevision.baseline_set_item_id.in_([item.id for item in items]))
++    revisions = revisions.group_by(BaselineTruthRevision.baseline_set_item_id).subquery()
++    latest = {row.baseline_set_item_id: row for row in db.scalars(select(BaselineTruthRevision).join(revisions,
++        (revisions.c.item_id == BaselineTruthRevision.baseline_set_item_id) & (revisions.c.rev == BaselineTruthRevision.revision)))}
++    identifiers = set()
++    for item in items:
++        inputs = effective_truth_from_latest(item, latest.get(item.id)).workflow_input
++        identifiers.add(item.asset_id)
++        for key in ("original_asset_id", "preview_asset_id"):
++            identity = inputs.get(key)
++            if identity is not None:
++                if type(identity) is not int or identity <= 0: raise TextureAuditError("invalid_texture_asset_id")
++                identifiers.add(identity)
++    return sorted(identifiers)
++
++
++def frozen_asset_ids(db, run_id, item_id=None):
++    query = select(TextureItem.asset_id, TextureItem.input_snapshot_json).where(TextureItem.run_id == run_id)
++    if item_id is not None: query = query.where(TextureItem.id == str(item_id))
++    identifiers = set()
++    for primary, encoded in db.execute(query):
++        identifiers.add(primary); snapshot = json.loads(encoded)
++        for role in ("preview", "original_file"):
++            identity = snapshot[role].get("id")
++            if type(identity) is not int or identity <= 0: raise TextureAuditError("invalid_texture_asset_id")
++            identifiers.add(identity)
++    return sorted(identifiers)
 +
 +
 +def import_samples(db, *, request_id, samples, actor):
@@ -3695,6 +3760,7 @@ index 0000000..fe7d14b
 +    if "reasons" in patch and (not isinstance(patch["reasons"], list) or len(patch["reasons"]) > 100
 +        or any(not isinstance(v, str) or len(v) > 1000 for v in patch["reasons"])): raise TextureAuditError("invalid_review_reasons")
 +    if not isinstance(reason, str) or not reason.strip() or len(reason) > 4000: raise TextureAuditError("review_reason_required")
++    archive_statistics(db, item.run_id)
 +    row = TextureReview(item_id=item.id, result_id=result_id, revision=expected_revision + 1,
 +        patch_json=canonical(patch), reason=reason, actor=actor, created_at=now())
 +    db.add(row); db.flush(); return row
@@ -7518,10 +7584,10 @@ index 0000000..c6691ce
 +    assert _dispatch_one(db,settings=settings,send=recv) and len(recv.calls)==1
 diff --git a/backend/tests/test_texture_api.py b/backend/tests/test_texture_api.py
 new file mode 100644
-index 0000000..e69481a
+index 0000000..c43b192
 --- /dev/null
 +++ b/backend/tests/test_texture_api.py
-@@ -0,0 +1,111 @@
+@@ -0,0 +1,172 @@
 +import hashlib
 +import io
 +import json
@@ -7633,6 +7699,67 @@ index 0000000..e69481a
 +    plan = SimpleNamespace(source_kind="texture", result_mode="effective")
 +    assert not complete(plan, {"status": "completed", "raw": {"can_write": False}, "effective": {"verdict": "pass"}})
 +    assert not complete(plan, {"status": "incomplete", "raw": {"can_write": True}, "effective": {"verdict": "pass"}})
++
++
++def test_baseline_linked_original_requires_its_actual_category_permission(context, monkeypatch, tmp_path):
++    from app.models import BaselineSet, BaselineSetItem
++    sessions, login, _ = context
++    _, model_id, asset_id, data = dependencies(sessions, tmp_path)
++    monkeypatch.setenv("STOCK_TEXTURE_ENABLED", "1")
++    with sessions() as db:
++        original = Asset(original_name="foreign.png", stored_name="foreign.png", mime_type="image/png", size_bytes=len(data),
++            sha256=hashlib.sha256(data).hexdigest(), category_key="space_image")
++        db.add(original); db.flush()
++        baseline = BaselineSet(category_key="texture", name="关联附件权限", default_expected_level="L1", fingerprint="d"*64, created_by="test")
++        db.add(baseline); db.flush()
++        db.add(BaselineSetItem(baseline_set_id=baseline.id, asset_id=asset_id, expected_level=None,
++            truth_contract_key="texture-review.v1", expected_result_json='{"verdict":null}',
++            asset_snapshot_json=json.dumps({"workflow_input": {"original_asset_id": original.id}})))
++        db.commit(); baseline_id = baseline.id
++    operator, _ = login("category_manager", ["texture"])
++    response = operator.post("/api/texture-regressions", json={"request_id":"foreign-attachment", "name":"关联权限",
++        "baseline_set_id":baseline_id, "model_registry_id":model_id, "selected_rules":["uv_layout"],
++        "safety_selected":False, "partial_scope_confirmed":True, "confirmed":True})
++    assert response.status_code == 403, response.text
++
++
++def test_changed_linked_original_blocks_review_and_automatic_post(context, monkeypatch, tmp_path):
++    from app.stock_writes import dispatch_one, StockWriteItem
++    sessions, login, _ = context
++    settings, model_id, asset_id, data = dependencies(sessions, tmp_path)
++    monkeypatch.setenv("STOCK_TEXTURE_ENABLED", "1")
++    monkeypatch.setenv("STOCK_WRITE_ENABLED", "1")
++    with sessions() as db:
++        original = Asset(original_name="linked-original.png", stored_name="linked-original.png", mime_type="image/png",
++            size_bytes=len(data), sha256=hashlib.sha256(data).hexdigest(), category_key="texture")
++        db.add(original); db.commit(); original_id = original.id
++    operator, _ = login("category_manager", ["texture"])
++    response = operator.post("/api/texture-regressions", json={"request_id":"changed-attachment", "name":"运行中关联权限",
++        "samples":[{"asset_id":asset_id,"original_asset_id":original_id}], "model_registry_id":model_id,
++        "selected_rules":["uv_layout"], "safety_selected":False, "partial_scope_confirmed":True, "confirmed":True})
++    assert response.status_code == 200, response.text
++    with sessions() as db:
++        item = db.scalar(select(TextureItem)); item.status = "completed"; item_id = item.id
++        db.add(TextureResult(id="attachment-result", item_id=item.id, revision=1, evidence_hash="c"*64,
++            result_json=canonical({"verdict":"pass", "execution_complete":True, "can_write":True}), created_at=now()))
++        db.commit()
++    response = operator.post("/api/stock-writes/plans", json={"source_kind":"texture", "run_id":"changed-attachment",
++        "targets":[{"name":"fixture","url":"http://192.168.1.31:9988/receive"}]})
++    assert response.status_code == 200, response.text
++    plan = response.json()
++    assert operator.post("/api/stock-writes/plans/"+plan["id"]+"/confirm",
++        json={"expected_revision":plan["revision"], "confirmed":True}).status_code == 200
++    with sessions() as db:
++        db.get(Asset, original_id).category_key = "space_image"; db.commit()
++    response = operator.post("/api/texture-regressions/changed-attachment/items/"+item_id+"/review",
++        json={"result_id":"attachment-result", "expected_revision":0, "patch":{"verdict":"reject"}, "reason":"应先校验附件权限"})
++    assert response.status_code == 403, response.text
++    received = []
++    def receiver(*args, **kwargs): received.append(args); raise AssertionError("must not reach receiver")
++    with sessions() as db:
++        assert dispatch_one(db, settings=settings, send=receiver)
++        assert db.scalar(select(StockWriteItem.error_code)) == "source_category_changed"
++    assert not received
 diff --git a/backend/tests/test_texture_audit.py b/backend/tests/test_texture_audit.py
 new file mode 100644
 index 0000000..e2680fa
@@ -7733,10 +7860,10 @@ index 0000000..e2680fa
 +    assert old!=policy['company_standard']
 diff --git a/backend/tests/test_texture_regression.py b/backend/tests/test_texture_regression.py
 new file mode 100644
-index 0000000..ac3c05e
+index 0000000..874210d
 --- /dev/null
 +++ b/backend/tests/test_texture_regression.py
-@@ -0,0 +1,277 @@
+@@ -0,0 +1,306 @@
 +import hashlib
 +import json
 +from types import SimpleNamespace
@@ -7832,6 +7959,9 @@ index 0000000..ac3c05e
 +        assert statistics(db, run_id)["raw_accuracy"] is None
 +        review_item(db, doc["item_id"], result_id=doc["result_id"], expected_revision=0,
 +            patch={"verdict": "reject", "reasons": ["人工确认业务问题"]}, reason="核对原图", actor="ops")
++        from app.texture_regression import TextureStatistics
++        archived = db.scalar(select(TextureStatistics).order_by(TextureStatistics.revision))
++        assert archived is not None and json.loads(archived.summary_json)["human_reviewed"] == 0
 +        update_reference(db, doc["item_id"], verdict="reject", expected_revision=0, actor="ops", confirmed=True)
 +        db.commit()
 +        summary = statistics(db, run_id)
@@ -7926,6 +8056,32 @@ index 0000000..ac3c05e
 +    assert tick(engine, settings=settings)
 +    with sessions() as db:
 +        assert statistics(db, run_id)["execution_complete"] == 2
++
++
++def test_failed_safety_creation_rolls_back_native_children_and_can_resume(setup, monkeypatch):
++    from app.models import BaselineRegressionRun, RuntimeDispatchItem
++    import app.safety_regression as safety
++    from app.safety_rules import SafetyError
++    engine, sessions, settings, *_ = setup
++    original = safety.create_round
++    def failed_after_native(db, **kwargs):
++        assert db.scalar(select(func.count(BaselineRegressionRun.id))) == 1
++        raise SafetyError("fixture_launch_failure", retryable=False)
++    monkeypatch.setattr(safety, "create_round", failed_after_native)
++    run_id = make(setup, safety=True)
++    prepare(setup)
++    with sessions() as db:
++        assert db.get(TextureRun, run_id).status == "blocked"
++        for model in (BaselineRegressionRun, ProductionRun, RuntimeDispatchItem):
++            assert db.scalar(select(func.count(model.id))) == 0
++        assert db.get(TextureRun, run_id).native_run_id is None
++        control(db, run_id, "resume"); db.commit()
++    monkeypatch.setattr(safety, "create_round", original)
++    assert tick(engine, settings=settings)
++    with sessions() as db:
++        run = db.get(TextureRun, run_id)
++        assert run.status == "running" and run.native_run_id and run.safety_run_id
++        assert db.scalar(select(func.count(BaselineRegressionRun.id))) == 1
 +
 +
 +def test_failed_safety_supplement_keeps_human_and_does_not_repeat_model(setup):
