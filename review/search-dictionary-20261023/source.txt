@@ -110,7 +110,11 @@ def normalize_name(value):
     raw = unicodedata.normalize("NFKC", value).strip()
     # Detect risky original input BEFORE punctuation removal.
     risk = "".join(c for c in raw if not c.isspace() and not unicodedata.category(c).startswith("C"))
-    if re.search(r"(?i)(?:https?://|www\.|[^\s@]+@[^\s@]+\.|[\w-]+\.[a-z]{2,}(?:\b|/))", risk):
+    # Explicit URL/email markers cannot be hidden with whitespace. For bare
+    # domains, preserve word boundaries: "St. John" is a name, not "St.John".
+    if re.search(r"(?i)(?:https?://|www\.|[^\s@]+@[^\s@]+\.)", risk) or re.search(
+        r"(?i)[\w-]+\.[a-z]{2,}(?:\b|/)", raw
+    ):
         raise DictionaryError("name_url", "网址、域名和邮箱不能作为词面")
     if any(c in raw for c in ",，、;；\n\r"):
         raise DictionaryError("multiple_names", "每个词面只能填写一个词；别名请分项填写")
@@ -282,111 +286,6 @@ def restore_preview(db, history_id, *, actor, actor_name=""):
     return preview(db, [{k: old[k] for k in EDIT_FIELDS} | {"master_brand_id": row.master_brand_id,
         "expected_revision": row.revision}], actor=actor, actor_name=actor_name, action="restore")
 
-===== backend/app/search_dictionary_worker.py =====
-"""Opt-in moderation worker. No DB locks survive a provider call."""
-from __future__ import annotations
-
-import json
-import os
-import time
-from datetime import datetime, timedelta, timezone
-
-from sqlalchemy import select
-from sqlalchemy.orm import Session
-
-from .database import reserve_sqlite_immediate_transaction
-from .search_dictionary import SearchDictionaryBatch as Batch, SearchDictionarySafety as Check, now, canonical
-from .safety_provider import AliSafetyProvider, provider_configuration
-from .safety_rules import DEFAULT_RULES, SafetyError, interpret
-
-
-def summarize(db, batch):
-    states = list(db.scalars(select(Check.state).where(Check.batch_id == batch.id).with_for_update()))
-    if states and all(s == "passed" for s in states):
-        batch.state = "ready"
-    elif "rejected" in states:
-        batch.state = "rejected"
-    elif "unknown" in states:
-        batch.state = "unknown"
-    elif "failed" in states:
-        batch.state = "failed"
-    else:
-        batch.state = "checking"
-
-
-def tick(engine, *, provider=None):
-    if provider is None:
-        if os.getenv("SEARCH_DICTIONARY_SAFETY_ENABLED", "0") != "1" or not provider_configuration()["configured"]:
-            return False
-        provider = AliSafetyProvider()
-    with Session(engine, expire_on_commit=False) as db:
-        reserve_sqlite_immediate_transaction(db)
-        # A crashed submission cannot be billed again silently. Known results
-        # may finish; expired 5-minute attempts are explicitly uncertain.
-        cutoff = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
-        stale_id = db.execute(select(Check.id, Check.batch_id).where(Check.state == "running", Check.started_at < cutoff)
-            .order_by(Check.id).limit(1)).first()
-        if stale_id:
-            batch = db.scalar(select(Batch).where(Batch.id == stale_id.batch_id).with_for_update(skip_locked=True))
-            if batch is None: db.rollback(); return False
-            stale = db.scalar(select(Check).where(Check.id == stale_id.id).with_for_update().execution_options(populate_existing=True))
-            if stale.state == "running" and stale.started_at < cutoff:
-                stale.state = "unknown"; stale.error_code = "worker_result_unknown"; stale.finished_at = now()
-                db.flush(); summarize(db, batch)
-            db.commit(); return True
-        candidate = db.execute(select(Check.id, Check.batch_id).join(Batch, Batch.id == Check.batch_id).where(
-            Check.state == "queued", Batch.state == "checking", Batch.expires_at > now())
-            .order_by(Check.id).limit(1)).first()
-        if candidate is None:
-            db.rollback(); return False
-        batch = db.scalar(select(Batch).where(Batch.id == candidate.batch_id).with_for_update(skip_locked=True).execution_options(populate_existing=True))
-        if batch is None or batch.state != "checking" or batch.expires_at <= now(): db.rollback(); return False
-        check = db.scalar(select(Check).where(Check.id == candidate.id).with_for_update().execution_options(populate_existing=True))
-        if check.state != "queued": db.rollback(); return False
-        check.state = "running"; check.started_at = now()
-        identity, batch_id, request_id, content = check.id, check.batch_id, check.request_id, check.content
-        db.commit()
-    result, code, result_state = {}, "", "failed"
-    try:
-        raw = provider.moderate_text(content, request_id, "comment_detection_pro")
-        decision = interpret(raw, DEFAULT_RULES, data_id=request_id)
-        result = {"interpretation": decision, "service": "comment_detection_pro", "rules": DEFAULT_RULES}
-        result_state = "passed" if decision["verdict"] == "pass" else "rejected"
-    except SafetyError as exc:
-        code = exc.code
-        result_state = "unknown" if exc.submitted else "failed"
-    except Exception:
-        # Never persist SDK exception strings (credentials/URLs/user text).
-        code = "provider_result_unknown"; result_state = "unknown"
-    with Session(engine) as db:
-        reserve_sqlite_immediate_transaction(db)
-        batch = db.scalar(select(Batch).where(Batch.id == batch_id).with_for_update())
-        check = db.scalar(select(Check).where(Check.id == identity).with_for_update())
-        if check.state != "running" or check.request_id != request_id:
-            db.rollback(); return True
-        check.state = result_state; check.result_json = canonical(result)
-        check.error_code = code; check.finished_at = now()
-        db.flush(); summarize(db, batch); db.commit()
-    return True
-
-
-def main():
-    from .database import engine
-    from .migrations.runner import MIGRATIONS
-    from sqlalchemy import text
-    if os.getenv("SEARCH_DICTIONARY_SAFETY_ENABLED", "0") != "1":
-        raise SystemExit("search dictionary moderation is disabled")
-    with engine.connect() as connection:
-        if connection.scalar(text("select max(version) from schema_migrations")) != max(m.version for m in MIGRATIONS):
-            raise SystemExit("schema upgrade required")
-    while True:
-        if not tick(engine):
-            time.sleep(2)
-
-
-if __name__ == "__main__":
-    main()
-
 ===== backend/app/search_dictionary_api.py =====
 """Authenticated employee API for application-side search dictionaries."""
 from __future__ import annotations
@@ -400,9 +299,9 @@ from typing import Literal
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import func, select
+from sqlalchemy import func, select, true
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, aliased
 
 from .authz import has_permission
 from .database import get_db
@@ -493,27 +392,35 @@ def build_search_dictionary_router(current_user):
     def export(q: str = Query(default="", max_length=200), match: Literal["contains", "exact"] = "contains",
                status: Literal["active", "inactive", ""] = "", res_type: str = "", entity_type: str = "",
                format: Literal["json", "csv"] = "json", user=Depends(current_user), db: Session = Depends(get_db)):
-        def operation():
-            root = s.state(db)
-            rows = [s.entity_payload(r) for r in db.scalars(filtered(q, match, status, res_type, entity_type)
-                .order_by(s.SearchEntity.master_brand_id).with_for_update().execution_options(populate_existing=True))]
-            if format == "json":
-                return {"schema_version": "search-entities-v1", "catalog_revision": root.revision, "normalization_version": s.NORMALIZATION_VERSION,
-                        "row_count": len(rows), "items": rows, "external_sync_status": "not_connected"}
-            cols = ["master_brand_id", "expected_revision", "name", "alias_names", "entity_type", "res_type", "region", "status"]
-            stream = io.StringIO(newline=""); output = csv.DictWriter(stream, fieldnames=cols); output.writeheader()
-            for row in rows:
-                row["expected_revision"] = row["revision"]
-                values = {k: row.get(k) for k in cols}; values["alias_names"] = json.dumps(values["alias_names"], ensure_ascii=False)
-                # Block spreadsheet formula execution; textual imported prefix
-                # is removed by the explicit CSV parser, not by arbitrary data cleaning.
-                for key, value in values.items():
-                    if isinstance(value, str) and value.startswith(("=", "+", "-", "@", "\t", "\r")):
-                        values[key] = "'" + value
-                output.writerow(values)
-            return Response("\ufeff" + stream.getvalue(), media_type="text/csv; charset=utf-8",
-                headers={"Content-Disposition": 'attachment; filename="search-entities.csv"', "X-Catalog-Revision": str(root.revision)})
-        return execute(db, operation)
+        def snapshot():
+            # One read statement gives the revision and rows the same snapshot,
+            # even under READ COMMITTED, without blocking dictionary writers.
+            entity = aliased(s.SearchEntity, filtered(q, match, status, res_type, entity_type).subquery())
+            records = db.execute(select(s.SearchDictionaryState.revision, entity)
+                .select_from(s.SearchDictionaryState).outerjoin(entity, true())
+                .where(s.SearchDictionaryState.key == "master_brand")
+                .order_by(entity.master_brand_id).execution_options(populate_existing=True)).all()
+            if not records:
+                raise s.DictionaryError("not_initialized", "词典尚未完成数据库升级")
+            return records[0][0], [s.entity_payload(row) for _, row in records if row is not None]
+        revision, rows = execute(db, snapshot)  # release transaction before serialization
+        if format == "json":
+            return {"schema_version": "search-entities-v1", "catalog_revision": revision, "normalization_version": s.NORMALIZATION_VERSION,
+                    "row_count": len(rows), "items": rows, "external_sync_status": "not_connected"}
+        cols = ["master_brand_id", "expected_revision", "name", "alias_names", "entity_type", "res_type", "region", "status", "_text_encoding"]
+        stream = io.StringIO(newline=""); output = csv.DictWriter(stream, fieldnames=cols); output.writeheader()
+        for row in rows:
+            row["expected_revision"] = row["revision"]
+            values = {k: row.get(k) for k in cols}; values["alias_names"] = json.dumps(values["alias_names"], ensure_ascii=False)
+            # Explicit format marker keeps exported escapes reversible without
+            # stripping genuine apostrophes from manually authored CSV files.
+            values["_text_encoding"] = "apostrophe-v1"
+            for key, value in values.items():
+                if isinstance(value, str) and value.startswith(("'", "=", "+", "-", "@", "\t", "\r")):
+                    values[key] = "'" + value
+            output.writerow(values)
+        return Response("\ufeff" + stream.getvalue(), media_type="text/csv; charset=utf-8",
+            headers={"Content-Disposition": 'attachment; filename="search-entities.csv"', "X-Catalog-Revision": str(revision)})
 
     @router.post("/api/search-dictionary/batches/preview")
     def preview(body: Preview, user=Depends(current_user), db: Session = Depends(get_db)):
@@ -521,9 +428,13 @@ def build_search_dictionary_router(current_user):
         return execute(db, lambda: summary(db, s.preview(db, [r.model_dump(exclude_unset=True) for r in body.rows], actor=actor, actor_name=user.display_name or user.username)))
 
     @router.get("/api/search-dictionary/batches")
-    def batches(user=Depends(current_user), db: Session = Depends(get_db)):
-        return {"items": [{"id": r.id, "state": r.state, "created_at": r.created_at, "actor": r.actor} for r in
-            db.scalars(select(s.SearchDictionaryBatch).order_by(s.SearchDictionaryBatch.created_at.desc()).limit(24))]}
+    def batches(mine: bool = True, offset: int = Query(default=0, ge=0), limit: int = Query(default=12, ge=1, le=100),
+                user=Depends(current_user), db: Session = Depends(get_db)):
+        query = select(s.SearchDictionaryBatch)
+        if mine: query = query.where(s.SearchDictionaryBatch.actor == "user:" + str(user.id))
+        total = db.scalar(select(func.count()).select_from(query.subquery()))
+        return {"total": total, "items": [{"id": r.id, "state": r.state, "created_at": r.created_at, "actor": r.actor, "actor_name": r.actor_name} for r in
+            db.scalars(query.order_by(s.SearchDictionaryBatch.created_at.desc(), s.SearchDictionaryBatch.id.desc()).offset(offset).limit(limit))]}
 
     @router.get("/api/search-dictionary/batches/{batch_id}")
     def batch_detail(batch_id: str, user=Depends(current_user), db: Session = Depends(get_db)):
@@ -553,6 +464,117 @@ def build_search_dictionary_router(current_user):
 
     return router
 
+===== backend/app/search_dictionary_worker.py =====
+"""Opt-in moderation worker. No DB locks survive a provider call."""
+from __future__ import annotations
+
+import json
+import os
+import time
+from datetime import datetime, timedelta, timezone
+
+from sqlalchemy import select
+from sqlalchemy.orm import Session, aliased
+
+from .database import reserve_sqlite_immediate_transaction
+from .search_dictionary import SearchDictionaryBatch as Batch, SearchDictionarySafety as Check, now, canonical
+from .safety_provider import AliSafetyProvider, provider_configuration
+from .safety_rules import DEFAULT_RULES, SafetyError, interpret
+
+
+def summarize(db, batch):
+    states = list(db.scalars(select(Check.state).where(Check.batch_id == batch.id).with_for_update()))
+    if states and all(s == "passed" for s in states):
+        batch.state = "ready"
+    elif "rejected" in states:
+        batch.state = "rejected"
+    elif "unknown" in states:
+        batch.state = "unknown"
+    elif "failed" in states:
+        batch.state = "failed"
+    else:
+        batch.state = "checking"
+
+
+def tick(engine, *, provider=None):
+    if provider is None:
+        if os.getenv("SEARCH_DICTIONARY_SAFETY_ENABLED", "0") != "1" or not provider_configuration()["configured"]:
+            return False
+        provider = AliSafetyProvider()
+    with Session(engine, expire_on_commit=False) as db:
+        reserve_sqlite_immediate_transaction(db)
+        # A crashed submission cannot be billed again silently. Known results
+        # may finish; expired 5-minute attempts are explicitly uncertain.
+        cutoff = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
+        stale_id = db.execute(select(Check.id, Check.batch_id).where(Check.state == "running", Check.started_at < cutoff)
+            .order_by(Check.id).limit(1)).first()
+        if stale_id:
+            batch = db.scalar(select(Batch).where(Batch.id == stale_id.batch_id).with_for_update(skip_locked=True))
+            if batch is None: db.rollback(); return False
+            stale = db.scalar(select(Check).where(Check.id == stale_id.id).with_for_update().execution_options(populate_existing=True))
+            if stale.state == "running" and stale.started_at < cutoff:
+                stale.state = "unknown"; stale.error_code = "worker_result_unknown"; stale.finished_at = now()
+                db.flush(); summarize(db, batch)
+            db.commit(); return True
+        running = aliased(Check)
+        candidate = db.execute(select(Check.id, Check.batch_id).join(Batch, Batch.id == Check.batch_id).where(
+            Check.state == "queued", Batch.state == "checking", Batch.expires_at > now(),
+            ~select(running.id).where(running.batch_id == Batch.id, running.state == "running").exists())
+            .order_by(Check.id).limit(1)).first()
+        if candidate is None:
+            db.rollback(); return False
+        batch = db.scalar(select(Batch).where(Batch.id == candidate.batch_id).with_for_update(skip_locked=True).execution_options(populate_existing=True))
+        if batch is None or batch.state != "checking" or batch.expires_at <= now(): db.rollback(); return False
+        # Only one paid request per batch may be in flight. A crashed/uncertain
+        # request blocks that batch's remaining spend, not other batches.
+        if db.scalar(select(Check.id).where(Check.batch_id == batch.id, Check.state == "running").limit(1).with_for_update()) is not None:
+            db.rollback(); return False
+        check = db.scalar(select(Check).where(Check.id == candidate.id).with_for_update().execution_options(populate_existing=True))
+        if check.state != "queued": db.rollback(); return False
+        check.state = "running"; check.started_at = now()
+        identity, batch_id, request_id, content = check.id, check.batch_id, check.request_id, check.content
+        db.commit()
+    result, code, result_state = {}, "", "failed"
+    try:
+        raw = provider.moderate_text(content, request_id, "comment_detection_pro")
+        decision = interpret(raw, DEFAULT_RULES, data_id=request_id)
+        result = {"interpretation": decision, "service": "comment_detection_pro", "rules": DEFAULT_RULES}
+        result_state = "passed" if decision["verdict"] == "pass" else "rejected"
+    except SafetyError as exc:
+        code = exc.code
+        result_state = "unknown" if exc.submitted else "failed"
+    except Exception:
+        # Never persist SDK exception strings (credentials/URLs/user text).
+        code = "provider_result_unknown"; result_state = "unknown"
+    with Session(engine) as db:
+        reserve_sqlite_immediate_transaction(db)
+        batch = db.scalar(select(Batch).where(Batch.id == batch_id).with_for_update())
+        check = db.scalar(select(Check).where(Check.id == identity).with_for_update())
+        if check.state != "running" or check.request_id != request_id:
+            db.rollback(); return True
+        check.state = result_state; check.result_json = canonical(result)
+        check.error_code = code; check.finished_at = now()
+        db.flush(); summarize(db, batch); db.commit()
+    return True
+
+
+def main():
+    from .database import engine
+    from .migrations.runner import MIGRATIONS
+    from sqlalchemy import text
+    if os.getenv("SEARCH_DICTIONARY_SAFETY_ENABLED", "0") != "1":
+        raise SystemExit("search dictionary moderation is disabled")
+    with engine.connect() as connection:
+        if connection.scalar(text("select max(version) from schema_migrations")) != max(m.version for m in MIGRATIONS):
+            raise SystemExit("schema upgrade required")
+    while True:
+        if not tick(engine):
+            time.sleep(2)
+
+
+if __name__ == "__main__":
+    main()
+
 ===== backend/app/migrations/search_dictionary_140.py =====
 """Search application dictionary: never mutate old content-distribution tables."""
 from sqlalchemy import inspect
@@ -579,6 +601,8 @@ def migrate(connection):
         connection.execute(table.insert().values(key="master_brand", revision=0))
 
 ===== backend/tests/test_search_dictionary.py =====
+import csv
+import io
 import json
 from datetime import datetime, timedelta, timezone
 
@@ -634,6 +658,9 @@ def test_normalization_rejects_url_before_punctuation_and_keeps_business_symbols
     assert s.normalize_name(" ３Ｄ-Max ") == "3d-max"
     assert s.normalize_name("C++") == "c++"
     assert s.normalize_name('"Modern Living Room"') == "modernlivingroom"
+    assert s.normalize_name("St. John") == "stjohn"
+    assert s.normalize_name("J. Crew") == "jcrew"
+    assert s.normalize_name("Co. Ltd.") == "coltd"
     for value in ["www.example.com", "https://example.com/中文", "e@example.com", "ｗｗｗ．ｅｘａｍｐｌｅ．ｃｏｍ", "A,B", "１２３", "AB123", "---", "太"*41]:
         with pytest.raises(s.DictionaryError): s.normalize_name(value)
 
@@ -694,6 +721,39 @@ def test_stale_confirm_rejected_after_other_commit(database):
         assert db.scalar(select(func.count()).select_from(s.SearchEntity)) == 1
 
 
+def test_bulk_name_transfer_is_rejected_during_preview_in_both_orders(database):
+    approve(database, proposed(database, [{"name": "公司甲", "alias_names": ["甲别名"]}, {"name": "公司乙"}]))
+    rows = [{"master_brand_id": 1, "expected_revision": 1, "alias_names": []},
+            {"master_brand_id": 2, "expected_revision": 1, "alias_names": ["甲别名"]}]
+    for values in (rows, rows[::-1]):
+        value = proposed(database, values)
+        with Session(database) as db:
+            batch = db.get(s.SearchDictionaryBatch, value[0])
+            assert batch.state == "invalid" and json.loads(batch.errors_json)[0]["code"] == "name_conflict"
+            assert json.loads(db.get(s.SearchEntity, 1).alias_names) == ["甲别名"]
+            assert db.get(s.SearchEntity, 2).revision == 1
+            assert db.scalar(select(func.count()).select_from(s.SearchDictionarySafety).where(s.SearchDictionarySafety.batch_id == batch.id)) == 0
+
+
+def test_inflight_check_blocks_same_batch_spend_but_not_other_batch(database):
+    first = proposed(database, [{"name": "在途主名", "alias_names": ["在途别名"]}])
+    other = proposed(database, [{"name": "另一批次"}])
+    second_provider = Provider()
+    class Interleaved(Provider):
+        def moderate_text(self, *args):
+            assert tick(database, provider=second_provider)  # other batch may progress
+            assert not tick(database, provider=second_provider)  # same batch must wait
+            return super().moderate_text(*args)
+    provider = Interleaved()
+    assert tick(database, provider=provider)
+    assert second_provider.calls[0][0] == "另一批次" and len(second_provider.calls) == 1
+    with Session(database) as db:
+        assert db.get(s.SearchDictionaryBatch, other[0]).state == "ready"
+        states = list(db.scalars(select(s.SearchDictionarySafety.state).where(s.SearchDictionarySafety.batch_id == first[0])))
+        assert sorted(states) == ["passed", "queued"]
+    assert tick(database, provider=second_provider)
+
+
 def test_reject_or_unknown_never_enters_application_and_never_auto_retries(database):
     rejected = proposed(database, [{"name": "测试拒绝项"}])
     provider = Provider("high")
@@ -751,6 +811,33 @@ def test_cookie_bulk_all_page_export_permissions_and_restore(context):
     assert client.post("/api/search-dictionary/batches/preview", json={"rows": [{"master_brand_id": True, "name": "无效编号"}]}).status_code == 422
     assert client.post("/api/search-dictionary/batches/preview", json={"rows": [{"name": "未知列", "source_system": "trusted"}]}).status_code == 422
 
+
+def test_export_csv_preserves_apostrophe_and_batch_history_is_pageable(context):
+    sessions, login, _ = context
+    with sessions() as db:
+        db.add(s.SearchDictionaryState(key="master_brand", revision=0)); db.commit(); engine = db.get_bind()
+    client, uid = login("product_rd", [])
+    result = client.post("/api/search-dictionary/batches/preview", json={"rows": [{"name": "'+One Design", "alias_names": ["St. John"]}]})
+    assert result.status_code == 200, result.text
+    batch = result.json()
+    while tick(engine, provider=Provider()): pass
+    assert client.post(f"/api/search-dictionary/batches/{batch['id']}/confirm", json={"confirmed": True, "payload_hash": batch["payload_hash"]}).status_code == 200
+    response = client.get("/api/search-dictionary/export?format=csv")
+    exported = list(csv.DictReader(io.StringIO(response.text.lstrip('\ufeff'))))
+    assert exported[0]["name"] == "''+One Design"
+    assert exported[0]["_text_encoding"] == "apostrophe-v1"
+    assert json.loads(exported[0]["alias_names"]) == ["St. John"]
+    assert response.headers["X-Catalog-Revision"] == "1"
+    assert client.get("/api/search-dictionary/export?res_type=SU").json()["catalog_revision"] == 1
+    with sessions() as db:
+        for i in range(25): s.preview(db, [{"name": f"分页草稿{i}"}], actor=f"user:{uid}")
+        s.preview(db, [{"name": "其他人的草稿"}], actor="user:9999")
+        db.commit()
+    assert client.get("/api/search-dictionary/batches").json()["total"] == 26
+    page = client.get("/api/search-dictionary/batches?offset=24").json()
+    assert len(page["items"]) == 2 and any(r["id"] == batch["id"] for r in page["items"])
+    assert client.get("/api/search-dictionary/batches?mine=false").json()["total"] == 27
+
 ===== frontend/src/pages/search-dictionary-page.tsx =====
 import { useState } from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
@@ -763,13 +850,7 @@ import { Pager } from "@/components/ui/pager"
 import { api } from "@/lib/api"
 import { parseSearchDictionaryImport } from "@/lib/search-dictionary-import"
 import { formatPlatformMinute } from "@/lib/platform-time"
-
-type Entity = { master_brand_id: number; revision: number; name: string; normalized_name: string; alias_names: string[];
-  entity_type: string; res_type: string; region: string | null; status: string; updated_by: string; updated_by_name: string; updated_at: string; version: string }
-type Batch = { id: string; actor: string; state: string; payload_hash: string; expires_at: string; errors: { row: number; message: string }[];
-  changes: { row: number; before: Entity | null; after: Partial<Entity> }[]; safety_counts: Record<string, number>;
-  safety_failures?: { content: string; state: string; error_code: string }[] }
-type History = { id: number; revision: number; actor: string; created_at: string; snapshot: Entity }
+import type { SearchDictionaryEntity as Entity, SearchDictionaryBatch as Batch, SearchDictionaryHistory as History } from "@/lib/types"
 const labels: Record<string, string> = { name: "标准名", alias_names: "别名", entity_type: "实体类型", res_type: "素材类型", region: "地区", status: "状态",
   designer: "名师名司", developer: "房企地产", unknown_entity: "未细分实体", all: "通用", inspiration: "灵感图", active: "启用", inactive: "停用",
   checking: "等待安全校验", ready: "校验通过，待确认", invalid: "资料校验未通过", rejected: "安全校验未通过", unknown: "安全请求结果待核实",
@@ -787,6 +868,7 @@ export function SearchDictionaryPage() {
   const client = useQueryClient()
   const [query, setQuery] = useState(""); const [draftQuery, setDraftQuery] = useState(""); const [match, setMatch] = useState("contains")
   const [scope, setScope] = useState(""); const [kind, setKind] = useState(""); const [status, setStatus] = useState(""); const [offset, setOffset] = useState(0)
+  const [batchOffset, setBatchOffset] = useState(0); const [mine, setMine] = useState(true)
   const [drawer, setDrawer] = useState<"edit" | "import" | "batch" | "history" | null>(null)
   const [editing, setEditing] = useState<Entity | null>(null); const [historyId, setHistoryId] = useState(0)
   const [name, setName] = useState(""); const [aliases, setAliases] = useState(""); const [entityType, setEntityType] = useState("unknown_entity")
@@ -797,7 +879,7 @@ export function SearchDictionaryPage() {
   const params = new URLSearchParams({ q: query, match, res_type: scope, entity_type: kind, status })
   const listing = useQuery({ queryKey: ["search-dictionary-items", params.toString(), offset],
     queryFn: () => api<{ items: Entity[]; total: number }>(`/api/search-dictionary/entities?${params}&offset=${offset}&limit=24`) })
-  const recent = useQuery({ queryKey: ["search-dictionary-batches"], queryFn: () => api<{ items: { id: string; state: string; created_at: string }[] }>("/api/search-dictionary/batches"), refetchInterval: 10000 })
+  const recent = useQuery({ queryKey: ["search-dictionary-batches", mine, batchOffset], queryFn: () => api<{ total: number; items: { id: string; state: string; created_at: string; actor_name: string; actor: string }[] }>(`/api/search-dictionary/batches?mine=${mine}&offset=${batchOffset}&limit=12`), refetchInterval: 10000 })
   const batch = useQuery({ queryKey: ["search-dictionary-batch", batchId], enabled: !!batchId && drawer === "batch",
     queryFn: () => api<Batch>(`/api/search-dictionary/batches/${batchId}`), refetchInterval: q => q.state.data?.state === "checking" ? 3000 : false })
   const history = useQuery({ queryKey: ["search-dictionary-history", historyId], enabled: drawer === "history",
@@ -837,8 +919,10 @@ export function SearchDictionaryPage() {
       </div>
       <Pager page={{ total, offset, limit: 24, has_more: offset + 24 < total }} fallbackLimit={24} onChange={setOffset} showPageNumbers />
     </Card>
-    <Card className="space-y-3 p-5"><h2 className="font-bold">最近的修改与导入</h2><p className="text-sm text-muted-foreground">关闭页面不影响已提交的安全校验；校验通过后由原操作人确认写入。</p>
-      <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">{recent.data?.items.map(r => <button key={r.id} className="rounded-xl border p-3 text-left hover:bg-muted" onClick={() => selectBatch(r.id)}><p className="text-sm font-bold">{shown(r.state)}</p><p className="mt-1 text-xs text-muted-foreground">{formatPlatformMinute(r.created_at)} · {r.id.slice(0, 8)}</p></button>)}</div>
+    <Card className="space-y-3 p-5"><div className="flex flex-wrap items-center justify-between gap-3"><h2 className="font-bold">修改与导入记录</h2><select className={`${input} max-w-48`} aria-label="导入记录范围" value={mine ? "mine" : "all"} onChange={e => { setMine(e.target.value === "mine"); setBatchOffset(0) }}><option value="mine">我的记录</option><option value="all">全部记录</option></select></div><p className="text-sm text-muted-foreground">关闭页面不影响已提交的安全校验；校验通过后由原操作人确认写入。</p>
+      <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">{recent.data?.items.map(r => <button key={r.id} className="rounded-xl border p-3 text-left hover:bg-muted" onClick={() => selectBatch(r.id)}><p className="text-sm font-bold">{shown(r.state)}</p><p className="mt-1 text-xs text-muted-foreground">{formatPlatformMinute(r.created_at)} · {r.actor_name || r.actor} · {r.id.slice(0, 8)}</p></button>)}</div>
+      {recent.isError && <p role="alert" className="text-red-700">{recent.error.message}</p>}
+      <Pager page={{ total: recent.data?.total || 0, offset: batchOffset, limit: 12, has_more: batchOffset + 12 < (recent.data?.total || 0) }} fallbackLimit={12} onChange={setBatchOffset} showPageNumbers />
     </Card>
     <SecondaryDrawer open={drawer === "edit"} onOpenChange={v => !v && setDrawer(null)} title={editing ? "编辑实体" : "新增实体"} description="主名填写一个词；别名每行一个。改名不会改变实体编号。">
       <form className="space-y-4" onSubmit={event => { event.preventDefault(); action.mutate(() => preview([{ ...(editing ? { master_brand_id: editing.master_brand_id, expected_revision: editing.revision } : {}), name, alias_names: aliases.split("\n").map(a => a.trim()).filter(Boolean), entity_type: entityType, res_type: resType, region: region || null, status: enabled ? "active" : "inactive" }])) }}>
@@ -907,24 +991,27 @@ export function parseSearchDictionaryImport(text: string): Record<string, unknow
   if (quoted) throw new Error("CSV引号未闭合")
   if (field || row.length) { row.push(field); rows.push(row) }
   const headers = rows.shift()?.map(x => x.trim()) || []
-  if (!headers.length || new Set(headers).size !== headers.length || headers.some(h => !editable.includes(h))) throw new Error("表头为空、重复或包含不支持的列")
+  if (!headers.length || new Set(headers).size !== headers.length || headers.some(h => !editable.includes(h) && h !== "_text_encoding")) throw new Error("表头为空、重复或包含不支持的列")
   return rows.filter(r => r.some(v => v.trim())).map((r, i) => {
     if (r.length !== headers.length) throw new Error(`第${i + 2}行列数不一致`)
-    return Object.fromEntries(headers.map((h, n) => {
+    const encoding = headers.indexOf("_text_encoding")
+    if (encoding >= 0 && r[encoding] !== "apostrophe-v1") throw new Error(`第${i + 2}行导出转义格式无效`)
+    return Object.fromEntries(headers.flatMap<[string, unknown]>((h, n) => {
+      if (h === "_text_encoding") return []
       let value = r[n]
+      if (encoding >= 0 && /^'['=+@\-\t\r]/.test(value)) value = value.slice(1)
       if (["master_brand_id", "expected_revision"].includes(h)) {
-        if (!value.trim()) return [h, null]
+        if (!value.trim()) return [[h, null]]
         const id = Number(value)
         if (!/^\d+$/.test(value) || !Number.isSafeInteger(id) || id <= 0) throw new Error(`第${i + 2}行${h}必须是正整数`)
-        return [h, id]
+        return [[h, id]]
       }
       if (h === "alias_names") {
         const aliases: unknown = value.trim().startsWith("[") ? JSON.parse(value) : value.split("|").filter(Boolean)
         if (!Array.isArray(aliases) || aliases.some(x => typeof x !== "string")) throw new Error(`第${i + 2}行别名需为文字数组或用竖线分隔`)
-        return [h, aliases]
+        return [[h, aliases]]
       }
-      if (/^'[=+@-]/.test(value)) value = value.slice(1) // exported formula escape
-      return [h, h === "region" && !value ? null : value]
+      return [[h, h === "region" && !value ? null : value]]
     }))
   })
 }
@@ -939,6 +1026,16 @@ const roundtrip = parse(JSON.stringify({ schema_version: "search-entities-v1", i
 assert.equal(roundtrip[0].expected_revision, 3)
 assert.equal(roundtrip[0].source_system, undefined)
 assert.equal(roundtrip[0].status, "inactive")
+// Manual CSV is never silently unescaped; platform exports declare their encoding.
+assert.equal(parse("name\n'+One Design")[0].name, "'+One Design")
+for (const original of ["'+One Design", "'Studio", "+Design", "=Design", "@Design", "-Design", "\tDesign", "\rDesign"]) {
+  const encoded = "'" + original
+  const csv = 'name,alias_names,_text_encoding\r\n' + '"' + encoded.replaceAll('"', '""') + '","[]",apostrophe-v1\r\n'
+  const result = parse(csv)[0]
+  assert.equal(result.name, original)
+  assert.equal(result._text_encoding, undefined)
+}
+assert.throws(() => parse("name,_text_encoding\nfoo,unknown-v2"))
 console.log("search dictionary import checks passed")
 
 ===== backend/app/authz.py =====
@@ -1073,6 +1170,362 @@ def require_permission(permission: str):
 
     return dependency
 
+===== backend/app/employee_access.py =====
+"""Employee API write boundary (service-token APIs do not use current_user).
+
+Unknown writes require admin. This allowlist complements, never removes, each
+service's budget, frozen-version, idempotency and publication checks.
+"""
+from __future__ import annotations
+
+from typing import Any
+from urllib.parse import urlsplit
+
+from fastapi import HTTPException, Request
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from . import models as m
+from .authz import effective_role, has_permission, require_categories
+
+# Each value is (capability, database ownership resolver). Exact routed paths
+# include compatibility endpoints; no URL-prefix grants to an entire subsystem.
+WRITE_POLICIES: dict[tuple[str, str], tuple[str, str]] = {}
+
+
+def _allow(method: str, paths: list[str], permission: str, resolver: str) -> None:
+    for path in paths:
+        WRITE_POLICIES[(method, path)] = (permission, resolver)
+
+
+_allow("PUT", ["/api/me/preferences"], "preferences:write", "self")
+_allow("POST", ["/api/me/mcp/rotate"], "preferences:write", "self")
+_allow("POST", ["/api/semantic-vocabularies", "/api/semantic-vocabularies/{vocabulary_id}/terms",
+    "/api/semantic-vocabularies/{vocabulary_id}/mappings", "/api/semantic-vocabularies/{vocabulary_id}/imports/preview",
+    "/api/semantic-vocabulary-imports/{batch_id}/confirm", "/api/semantic-vocabulary-history/{history_id}/restore"], "drafts:write", "read")
+_allow("POST", ["/api/semantic-vocabularies/{vocabulary_id}/snapshot"], "results:export", "read")
+_allow("POST", ["/api/semantic-vocabulary-collection/{run_id}/retry"], "drafts:write", "read")
+_allow("POST", ["/api/search-dictionary/batches/preview", "/api/search-dictionary/batches/{batch_id}/confirm",
+    "/api/search-dictionary/history/{history_id}/restore-preview"], "drafts:write", "read")
+_allow("DELETE", ["/api/me/mcp"], "preferences:write", "self")
+_allow("POST", ["/api/auth/password"], "preferences:write", "self")
+_allow("POST", ["/api/published-labels/export", "/api/sample-sets/{sample_set_id}/export",
+    "/api/baseline-regressions/{run_id}/exports", "/api/local-hardware-cost/estimate",
+    "/api/stock-exports", "/api/stock-exports/{job_id}/rebuild"], "results:export", "read")
+_allow("PUT", ["/api/incremental-corrections/{evaluation_id}/level", "/api/incremental-corrections/{evaluation_id}/field"], "reviews:write", "evaluation")
+_allow("POST", ["/api/stock-writes/endpoints", "/api/stock-writes/plans", "/api/stock-writes/plans/{plan_id}/refresh",
+    "/api/stock-writes/plans/{plan_id}/confirm", "/api/stock-writes/plans/{plan_id}/control/{action}",
+    "/api/stock-writes/items/{item_id}/resolve"], "reviews:write", "stock_write")
+_allow("PUT", ["/api/incremental-corrections/batch/level"], "reviews:write", "evaluation_batch")
+_allow("POST", ["/api/evaluation-results/{evaluation_id}/correct-node", "/api/evaluations/{evaluation_id}/review",
+    "/api/evaluations/{evaluation_id}/review-panel/open", "/api/evaluations/{evaluation_id}/review-panel/reopen",
+    "/api/evaluations/{evaluation_id}/review-panel/votes", "/api/evaluations/{evaluation_id}/review-panel/lead-adjudication"], "reviews:write", "evaluation")
+_allow("POST", ["/api/baseline-sets/{baseline_set_id}/items/{item_id}/truth"], "reviews:write", "baseline_set_item")
+_allow("POST", ["/api/baseline-sets/{baseline_set_id}/runs"], "regressions:run", "baseline_set")
+_allow("POST", ["/api/baseline-sets/{baseline_set_id}/cover-regressions"], "reviews:write", "baseline_set")
+_allow("POST", ["/api/safety-regressions"], "reviews:write", "safety_create")
+_allow("POST", ["/api/texture-regressions"], "reviews:write", "texture_create")
+_allow("POST", ["/api/texture-regressions/{run_id}/control/{action}", "/api/texture-regressions/{run_id}/recompute"], "reviews:write", "texture_run")
+_allow("POST", ["/api/texture-regressions/{run_id}/items/{item_id}/review",
+    "/api/texture-regressions/{run_id}/items/{item_id}/reference",
+    "/api/texture-regressions/{run_id}/items/{item_id}/retry"], "reviews:write", "texture_item")
+_allow("POST", ["/api/safety-regressions/{run_id}/control/{action}",
+    "/api/safety-regressions/{run_id}/recompute"], "reviews:write", "safety_run")
+_allow("POST", ["/api/safety-regressions/{run_id}/items/{item_id}/review",
+    "/api/safety-regressions/{run_id}/items/{item_id}/reference",
+    "/api/safety-regressions/{run_id}/items/{item_id}/retry"], "reviews:write", "safety_item")
+_allow("POST", ["/api/cover-regressions/{run_id}/control/{action}"], "reviews:write", "cover_run")
+_allow("POST", ["/api/cover-regressions/{run_id}/items/{item_id}/review",
+    "/api/cover-regressions/{run_id}/items/{item_id}/regenerate",
+    "/api/cover-regressions/{run_id}/items/{item_id}/retry-input",
+    "/api/cover-regressions/{run_id}/items/{item_id}/attempts/{attempt_id}/recheck",
+    "/api/cover-regressions/{run_id}/items/{item_id}/attempts/{attempt_id}/retry",
+    "/api/cover-regressions/{run_id}/items/{item_id}/attempts/{attempt_id}/resolve"], "reviews:write", "cover_item")
+_allow("POST", ["/api/baseline-regressions/{run_id}/items/{item_id}/corrections",
+    "/api/baseline-regressions/{run_id}/items/{item_id}/notes", "/api/baseline-regressions/{run_id}/items/{item_id}/route-revision"], "reviews:write", "baseline_item")
+_allow("POST", ["/api/baseline-regressions/{run_id}/truth-import", "/api/baseline-regressions/{run_id}/truth-import/preview"], "reviews:write", "baseline_run")
+_allow("POST", ["/api/baseline-regressions/{run_id}/auto-corrections", "/api/baseline-regressions/{run_id}/corrections",
+    "/api/baseline-regressions/{run_id}/optimization-cases"], "drafts:write", "baseline_run")
+_allow("POST", ["/api/baseline-corrections/{correction_id}/retry"], "drafts:write", "baseline_correction")
+_allow("POST", ["/api/prompt-regressions/{run_id}/items/{item_id}/corrections"], "reviews:write", "prompt_item")
+_allow("POST", ["/api/paired-regressions", "/api/prompt-regressions"], "regressions:run", "sample_set")
+_allow("POST", ["/api/paired-regressions/{run_id}/items/{item_id}/results"], "regressions:run", "paired_item")
+_allow("POST", ["/api/migrations/{run_id}/items/{item_id}/review"], "reviews:write", "migration_item")
+_allow("POST", ["/api/evaluation-production-runs/{run_id}/evaluations/{evaluation_id}/corrections"], "reviews:write", "production_evaluation")
+_allow("POST", ["/api/failures/{run_id}/retry", "/api/failures/{run_id}/recover", "/api/failures/{run_id}/resolution"], "production:rerun", "runtime_id")
+_allow("POST", ["/api/runtime/runs/{run_key}/retry"], "production:rerun", "runtime_key")
+_allow("POST", ["/api/incremental-materials/jobs/{job_id}/retry"], "production:rerun", "material_job")
+_allow("POST", ["/api/stock-reruns"], "production:rerun", "assets")
+_allow("POST", ["/api/evaluation-production-runs"], "production:rerun", "package")
+_allow("POST", ["/api/evaluation-production-runs/{run_id}/reconcile"], "production:rerun", "production_run")
+
+_allow("POST", ["/api/prompts", "/api/prompts/{prompt_id}/clone", "/api/prompts/{prompt_id}/metric-snapshots",
+    "/api/prompts/ai-revise", "/api/prompt-optimizations", "/api/prompt-optimizations/{run_id}/materialize-and-validate",
+    "/api/workflows/compose", "/api/workflows", "/api/workflows/{workflow_key}/validate-manifest",
+    "/api/workflows/{workflow_key}/working-copy/validate", "/api/workflows/{workflow_key}/generate-version",
+    "/api/workflows/{workflow_key}/versions", "/api/workflows/{workflow_key}/versions/{version}/validate",
+    "/api/scripts", "/api/scripts/{script_key}/versions", "/api/scripts/{script_key}/versions/{version}/validate",
+    "/api/workflow-assets", "/api/workflow-assets/{asset_key}/prompt-versions",
+    "/api/evaluation-components", "/api/evaluation-components/{asset_id}/copy", "/api/evaluation-components/{asset_id}/versions",
+    "/api/category-evaluation/v3-config/{category_key}/revisions", "/api/category-evaluation/v3-config/{category_key}/revisions/{revision}/rebase",
+    "/api/category-evaluation/v3-config/{category_key}/validate", "/api/category-evaluation/v3-config/validate",
+    "/api/category-evaluation/preview/inspiration/evaluate", "/api/category-evaluation/preview/validate"], "drafts:write", "draft")
+_allow("PUT", ["/api/prompts/{prompt_id}", "/api/workflows/{workflow_key}/working-copy",
+    "/api/evaluation-components/{asset_id}/working-copy"], "drafts:write", "draft")
+_allow("PATCH", ["/api/workflow-assets/{asset_key}", "/api/evaluation-components/{asset_id}"], "drafts:write", "draft")
+
+
+def check_origin(request: Request) -> None:
+    """Cookie writes cannot originate from another site, including login CSRF."""
+    if request.method in {"GET", "HEAD", "OPTIONS"}:
+        return
+    if request.headers.get("sec-fetch-site") == "cross-site":
+        raise HTTPException(403, "不接受跨站操作")
+    source = request.headers.get("origin") or request.headers.get("referer")
+    if source:
+        supplied, actual = urlsplit(source), urlsplit(str(request.base_url))
+        from .dingtalk_identity import identity_settings
+        config = identity_settings()
+        canonical = urlsplit(config.redirect_uri)
+        # A configured HTTPS public origin also works behind the private HTTP
+        # gateway; arbitrary forwarded headers never supply this authority.
+        if config.ready and actual.netloc == canonical.netloc:
+            actual = canonical
+        def origin(value):
+            try:
+                return value.scheme, value.hostname, value.port or (443 if value.scheme == "https" else 80)
+            except ValueError:
+                return None
+        if origin(supplied) is None or origin(supplied) != origin(actual):
+            raise HTTPException(403, "操作来源不匹配")
+
+
+def _row(db: Session, model, identity):
+    if identity is None:
+        raise HTTPException(422, "缺少业务对象标识")
+    # Pin ownership until this business transaction commits. A concurrent
+    # administrator category change must order before or after the write.
+    row = db.scalar(select(model).where(model.id == identity).with_for_update()
+        .execution_options(populate_existing=True))
+    if row is None:
+        raise HTTPException(404, "业务对象不存在")
+    return row
+
+
+def _asset_categories(db: Session, ids: list[int]) -> set[str | None]:
+    if not ids or len(ids) > 5000 or any(type(i) is not int or i <= 0 for i in ids):
+        raise HTTPException(422, "素材范围无效")
+    rows = db.execute(select(m.Asset.id, m.Asset.category_key).where(m.Asset.id.in_(ids))
+        .order_by(m.Asset.id).with_for_update()).all()
+    if len(rows) != len(set(ids)):
+        raise HTTPException(404, "包含不存在的素材")
+    return {r.category_key for r in rows}
+
+
+def _texture_asset_categories(db, identifiers):
+    # All roles share one ascending asset lock order, including large imports.
+    ids = sorted(set(identifiers)); categories = set()
+    for offset in range(0, len(ids), 5000):
+        categories |= _asset_categories(db, ids[offset:offset + 5000])
+    return categories
+
+
+def _evaluation(db: Session, identity) -> set[str | None]:
+    row = _row(db, m.EvaluationResult, identity)
+    categories = {_row(db, m.Asset, row.asset_id).category_key}
+    if row.production_run_id:
+        categories.add(_row(db, m.ProductionRun, row.production_run_id).category_key)
+    return categories
+
+
+def object_categories(db: Session, resolver: str, params: dict, body: dict) -> set[str | None]:
+    raw_params=params
+    params = {key: int(value) if key.endswith("_id") and str(value).isdigit() else value for key, value in params.items()}
+    if resolver == 'stock_write':
+        from .stock_writes import StockWritePlan,StockWriteTarget,StockWriteItem,source_run
+        def source_categories(kind,run):
+            from .cover_regression import CoverRegressionItem
+            from .safety_regression import SafetyItem
+            from .texture_regression import TextureItem
+            if kind == 'texture':
+                from .texture_regression import frozen_asset_ids
+                return {run.category_key} | _texture_asset_categories(db, frozen_asset_ids(db, run.id))
+            model=TextureItem if kind=='texture' else SafetyItem if kind=='safety' else m.BaselineRegressionItem if kind=='baseline' else CoverRegressionItem
+            categories=set(db.scalars(select(m.Asset.category_key).join(model,model.asset_id==m.Asset.id)
+                .where(model.run_id==run.id).order_by(m.Asset.id).with_for_update()).all())
+            return categories | {run.category_key}
+        if params.get('item_id') is not None:
+            item=db.get(StockWriteItem,params['item_id'])
+            if not item:raise HTTPException(404,'请求不存在')
+            target=db.get(StockWriteTarget,item.target_id)
+            plan=_row(db,StockWritePlan,target.plan_id)
+            _row(db,StockWriteTarget,target.id)
+            item=_row(db,StockWriteItem,item.id)
+            if plan.source_kind == 'texture':
+                from .texture_regression import frozen_asset_ids
+                return {plan.category_key} | _texture_asset_categories(db, frozen_asset_ids(db, plan.run_id, item.source_item_id))
+            return {plan.category_key} | _asset_categories(db,[item.asset_id])
+        if params.get('plan_id') is not None:
+            plan=_row(db,StockWritePlan,str(raw_params['plan_id']))
+            run=source_run(db,plan.source_kind,plan.run_id)
+            if run is None:raise HTTPException(404,'回归轮次不存在')
+            return source_categories(plan.source_kind,run)
+        if body.get('source_kind') in {'cover','baseline','safety','texture'}:
+            try:run=source_run(db,body['source_kind'],str(body.get('run_id','')))
+            except ValueError:raise HTTPException(422,'轮次编号无效')
+            if run is None:raise HTTPException(404,'回归轮次不存在')
+            return source_categories(body['source_kind'],run)
+        return {body.get('category_key')}
+    if resolver == 'texture_create':
+        from .texture_mechanism import CATEGORY
+        if body.get('samples'):
+            identifiers = [sample.get(key) for sample in body['samples'] if isinstance(sample, dict)
+                for key in ('asset_id', 'original_asset_id', 'preview_asset_id') if sample.get(key) is not None]
+            return {CATEGORY} | _texture_asset_categories(db, identifiers)
+        baseline = _row(db, m.BaselineSet, body.get('baseline_set_id'))
+        from .texture_regression import baseline_asset_ids
+        return {CATEGORY, baseline.category_key} | _texture_asset_categories(db, baseline_asset_ids(db, baseline.id))
+    if resolver in {'texture_run', 'texture_item'}:
+        from .texture_regression import TextureRun, TextureItem
+        run = _row(db, TextureRun, str(raw_params.get('run_id')))
+        if resolver == 'texture_item':
+            item = _row(db, TextureItem, str(raw_params.get('item_id')))
+            if item.run_id != run.id: raise HTTPException(404, '样本不属于本轮')
+            from .texture_regression import frozen_asset_ids
+            return {run.category_key} | _texture_asset_categories(db, frozen_asset_ids(db, run.id, item.id))
+        from .texture_regression import frozen_asset_ids
+        return {run.category_key} | _texture_asset_categories(db, frozen_asset_ids(db, run.id))
+    if resolver == 'safety_create':
+        categories = {body.get('category_key')}
+        if body.get('asset_ids'): categories |= _asset_categories(db, body['asset_ids'])
+        if body.get('baseline_set_id'):
+            baseline = _row(db, m.BaselineSet, body['baseline_set_id'])
+            categories |= {baseline.category_key} | set(db.scalars(select(m.Asset.category_key).join(m.BaselineSetItem)
+                .where(m.BaselineSetItem.baseline_set_id == baseline.id).order_by(m.Asset.id).with_for_update()).all())
+        return categories
+    if resolver in {'safety_run', 'safety_item'}:
+        from .safety_regression import SafetyRun, SafetyItem
+        run = _row(db, SafetyRun, str(raw_params.get('run_id')))
+        if resolver == 'safety_item':
+            item = _row(db, SafetyItem, str(raw_params.get('item_id')))
+            if item.run_id != run.id: raise HTTPException(404, '样本不属于本轮')
+            return {run.category_key} | _asset_categories(db, [item.asset_id])
+        return {run.category_key} | set(db.scalars(select(m.Asset.category_key).join(SafetyItem)
+            .where(SafetyItem.run_id == run.id).order_by(m.Asset.id).with_for_update()).all())
+    if resolver in {"cover_run", "cover_item"}:
+        from .cover_regression import CoverRegressionRun, CoverRegressionItem
+        run = _row(db, CoverRegressionRun, str(params.get("run_id")))
+        if resolver == "cover_item":
+            item = _row(db, CoverRegressionItem, str(params.get("item_id")))
+            if item.run_id != run.id:
+                raise HTTPException(404, "样本不属于本轮")
+            return {run.category_key} | _asset_categories(db, [item.asset_id])
+        return {run.category_key}
+    if resolver == "evaluation":
+        return _evaluation(db, params.get("evaluation_id"))
+    if resolver == "evaluation_batch":
+        items = body.get("items")
+        if not isinstance(items, list) or not 1 <= len(items) <= 200:
+            raise HTTPException(422, "批量对象范围无效")
+        result: set[str | None] = set()
+        for item in items:
+            if not isinstance(item, dict) or type(item.get("evaluation_id")) is not int:
+                raise HTTPException(422, "批量对象无效")
+        for item in sorted(items, key=lambda item: item["evaluation_id"]):
+            result |= _evaluation(db, item.get("evaluation_id"))
+        return result
+    if resolver in {"baseline_item", "baseline_set_item"}:
+        model = m.BaselineRegressionItem if resolver == "baseline_item" else m.BaselineSetItem
+        row = _row(db, model, params.get("item_id"))
+        parent_key = "run_id" if resolver == "baseline_item" else "baseline_set_id"
+        if getattr(row, parent_key) != params.get(parent_key):
+            raise HTTPException(404, "条目不属于指定集合")
+        parent = _row(db, m.BaselineRegressionRun if resolver == "baseline_item" else m.BaselineSet, getattr(row, parent_key))
+        return {parent.category_key} | _asset_categories(db, [row.asset_id])
+    if resolver in {"baseline_set", "baseline_run"}:
+        parent = _row(db, m.BaselineSet if resolver == "baseline_set" else m.BaselineRegressionRun,
+                      params.get("baseline_set_id" if resolver == "baseline_set" else "run_id"))
+        model, key = (m.BaselineSetItem, "baseline_set_id") if resolver == "baseline_set" else (m.BaselineRegressionItem, "run_id")
+        categories = set(db.scalars(select(m.Asset.category_key).join(model, model.asset_id == m.Asset.id)
+            .where(getattr(model, key) == parent.id).order_by(m.Asset.id).with_for_update()).all())
+        return categories | {parent.category_key}
+    if resolver == "baseline_correction":
+        return {_row(db, m.BaselineCorrectionRun, params.get("correction_id")).category_key}
+    if resolver == "sample_set":
+        row = _row(db, m.SampleSet, body.get("sample_set_id"))
+        return {row.category_key} | set(db.scalars(select(m.Asset.category_key).join(m.SampleSetItem)
+            .where(m.SampleSetItem.sample_set_id == row.id).order_by(m.Asset.id).with_for_update()).all())
+    if resolver in {"prompt_item", "paired_item", "migration_item"}:
+        row = _row(db, m.MigrationItem if resolver == "migration_item" else m.PromptRegressionItem, params.get("item_id"))
+        if row.run_id != params.get("run_id"):
+            raise HTTPException(404, "条目不属于指定运行")
+        if resolver == "migration_item":
+            return _asset_categories(db, [row.asset_id])
+        sample = _row(db, m.SampleSetItem, row.sample_item_id)
+        categories = _asset_categories(db, [sample.asset_id]) | {_row(db, m.SampleSet, sample.sample_set_id).category_key}
+        if resolver == "paired_item":
+            categories |= _evaluation(db, body.get("baseline_evaluation_id")) | _evaluation(db, body.get("candidate_evaluation_id"))
+        return categories
+    if resolver in {"runtime_id", "runtime_key"}:
+        row = (_row(db, m.ProductionRun, params.get("run_id")) if resolver == "runtime_id" else
+               db.scalar(select(m.ProductionRun).where(m.ProductionRun.run_key == params.get("run_key"))
+                   .with_for_update().execution_options(populate_existing=True)))
+        if row is None:
+            raise HTTPException(404, "运行不存在")
+        return {row.category_key}
+    if resolver == "material_job":
+        from .incremental_material_models import IncrementalMaterialJob
+        return {_row(db, IncrementalMaterialJob, params.get("job_id")).category_key}
+    if resolver == "assets":
+        return _asset_categories(db, body.get("asset_ids", []))
+    if resolver == "package":
+        row = _row(db, m.MaterialPackage, body.get("material_package_id"))
+        return {row.category_key} | set(db.scalars(select(m.Asset.category_key).join(m.MaterialPackageItem)
+            .where(m.MaterialPackageItem.package_id == row.id).order_by(m.Asset.id).with_for_update()).all())
+    if resolver in {"production_run", "production_evaluation"}:
+        row = _row(db, m.EvaluationProductionRun, params.get("run_id"))
+        categories = {row.category_key}
+        if resolver == "production_evaluation":
+            categories |= _evaluation(db, params.get("evaluation_id"))
+        return categories
+    raise HTTPException(403, "该操作仅系统管理员可执行")
+
+
+def authorize_employee_write(request: Request, db: Session, user: m.User, body: dict[str, Any]) -> None:
+    if request.method in {"GET", "HEAD", "OPTIONS"}:
+        return
+    check_origin(request)
+    if effective_role(user) == "admin":
+        return
+    path = getattr(request.scope.get("route"), "path", "").rstrip("/")
+    policy = WRITE_POLICIES.get((request.method, path))
+    if policy is None or not has_permission(user, policy[0]):
+        raise HTTPException(403, "当前角色不能执行此操作")
+    resolver = policy[1]
+    if resolver in {"self", "read"}:
+        return
+    if resolver == "draft":
+        if body.get("status", "draft") not in {"draft", "candidate"} or body.get("active") is True:
+            raise HTTPException(403, "产研只能编辑草稿，正式启用由系统管理员执行")
+        return
+    categories = object_categories(db, resolver, request.path_params, body)
+    require_categories(user, categories)
+    # A supplied category is never authoritative, but must also agree with the
+    # source objects so it cannot redirect a write into another category.
+    if body.get("category_key") and body["category_key"] not in categories:
+        raise HTTPException(403, "请求类目与实际对象不一致")
+    db.info["employee_object_guard"] = (resolver, dict(request.path_params), body)
+
+
+def recheck_employee_objects(db: Session, user: m.User) -> None:
+    guard = db.info.get("employee_object_guard")
+    if guard:
+        resolver, params, body = guard
+        categories = object_categories(db, resolver, params, body)
+        require_categories(user, categories)
+        if body.get("category_key") and body["category_key"] not in categories:
+            raise HTTPException(403, "对象类目已变化，请刷新后重试")
+
 ===== docs/decisions/2026-10-23-search-dictionary.md =====
 # 搜索词管理：名师名司先落地
 
@@ -1088,253 +1541,6 @@ def require_permission(permission: str):
 
 首期生产开关默认关闭。安全供应商凭据及同步合同待对接，全部本地验证使用明确的合成文本和模拟供应商，不调用真实付费接口。
 
-===== Integration patch =====
-diff --git a/backend/app/employee_access.py b/backend/app/employee_access.py
-index 27fb53a..45c199a 100644
---- a/backend/app/employee_access.py
-+++ b/backend/app/employee_access.py
-@@ -32,6 +32,8 @@ _allow("POST", ["/api/semantic-vocabularies", "/api/semantic-vocabularies/{vocab
-     "/api/semantic-vocabulary-imports/{batch_id}/confirm", "/api/semantic-vocabulary-history/{history_id}/restore"], "drafts:write", "read")
- _allow("POST", ["/api/semantic-vocabularies/{vocabulary_id}/snapshot"], "results:export", "read")
- _allow("POST", ["/api/semantic-vocabulary-collection/{run_id}/retry"], "drafts:write", "read")
-+_allow("POST", ["/api/search-dictionary/batches/preview", "/api/search-dictionary/batches/{batch_id}/confirm",
-+    "/api/search-dictionary/history/{history_id}/restore-preview"], "drafts:write", "read")
- _allow("DELETE", ["/api/me/mcp"], "preferences:write", "self")
- _allow("POST", ["/api/auth/password"], "preferences:write", "self")
- _allow("POST", ["/api/published-labels/export", "/api/sample-sets/{sample_set_id}/export",
-diff --git a/backend/app/main.py b/backend/app/main.py
-index ce0223f..e608e19 100644
---- a/backend/app/main.py
-+++ b/backend/app/main.py
-@@ -2127,6 +2127,8 @@ from .texture_regression_api import build_texture_regression_router
- app.include_router(build_texture_regression_router(current_user))
- from .semantic_catalog_api import build_semantic_catalog_router
- app.include_router(build_semantic_catalog_router(current_user))
-+from .search_dictionary_api import build_search_dictionary_router
-+app.include_router(build_search_dictionary_router(current_user))
- from .stock_export_api import build_stock_export_router
- app.include_router(build_stock_export_router(current_user))
- from .stock_write_api import build_stock_write_router
-diff --git a/backend/app/migrations/mysql_baseline.py b/backend/app/migrations/mysql_baseline.py
-index 750b8ba..80431f5 100644
---- a/backend/app/migrations/mysql_baseline.py
-+++ b/backend/app/migrations/mysql_baseline.py
-@@ -373,8 +373,8 @@ def create_mysql_baseline(
- # 漏了任何一条，发布会在迁移那一步被拒（迁移前失败，线上无影响，但白跑一轮）。
- # test_mysql_upgrade_path_reaches_latest_migration 会在本地就拦住这种遗漏——
- # 真 MySQL 的用例在没有 MySQL 的机器上全部跳过，指望不上。
--UPGRADE_SOURCE_VERSIONS = frozenset(range(87, 139))
--UPGRADE_TARGET_VERSIONS = frozenset(range(88, 140))
-+UPGRADE_SOURCE_VERSIONS = frozenset(range(87, 140))
-+UPGRADE_TARGET_VERSIONS = frozenset(range(88, 141))
- 
- 
- def upgrade_mysql_schema(connection: Connection, *, expected: int) -> None:
-@@ -1618,6 +1618,14 @@ def upgrade_mysql_schema(connection: Connection, *, expected: int) -> None:
-             (139, 'semantic_catalog'),
-         )
-         actual = 139
-+    if actual == 139 and expected >= 140:
-+        from .search_dictionary_140 import migrate
-+        migrate(connection)
-+        connection.exec_driver_sql(
-+            'INSERT INTO schema_migrations (version, name) VALUES (%s, %s)',
-+            (140, 'search_dictionary'),
-+        )
-+        actual = 140
- 
- 
- 
-diff --git a/backend/app/migrations/runner.py b/backend/app/migrations/runner.py
-index 091f929..78b2e1a 100644
---- a/backend/app/migrations/runner.py
-+++ b/backend/app/migrations/runner.py
-@@ -12139,6 +12139,11 @@ def _migration_139_semantic_catalog(connection: Connection) -> None:
-     migrate(connection)
- 
- 
-+def _migration_140_search_dictionary(connection: Connection) -> None:
-+    from .search_dictionary_140 import migrate
-+    migrate(connection)
-+
-+
- def _migration_136_stock_writes(connection: Connection) -> None:
-     from .stock_writes_136 import migrate
-     migrate(connection)
-@@ -12666,6 +12671,7 @@ MIGRATIONS = [
-     Migration(137, 'safety_regression', _migration_137_safety_regression),
-     Migration(138, 'texture_regression', _migration_138_texture_regression),
-     Migration(139, 'semantic_catalog', _migration_139_semantic_catalog),
-+    Migration(140, 'search_dictionary', _migration_140_search_dictionary),
- ]
- 
- 
-diff --git a/backend/tests/test_migration.py b/backend/tests/test_migration.py
-index 08b5c6a..94dea23 100644
---- a/backend/tests/test_migration.py
-+++ b/backend/tests/test_migration.py
-@@ -154,6 +154,7 @@ MIGRATION_NAMES = [
-     "safety_regression",
-     "texture_regression",
-     "semantic_catalog",
-+    "search_dictionary",
- ]
- 
- 
-diff --git a/frontend/src/App.tsx b/frontend/src/App.tsx
-index 1c94779..17498a4 100644
---- a/frontend/src/App.tsx
-+++ b/frontend/src/App.tsx
-@@ -42,6 +42,7 @@ const CoverRegressionPage = lazy(() => import("@/pages/cover-regression-page").t
- const SafetyRegressionPage = lazy(() => import("@/pages/safety-regression-page").then(module => ({ default: module.SafetyRegressionPage })))
- const TextureRegressionPage = lazy(() => import("@/pages/texture-regression-page").then(module => ({ default: module.TextureRegressionPage })))
- const SemanticCatalogPage = lazy(() => import("@/pages/semantic-catalog-page").then(module => ({ default: module.SemanticCatalogPage })))
-+const SearchDictionaryPage = lazy(() => import("@/pages/search-dictionary-page").then(module => ({ default: module.SearchDictionaryPage })))
- const ReviewPage = lazy(() =>
-   import("@/pages/review-page").then((module) => ({ default: module.ReviewPage })),
- )
-@@ -200,6 +201,7 @@ export default function App() {
-             <Route path="workflow/automation" element={<Suspense fallback={<RouteLoading />}><AutomationOverviewPage /></Suspense>} />
-             <Route path="workflow/quality-assets" element={<Suspense fallback={<RouteLoading />}><QualityAssetsPage /></Suspense>} />
-             <Route path="workflow/governance/semantic-catalog" element={<Suspense fallback={<RouteLoading />}><SemanticCatalogPage /></Suspense>} />
-+            <Route path="workflow/governance/search-dictionary" element={<Suspense fallback={<RouteLoading />}><SearchDictionaryPage /></Suspense>} />
-             <Route path="workflow/production-line" element={<LegacyRoute><Suspense fallback={<RouteLoading />}><EvaluationPackagePipelinePage user={user} /></Suspense></LegacyRoute>} />
-             <Route path="workflow/materials/packages" element={<AssetsPage />} />
-             <Route path="workflow/materials/assets" element={<Navigate to="/workflow/materials/packages" replace />} />
-diff --git a/frontend/src/components/app-shell.tsx b/frontend/src/components/app-shell.tsx
-index 0a3fc21..8afa04f 100644
---- a/frontend/src/components/app-shell.tsx
-+++ b/frontend/src/components/app-shell.tsx
-@@ -154,6 +154,7 @@ const advancedWorkflowDomain =
-       { to: "/workflow/governance/users", label: "用户与权限" },
-       { to: "/workflow/governance/tag-demand-contracts", label: "字段需求合同" },
-       { to: "/workflow/governance/semantic-catalog", label: "标准词与映射" },
-+      { to: "/workflow/governance/search-dictionary", label: "搜索词库" },
-       { to: "/workflow/governance/projections", label: "下游表投影" },
-       { to: "/workflow/governance/canary", label: "受控试运行" },
-       { to: "/workflow/governance/audit", label: "系统审计" },
-diff --git a/scripts/module_release.py b/scripts/module_release.py
-index 2325a13..f8a62ca 100644
---- a/scripts/module_release.py
-+++ b/scripts/module_release.py
-@@ -32,7 +32,7 @@ import time
- import urllib.request
- from datetime import datetime
- 
--SCHEMA = 139
-+SCHEMA = 140
- CONTRACT = 'business-modules-v1'
- MODULES = {'common', 'incremental', 'stock', 'compatibility'}
- SINGLETON_ROLES = {'auxiliary', 'optimization', 'projection'}
+复审后的实现约束：导出使用一个只读查询同时获取修订与全部匹配行，不锁住词典写入；序列化前结束事务。CSV使用显式_text_encoding=apostrophe-v1列标明公式转义，原有单引号也转义一层，只有带此标记的文件才解码，手写CSV不改变真实前缀。导入记录默认看本人、可切全部并分页，原来的员工只读权限不变。一个批次最多一条安全请求在途；在途未结不再扩散该批次费用，其他批次继续。
 
-===== Existing deterministic Ali response interpreter =====
-"""Deterministic, versionable interpretation of Ali moderation responses.
-
-The unmodified provider body remains separate from this interpretation. A
-missing/unknown risk level can never acquire a passing verdict by accident.
-"""
-from __future__ import annotations
-
-import copy
-import math
-
-VERDICTS = {"pass", "reject", "review"}
-RISK_LEVELS = {"high", "medium", "low", "none"}
-DEFAULT_RULES = {
-    "risk_levels": {"high": "reject", "medium": "review", "low": "review", "none": "pass"},
-    "labels": {},
-}
-SEVERITY = {"pass": 0, "review": 1, "reject": 2}
-
-
-class SafetyError(ValueError):
-    def __init__(self, code, *, retryable=False, raw=None, submitted=False):
-        self.code = code
-        self.retryable = retryable
-        self.raw = raw
-        self.submitted = submitted
-        super().__init__(code)
-
-
-def validate_rules(rules):
-    if not isinstance(rules, dict) or set(rules) != {"risk_levels", "labels"}:
-        raise SafetyError("invalid_safety_rules")
-    levels, labels = rules["risk_levels"], rules["labels"]
-    if not isinstance(levels, dict) or set(levels) != RISK_LEVELS or any(not isinstance(v, str) or v not in VERDICTS for v in levels.values()):
-        raise SafetyError("invalid_risk_mapping")
-    if not isinstance(labels, dict) or len(labels) > 200:
-        raise SafetyError("invalid_label_rules")
-    for label, rule in labels.items():
-        if not isinstance(label, str) or not label or len(label) > 100 or not isinstance(rule, dict):
-            raise SafetyError("invalid_label_rule")
-        if set(rule) != {"verdict", "min_confidence"} or not isinstance(rule["verdict"], str) or rule["verdict"] not in {"review", "reject"}:
-            raise SafetyError("invalid_label_rule")
-        score = rule["min_confidence"]
-        if type(score) not in (int, float) or not math.isfinite(score) or not 0 <= score <= 100:
-            raise SafetyError("invalid_confidence_threshold")
-    return copy.deepcopy(rules)
-
-
-def field(obj, *names, default=None):
-    present = [obj[n] for n in names if n in obj]
-    if present and any(value != present[0] for value in present[1:]):
-        raise SafetyError("conflicting_provider_fields")
-    return present[0] if present else default
-
-
-def interpret(raw, rules, *, data_id=None):
-    rules = validate_rules(rules)
-    if not isinstance(raw, dict):
-        raise SafetyError("invalid_provider_body")
-    code = field(raw, "Code", "code")
-    if type(code) is not int or code != 200:
-        raise SafetyError("provider_error_" + (str(code) if type(code) is int else "unknown"),
-                          raw=raw, retryable=type(code) is int and code in {429, 500, 502, 503, 504, 581, 588}, submitted=True)
-    data = field(raw, "Data", "data")
-    if not isinstance(data, dict):
-        raise SafetyError("invalid_provider_data", raw=raw, submitted=True)
-    echoed = field(data, "DataId", "dataId")
-    if data_id is not None and echoed is not None and echoed != data_id:
-        raise SafetyError("provider_data_id_mismatch", raw=raw, submitted=True)
-    level = field(data, "RiskLevel", "riskLevel")
-    entries = field(data, "Result", "result")
-    guards, reasons, decisions = [], [], []
-    if not isinstance(level, str) or level not in RISK_LEVELS:
-        guards.append("unknown_or_missing_risk_level")
-    else:
-        decisions.append(rules["risk_levels"][level])
-    if not isinstance(entries, list) or not entries:
-        guards.append("missing_detection_results")
-        entries = []
-    for entry in entries:
-        if not isinstance(entry, dict):
-            guards.append("invalid_detection_result")
-            continue
-        label = field(entry, "Label", "label")
-        score = field(entry, "Confidence", "confidence")
-        if not isinstance(label, str) or not label:
-            guards.append("missing_label")
-            continue
-        valid_score = type(score) in (int, float) and math.isfinite(score) and 0 <= score <= 100
-        if score is not None and not valid_score:
-            guards.append("invalid_confidence")
-        reason = {"label": label, "confidence": score,
-                  "description": field(entry, "Description", "description", default=""),
-                  "risk_words": field(entry, "RiskWords", "Riskwords", "riskWords"),
-                  "risk_positions": field(entry, "RiskPositions", "riskPositions"),
-                  "customized_hit": field(entry, "CustomizedHit", "customizedHit")}
-        reasons.append(reason)
-        if label in rules["labels"]:
-            rule = rules["labels"][label]
-            if valid_score and score >= rule["min_confidence"]:
-                decisions.append(rule["verdict"])
-            elif not valid_score:
-                guards.append("label_threshold_requires_confidence")
-        if level == "none" and label not in {"nonLabel", "nonLabel_lib", "ugc"}:
-            # A contradictory body is not silently trusted as clean content.
-            guards.append("risk_label_with_none_level")
-    if guards:
-        decisions.append("review")
-    return {"verdict": max(decisions or ["review"], key=SEVERITY.get),
-            "risk_level": level, "reasons": reasons, "guards": sorted(set(guards)),
-            "request_id": field(raw, "RequestId", "requestId"), "data_id": echoed}
+主名/别名转移至另一实体不属于本期批量合并：即使原实体在同一批次删除该别名，整批预览仍明确报冲突，不能确认，不存在提交一半成功。带空格的英文缩写按原始空白边界检查域名，避免St. John被误判；无空格且与域名结构相同的词仍按现有域名规则拦截，不能以猜测域名白名单放行。

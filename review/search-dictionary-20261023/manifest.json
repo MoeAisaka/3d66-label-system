@@ -1,19 +1,20 @@
 {
-  "candidate": "2f64d823923c9d17451ad3dbf9124142a3dc0ea5",
+  "candidate": "fd3744c2961c2d1092c4c9dbecdc78daf6b38f51",
   "base_candidate": "cddf4d02c94935935b17ddaba0e0ca2e4d8c651e",
   "schema": 140,
   "scope": "Search named-entity application dictionary; synonym/misspell direction pending user clarification; no old distribution table changes, no paid calls, no production deploy",
   "verification": {
-    "tests": 10,
-    "affected_after_actor_change": 8,
-    "sqlite_repeat": true,
-    "csv": true,
-    "build": true,
-    "chrome_synthetic": true,
-    "real_mysql": false
+    "linux": 20,
+    "mysql139_to140": true,
+    "rows": 400,
+    "confirm_seconds": 1.512,
+    "changes_bytes": 195791,
+    "chrome": true,
+    "deployed": false
   },
   "context_base": "https://github.com/MoeAisaka/3d66-label-system/blob/8138d72caf83cd85dd772fbf43ce906f3780c59b/review/20261022/index.json",
   "parent_patch": "https://github.com/MoeAisaka/3d66-label-system/blob/c299a2ed435fb76708a10a7d9553bcd0cdbe00e6/review/semantic-catalog-20261023/candidate.patch",
-  "source_sha256": "1bacab732bdf4b41ae677a1b7396a9bbafe7ef94a5ae445e33ea443abb039ccc",
-  "review": "One consolidated review, reachable P0/P1 with counterexample. Review transaction/locks, provider crash/timeout, permissions, immutable confirmation, import/restore/collision, migration, UI correctness. Distinguish verified code problems from speculation. State actual reading scope; cannot claim full repository if unavailable."
+  "source_sha256": "2b01c6cdb4139f768864d87790e90c0d4156b9ba713e8bdd9fa14e8d9a6d3fa5",
+  "review": "One consolidated review, reachable P0/P1 with counterexample. Review transaction/locks, provider crash/timeout, permissions, immutable confirmation, import/restore/collision, migration, UI correctness. Distinguish verified code problems from speculation. State actual reading scope; cannot claim full repository if unavailable.",
+  "review_note": "Gemini A reviewed once; controller fixed reachable findings and verified B. Poe not executed, quota 13362 requested vs10893 available. No second Gemini round."
 }

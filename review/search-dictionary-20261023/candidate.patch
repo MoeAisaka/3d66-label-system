@@ -1,3 +1,17 @@
+diff --git a/PROJECT_STATUS.md b/PROJECT_STATUS.md
+index 1f38c73..5e040fe 100644
+--- a/PROJECT_STATUS.md
++++ b/PROJECT_STATUS.md
+@@ -1,3 +1,9 @@
++# 2026-10-23 · 搜索词典140复审收尾（未部署）
++
++- 名师名司应用表、逐条维护、整批CSV/JSON导入、阿里文字校验后台队列、历史恢复及全分页导出已实现。修改先预览，全部检查通过后原操作人确认；无凭据时不绕过，不写入新增/变更文字。稳定实体编号、停用和历史保留。搜索纠错方向及真实数仓同步合同仍待确认。
++- Gemini对固定A候选2f64d823完成一次集中源码复审，未读GitHub全库；主控修正CSV单引号往返、英文缩写误判、只读导出锁、个人导入分页和单批安全在途扩散。11项业务专项、3项迁移检查、CSV和正式前端构建已通过，修正版浏览器和MySQL/Linux验证待补。Poe报价13362点高于10893可用点，未执行，详见docs/verification/2026-10-23-search-dictionary-review.md。
++- 标准词表139最终C cddf4d02已完成85 prepare、同归档137的57项Linux及真实MySQL138→139/重复升级/7新表/400行完整Cookie HTTP/旧读及并发冲突验证；未部署，未启用生产收录。生产仍是MCP133/9ad464ac。
++
+ # 2026-10-23 · 标准词表与旧字段映射候选139（未部署）
+ 
+ - 新增按类目／字段／语言隔离的标准词表、稳定词条编号、别名冲突检查、停用恢复及旧字段／旧值映射；词表内容按修订冻结，修改不影响旧机制。管理员和产研维护，其他员工只读。
 diff --git a/backend/app/employee_access.py b/backend/app/employee_access.py
 index 27fb53a..45c199a 100644
 --- a/backend/app/employee_access.py
@@ -109,10 +123,10 @@ index 0000000..ca65c12
 +        connection.execute(table.insert().values(key="master_brand", revision=0))
 diff --git a/backend/app/search_dictionary.py b/backend/app/search_dictionary.py
 new file mode 100644
-index 0000000..eb499aa
+index 0000000..661f08e
 --- /dev/null
 +++ b/backend/app/search_dictionary.py
-@@ -0,0 +1,282 @@
+@@ -0,0 +1,286 @@
 +"""Search entity maintenance; confirmations are atomic, moderation is external."""
 +from __future__ import annotations
 +
@@ -224,7 +238,11 @@ index 0000000..eb499aa
 +    raw = unicodedata.normalize("NFKC", value).strip()
 +    # Detect risky original input BEFORE punctuation removal.
 +    risk = "".join(c for c in raw if not c.isspace() and not unicodedata.category(c).startswith("C"))
-+    if re.search(r"(?i)(?:https?://|www\.|[^\s@]+@[^\s@]+\.|[\w-]+\.[a-z]{2,}(?:\b|/))", risk):
++    # Explicit URL/email markers cannot be hidden with whitespace. For bare
++    # domains, preserve word boundaries: "St. John" is a name, not "St.John".
++    if re.search(r"(?i)(?:https?://|www\.|[^\s@]+@[^\s@]+\.)", risk) or re.search(
++        r"(?i)[\w-]+\.[a-z]{2,}(?:\b|/)", raw
++    ):
 +        raise DictionaryError("name_url", "网址、域名和邮箱不能作为词面")
 +    if any(c in raw for c in ",，、;；\n\r"):
 +        raise DictionaryError("multiple_names", "每个词面只能填写一个词；别名请分项填写")
@@ -397,10 +415,10 @@ index 0000000..eb499aa
 +        "expected_revision": row.revision}], actor=actor, actor_name=actor_name, action="restore")
 diff --git a/backend/app/search_dictionary_api.py b/backend/app/search_dictionary_api.py
 new file mode 100644
-index 0000000..b980a67
+index 0000000..ee48b92
 --- /dev/null
 +++ b/backend/app/search_dictionary_api.py
-@@ -0,0 +1,164 @@
+@@ -0,0 +1,176 @@
 +"""Authenticated employee API for application-side search dictionaries."""
 +from __future__ import annotations
 +
@@ -413,9 +431,9 @@ index 0000000..b980a67
 +from fastapi import APIRouter, Depends, HTTPException, Query
 +from fastapi.responses import Response
 +from pydantic import BaseModel, ConfigDict, Field
-+from sqlalchemy import func, select
++from sqlalchemy import func, select, true
 +from sqlalchemy.exc import IntegrityError
-+from sqlalchemy.orm import Session
++from sqlalchemy.orm import Session, aliased
 +
 +from .authz import has_permission
 +from .database import get_db
@@ -506,27 +524,35 @@ index 0000000..b980a67
 +    def export(q: str = Query(default="", max_length=200), match: Literal["contains", "exact"] = "contains",
 +               status: Literal["active", "inactive", ""] = "", res_type: str = "", entity_type: str = "",
 +               format: Literal["json", "csv"] = "json", user=Depends(current_user), db: Session = Depends(get_db)):
-+        def operation():
-+            root = s.state(db)
-+            rows = [s.entity_payload(r) for r in db.scalars(filtered(q, match, status, res_type, entity_type)
-+                .order_by(s.SearchEntity.master_brand_id).with_for_update().execution_options(populate_existing=True))]
-+            if format == "json":
-+                return {"schema_version": "search-entities-v1", "catalog_revision": root.revision, "normalization_version": s.NORMALIZATION_VERSION,
-+                        "row_count": len(rows), "items": rows, "external_sync_status": "not_connected"}
-+            cols = ["master_brand_id", "expected_revision", "name", "alias_names", "entity_type", "res_type", "region", "status"]
-+            stream = io.StringIO(newline=""); output = csv.DictWriter(stream, fieldnames=cols); output.writeheader()
-+            for row in rows:
-+                row["expected_revision"] = row["revision"]
-+                values = {k: row.get(k) for k in cols}; values["alias_names"] = json.dumps(values["alias_names"], ensure_ascii=False)
-+                # Block spreadsheet formula execution; textual imported prefix
-+                # is removed by the explicit CSV parser, not by arbitrary data cleaning.
-+                for key, value in values.items():
-+                    if isinstance(value, str) and value.startswith(("=", "+", "-", "@", "\t", "\r")):
-+                        values[key] = "'" + value
-+                output.writerow(values)
-+            return Response("\ufeff" + stream.getvalue(), media_type="text/csv; charset=utf-8",
-+                headers={"Content-Disposition": 'attachment; filename="search-entities.csv"', "X-Catalog-Revision": str(root.revision)})
-+        return execute(db, operation)
++        def snapshot():
++            # One read statement gives the revision and rows the same snapshot,
++            # even under READ COMMITTED, without blocking dictionary writers.
++            entity = aliased(s.SearchEntity, filtered(q, match, status, res_type, entity_type).subquery())
++            records = db.execute(select(s.SearchDictionaryState.revision, entity)
++                .select_from(s.SearchDictionaryState).outerjoin(entity, true())
++                .where(s.SearchDictionaryState.key == "master_brand")
++                .order_by(entity.master_brand_id).execution_options(populate_existing=True)).all()
++            if not records:
++                raise s.DictionaryError("not_initialized", "词典尚未完成数据库升级")
++            return records[0][0], [s.entity_payload(row) for _, row in records if row is not None]
++        revision, rows = execute(db, snapshot)  # release transaction before serialization
++        if format == "json":
++            return {"schema_version": "search-entities-v1", "catalog_revision": revision, "normalization_version": s.NORMALIZATION_VERSION,
++                    "row_count": len(rows), "items": rows, "external_sync_status": "not_connected"}
++        cols = ["master_brand_id", "expected_revision", "name", "alias_names", "entity_type", "res_type", "region", "status", "_text_encoding"]
++        stream = io.StringIO(newline=""); output = csv.DictWriter(stream, fieldnames=cols); output.writeheader()
++        for row in rows:
++            row["expected_revision"] = row["revision"]
++            values = {k: row.get(k) for k in cols}; values["alias_names"] = json.dumps(values["alias_names"], ensure_ascii=False)
++            # Explicit format marker keeps exported escapes reversible without
++            # stripping genuine apostrophes from manually authored CSV files.
++            values["_text_encoding"] = "apostrophe-v1"
++            for key, value in values.items():
++                if isinstance(value, str) and value.startswith(("'", "=", "+", "-", "@", "\t", "\r")):
++                    values[key] = "'" + value
++            output.writerow(values)
++        return Response("\ufeff" + stream.getvalue(), media_type="text/csv; charset=utf-8",
++            headers={"Content-Disposition": 'attachment; filename="search-entities.csv"', "X-Catalog-Revision": str(revision)})
 +
 +    @router.post("/api/search-dictionary/batches/preview")
 +    def preview(body: Preview, user=Depends(current_user), db: Session = Depends(get_db)):
@@ -534,9 +560,13 @@ index 0000000..b980a67
 +        return execute(db, lambda: summary(db, s.preview(db, [r.model_dump(exclude_unset=True) for r in body.rows], actor=actor, actor_name=user.display_name or user.username)))
 +
 +    @router.get("/api/search-dictionary/batches")
-+    def batches(user=Depends(current_user), db: Session = Depends(get_db)):
-+        return {"items": [{"id": r.id, "state": r.state, "created_at": r.created_at, "actor": r.actor} for r in
-+            db.scalars(select(s.SearchDictionaryBatch).order_by(s.SearchDictionaryBatch.created_at.desc()).limit(24))]}
++    def batches(mine: bool = True, offset: int = Query(default=0, ge=0), limit: int = Query(default=12, ge=1, le=100),
++                user=Depends(current_user), db: Session = Depends(get_db)):
++        query = select(s.SearchDictionaryBatch)
++        if mine: query = query.where(s.SearchDictionaryBatch.actor == "user:" + str(user.id))
++        total = db.scalar(select(func.count()).select_from(query.subquery()))
++        return {"total": total, "items": [{"id": r.id, "state": r.state, "created_at": r.created_at, "actor": r.actor, "actor_name": r.actor_name} for r in
++            db.scalars(query.order_by(s.SearchDictionaryBatch.created_at.desc(), s.SearchDictionaryBatch.id.desc()).offset(offset).limit(limit))]}
 +
 +    @router.get("/api/search-dictionary/batches/{batch_id}")
 +    def batch_detail(batch_id: str, user=Depends(current_user), db: Session = Depends(get_db)):
@@ -567,10 +597,10 @@ index 0000000..b980a67
 +    return router
 diff --git a/backend/app/search_dictionary_worker.py b/backend/app/search_dictionary_worker.py
 new file mode 100644
-index 0000000..547d5c4
+index 0000000..3bfcfa9
 --- /dev/null
 +++ b/backend/app/search_dictionary_worker.py
-@@ -0,0 +1,103 @@
+@@ -0,0 +1,109 @@
 +"""Opt-in moderation worker. No DB locks survive a provider call."""
 +from __future__ import annotations
 +
@@ -580,7 +610,7 @@ index 0000000..547d5c4
 +from datetime import datetime, timedelta, timezone
 +
 +from sqlalchemy import select
-+from sqlalchemy.orm import Session
++from sqlalchemy.orm import Session, aliased
 +
 +from .database import reserve_sqlite_immediate_transaction
 +from .search_dictionary import SearchDictionaryBatch as Batch, SearchDictionarySafety as Check, now, canonical
@@ -622,13 +652,19 @@ index 0000000..547d5c4
 +                stale.state = "unknown"; stale.error_code = "worker_result_unknown"; stale.finished_at = now()
 +                db.flush(); summarize(db, batch)
 +            db.commit(); return True
++        running = aliased(Check)
 +        candidate = db.execute(select(Check.id, Check.batch_id).join(Batch, Batch.id == Check.batch_id).where(
-+            Check.state == "queued", Batch.state == "checking", Batch.expires_at > now())
++            Check.state == "queued", Batch.state == "checking", Batch.expires_at > now(),
++            ~select(running.id).where(running.batch_id == Batch.id, running.state == "running").exists())
 +            .order_by(Check.id).limit(1)).first()
 +        if candidate is None:
 +            db.rollback(); return False
 +        batch = db.scalar(select(Batch).where(Batch.id == candidate.batch_id).with_for_update(skip_locked=True).execution_options(populate_existing=True))
 +        if batch is None or batch.state != "checking" or batch.expires_at <= now(): db.rollback(); return False
++        # Only one paid request per batch may be in flight. A crashed/uncertain
++        # request blocks that batch's remaining spend, not other batches.
++        if db.scalar(select(Check.id).where(Check.batch_id == batch.id, Check.state == "running").limit(1).with_for_update()) is not None:
++            db.rollback(); return False
 +        check = db.scalar(select(Check).where(Check.id == candidate.id).with_for_update().execution_options(populate_existing=True))
 +        if check.state != "queued": db.rollback(); return False
 +        check.state = "running"; check.started_at = now()
@@ -688,10 +724,12 @@ index 08b5c6a..94dea23 100644
  
 diff --git a/backend/tests/test_search_dictionary.py b/backend/tests/test_search_dictionary.py
 new file mode 100644
-index 0000000..d58799e
+index 0000000..2d854b7
 --- /dev/null
 +++ b/backend/tests/test_search_dictionary.py
-@@ -0,0 +1,171 @@
+@@ -0,0 +1,236 @@
++import csv
++import io
 +import json
 +from datetime import datetime, timedelta, timezone
 +
@@ -747,6 +785,9 @@ index 0000000..d58799e
 +    assert s.normalize_name(" ３Ｄ-Max ") == "3d-max"
 +    assert s.normalize_name("C++") == "c++"
 +    assert s.normalize_name('"Modern Living Room"') == "modernlivingroom"
++    assert s.normalize_name("St. John") == "stjohn"
++    assert s.normalize_name("J. Crew") == "jcrew"
++    assert s.normalize_name("Co. Ltd.") == "coltd"
 +    for value in ["www.example.com", "https://example.com/中文", "e@example.com", "ｗｗｗ．ｅｘａｍｐｌｅ．ｃｏｍ", "A,B", "１２３", "AB123", "---", "太"*41]:
 +        with pytest.raises(s.DictionaryError): s.normalize_name(value)
 +
@@ -807,6 +848,39 @@ index 0000000..d58799e
 +        assert db.scalar(select(func.count()).select_from(s.SearchEntity)) == 1
 +
 +
++def test_bulk_name_transfer_is_rejected_during_preview_in_both_orders(database):
++    approve(database, proposed(database, [{"name": "公司甲", "alias_names": ["甲别名"]}, {"name": "公司乙"}]))
++    rows = [{"master_brand_id": 1, "expected_revision": 1, "alias_names": []},
++            {"master_brand_id": 2, "expected_revision": 1, "alias_names": ["甲别名"]}]
++    for values in (rows, rows[::-1]):
++        value = proposed(database, values)
++        with Session(database) as db:
++            batch = db.get(s.SearchDictionaryBatch, value[0])
++            assert batch.state == "invalid" and json.loads(batch.errors_json)[0]["code"] == "name_conflict"
++            assert json.loads(db.get(s.SearchEntity, 1).alias_names) == ["甲别名"]
++            assert db.get(s.SearchEntity, 2).revision == 1
++            assert db.scalar(select(func.count()).select_from(s.SearchDictionarySafety).where(s.SearchDictionarySafety.batch_id == batch.id)) == 0
++
++
++def test_inflight_check_blocks_same_batch_spend_but_not_other_batch(database):
++    first = proposed(database, [{"name": "在途主名", "alias_names": ["在途别名"]}])
++    other = proposed(database, [{"name": "另一批次"}])
++    second_provider = Provider()
++    class Interleaved(Provider):
++        def moderate_text(self, *args):
++            assert tick(database, provider=second_provider)  # other batch may progress
++            assert not tick(database, provider=second_provider)  # same batch must wait
++            return super().moderate_text(*args)
++    provider = Interleaved()
++    assert tick(database, provider=provider)
++    assert second_provider.calls[0][0] == "另一批次" and len(second_provider.calls) == 1
++    with Session(database) as db:
++        assert db.get(s.SearchDictionaryBatch, other[0]).state == "ready"
++        states = list(db.scalars(select(s.SearchDictionarySafety.state).where(s.SearchDictionarySafety.batch_id == first[0])))
++        assert sorted(states) == ["passed", "queued"]
++    assert tick(database, provider=second_provider)
++
++
 +def test_reject_or_unknown_never_enters_application_and_never_auto_retries(database):
 +    rejected = proposed(database, [{"name": "测试拒绝项"}])
 +    provider = Provider("high")
@@ -863,12 +937,39 @@ index 0000000..d58799e
 +    assert client.post("/api/search-dictionary/batches/preview", json={"rows": rows}, headers={"Origin": "https://elsewhere.invalid"}).status_code == 403
 +    assert client.post("/api/search-dictionary/batches/preview", json={"rows": [{"master_brand_id": True, "name": "无效编号"}]}).status_code == 422
 +    assert client.post("/api/search-dictionary/batches/preview", json={"rows": [{"name": "未知列", "source_system": "trusted"}]}).status_code == 422
++
++
++def test_export_csv_preserves_apostrophe_and_batch_history_is_pageable(context):
++    sessions, login, _ = context
++    with sessions() as db:
++        db.add(s.SearchDictionaryState(key="master_brand", revision=0)); db.commit(); engine = db.get_bind()
++    client, uid = login("product_rd", [])
++    result = client.post("/api/search-dictionary/batches/preview", json={"rows": [{"name": "'+One Design", "alias_names": ["St. John"]}]})
++    assert result.status_code == 200, result.text
++    batch = result.json()
++    while tick(engine, provider=Provider()): pass
++    assert client.post(f"/api/search-dictionary/batches/{batch['id']}/confirm", json={"confirmed": True, "payload_hash": batch["payload_hash"]}).status_code == 200
++    response = client.get("/api/search-dictionary/export?format=csv")
++    exported = list(csv.DictReader(io.StringIO(response.text.lstrip('\ufeff'))))
++    assert exported[0]["name"] == "''+One Design"
++    assert exported[0]["_text_encoding"] == "apostrophe-v1"
++    assert json.loads(exported[0]["alias_names"]) == ["St. John"]
++    assert response.headers["X-Catalog-Revision"] == "1"
++    assert client.get("/api/search-dictionary/export?res_type=SU").json()["catalog_revision"] == 1
++    with sessions() as db:
++        for i in range(25): s.preview(db, [{"name": f"分页草稿{i}"}], actor=f"user:{uid}")
++        s.preview(db, [{"name": "其他人的草稿"}], actor="user:9999")
++        db.commit()
++    assert client.get("/api/search-dictionary/batches").json()["total"] == 26
++    page = client.get("/api/search-dictionary/batches?offset=24").json()
++    assert len(page["items"]) == 2 and any(r["id"] == batch["id"] for r in page["items"])
++    assert client.get("/api/search-dictionary/batches?mine=false").json()["total"] == 27
 diff --git a/docs/decisions/2026-10-23-search-dictionary.md b/docs/decisions/2026-10-23-search-dictionary.md
 new file mode 100644
-index 0000000..356059d
+index 0000000..ed20db7
 --- /dev/null
 +++ b/docs/decisions/2026-10-23-search-dictionary.md
-@@ -0,0 +1,13 @@
+@@ -0,0 +1,17 @@
 +# 搜索词管理：名师名司先落地
 +
 +范围依据：TPWL-21395、0818后台需求（revision1600）、0817字段说明，以及用户后续确认。先实施名师名司词典和安全校验、批量确认、版本历史；同义词/错别词方向与编号口径未核对的部分保留待接，不猜测现有数仓DDL。不改旧名师名司内容分发后台，不做AI提炼。
@@ -882,6 +983,27 @@ index 0000000..356059d
 +每批最多500条、最多5000个不同待审核文本、正文2MiB。核心数据及审计长期保留，分页24条；导出当前筛选全部页，包含版本及停用状态。后台更新应用MySQL表，数仓每日同步由外部流程执行；未收到外部回执不显示“已同步”或承诺搜索生效时间。
 +
 +首期生产开关默认关闭。安全供应商凭据及同步合同待对接，全部本地验证使用明确的合成文本和模拟供应商，不调用真实付费接口。
++
++复审后的实现约束：导出使用一个只读查询同时获取修订与全部匹配行，不锁住词典写入；序列化前结束事务。CSV使用显式_text_encoding=apostrophe-v1列标明公式转义，原有单引号也转义一层，只有带此标记的文件才解码，手写CSV不改变真实前缀。导入记录默认看本人、可切全部并分页，原来的员工只读权限不变。一个批次最多一条安全请求在途；在途未结不再扩散该批次费用，其他批次继续。
++
++主名/别名转移至另一实体不属于本期批量合并：即使原实体在同一批次删除该别名，整批预览仍明确报冲突，不能确认，不存在提交一半成功。带空格的英文缩写按原始空白边界检查域名，避免St. John被误判；无空格且与域名结构相同的词仍按现有域名规则拦截，不能以猜测域名白名单放行。
+diff --git a/docs/verification/2026-10-23-search-dictionary-review.md b/docs/verification/2026-10-23-search-dictionary-review.md
+new file mode 100644
+index 0000000..385ce08
+--- /dev/null
++++ b/docs/verification/2026-10-23-search-dictionary-review.md
+@@ -0,0 +1,11 @@
++# 搜索词典140：实现和复审证据
++
++范围为名师名司应用表维护；同义词/错别词方向、真实安全凭据及每日数仓同步合同仍待对接。没有真实付费调用、生产写入或部署。
++
++Gemini Argon于A候选2f64d823完成一次集中源码复审：https://gemini.google.com/app/860e6db74c80cdd7 。模型明确未读取GitHub全库，只审阅直接提供的81778字符源码材料，不能称全库已通过。源快照为GitHub60992f26。Poe Opus5.5需要13362点，现有10893点，未执行；未更改订阅。
++
++控制器裁定并修正：CSV单引号往返歧义、带空白英文名称的域名误判、导出持有排他锁、较早个人批次无法找回，以及同批安全请求崩溃后继续扩散费用。双工交错验证保证一个批次仅一个请求在途，其他批次可继续。只读员工原有查看范围不缩减。
++
++未采纳“批次互换名称会提交500”的推断：两种行顺序均在预览明确报冲突，未写应用表、未创建安全请求；本期不扩展实体合并语义。MySQL元数据遗漏和普通TEXT截断属于待实机核验的推测；现有迁移已走统一转换后的mysql_metadata，不能按推测改掉迁移框架。
++
++本地证据：11项业务专项中10项首次通过，另外1项仅修正测试将JSON转义字串当中文直比的问题后通过；3项迁移门禁/重复SQLite升级通过。CSV转义检查、TypeScript及Vite构建通过。A版真实Chrome验证新增预览、模拟安全后整批确认、重复行整批拒绝及390像素无整页溢出；修正版浏览器、Linux及真实MySQL140验证记录在后续追加，不以本地结果冒充生产验收。
 diff --git a/docs/verification/2026-10-23-semantic-catalog-review.md b/docs/verification/2026-10-23-semantic-catalog-review.md
 index 95f9907..e1d9b29 100644
 --- a/docs/verification/2026-10-23-semantic-catalog-review.md
@@ -906,10 +1028,10 @@ index 95f9907..e1d9b29 100644
  
 diff --git a/frontend/scripts/check-search-dictionary-import.ts b/frontend/scripts/check-search-dictionary-import.ts
 new file mode 100644
-index 0000000..41a1c19
+index 0000000..ce6867a
 --- /dev/null
 +++ b/frontend/scripts/check-search-dictionary-import.ts
-@@ -0,0 +1,10 @@
+@@ -0,0 +1,20 @@
 +import assert from "node:assert/strict"
 +import { parseSearchDictionaryImport as parse } from "../src/lib/search-dictionary-import.ts"
 +assert.deepEqual(parse('\ufeffname,alias_names,region\r\n示例,甲|乙,\r\n'), [{ name: "示例", alias_names: ["甲", "乙"], region: null }])
@@ -919,6 +1041,16 @@ index 0000000..41a1c19
 +assert.equal(roundtrip[0].expected_revision, 3)
 +assert.equal(roundtrip[0].source_system, undefined)
 +assert.equal(roundtrip[0].status, "inactive")
++// Manual CSV is never silently unescaped; platform exports declare their encoding.
++assert.equal(parse("name\n'+One Design")[0].name, "'+One Design")
++for (const original of ["'+One Design", "'Studio", "+Design", "=Design", "@Design", "-Design", "\tDesign", "\rDesign"]) {
++  const encoded = "'" + original
++  const csv = 'name,alias_names,_text_encoding\r\n' + '"' + encoded.replaceAll('"', '""') + '","[]",apostrophe-v1\r\n'
++  const result = parse(csv)[0]
++  assert.equal(result.name, original)
++  assert.equal(result._text_encoding, undefined)
++}
++assert.throws(() => parse("name,_text_encoding\nfoo,unknown-v2"))
 +console.log("search dictionary import checks passed")
 diff --git a/frontend/src/App.tsx b/frontend/src/App.tsx
 index 1c94779..17498a4 100644
@@ -954,10 +1086,10 @@ index 0a3fc21..8afa04f 100644
        { to: "/workflow/governance/audit", label: "系统审计" },
 diff --git a/frontend/src/lib/search-dictionary-import.ts b/frontend/src/lib/search-dictionary-import.ts
 new file mode 100644
-index 0000000..ff2dc77
+index 0000000..ba718bc
 --- /dev/null
 +++ b/frontend/src/lib/search-dictionary-import.ts
-@@ -0,0 +1,50 @@
+@@ -0,0 +1,53 @@
 +const editable = ["master_brand_id", "expected_revision", "name", "alias_names", "entity_type", "res_type", "region", "status"]
 +
 +export function parseSearchDictionaryImport(text: string): Record<string, unknown>[] {
@@ -987,33 +1119,53 @@ index 0000000..ff2dc77
 +  if (quoted) throw new Error("CSV引号未闭合")
 +  if (field || row.length) { row.push(field); rows.push(row) }
 +  const headers = rows.shift()?.map(x => x.trim()) || []
-+  if (!headers.length || new Set(headers).size !== headers.length || headers.some(h => !editable.includes(h))) throw new Error("表头为空、重复或包含不支持的列")
++  if (!headers.length || new Set(headers).size !== headers.length || headers.some(h => !editable.includes(h) && h !== "_text_encoding")) throw new Error("表头为空、重复或包含不支持的列")
 +  return rows.filter(r => r.some(v => v.trim())).map((r, i) => {
 +    if (r.length !== headers.length) throw new Error(`第${i + 2}行列数不一致`)
-+    return Object.fromEntries(headers.map((h, n) => {
++    const encoding = headers.indexOf("_text_encoding")
++    if (encoding >= 0 && r[encoding] !== "apostrophe-v1") throw new Error(`第${i + 2}行导出转义格式无效`)
++    return Object.fromEntries(headers.flatMap<[string, unknown]>((h, n) => {
++      if (h === "_text_encoding") return []
 +      let value = r[n]
++      if (encoding >= 0 && /^'['=+@\-\t\r]/.test(value)) value = value.slice(1)
 +      if (["master_brand_id", "expected_revision"].includes(h)) {
-+        if (!value.trim()) return [h, null]
++        if (!value.trim()) return [[h, null]]
 +        const id = Number(value)
 +        if (!/^\d+$/.test(value) || !Number.isSafeInteger(id) || id <= 0) throw new Error(`第${i + 2}行${h}必须是正整数`)
-+        return [h, id]
++        return [[h, id]]
 +      }
 +      if (h === "alias_names") {
 +        const aliases: unknown = value.trim().startsWith("[") ? JSON.parse(value) : value.split("|").filter(Boolean)
 +        if (!Array.isArray(aliases) || aliases.some(x => typeof x !== "string")) throw new Error(`第${i + 2}行别名需为文字数组或用竖线分隔`)
-+        return [h, aliases]
++        return [[h, aliases]]
 +      }
-+      if (/^'[=+@-]/.test(value)) value = value.slice(1) // exported formula escape
-+      return [h, h === "region" && !value ? null : value]
++      return [[h, h === "region" && !value ? null : value]]
 +    }))
 +  })
 +}
+diff --git a/frontend/src/lib/types.ts b/frontend/src/lib/types.ts
+index e659cb5..90dd41b 100644
+--- a/frontend/src/lib/types.ts
++++ b/frontend/src/lib/types.ts
+@@ -3880,6 +3880,12 @@ export type CoverRegressionRun = {
+   id: string; baseline_set_id: number; name: string; category_key: string; status: string; created_at: string
+   config: { prompt: string; parameters: { width: number; height: number; steps: number; seed: number; cfg: number } }
+ }
++export type SearchDictionaryEntity = { master_brand_id: number; revision: number; name: string; normalized_name: string; alias_names: string[];
++  entity_type: string; res_type: string; region: string | null; status: string; updated_by: string; updated_by_name: string; updated_at: string; version: string }
++export type SearchDictionaryBatch = { id: string; actor: string; state: string; payload_hash: string; expires_at: string; errors: { row: number; message: string }[];
++  changes: { row: number; before: SearchDictionaryEntity | null; after: Partial<SearchDictionaryEntity> }[]; safety_counts: Record<string, number>;
++  safety_failures?: { content: string; state: string; error_code: string }[] }
++export type SearchDictionaryHistory = { id: number; revision: number; actor: string; created_at: string; snapshot: SearchDictionaryEntity }
+ export type CoverRegressionDetail = CoverRegressionRun & {
+   total: number; offset: number; items: CoverRegressionItem[]
+   statistics: { total: number; succeeded: number; failed: number; needs_review: number; pending: number;
 diff --git a/frontend/src/pages/search-dictionary-page.tsx b/frontend/src/pages/search-dictionary-page.tsx
 new file mode 100644
-index 0000000..89ae9ed
+index 0000000..9f71268
 --- /dev/null
 +++ b/frontend/src/pages/search-dictionary-page.tsx
-@@ -0,0 +1,124 @@
+@@ -0,0 +1,121 @@
 +import { useState } from "react"
 +import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 +import { toast } from "sonner"
@@ -1025,13 +1177,7 @@ index 0000000..89ae9ed
 +import { api } from "@/lib/api"
 +import { parseSearchDictionaryImport } from "@/lib/search-dictionary-import"
 +import { formatPlatformMinute } from "@/lib/platform-time"
-+
-+type Entity = { master_brand_id: number; revision: number; name: string; normalized_name: string; alias_names: string[];
-+  entity_type: string; res_type: string; region: string | null; status: string; updated_by: string; updated_by_name: string; updated_at: string; version: string }
-+type Batch = { id: string; actor: string; state: string; payload_hash: string; expires_at: string; errors: { row: number; message: string }[];
-+  changes: { row: number; before: Entity | null; after: Partial<Entity> }[]; safety_counts: Record<string, number>;
-+  safety_failures?: { content: string; state: string; error_code: string }[] }
-+type History = { id: number; revision: number; actor: string; created_at: string; snapshot: Entity }
++import type { SearchDictionaryEntity as Entity, SearchDictionaryBatch as Batch, SearchDictionaryHistory as History } from "@/lib/types"
 +const labels: Record<string, string> = { name: "标准名", alias_names: "别名", entity_type: "实体类型", res_type: "素材类型", region: "地区", status: "状态",
 +  designer: "名师名司", developer: "房企地产", unknown_entity: "未细分实体", all: "通用", inspiration: "灵感图", active: "启用", inactive: "停用",
 +  checking: "等待安全校验", ready: "校验通过，待确认", invalid: "资料校验未通过", rejected: "安全校验未通过", unknown: "安全请求结果待核实",
@@ -1049,6 +1195,7 @@ index 0000000..89ae9ed
 +  const client = useQueryClient()
 +  const [query, setQuery] = useState(""); const [draftQuery, setDraftQuery] = useState(""); const [match, setMatch] = useState("contains")
 +  const [scope, setScope] = useState(""); const [kind, setKind] = useState(""); const [status, setStatus] = useState(""); const [offset, setOffset] = useState(0)
++  const [batchOffset, setBatchOffset] = useState(0); const [mine, setMine] = useState(true)
 +  const [drawer, setDrawer] = useState<"edit" | "import" | "batch" | "history" | null>(null)
 +  const [editing, setEditing] = useState<Entity | null>(null); const [historyId, setHistoryId] = useState(0)
 +  const [name, setName] = useState(""); const [aliases, setAliases] = useState(""); const [entityType, setEntityType] = useState("unknown_entity")
@@ -1059,7 +1206,7 @@ index 0000000..89ae9ed
 +  const params = new URLSearchParams({ q: query, match, res_type: scope, entity_type: kind, status })
 +  const listing = useQuery({ queryKey: ["search-dictionary-items", params.toString(), offset],
 +    queryFn: () => api<{ items: Entity[]; total: number }>(`/api/search-dictionary/entities?${params}&offset=${offset}&limit=24`) })
-+  const recent = useQuery({ queryKey: ["search-dictionary-batches"], queryFn: () => api<{ items: { id: string; state: string; created_at: string }[] }>("/api/search-dictionary/batches"), refetchInterval: 10000 })
++  const recent = useQuery({ queryKey: ["search-dictionary-batches", mine, batchOffset], queryFn: () => api<{ total: number; items: { id: string; state: string; created_at: string; actor_name: string; actor: string }[] }>(`/api/search-dictionary/batches?mine=${mine}&offset=${batchOffset}&limit=12`), refetchInterval: 10000 })
 +  const batch = useQuery({ queryKey: ["search-dictionary-batch", batchId], enabled: !!batchId && drawer === "batch",
 +    queryFn: () => api<Batch>(`/api/search-dictionary/batches/${batchId}`), refetchInterval: q => q.state.data?.state === "checking" ? 3000 : false })
 +  const history = useQuery({ queryKey: ["search-dictionary-history", historyId], enabled: drawer === "history",
@@ -1099,8 +1246,10 @@ index 0000000..89ae9ed
 +      </div>
 +      <Pager page={{ total, offset, limit: 24, has_more: offset + 24 < total }} fallbackLimit={24} onChange={setOffset} showPageNumbers />
 +    </Card>
-+    <Card className="space-y-3 p-5"><h2 className="font-bold">最近的修改与导入</h2><p className="text-sm text-muted-foreground">关闭页面不影响已提交的安全校验；校验通过后由原操作人确认写入。</p>
-+      <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">{recent.data?.items.map(r => <button key={r.id} className="rounded-xl border p-3 text-left hover:bg-muted" onClick={() => selectBatch(r.id)}><p className="text-sm font-bold">{shown(r.state)}</p><p className="mt-1 text-xs text-muted-foreground">{formatPlatformMinute(r.created_at)} · {r.id.slice(0, 8)}</p></button>)}</div>
++    <Card className="space-y-3 p-5"><div className="flex flex-wrap items-center justify-between gap-3"><h2 className="font-bold">修改与导入记录</h2><select className={`${input} max-w-48`} aria-label="导入记录范围" value={mine ? "mine" : "all"} onChange={e => { setMine(e.target.value === "mine"); setBatchOffset(0) }}><option value="mine">我的记录</option><option value="all">全部记录</option></select></div><p className="text-sm text-muted-foreground">关闭页面不影响已提交的安全校验；校验通过后由原操作人确认写入。</p>
++      <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">{recent.data?.items.map(r => <button key={r.id} className="rounded-xl border p-3 text-left hover:bg-muted" onClick={() => selectBatch(r.id)}><p className="text-sm font-bold">{shown(r.state)}</p><p className="mt-1 text-xs text-muted-foreground">{formatPlatformMinute(r.created_at)} · {r.actor_name || r.actor} · {r.id.slice(0, 8)}</p></button>)}</div>
++      {recent.isError && <p role="alert" className="text-red-700">{recent.error.message}</p>}
++      <Pager page={{ total: recent.data?.total || 0, offset: batchOffset, limit: 12, has_more: batchOffset + 12 < (recent.data?.total || 0) }} fallbackLimit={12} onChange={setBatchOffset} showPageNumbers />
 +    </Card>
 +    <SecondaryDrawer open={drawer === "edit"} onOpenChange={v => !v && setDrawer(null)} title={editing ? "编辑实体" : "新增实体"} description="主名填写一个词；别名每行一个。改名不会改变实体编号。">
 +      <form className="space-y-4" onSubmit={event => { event.preventDefault(); action.mutate(() => preview([{ ...(editing ? { master_brand_id: editing.master_brand_id, expected_revision: editing.revision } : {}), name, alias_names: aliases.split("\n").map(a => a.trim()).filter(Boolean), entity_type: entityType, res_type: resType, region: region || null, status: enabled ? "active" : "inactive" }])) }}>
