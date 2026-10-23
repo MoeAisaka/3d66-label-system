@@ -1,0 +1,677 @@
+===== backend/app/semantic_catalog.py =====
+"""Versioned label vocabulary. No model, runtime publication or downstream IO."""
+from __future__ import annotations
+
+import hashlib
+import json
+import re
+import unicodedata
+import uuid
+from datetime import datetime, timedelta, timezone
+
+from sqlalchemy import ForeignKey, Integer, String, Text, UniqueConstraint, select
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Mapped, mapped_column
+
+from .database import Base, reserve_sqlite_immediate_transaction
+
+
+def canonical(value):
+    return json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":"), allow_nan=False)
+
+
+def digest(value):
+    return hashlib.sha256(canonical(value).encode()).hexdigest()
+
+
+def now():
+    return datetime.now(timezone.utc).isoformat()
+
+
+class CatalogError(ValueError):
+    def __init__(self, code, message):
+        self.code = code
+        super().__init__(message)
+
+
+class Vocabulary(Base):
+    __tablename__ = "semantic_vocabularies"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    identity_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    category_key: Mapped[str] = mapped_column(String(40), index=True)
+    field_path: Mapped[str] = mapped_column(String(160))
+    locale: Mapped[str] = mapped_column(String(8))
+    name: Mapped[str] = mapped_column(String(160))
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+    created_at: Mapped[str] = mapped_column(String(40), default=now)
+
+
+class VocabularyTerm(Base):
+    __tablename__ = "semantic_vocabulary_terms"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    vocabulary_id: Mapped[int] = mapped_column(ForeignKey("semantic_vocabularies.id", ondelete="RESTRICT"), index=True)
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+    canonical_term: Mapped[str] = mapped_column(String(200))
+    aliases_json: Mapped[str] = mapped_column(Text, default="[]")
+    status: Mapped[str] = mapped_column(String(20), default="active", index=True)
+    curation_status: Mapped[str] = mapped_column(String(20), default="confirmed")
+    source_json: Mapped[str] = mapped_column(Text, default="{}")
+    note: Mapped[str] = mapped_column(Text, default="")
+    updated_by: Mapped[str] = mapped_column(String(100))
+    updated_at: Mapped[str] = mapped_column(String(40), default=now)
+
+
+class VocabularyKey(Base):
+    """Canonical names and aliases share the same collision domain, even inactive."""
+    __tablename__ = "semantic_vocabulary_keys"
+    __table_args__ = (UniqueConstraint("vocabulary_id", "key_hash", name="uq_semantic_vocab_key"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    vocabulary_id: Mapped[int] = mapped_column(ForeignKey("semantic_vocabularies.id", ondelete="RESTRICT"))
+    term_id: Mapped[int] = mapped_column(ForeignKey("semantic_vocabulary_terms.id", ondelete="RESTRICT"), index=True)
+    key_hash: Mapped[str] = mapped_column(String(64))
+    normalized_value: Mapped[str] = mapped_column(String(4000))
+
+
+class LegacyTagMapping(Base):
+    __tablename__ = "semantic_legacy_mappings"
+    __table_args__ = (UniqueConstraint("vocabulary_id", "identity_hash", name="uq_semantic_legacy_identity"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    vocabulary_id: Mapped[int] = mapped_column(ForeignKey("semantic_vocabularies.id", ondelete="RESTRICT"), index=True)
+    identity_hash: Mapped[str] = mapped_column(String(64))
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+    source_system: Mapped[str] = mapped_column(String(120))
+    source_field: Mapped[str] = mapped_column(String(160))
+    source_value: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    target_term_id: Mapped[int | None] = mapped_column(ForeignKey("semantic_vocabulary_terms.id", ondelete="RESTRICT"), nullable=True)
+    status: Mapped[str] = mapped_column(String(20), default="active")
+    note: Mapped[str] = mapped_column(Text, default="")
+    updated_by: Mapped[str] = mapped_column(String(100))
+    updated_at: Mapped[str] = mapped_column(String(40), default=now)
+
+
+class VocabularyHistory(Base):
+    __tablename__ = "semantic_vocabulary_history"
+    __table_args__ = (UniqueConstraint("vocabulary_id", "object_kind", "object_id", "revision", name="uq_semantic_vocab_history"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    vocabulary_id: Mapped[int] = mapped_column(ForeignKey("semantic_vocabularies.id", ondelete="RESTRICT"), index=True)
+    object_kind: Mapped[str] = mapped_column(String(20))
+    object_id: Mapped[int] = mapped_column(Integer)
+    revision: Mapped[int] = mapped_column(Integer)
+    action: Mapped[str] = mapped_column(String(20))
+    snapshot_json: Mapped[str] = mapped_column(Text)
+    actor: Mapped[str] = mapped_column(String(100))
+    created_at: Mapped[str] = mapped_column(String(40), default=now)
+
+
+class VocabularyImport(Base):
+    __tablename__ = "semantic_vocabulary_imports"
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    vocabulary_id: Mapped[int] = mapped_column(ForeignKey("semantic_vocabularies.id", ondelete="RESTRICT"), index=True)
+    vocabulary_revision: Mapped[int] = mapped_column(Integer)
+    payload_json: Mapped[str] = mapped_column(Text)
+    payload_hash: Mapped[str] = mapped_column(String(64))
+    errors_json: Mapped[str] = mapped_column(Text, default="[]")
+    changes_json: Mapped[str] = mapped_column(Text, default="[]")
+    state: Mapped[str] = mapped_column(String(20))
+    actor: Mapped[str] = mapped_column(String(100))
+    created_at: Mapped[str] = mapped_column(String(40), default=now)
+    expires_at: Mapped[str] = mapped_column(String(40))
+    completed_at: Mapped[str | None] = mapped_column(String(40), nullable=True)
+
+
+class VocabularyObservation(Base):
+    """One receipt per successful run; retries cannot re-collect or re-count it."""
+    __tablename__ = "semantic_vocabulary_observations"
+    run_id: Mapped[int] = mapped_column(ForeignKey("production_runs.id", ondelete="RESTRICT"), primary_key=True)
+    result_hash: Mapped[str] = mapped_column(String(64))
+    term_ids_json: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[str] = mapped_column(String(40), default=now)
+
+
+def text(value, label, maximum=200):
+    if not isinstance(value, str) or not value.strip() or len(value.strip()) > maximum:
+        raise CatalogError("text_invalid", f"{label}需填写1至{maximum}个字符")
+    if any(unicodedata.category(c).startswith("C") for c in value):
+        raise CatalogError("text_invalid", f"{label}不能包含控制字符")
+    return value.strip()
+
+
+def match_key(value):
+    return unicodedata.normalize("NFKC", value.strip()).casefold()
+
+
+def key_hash(value):
+    return digest(match_key(value))
+
+
+def vocabulary(db, identity, *, lock=False):
+    if lock:
+        reserve_sqlite_immediate_transaction(db)
+    query = select(Vocabulary).where(Vocabulary.id == identity)
+    if lock:
+        query = query.with_for_update().execution_options(populate_existing=True)
+    row = db.scalar(query)
+    if row is None:
+        raise CatalogError("not_found", "词表不存在")
+    return row
+
+
+def create_vocabulary(db, *, category_key, field_path, locale, name):
+    from .models import EvaluationCategoryProfile
+    if not re.fullmatch(r"[a-z][a-z0-9_]{1,39}", category_key or ""):
+        raise CatalogError("category_invalid", "类目无效")
+    profile = db.scalar(select(EvaluationCategoryProfile).where(EvaluationCategoryProfile.category_key == category_key))
+    if profile is None or profile.status != "active":
+        raise CatalogError("category_invalid", "请选择已启用类目")
+    if locale not in {"zh", "en"} or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.]{0,159}", field_path or ""):
+        raise CatalogError("field_invalid", "字段路径或语言无效")
+    identity = digest([category_key, field_path, locale])
+    existing = db.scalar(select(Vocabulary).where(Vocabulary.identity_hash == identity))
+    if existing:
+        return existing
+    row = Vocabulary(identity_hash=identity, category_key=category_key, field_path=field_path, locale=locale,
+                     name=text(name, "词表名称", 160), revision=1)
+    try:
+        with db.begin_nested():
+            db.add(row); db.flush()
+        return row
+    except IntegrityError:
+        # Two distinct successful runs can discover the first word concurrently.
+        # A savepoint preserves their unrelated evaluation transaction.
+        existing = db.scalar(select(Vocabulary).where(Vocabulary.identity_hash == identity).with_for_update()
+            .execution_options(populate_existing=True))
+        if existing is None:
+            raise
+        return existing
+
+
+def term_payload(row):
+    return {"id": row.id, "vocabulary_id": row.vocabulary_id, "revision": row.revision,
+            "canonical_term": row.canonical_term, "aliases": json.loads(row.aliases_json),
+            "status": row.status, "curation_status": row.curation_status, "source": json.loads(row.source_json),
+            "note": row.note, "updated_by": row.updated_by, "updated_at": row.updated_at}
+
+
+def mapping_payload(row):
+    return {"id": row.id, "vocabulary_id": row.vocabulary_id, "revision": row.revision,
+            "source_system": row.source_system, "source_field": row.source_field, "source_value": row.source_value,
+            "target_term_id": row.target_term_id, "status": row.status, "note": row.note,
+            "updated_by": row.updated_by, "updated_at": row.updated_at}
+
+
+def checked_status(value):
+    if value not in {"active", "inactive"}:
+        raise CatalogError("status_invalid", "状态只能为启用或停用")
+    return value
+
+
+def append_history(db, catalog, row, kind, actor, action):
+    catalog.revision += 1
+    db.add(VocabularyHistory(vocabulary_id=catalog.id, object_kind=kind, object_id=row.id,
+        revision=row.revision, action=action, snapshot_json=canonical(term_payload(row) if kind == "term" else mapping_payload(row)), actor=actor))
+    db.flush()
+
+
+def save_term(db, vocabulary_id, payload, *, actor, action="edit", source=None):
+    catalog = vocabulary(db, vocabulary_id, lock=True)
+    identity = payload.get("id")
+    row = db.scalar(select(VocabularyTerm).where(VocabularyTerm.id == identity).with_for_update()
+        .execution_options(populate_existing=True)) if identity else None
+    if identity and (not row or row.vocabulary_id != catalog.id):
+        raise CatalogError("not_found", "词条不属于此词表")
+    if row and payload.get("expected_revision") != row.revision:
+        raise CatalogError("revision_conflict", "词条已有新修改，请刷新后重试")
+    name = text(payload.get("canonical_term"), "标准词")
+    aliases = payload.get("aliases", [])
+    if not isinstance(aliases, list) or len(aliases) > 100:
+        raise CatalogError("aliases_invalid", "别名最多100个")
+    aliases = [text(a, "别名") for a in aliases]
+    values = [name, *aliases]
+    keys = [key_hash(a) for a in values]
+    if len(set(keys)) != len(keys):
+        raise CatalogError("alias_duplicate", "标准词与别名重复")
+    conflicts = db.scalars(select(VocabularyKey).where(VocabularyKey.vocabulary_id == catalog.id, VocabularyKey.key_hash.in_(keys)).with_for_update()).all()
+    if any(k.term_id != identity for k in conflicts):
+        raise CatalogError("alias_conflict", "标准词或别名已归属于其他词条（含停用词条）")
+    note = payload.get("note", "")
+    if not isinstance(note, str) or len(note) > 4000:
+        raise CatalogError("note_invalid", "说明最多4000个字符")
+    status = checked_status(payload.get("status", "active"))
+    # Collection never changes an existing human decision. Source is server-owned.
+    if row is None:
+        row = VocabularyTerm(vocabulary_id=catalog.id, revision=1, source_json=canonical(source or {"kind": "human"}))
+        db.add(row)
+    else:
+        row.revision += 1
+    row.canonical_term = name; row.aliases_json = canonical(aliases); row.status = status
+    row.curation_status = "unreviewed" if source else "confirmed"
+    row.note = note; row.updated_by = actor; row.updated_at = now()
+    db.flush()
+    old_keys = db.scalars(select(VocabularyKey).where(VocabularyKey.term_id == row.id)).all()
+    keep = set(keys)
+    for key in old_keys:
+        if key.key_hash not in keep:
+            db.delete(key)
+    old_hashes = {k.key_hash for k in old_keys}
+    for raw, hashed in zip(values, keys):
+        if hashed not in old_hashes:
+            db.add(VocabularyKey(vocabulary_id=catalog.id, term_id=row.id, key_hash=hashed, normalized_value=match_key(raw)))
+    append_history(db, catalog, row, "term", actor, action)
+    return row
+
+
+def save_mapping(db, vocabulary_id, payload, *, actor, action="edit"):
+    catalog = vocabulary(db, vocabulary_id, lock=True)
+    system = text(payload.get("source_system"), "来源系统", 120)
+    field = text(payload.get("source_field"), "旧字段", 160)
+    value = payload.get("source_value")
+    if value is not None:
+        value = text(value, "旧字段值")
+    identity_hash = digest([system, field, value])
+    identity = payload.get("id")
+    row = db.scalar(select(LegacyTagMapping).where(LegacyTagMapping.id == identity).with_for_update()
+        .execution_options(populate_existing=True)) if identity else None
+    if identity and (not row or row.vocabulary_id != catalog.id):
+        raise CatalogError("not_found", "映射不属于此词表")
+    if row and payload.get("expected_revision") != row.revision:
+        raise CatalogError("revision_conflict", "映射已有新修改，请刷新后重试")
+    duplicate = db.scalar(select(LegacyTagMapping.id).where(LegacyTagMapping.vocabulary_id == catalog.id,
+        LegacyTagMapping.identity_hash == identity_hash).with_for_update())
+    if duplicate and duplicate != identity:
+        raise CatalogError("mapping_duplicate", "相同来源和旧字段值已有映射（含停用映射）")
+    target_id = payload.get("target_term_id")
+    target = db.scalar(select(VocabularyTerm).where(VocabularyTerm.id == target_id).with_for_update()
+        .execution_options(populate_existing=True)) if target_id is not None else None
+    if target_id is not None and (not target or target.vocabulary_id != catalog.id):
+        raise CatalogError("target_invalid", "目标词必须属于此词表")
+    if value is not None and target is None:
+        raise CatalogError("target_required", "旧值映射必须选择标准词；仅字段映射可不指定词")
+    note = payload.get("note", "")
+    if not isinstance(note, str) or len(note) > 4000:
+        raise CatalogError("note_invalid", "说明最多4000个字符")
+    if row is None:
+        row = LegacyTagMapping(vocabulary_id=catalog.id, revision=1)
+        db.add(row)
+    else:
+        row.revision += 1
+    row.identity_hash = identity_hash; row.source_system = system; row.source_field = field
+    row.source_value = value; row.target_term_id = target_id
+    row.status = checked_status(payload.get("status", "active")); row.note = note
+    row.updated_by = actor; row.updated_at = now()
+    db.flush(); append_history(db, catalog, row, "mapping", actor, action)
+    return row
+
+
+def frozen_catalog(db, identity):
+    catalog = vocabulary(db, identity, lock=True)
+    # Writers acquire the same catalog lock, so terms and mappings are one version.
+    data = {"format_version": "semantic-vocabulary-v1", "id": catalog.id, "revision": catalog.revision,
+            "category_key": catalog.category_key, "field_path": catalog.field_path, "locale": catalog.locale,
+            "normalization": "nfkc-trim-casefold-v1",
+            "terms": [term_payload(r) for r in db.scalars(select(VocabularyTerm).where(VocabularyTerm.vocabulary_id == identity).order_by(VocabularyTerm.id).with_for_update().execution_options(populate_existing=True))],
+            "mappings": [mapping_payload(r) for r in db.scalars(select(LegacyTagMapping).where(LegacyTagMapping.vocabulary_id == identity).order_by(LegacyTagMapping.id).with_for_update().execution_options(populate_existing=True))]}
+    return data | {"content_hash": digest(data)}
+
+
+def resolve(snapshot, value, *, source_system=None, source_field=None):
+    """Pure frozen lookup; ambiguity/inactive targets never fall back to guessing."""
+    base = dict(snapshot); supplied = base.pop("content_hash", None)
+    if base.get("format_version") != "semantic-vocabulary-v1" or supplied != digest(base):
+        raise CatalogError("snapshot_invalid", "词表快照摘要不匹配")
+    terms = {r["id"]: r for r in base["terms"]}
+    if source_system is not None or source_field is not None:
+        mappings = [m for m in base["mappings"] if m["source_system"] == source_system and m["source_field"] == source_field]
+        exact = [m for m in mappings if m["source_value"] == value]
+        chosen = exact or [m for m in mappings if m["source_value"] is None]
+        if not chosen or chosen[0]["status"] != "active":
+            return {"status": "unmapped", "raw_value": value}
+        if chosen[0]["target_term_id"] is not None:
+            target = terms[chosen[0]["target_term_id"]]
+            return {"status": "matched" if target["status"] == "active" else "inactive", "term": target, "raw_value": value}
+    for term in terms.values():
+        if any(match_key(v) == match_key(value) for v in [term["canonical_term"], *term["aliases"]]):
+            return {"status": "matched" if term["status"] == "active" else "inactive", "term": term, "raw_value": value}
+    return {"status": "unmapped", "raw_value": value}
+
+
+def history_preview(db, history_id):
+    history = db.get(VocabularyHistory, history_id)
+    if not history:
+        raise CatalogError("not_found", "历史记录不存在")
+    vocabulary(db, history.vocabulary_id, lock=True)
+    model = VocabularyTerm if history.object_kind == "term" else LegacyTagMapping
+    row = db.scalar(select(model).where(model.id == history.object_id).with_for_update().execution_options(populate_existing=True))
+    current = term_payload(row) if history.object_kind == "term" else mapping_payload(row)
+    previous = json.loads(history.snapshot_json)
+    keys = set(current) - {"id", "vocabulary_id", "revision", "updated_by", "updated_at", "source", "curation_status"}
+    changes = {k: {"before": current[k], "after": previous[k]} for k in sorted(keys) if current[k] != previous[k]}
+    return {"history_id": history.id, "vocabulary_id": history.vocabulary_id, "object_kind": history.object_kind,
+            "object_id": history.object_id, "expected_revision": row.revision, "changes": changes,
+            "preview_hash": digest([history.id, current, previous])}
+
+
+def restore_history(db, history_id, *, preview_hash, actor):
+    preview = history_preview(db, history_id)
+    if preview["preview_hash"] != preview_hash:
+        raise CatalogError("revision_conflict", "内容已有新修改，请重新查看恢复差异")
+    history = db.get(VocabularyHistory, history_id)
+    previous = json.loads(history.snapshot_json)
+    operation = save_term if history.object_kind == "term" else save_mapping
+    return operation(db, history.vocabulary_id, previous | {"expected_revision": preview["expected_revision"]}, actor=actor, action="restore")
+
+
+def _import_rows(db, catalog, rows, *, actor, changes=None):
+    errors = []
+    for index, row in enumerate(rows, 1):
+        try:
+            with db.begin_nested():
+                if not isinstance(row, dict):
+                    raise CatalogError("row_invalid", "每行必须是对象")
+                kind = row.get("kind", "term")
+                if kind not in {"term", "mapping"}:
+                    raise CatalogError("kind_invalid", "类型只能为词条或映射")
+                operation = save_term if kind == "term" else save_mapping
+                model = VocabularyTerm if kind == "term" else LegacyTagMapping
+                serializer = term_payload if kind == "term" else mapping_payload
+                previous = db.scalar(select(model).where(model.id == row.get("id")).with_for_update()
+                    .execution_options(populate_existing=True)) if row.get("id") else None
+                before = serializer(previous) if previous and previous.vocabulary_id == catalog.id else None
+                saved = operation(db, catalog.id, row, actor=actor, action="import")
+                if changes is not None:
+                    after = serializer(saved)
+                    if not row.get("id"):
+                        after["id"] = None  # A preview does not allocate a public stable ID.
+                    changes.append({"row": index, "kind": kind, "before": before, "after": after})
+        except CatalogError as exc:
+            errors.append({"row": index, "code": exc.code, "message": str(exc)})
+    return errors
+
+
+def preview_import(db, identity, rows, *, actor):
+    catalog = vocabulary(db, identity, lock=True)
+    if not isinstance(rows, list) or not 1 <= len(rows) <= 1000 or len(canonical(rows).encode()) > 2 * 1024 * 1024:
+        raise CatalogError("import_size_invalid", "每批1至1000行且不超过2MiB")
+    revision = catalog.revision
+    changes = []
+    checkpoint = db.begin_nested()
+    try:
+        errors = _import_rows(db, catalog, rows, actor=actor, changes=changes)
+    finally:
+        checkpoint.rollback()
+    batch = VocabularyImport(id=uuid.uuid4().hex, vocabulary_id=identity, vocabulary_revision=revision,
+        payload_json=canonical(rows), payload_hash=digest(rows), errors_json=canonical(errors),
+        changes_json=canonical(changes),
+        state="invalid" if errors else "preview", actor=actor,
+        expires_at=(datetime.now(timezone.utc) + timedelta(hours=24)).isoformat())
+    db.add(batch); db.flush()
+    return batch
+
+
+def confirm_import(db, batch_id, *, payload_hash, actor):
+    batch = db.get(VocabularyImport, batch_id)
+    if not batch:
+        raise CatalogError("not_found", "导入批次不存在")
+    catalog = vocabulary(db, batch.vocabulary_id, lock=True)
+    db.refresh(batch)
+    if batch.payload_hash != payload_hash or batch.actor != actor:
+        raise CatalogError("import_confirmation_invalid", "请由预览人确认原导入批次")
+    if batch.state == "completed":
+        return batch
+    if batch.state != "preview" or datetime.fromisoformat(batch.expires_at) < datetime.now(timezone.utc):
+        raise CatalogError("import_not_ready", "批次有错误或预览已过期，请重新检查")
+    if catalog.revision != batch.vocabulary_revision:
+        raise CatalogError("revision_conflict", "词表已有修改，请重新导入预览")
+    with db.begin_nested():
+        errors = _import_rows(db, catalog, json.loads(batch.payload_json), actor=actor)
+        if errors:
+            raise CatalogError("import_conflict", "词表发生冲突，本批次未生效")
+        batch.state = "completed"; batch.completed_at = now(); db.flush()
+    return batch
+
+
+def collect_run_terms(db, run, manifest, output):
+    """Collect already validated labels, never change existing terms or a rule.
+
+    Called under the native run's existing lock. Catalog locks are acquired in
+    field order; management never locks a production run after a catalog.
+    """
+    from .knowledge_graph_contracts import KNOWLEDGE_GRAPH_SEMANTIC_FIELDS
+    if run.category_key != "knowledge_graph" or run.model_execution_mode != "real":
+        return None
+    existing = db.scalar(select(VocabularyObservation).where(VocabularyObservation.run_id == run.id).with_for_update())
+    if existing:
+        return existing
+    site = None
+    for node in manifest.get("nodes", []):
+        if node.get("kind") == "prompt":
+            snapshot = node.get("config", {}).get("output_contract_snapshot", {})
+            if snapshot.get("site_scope") in {"domestic", "overseas"}:
+                site = snapshot["site_scope"]; break
+    if site is None:
+        return None  # Never infer locale from a filename, free text or output.
+    fields = set(KNOWLEDGE_GRAPH_SEMANTIC_FIELDS) | {"view_angle", "ceiling", "spatial_structure", "physical_structural_features"}
+    identifiers = []
+    for field in sorted(fields):
+        raw = output.get(field)
+        if not isinstance(raw, str) or not raw:
+            continue
+        values = []
+        for part in re.split(r"[,，、;；]+", raw):
+            value = re.sub(r"_0\.[0-9]+$", "", part.strip()) if field in {"object", "material"} else part.strip()
+            if value and len(value) <= 200 and not any(unicodedata.category(c).startswith("C") for c in value):
+                values.append(value)
+        if not values:
+            continue
+        catalog = create_vocabulary(db, category_key=run.category_key, field_path=field, locale="zh" if site == "domestic" else "en", name=field)
+        catalog = vocabulary(db, catalog.id, lock=True)
+        for value in dict.fromkeys(values):
+            key = db.scalar(select(VocabularyKey).where(VocabularyKey.vocabulary_id == catalog.id,
+                VocabularyKey.key_hash == key_hash(value)).with_for_update())
+            if key:
+                identifiers.append(key.term_id)
+                continue
+            row = save_term(db, catalog.id, {"canonical_term": value}, actor="system:collection", action="collect",
+                source={"kind": "workflow_output", "run_id": run.id, "workflow_version_id": run.workflow_version_id})
+            identifiers.append(row.id)
+    receipt = VocabularyObservation(run_id=run.id, result_hash=digest(output), term_ids_json=canonical(sorted(set(identifiers))))
+    db.add(receipt); db.flush()
+    return receipt
+
+===== backend/app/semantic_catalog_api.py =====
+"""Employee vocabulary maintenance. Not a publication or credential endpoint."""
+from __future__ import annotations
+
+import json
+from typing import Literal
+
+from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, ConfigDict, Field
+from sqlalchemy import func, or_, select
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
+
+from .authz import has_permission
+from .database import get_db
+from . import semantic_catalog as s
+
+
+class Strict(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class CreateVocabulary(Strict):
+    category_key: str = Field(max_length=40)
+    field_path: str = Field(max_length=160)
+    locale: Literal["zh", "en"]
+    name: str = Field(max_length=160)
+
+
+class SaveTerm(Strict):
+    id: int | None = Field(default=None, gt=0)
+    expected_revision: int | None = Field(default=None, ge=1)
+    canonical_term: str = Field(min_length=1, max_length=200)
+    aliases: list[str] = Field(default_factory=list, max_length=100)
+    status: Literal["active", "inactive"] = "active"
+    note: str = Field(default="", max_length=4000)
+
+
+class SaveMapping(Strict):
+    id: int | None = Field(default=None, gt=0)
+    expected_revision: int | None = Field(default=None, ge=1)
+    source_system: str = Field(min_length=1, max_length=120)
+    source_field: str = Field(min_length=1, max_length=160)
+    source_value: str | None = Field(default=None, max_length=200)
+    target_term_id: int | None = Field(default=None, gt=0)
+    status: Literal["active", "inactive"] = "active"
+    note: str = Field(default="", max_length=4000)
+
+
+class ImportRow(Strict):
+    kind: Literal["term", "mapping"] = "term"
+    id: int | None = Field(default=None, gt=0)
+    expected_revision: int | None = Field(default=None, ge=1)
+    canonical_term: str | None = Field(default=None, max_length=200)
+    aliases: list[str] = Field(default_factory=list, max_length=100)
+    source_system: str | None = Field(default=None, max_length=120)
+    source_field: str | None = Field(default=None, max_length=160)
+    source_value: str | None = Field(default=None, max_length=200)
+    target_term_id: int | None = Field(default=None, gt=0)
+    status: Literal["active", "inactive"] = "active"
+    note: str = Field(default="", max_length=4000)
+
+
+class PreviewImport(Strict):
+    rows: list[ImportRow] = Field(min_length=1, max_length=1000)
+
+
+class Confirmation(Strict):
+    payload_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    confirmed: Literal[True]
+
+
+class Restore(Strict):
+    preview_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    confirmed: Literal[True]
+
+
+def build_semantic_catalog_router(current_user):
+    router = APIRouter(tags=["semantic-vocabularies"])
+
+    def writer(user):
+        if not has_permission(user, "drafts:write"):
+            raise HTTPException(403, "需要系统管理员或产研权限")
+        return "user:" + str(user.id)
+
+    def execute(db, operation):
+        try:
+            value = operation(); db.commit(); return value
+        except s.CatalogError as exc:
+            db.rollback()
+            raise HTTPException(404 if exc.code == "not_found" else 409, {"code": exc.code, "message": str(exc)}) from None
+        except IntegrityError:
+            db.rollback()
+            raise HTTPException(409, "词表内容已变化或有重复，请刷新后重试") from None
+
+    def vocab_summary(row):
+        return {"id": row.id, "category_key": row.category_key, "field_path": row.field_path,
+                "locale": row.locale, "name": row.name, "revision": row.revision}
+
+    def batch_summary(row):
+        return {"id": row.id, "vocabulary_id": row.vocabulary_id, "state": row.state,
+                "payload_hash": row.payload_hash, "vocabulary_revision": row.vocabulary_revision,
+                "row_count": len(json.loads(row.payload_json)), "errors": json.loads(row.errors_json),
+                "changes": json.loads(row.changes_json),
+                "expires_at": row.expires_at, "completed_at": row.completed_at}
+
+    @router.get("/api/semantic-vocabularies")
+    def catalogs(category_key: str = "", user=Depends(current_user), db: Session = Depends(get_db)):
+        query = select(s.Vocabulary)
+        if category_key:
+            query = query.where(s.Vocabulary.category_key == category_key)
+        return {"can_edit": has_permission(user, "drafts:write"),
+                "items": [vocab_summary(row) for row in db.scalars(query.order_by(s.Vocabulary.id))]}
+
+    @router.post("/api/semantic-vocabularies")
+    def create(body: CreateVocabulary, user=Depends(current_user), db: Session = Depends(get_db)):
+        writer(user)
+        return execute(db, lambda: vocab_summary(s.create_vocabulary(db, **body.model_dump())))
+
+    @router.get("/api/semantic-vocabularies/{vocabulary_id}/{kind}")
+    def listing(vocabulary_id: int, kind: Literal["terms", "mappings", "history"], q: str = Query(default="", max_length=200),
+                status: Literal["active", "inactive", ""] = "", offset: int = Query(default=0, ge=0),
+                limit: int = Query(default=24, ge=1, le=100), user=Depends(current_user), db: Session = Depends(get_db)):
+        model = {"terms": s.VocabularyTerm, "mappings": s.LegacyTagMapping, "history": s.VocabularyHistory}[kind]
+        query = select(model).where(model.vocabulary_id == vocabulary_id)
+        if kind != "history" and status:
+            query = query.where(model.status == status)
+        if q:
+            # SQLAlchemy contains(autoescape=True) treats literal %, _ as text.
+            if kind == "terms":
+                query = query.where(model.id.in_(select(s.VocabularyKey.term_id).where(
+                    s.VocabularyKey.vocabulary_id == vocabulary_id,
+                    s.VocabularyKey.normalized_value.contains(s.match_key(q), autoescape=True))))
+            elif kind == "mappings":
+                query = query.where(or_(model.source_field.contains(q, autoescape=True), model.source_value.contains(q, autoescape=True)))
+        total = db.scalar(select(func.count()).select_from(query.subquery()))
+        rows = db.scalars(query.order_by(model.id.desc()).offset(offset).limit(limit)).all()
+        if kind == "history":
+            items = [{"id": r.id, "object_kind": r.object_kind, "object_id": r.object_id, "revision": r.revision,
+                      "action": r.action, "actor": r.actor, "created_at": r.created_at} for r in rows]
+        else:
+            items = [(s.term_payload if kind == "terms" else s.mapping_payload)(r) for r in rows]
+        return {"items": items, "total": total, "offset": offset, "limit": limit}
+
+    @router.post("/api/semantic-vocabularies/{vocabulary_id}/terms")
+    def save_term(vocabulary_id: int, body: SaveTerm, user=Depends(current_user), db: Session = Depends(get_db)):
+        actor = writer(user)
+        return execute(db, lambda: s.term_payload(s.save_term(db, vocabulary_id, body.model_dump(), actor=actor)))
+
+    @router.post("/api/semantic-vocabularies/{vocabulary_id}/mappings")
+    def save_mapping(vocabulary_id: int, body: SaveMapping, user=Depends(current_user), db: Session = Depends(get_db)):
+        actor = writer(user)
+        return execute(db, lambda: s.mapping_payload(s.save_mapping(db, vocabulary_id, body.model_dump(), actor=actor)))
+
+    @router.post("/api/semantic-vocabularies/{vocabulary_id}/imports/preview")
+    def preview(vocabulary_id: int, body: PreviewImport, user=Depends(current_user), db: Session = Depends(get_db)):
+        actor = writer(user)
+        return execute(db, lambda: batch_summary(s.preview_import(db, vocabulary_id, [r.model_dump() for r in body.rows], actor=actor)))
+
+    @router.post("/api/semantic-vocabulary-imports/{batch_id}/confirm")
+    def confirm(batch_id: str, body: Confirmation, user=Depends(current_user), db: Session = Depends(get_db)):
+        actor = writer(user)
+        return execute(db, lambda: batch_summary(s.confirm_import(db, batch_id, payload_hash=body.payload_hash, actor=actor)))
+
+    @router.get("/api/semantic-vocabulary-history/{history_id}/restore-preview")
+    def restore_preview(history_id: int, user=Depends(current_user), db: Session = Depends(get_db)):
+        return execute(db, lambda: s.history_preview(db, history_id))
+
+    @router.post("/api/semantic-vocabulary-history/{history_id}/restore")
+    def restore(history_id: int, body: Restore, user=Depends(current_user), db: Session = Depends(get_db)):
+        actor = writer(user)
+        def operation():
+            row = s.restore_history(db, history_id, preview_hash=body.preview_hash, actor=actor)
+            return (s.term_payload if isinstance(row, s.VocabularyTerm) else s.mapping_payload)(row)
+        return execute(db, operation)
+
+    @router.post("/api/semantic-vocabularies/{vocabulary_id}/snapshot")
+    def snapshot(vocabulary_id: int, user=Depends(current_user), db: Session = Depends(get_db)):
+        return execute(db, lambda: s.frozen_catalog(db, vocabulary_id))
+
+    return router
+
+===== backend/app/migrations/semantic_catalog_139.py =====
+"""Add vocabulary management without modifying any frozen result or workflow."""
+
+
+def migrate(connection):
+    from ..semantic_catalog import (Vocabulary, VocabularyTerm, VocabularyKey,
+                                    LegacyTagMapping, VocabularyHistory, VocabularyImport, VocabularyObservation)
+    models = (Vocabulary, VocabularyTerm, VocabularyKey, LegacyTagMapping, VocabularyHistory, VocabularyImport, VocabularyObservation)
+    if connection.dialect.name == "mysql":
+        from .mysql_baseline import mysql_metadata
+        metadata = mysql_metadata()
+        for model in models:
+            metadata.tables[model.__tablename__].create(connection, checkfirst=True)
+    else:
+        for model in models:
+            model.__table__.create(connection, checkfirst=True)

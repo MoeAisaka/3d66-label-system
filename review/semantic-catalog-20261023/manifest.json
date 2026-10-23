@@ -1,0 +1,37 @@
+{
+  "candidate": "c1e9da7e03d3b3ee4ba31b5efa9a50c63904d51d",
+  "task_base": "536beedf2b744fa38f22134a091222e284beeaa5",
+  "context_base": "bf5d192ffb4032218d20f725f908bb5b1f1cb416",
+  "schema": 139,
+  "deployed": false,
+  "base_context": "https://github.com/MoeAisaka/3d66-label-system/blob/8138d72caf83cd85dd772fbf43ce906f3780c59b/review/20261022/index.json",
+  "note": "Full indexed source base plus cumulative patch reconstruct candidate; no private Git history. Inline parts contain complete new code and permission/integration context.",
+  "parts": [
+    {
+      "name": "part1.txt",
+      "bytes": 35486,
+      "sha256": "97e288987ea27a78f6ae20436fa4b4ff2dfadfc6b6652fd73d5f391cb1b0c0e8"
+    },
+    {
+      "name": "part2.txt",
+      "bytes": 34944,
+      "sha256": "68991a19c136611f7cc8361d7d2c41d31f47dca60bbcc0b6650c8d054a56860c"
+    },
+    {
+      "name": "part3.txt",
+      "bytes": 40271,
+      "sha256": "77d5a65f4adf244f08d0957df4eef55b290a6cf72549f752b4defeb81bf28c83"
+    }
+  ],
+  "patch_sha256": "ab13e0bceb116439d0e9350e018254deed302e722e635796d85a958d697fc393",
+  "verification": {
+    "local_specific_and_migration": 10,
+    "unchanged_finalizer": 28,
+    "csv": true,
+    "frontend": true,
+    "chrome_synthetic": true,
+    "production": false,
+    "real_mysql": false
+  },
+  "review_request": "One consolidated P0/P1 review: reachable data loss, stale RR reads, concurrent identities, import/restore atomicity, actor revocation, frozen versions, collector impact on runtime; cite code and counterexample, no speculative scope. No incremental configuration or downstream business writes authorized."
+}

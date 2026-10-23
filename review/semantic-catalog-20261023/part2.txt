@@ -1,0 +1,369 @@
+===== backend/tests/test_semantic_catalog.py =====
+import json
+
+import pytest
+from sqlalchemy import create_engine, func, select
+from sqlalchemy.orm import sessionmaker
+
+from app.database import Base
+from app.models import EvaluationCategoryProfile
+from app import semantic_catalog as s
+from tests.test_employee_access import context
+
+
+@pytest.fixture
+def database(tmp_path):
+    engine = create_engine("sqlite:///" + str(tmp_path / "catalog.sqlite"))
+    Base.metadata.create_all(engine)
+    sessions = sessionmaker(engine, expire_on_commit=False)
+    with sessions() as db:
+        db.add(EvaluationCategoryProfile(category_key="knowledge_graph", display_name="知识图谱", status="active"))
+        db.commit()
+        yield db
+    engine.dispose()
+
+
+def catalog(db, field="style", locale="zh"):
+    return s.create_vocabulary(db, category_key="knowledge_graph", field_path=field, locale=locale, name="测试词表")
+
+
+def term(db, identity, name="北欧简约", aliases=None, **extra):
+    return s.save_term(db, identity, {"canonical_term": name, "aliases": aliases or [], **extra}, actor="user:1")
+
+
+def test_frozen_lookup_aliases_inactive_identity_and_language(database):
+    db = database; vocab = catalog(db)
+    row = term(db, vocab.id, aliases=["北欧风", "Ｃ＋＋", "3D-Max"])
+    first = s.frozen_catalog(db, vocab.id)
+    assert s.resolve(first, "c++")["term"]["id"] == row.id
+    assert s.resolve(first, "3d max")["status"] == "unmapped"
+    assert s.resolve(first, "3d-max")["status"] == "matched"
+    with pytest.raises(s.CatalogError, match="归属于其他"):
+        term(db, vocab.id, "另一个词", ["c++"])
+    term(db, vocab.id, aliases=["北欧风", "C++", "3D-Max"], id=row.id, expected_revision=1, status="inactive")
+    assert s.resolve(s.frozen_catalog(db, vocab.id), "北欧风")["status"] == "inactive"
+    assert s.resolve(first, "北欧风")["status"] == "matched"
+    with pytest.raises(s.CatalogError):
+        term(db, vocab.id, "北欧风")
+    other = catalog(db, locale="en")
+    assert term(db, other.id, "C++").id != row.id
+    damaged = first | {"revision": 999}
+    with pytest.raises(s.CatalogError, match="摘要"):
+        s.resolve(damaged, "北欧风")
+
+
+def test_restore_is_append_only_and_stale_preview_cannot_override(database):
+    db = database; vocab = catalog(db); row = term(db, vocab.id)
+    original = db.scalar(select(s.VocabularyHistory.id))
+    term(db, vocab.id, "现代", id=row.id, expected_revision=1)
+    preview = s.history_preview(db, original)
+    assert preview["changes"]["canonical_term"] == {"before": "现代", "after": "北欧简约"}
+    term(db, vocab.id, "中式", id=row.id, expected_revision=2)
+    with pytest.raises(s.CatalogError, match="重新查看"):
+        s.restore_history(db, original, preview_hash=preview["preview_hash"], actor="user:1")
+    restored = s.restore_history(db, original, preview_hash=s.history_preview(db, original)["preview_hash"], actor="user:1")
+    assert restored.id == row.id and restored.revision == 4 and restored.canonical_term == "北欧简约"
+    assert db.scalar(select(func.count(s.VocabularyHistory.id))) == 4
+    assert json.loads(db.get(s.VocabularyHistory, original).snapshot_json)["revision"] == 1
+
+
+def test_legacy_field_and_value_mapping_preserves_inactive_override(database):
+    db = database; vocab = catalog(db); row = term(db, vocab.id, aliases=["北欧风"])
+    s.save_mapping(db, vocab.id, {"source_system": "old-db", "source_field": "old_style"}, actor="user:1")
+    mapping = s.save_mapping(db, vocab.id, {"source_system": "old-db", "source_field": "old_style", "source_value": "北欧风",
+        "target_term_id": row.id, "status": "inactive"}, actor="user:1")
+    assert s.resolve(s.frozen_catalog(db, vocab.id), "北欧风", source_system="old-db", source_field="old_style")["status"] == "unmapped"
+    s.save_mapping(db, vocab.id, s.mapping_payload(mapping) | {"expected_revision": 1, "status": "active"}, actor="user:1")
+    assert s.resolve(s.frozen_catalog(db, vocab.id), "北欧风", source_system="old-db", source_field="old_style")["term"]["id"] == row.id
+    other = catalog(db, "object"); wrong = term(db, other.id, "椅子")
+    with pytest.raises(s.CatalogError, match="属于此词表"):
+        s.save_mapping(db, vocab.id, {"source_system": "old-db", "source_field": "old_object", "target_term_id": wrong.id}, actor="user:1")
+
+
+def test_import_checks_all_rows_no_partial_write_and_confirmation_is_idempotent(database):
+    db = database; vocab = catalog(db); db.commit()
+    bad = s.preview_import(db, vocab.id, [{"canonical_term": "北欧"}, {"canonical_term": "北欧"}, {"canonical_term": ""}], actor="user:1")
+    assert bad.state == "invalid" and len(json.loads(bad.errors_json)) == 2
+    assert db.scalar(select(func.count(s.VocabularyTerm.id))) == 0
+    assert db.scalar(select(func.count(s.VocabularyHistory.id))) == 0
+    with pytest.raises(s.CatalogError):
+        s.confirm_import(db, bad.id, payload_hash=bad.payload_hash, actor="user:1")
+    good = s.preview_import(db, vocab.id, [{"canonical_term": "北欧"}, {"canonical_term": "现代"}], actor="user:1")
+    assert good.state == "preview" and s.vocabulary(db, vocab.id).revision == 1
+    changes = json.loads(good.changes_json)
+    assert changes[0]["before"] is None and changes[0]["after"]["id"] is None
+    assert changes[0]["after"]["canonical_term"] == "北欧"
+    s.confirm_import(db, good.id, payload_hash=good.payload_hash, actor="user:1")
+    s.confirm_import(db, good.id, payload_hash=good.payload_hash, actor="user:1")
+    assert db.scalar(select(func.count(s.VocabularyTerm.id))) == 2
+    assert db.scalar(select(func.count(s.VocabularyHistory.id))) == 2
+    later = s.preview_import(db, vocab.id, [{"canonical_term": "中式"}], actor="user:1")
+    term(db, vocab.id, "日式")
+    with pytest.raises(s.CatalogError, match="重新导入"):
+        s.confirm_import(db, later.id, payload_hash=later.payload_hash, actor="user:1")
+
+
+def test_real_cookie_permissions_literal_alias_search_export_and_restore(context):
+    sessions, login, _ = context
+    with sessions() as db:
+        db.add(EvaluationCategoryProfile(category_key="model_3d_su", display_name="3D/SU", status="active"))
+        db.commit()
+    viewer, _ = login("viewer", [])
+    operator, _ = login("product_rd", [])
+    body = {"category_key": "model_3d_su", "field_path": "style", "locale": "zh", "name": "风格词表"}
+    assert viewer.post("/api/semantic-vocabularies", json=body).status_code == 403
+    response = operator.post("/api/semantic-vocabularies", json=body)
+    assert response.status_code == 200, response.text
+    identity = response.json()["id"]; prefix = f"/api/semantic-vocabularies/{identity}"
+    response = operator.post(prefix + "/terms", json={"canonical_term": "北欧简约", "aliases": ["北欧风", "50%_Loft"]})
+    assert response.status_code == 200, response.text
+    item = response.json()
+    assert viewer.get(prefix + "/terms", params={"q": "北欧风"}).json()["total"] == 1
+    assert viewer.get(prefix + "/terms", params={"q": "%_"}).json()["total"] == 1
+    assert viewer.get(prefix + "/terms", params={"q": "no%_"}).json()["total"] == 0
+    assert operator.post(prefix + "/terms", json={"canonical_term": "a", "active": True}).status_code == 422
+    assert operator.post(prefix + "/terms", json={"canonical_term": "a"}, headers={"Origin": "https://bad.invalid"}).status_code == 403
+    response = operator.post(prefix + "/terms", json={"canonical_term": "现代", "id": item["id"], "expected_revision": 1})
+    assert response.status_code == 200, response.text
+    assert operator.post(prefix + "/terms", json={"canonical_term": "日式", "id": item["id"], "expected_revision": 1}).status_code == 409
+    history = viewer.get(prefix + "/history").json()["items"][-1]
+    preview = viewer.get(f"/api/semantic-vocabulary-history/{history['id']}/restore-preview").json()
+    assert operator.post(f"/api/semantic-vocabulary-history/{history['id']}/restore", json={"confirmed": True, "preview_hash": preview["preview_hash"]}).status_code == 200
+    assert operator.post("/api/semantic-vocabulary-history/999999/restore", json={"confirmed": True, "preview_hash": "a" * 64}).status_code == 404
+    assert viewer.post(prefix + "/snapshot").json()["terms"][0]["canonical_term"] == "北欧简约"
+    assert operator.delete(prefix + "/terms/1").status_code in {404, 405}
+
+
+def test_collection_receipt_preserves_human_aliases_disabled_words_and_raw_result(database):
+    from types import SimpleNamespace
+    db = database; vocab = catalog(db); row = term(db, vocab.id, aliases=["北欧风"], status="inactive")
+    # A real persisted production parent, without calling a model or provider.
+    from tests.test_workflow_result_finalizer import _seed_succeeded_native_run
+    _, _, run, _ = _seed_succeeded_native_run(db)
+    run.category_key = "knowledge_graph"; run.model_execution_mode = "real"; db.flush()
+    manifest = {"nodes": [{"kind": "prompt", "config": {"output_contract_snapshot": {"site_scope": "domestic"}}}]}
+    output = {"style": "北欧风", "object": "椅子_0.7,桌子_0.5", "scope_evidence": "不能当成词", "review_required": True}
+    original = json.loads(json.dumps(output))
+    receipt = s.collect_run_terms(db, run, manifest, output)
+    s.collect_run_terms(db, run, manifest, output)
+    assert output == original
+    assert db.get(s.VocabularyTerm, row.id).status == "inactive"
+    assert db.get(s.VocabularyTerm, row.id).revision == 1
+    assert db.scalar(select(func.count(s.VocabularyObservation.run_id))) == 1
+    assert db.scalar(select(func.count(s.VocabularyTerm.id))) == 3
+    assert set(db.scalars(select(s.Vocabulary.field_path))) == {"style", "object"}
+    collected = db.scalars(select(s.VocabularyTerm).where(s.VocabularyTerm.curation_status == "unreviewed")).all()
+    assert {r.canonical_term for r in collected} == {"椅子", "桌子"}
+    assert json.loads(receipt.term_ids_json) == sorted([row.id, *[r.id for r in collected]])
+    assert s.collect_run_terms(db, SimpleNamespace(category_key="knowledge_graph", model_execution_mode="simulated"), manifest, output) is None
+
+
+def test_import_cookie_all_errors_preview_changes_nothing_then_whole_confirm(context):
+    sessions, login, _ = context
+    with sessions() as db:
+        db.add(EvaluationCategoryProfile(category_key="knowledge_graph", display_name="知识图谱", status="active")); db.commit()
+    operator, _ = login("product_rd", [])
+    identity = operator.post("/api/semantic-vocabularies", json={"category_key": "knowledge_graph", "field_path": "style", "locale": "zh", "name": "风格"}).json()["id"]
+    prefix = f"/api/semantic-vocabularies/{identity}"
+    invalid = operator.post(prefix + "/imports/preview", json={"rows": [{"canonical_term": "北欧"}, {"canonical_term": "北欧"}]}).json()
+    assert invalid["state"] == "invalid" and invalid["errors"][0]["row"] == 2
+    assert operator.get(prefix + "/terms").json()["total"] == 0
+    valid = operator.post(prefix + "/imports/preview", json={"rows": [{"canonical_term": f"词条{i}"} for i in range(25)]}).json()
+    assert valid["state"] == "preview"
+    assert operator.post(f"/api/semantic-vocabulary-imports/{valid['id']}/confirm", json={"confirmed": False, "payload_hash": valid["payload_hash"]}).status_code == 422
+    response = operator.post(f"/api/semantic-vocabulary-imports/{valid['id']}/confirm", json={"confirmed": True, "payload_hash": valid["payload_hash"]})
+    assert response.status_code == 200 and response.json()["state"] == "completed", response.text
+    assert len(operator.get(prefix + "/terms", params={"offset": 24}).json()["items"]) == 1
+    assert len(operator.post(prefix + "/snapshot").json()["terms"]) == 25
+    current = operator.get(prefix + "/terms").json()["items"][0]
+    edited = operator.post(prefix + "/imports/preview", json={"rows": [{"id": current["id"],
+        "expected_revision": current["revision"], "canonical_term": "整批改名"}]}).json()
+    assert edited["changes"][0]["before"]["canonical_term"] == current["canonical_term"]
+    assert edited["changes"][0]["after"]["canonical_term"] == "整批改名"
+
+===== frontend/src/pages/semantic-catalog-page.tsx =====
+import { useState } from "react"
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
+import { toast } from "sonner"
+import { PageHeader } from "@/components/app-shell"
+import { SecondaryDrawer } from "@/components/workspace-page"
+import { Button } from "@/components/ui/button"
+import { Card } from "@/components/ui/card"
+import { Pager } from "@/components/ui/pager"
+import { api } from "@/lib/api"
+import { parseSemanticCatalogCsv } from "@/lib/semantic-catalog-csv"
+import { formatPlatformMinute } from "@/lib/platform-time"
+import type { EvaluationCategoryProfile, SemanticVocabulary, SemanticVocabularyTerm, SemanticLegacyMapping,
+  SemanticVocabularyHistory, SemanticVocabularyImport, SemanticRestorePreview } from "@/lib/types"
+
+type Row = SemanticVocabularyTerm | SemanticLegacyMapping | SemanticVocabularyHistory
+type Listing = { items: Row[]; total: number; offset: number; limit: number }
+type Kind = "terms" | "mappings" | "history"
+const inputClass = "h-10 w-full min-w-0 rounded-xl border border-input bg-background px-3 text-sm"
+const labels: Record<string, string> = { canonical_term: "标准词", aliases: "别名", status: "状态", note: "说明", source_system: "来源系统",
+  source_field: "旧字段", source_value: "旧值", target_term_id: "标准词编号", active: "启用", inactive: "停用", edit: "修改", import: "导入", restore: "恢复" }
+const show = (v: unknown) => v == null ? "未指定" : typeof v === "string" ? (labels[v] || v) : JSON.stringify(v)
+
+function ImportChanges({ batch }: { batch: SemanticVocabularyImport }) {
+  const hidden = new Set(["id", "vocabulary_id", "revision", "source", "curation_status", "updated_at", "updated_by"])
+  return <div className="divide-y rounded-xl border px-4">{batch.changes.map(change => <details key={change.row} className="py-3">
+    <summary className="cursor-pointer font-bold">第{change.row}行 · {change.before ? "修改" : "新增"} · {String(change.after.canonical_term || change.after.source_field)}</summary>
+    <div className="mt-3 space-y-3 text-xs [overflow-wrap:anywhere]">{Object.entries(change.after).filter(([key, value]) => !hidden.has(key) && JSON.stringify(change.before?.[key]) !== JSON.stringify(value)).map(([key, value]) => <div key={key}><p className="font-bold">{labels[key] || key}</p>{change.before && <p className="mt-1 text-muted-foreground">原值：{show(change.before[key])}</p>}<p className="mt-1">新值：{show(value)}</p></div>)}</div>
+  </details>)}</div>
+}
+
+export function SemanticCatalogPage() {
+  const client = useQueryClient()
+  const [id, setId] = useState(0); const [kind, setKind] = useState<Kind>("terms")
+  const [offset, setOffset] = useState(0); const [q, setQ] = useState(""); const [status, setStatus] = useState("")
+  const [drawer, setDrawer] = useState<"catalog" | "term" | "mapping" | "import" | "restore" | null>(null)
+  const [editing, setEditing] = useState<SemanticVocabularyTerm | SemanticLegacyMapping | null>(null)
+  const [category, setCategory] = useState("knowledge_graph"); const [field, setField] = useState("style"); const [locale, setLocale] = useState("zh")
+  const [name, setName] = useState(""); const [aliases, setAliases] = useState(""); const [note, setNote] = useState(""); const [enabled, setEnabled] = useState(true)
+  const [system, setSystem] = useState(""); const [oldField, setOldField] = useState(""); const [oldValue, setOldValue] = useState(""); const [target, setTarget] = useState("")
+  const [importText, setImportText] = useState(""); const [batch, setBatch] = useState<SemanticVocabularyImport | null>(null)
+  const [restore, setRestore] = useState<SemanticRestorePreview | null>(null); const [confirmed, setConfirmed] = useState(false)
+  const catalogs = useQuery({ queryKey: ["semantic-catalogs"], queryFn: () => api<{ items: SemanticVocabulary[]; can_edit: boolean }>("/api/semantic-vocabularies") })
+  const categories = useQuery({ queryKey: ["evaluation-categories"], queryFn: () => api<{ items: EvaluationCategoryProfile[] }>("/api/evaluation-categories") })
+  const selected = catalogs.data?.items.find(v => v.id === id)
+  const prefix = `/api/semantic-vocabularies/${id}`
+  const detail = useQuery({ queryKey: ["semantic-catalog-items", id, kind, q, status, offset], enabled: id > 0,
+    queryFn: () => api<Listing>(`${prefix}/${kind}?q=${encodeURIComponent(q)}&status=${status}&offset=${offset}&limit=24`) })
+  const refresh = () => { void client.invalidateQueries({ queryKey: ["semantic-catalogs"] }); void client.invalidateQueries({ queryKey: ["semantic-catalog-items"] }) }
+  const action = useMutation({ mutationFn: async (operation: () => Promise<unknown>) => operation(),
+    onSuccess: () => refresh(), onError: (error: Error) => toast.error(error.message) })
+  const post = <T,>(url: string, body?: unknown) => api<T>(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) })
+  const writable = !!catalogs.data?.can_edit
+  const open = (type: "term" | "mapping", item?: SemanticVocabularyTerm | SemanticLegacyMapping) => {
+    setEditing(item || null); setDrawer(type); setNote(item?.note || ""); setEnabled(item?.status !== "inactive")
+    if (type === "term") { const v = item as SemanticVocabularyTerm | undefined; setName(v?.canonical_term || ""); setAliases(v?.aliases.join("\n") || "") }
+    else { const v = item as SemanticLegacyMapping | undefined; setSystem(v?.source_system || ""); setOldField(v?.source_field || ""); setOldValue(v?.source_value || ""); setTarget(v?.target_term_id?.toString() || "") }
+  }
+  const save = () => action.mutate(async () => {
+    const body = { ...(editing ? { id: editing.id, expected_revision: editing.revision } : {}), status: enabled ? "active" : "inactive", note }
+    await post(drawer === "term" ? prefix + "/terms" : prefix + "/mappings", drawer === "term"
+      ? { ...body, canonical_term: name, aliases: aliases.split("\n").map(v => v.trim()).filter(Boolean) }
+      : { ...body, source_system: system, source_field: oldField, source_value: oldValue || null, target_term_id: target ? Number(target) : null })
+    setDrawer(null); toast.success("已保存新修订")
+  })
+  const exportSnapshot = () => action.mutate(async () => {
+    const frozen = await post<{ terms: SemanticVocabularyTerm[]; mappings: SemanticLegacyMapping[] }>(prefix + "/snapshot")
+    const blob = new Blob([JSON.stringify(frozen, null, 2)], { type: "application/json" }); const url = URL.createObjectURL(blob)
+    const link = document.createElement("a"); link.href = url; link.download = `词表-${id}-固定版本.json`; link.click(); URL.revokeObjectURL(url)
+  })
+  return <>
+    <PageHeader index="A" title="标准词与映射" description="维护标准词、别名和旧字段对应关系。已冻结的工作流与历史结果保持各自版本。"
+      actions={writable && <Button onClick={() => { setDrawer("catalog"); setName("") }}>新建词表</Button>} />
+    <div className="shell-content mx-auto min-w-0 space-y-6 px-page py-7">
+      {catalogs.error && <p role="alert">{catalogs.error.message}</p>}
+      <Card className="min-w-0 overflow-hidden p-5">
+        <div className="flex flex-wrap items-end justify-between gap-4">
+          <label className="min-w-0 flex-1 space-y-2 text-sm font-bold">词表<select aria-label="选择词表" className={inputClass} value={id} onChange={e => { setId(Number(e.target.value)); setOffset(0); setQ(""); setStatus("") }}>
+            <option value={0}>选择词表</option>{catalogs.data?.items.map(v => <option key={v.id} value={v.id}>{v.name} · {v.category_key} / {v.field_path} / {v.locale === "zh" ? "中文" : "英文"} · V{v.revision}</option>)}
+          </select></label>
+          <Button variant="secondary" disabled={!id || action.isPending} onClick={exportSnapshot}>导出完整固定版本</Button>
+        </div>
+        {selected && <p className="mt-3 text-xs text-muted-foreground">稳定编号 #{selected.id} · {selected.field_path} · V{selected.revision}。停用可恢复，不删除内容和历史。</p>}
+      </Card>
+      <Card className="min-w-0 overflow-hidden">
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b p-4">
+          <nav className="flex flex-wrap gap-2" aria-label="词表资料">{([["terms", "标准词与别名"], ["mappings", "旧字段映射"], ["history", "修改历史"]] as const).map(([key, title]) =>
+            <Button key={key} variant={kind === key ? "primary" : "secondary"} aria-current={kind === key ? "page" : undefined} onClick={() => { setKind(key); setOffset(0); setQ(""); setStatus("") }}>{title}</Button>)}</nav>
+          {writable && id > 0 && kind !== "history" && <div className="flex flex-wrap gap-2"><Button variant="secondary" onClick={() => { setDrawer("import"); setBatch(null); setImportText(""); setConfirmed(false) }}>批量导入</Button><Button onClick={() => open(kind === "terms" ? "term" : "mapping")}>新增{kind === "terms" ? "词条" : "映射"}</Button></div>}
+        </div>
+        {kind !== "history" && <div className="flex flex-wrap gap-3 border-b p-4"><input aria-label="搜索词表内容" className={`${inputClass} max-w-sm`} value={q} placeholder={kind === "terms" ? "搜索标准词或别名" : "搜索旧字段或旧值"} onChange={e => { setQ(e.target.value); setOffset(0) }} /><select aria-label="启用状态" className={`${inputClass} max-w-36`} value={status} onChange={e => { setStatus(e.target.value); setOffset(0) }}><option value="">全部状态</option><option value="active">启用</option><option value="inactive">停用</option></select></div>}
+        {!id ? <p className="p-8 text-sm text-muted-foreground">先选择或新建词表。</p> : detail.isPending ? <p className="p-8">正在读取词表…</p> : detail.error ? <p className="p-8" role="alert">{detail.error.message}</p> : <>
+          <div className="overflow-x-auto"><table className="w-full table-fixed text-left text-sm"><thead className="bg-surface-sunken text-muted-foreground"><tr><th className="w-24 p-4">编号</th><th className="p-4">{kind === "terms" ? "标准词与别名" : kind === "mappings" ? "来源与对应关系" : "变更记录"}</th><th className="w-32 p-4">{kind === "history" ? "修订" : "状态"}</th><th className="w-28 p-4">操作</th></tr></thead><tbody>{detail.data?.items.map(r => <tr key={r.id} className="border-t align-top"><td className="p-4">#{r.id}</td><td className="break-words p-4 [overflow-wrap:anywhere]">
+            {"canonical_term" in r ? <><p className="font-bold">{r.canonical_term}</p><p className="mt-1 text-muted-foreground">{r.aliases.join("、") || "无别名"}</p><p className="mt-1 text-xs text-muted-foreground">{r.note}</p></> : "source_system" in r ? <><p>{r.source_system} · {r.source_field}</p><p className="mt-1 text-muted-foreground">{r.source_value == null ? "整个字段" : r.source_value} → {selected?.field_path}{r.target_term_id ? ` · 标准词 #${r.target_term_id}` : " · 按词表匹配"}</p></> : <>{r.object_kind === "term" ? "词条" : "映射"} #{r.object_id} · {labels[r.action] || r.action}<p className="mt-1 text-xs text-muted-foreground">{r.actor} · {formatPlatformMinute(r.created_at)}</p></>}
+          </td><td className="p-4">{"status" in r ? <>{show(r.status)}<p className="mt-1 text-xs text-muted-foreground">V{r.revision}{"curation_status" in r && r.curation_status === "unreviewed" ? " · 待整理" : ""}</p></> : `V${r.revision}`}</td><td className="p-4">{"status" in r ? writable && <Button size="sm" variant="secondary" onClick={() => open("canonical_term" in r ? "term" : "mapping", r)}>编辑</Button> : <Button size="sm" variant="secondary" onClick={() => action.mutate(async () => { const p = await api<SemanticRestorePreview>(`/api/semantic-vocabulary-history/${r.id}/restore-preview`); setRestore(p); setConfirmed(false); setDrawer("restore") })}>看差异</Button>}</td></tr>)}</tbody></table></div>
+          {!detail.data?.items.length && <p className="p-8 text-sm text-muted-foreground">当前条件下暂无记录。</p>}
+          <Pager page={detail.data && { ...detail.data, has_more: detail.data.offset + detail.data.limit < detail.data.total }} fallbackLimit={24} onChange={setOffset} loading={detail.isFetching} showPageNumbers />
+        </>}
+      </Card>
+    </div>
+    <SecondaryDrawer open={drawer != null} onOpenChange={open => !open && setDrawer(null)} title={drawer === "catalog" ? "新建词表" : drawer === "term" ? "标准词与别名" : drawer === "mapping" ? "旧字段映射" : drawer === "import" ? "检查并整批导入" : "恢复历史前查看差异"} description="修改会保留历史；不会自动替换已冻结的工作流配置。">
+      <div className="min-w-0 space-y-5 text-sm">
+        {drawer === "catalog" ? <>
+          <label className="block space-y-2">类目<select className={inputClass} value={category} onChange={e => setCategory(e.target.value)}>{categories.data?.items.filter(v => v.status === "active").map(v => <option key={v.category_key} value={v.category_key}>{v.display_name}</option>)}</select></label>
+          <label className="block space-y-2">字段路径<input className={inputClass} value={field} onChange={e => setField(e.target.value)} placeholder="例如 style" /></label>
+          <label className="block space-y-2">语言<select className={inputClass} value={locale} onChange={e => setLocale(e.target.value)}><option value="zh">中文</option><option value="en">英文</option></select></label>
+          <label className="block space-y-2">词表名称<input className={inputClass} value={name} onChange={e => setName(e.target.value)} /></label>
+          <Button disabled={!name.trim() || action.isPending} onClick={() => action.mutate(async () => { const v = await post<SemanticVocabulary>("/api/semantic-vocabularies", { category_key: category, field_path: field, locale, name }); setId(v.id); setOffset(0); setDrawer(null) })}>创建词表</Button>
+        </> : drawer === "term" || drawer === "mapping" ? <>
+          {drawer === "term" ? <><label className="block space-y-2">标准词<input className={inputClass} value={name} onChange={e => setName(e.target.value)} /></label><label className="block space-y-2">别名（每行一个）<textarea className="visual-native-textarea min-h-36 w-full" value={aliases} onChange={e => setAliases(e.target.value)} /></label></> : <>
+            <label className="block space-y-2">来源系统<input className={inputClass} value={system} onChange={e => setSystem(e.target.value)} /></label><label className="block space-y-2">旧字段<input className={inputClass} value={oldField} onChange={e => setOldField(e.target.value)} /></label><label className="block space-y-2">旧值（留空表示整个字段）<input className={inputClass} value={oldValue} onChange={e => setOldValue(e.target.value)} /></label><label className="block space-y-2">标准词编号（仅字段映射可留空）<input className={inputClass} value={target} inputMode="numeric" onChange={e => setTarget(e.target.value)} /></label><p className="text-xs text-muted-foreground">目标字段固定为当前词表：{selected?.field_path}。先在标准词列表查到对应编号。</p>
+          </>}
+          <label className="block space-y-2">说明<textarea className="visual-native-textarea min-h-24 w-full" value={note} onChange={e => setNote(e.target.value)} /></label><label className="flex items-center gap-2"><input type="checkbox" checked={enabled} onChange={e => setEnabled(e.target.checked)} />启用</label>
+          <Button disabled={action.isPending} onClick={save}>保存新修订</Button>
+        </> : drawer === "import" ? <>
+          <p className="text-muted-foreground">可上传 Excel 另存的 UTF-8 CSV，或粘贴 JSON 行数组。别名列用 JSON 数组或竖线分隔。每批最多1000行；全部通过后才能确认。</p>
+          <Button variant="secondary" onClick={() => { const csv = kind === "mappings" ? '\uFEFFkind,source_system,source_field,source_value,target_term_id,status,note\r\nmapping,旧库,old_style,,,active,字段映射填写示例\r\n' : '\uFEFFkind,canonical_term,aliases,status,note\r\nterm,北欧简约,北欧风|北欧,active,填写示例\r\n'; const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" })); const a = document.createElement("a"); a.href = url; a.download = "词表导入示例.csv"; a.click(); URL.revokeObjectURL(url) }}>下载 CSV 示例</Button>
+          <input aria-label="导入词表文件" type="file" accept=".csv,.json" onChange={async e => { try { const f = e.target.files?.[0]; if (!f) return; if (f.size > 2 * 1024 * 1024) throw new Error("文件不可超过2MiB"); const data = await f.text(); setImportText(JSON.stringify(f.name.endsWith(".json") ? JSON.parse(data) : parseSemanticCatalogCsv(data), null, 2)); setBatch(null); setConfirmed(false) } catch (error) { toast.error((error as Error).message) } }} />
+          <textarea aria-label="导入行数据" className="visual-native-textarea min-h-56 w-full font-mono text-xs" value={importText} onChange={e => { setImportText(e.target.value); setBatch(null); setConfirmed(false) }} />
+          <Button variant="secondary" disabled={!importText || action.isPending} onClick={() => action.mutate(async () => { setBatch(null); setConfirmed(false); setBatch(await post<SemanticVocabularyImport>(prefix + "/imports/preview", { rows: JSON.parse(importText) })) })}>检查全部行</Button>
+          {batch && <><p>{batch.row_count} 行 · {batch.state === "preview" ? "全部检查通过，尚未写入" : batch.state === "completed" ? "整批已生效" : "存在错误，未写入任何词条"}</p>{batch.errors.map(e => <p key={e.row} role="alert">第{e.row}行：{e.message}</p>)}{batch.state === "preview" && <><ImportChanges batch={batch} /><label className="flex items-center gap-2"><input type="checkbox" checked={confirmed} onChange={e => setConfirmed(e.target.checked)} />确认按当前预览整批导入</label><Button disabled={!confirmed || action.isPending} onClick={() => action.mutate(async () => { setBatch(await post<SemanticVocabularyImport>(`/api/semantic-vocabulary-imports/${batch.id}/confirm`, { payload_hash: batch.payload_hash, confirmed: true })); setConfirmed(false); toast.success("整批导入已完成") })}>确认整批导入</Button></>}</>}
+        </> : restore && <>
+          <p>{restore.object_kind === "term" ? "词条" : "映射"} #{restore.object_id} · 当前 V{restore.expected_revision}。恢复后追加新修订。</p>
+          {Object.entries(restore.changes).map(([key, diff]) => <div key={key} className="space-y-2 border-b pb-4 [overflow-wrap:anywhere]"><p className="font-bold">{labels[key] || key}</p><p>当前：{show(diff.before)}</p><p>恢复为：{show(diff.after)}</p></div>)}
+          {!Object.keys(restore.changes).length && <p>与当前内容相同，无需恢复。</p>}
+          {writable && Object.keys(restore.changes).length > 0 && <><label className="flex items-center gap-2"><input type="checkbox" checked={confirmed} onChange={e => setConfirmed(e.target.checked)} />已查看差异，确认恢复</label><Button disabled={!confirmed || action.isPending} onClick={() => action.mutate(async () => { await post(`/api/semantic-vocabulary-history/${restore.history_id}/restore`, { preview_hash: restore.preview_hash, confirmed: true }); setDrawer(null); toast.success("已恢复并保留新修订") })}>确认恢复</Button></>}
+        </>}
+      </div>
+    </SecondaryDrawer>
+  </>
+}
+
+===== frontend/src/lib/semantic-catalog-csv.ts =====
+/** Excel UTF-8 CSV; numeric identifiers must never silently become a new row. */
+export function parseSemanticCatalogCsv(value: string): Record<string, unknown>[] {
+  const rows: string[][] = []; let row: string[] = [], field = "", quoted = false, closed = false
+  for (let i = 0; i < value.length; i++) {
+    const c = value[i]
+    if (c === '"') {
+      if (quoted && value[i + 1] === '"') { field += '"'; i++ }
+      else if (quoted) { quoted = false; closed = true }
+      else if (!field && !closed) quoted = true
+      else throw new Error("CSV引号位置无效")
+    } else if (c === "," && !quoted) { row.push(field); field = ""; closed = false }
+    else if ((c === "\n" || c === "\r") && !quoted) {
+      if (c === "\r" && value[i + 1] === "\n") i++
+      row.push(field); rows.push(row); row = []; field = ""; closed = false
+    } else {
+      if (closed) throw new Error("CSV结束引号后存在多余字符")
+      field += c
+    }
+  }
+  if (quoted) throw new Error("CSV引号未闭合")
+  if (field || row.length) { row.push(field); rows.push(row) }
+  const headers = rows.shift()?.map(h => h.replace(/^\uFEFF/, "").trim()) || []
+  if (!headers.length || headers.some(h => !h) || new Set(headers).size !== headers.length) throw new Error("表头为空或有重复")
+  return rows.filter(r => r.some(v => v.trim())).map((r, i) => {
+    if (r.length !== headers.length) throw new Error(`第${i + 2}行列数不符`)
+    return Object.fromEntries(headers.map((h, n) => {
+      if (["id", "expected_revision", "target_term_id"].includes(h)) {
+        if (!r[n].trim()) return [h, null]
+        const number = Number(r[n])
+        if (!/^\d+$/.test(r[n]) || !Number.isSafeInteger(number) || number <= 0) throw new Error(`第${i + 2}行的${h}必须是正整数`)
+        return [h, number]
+      }
+      if (h === "aliases") return [h, r[n].trim().startsWith("[") ? JSON.parse(r[n]) : r[n].split("|").filter(Boolean)]
+      return [h, h === "source_value" && r[n] === "" ? null : r[n]]
+    }))
+  })
+}
+
+===== frontend/scripts/check-semantic-catalog-csv.ts =====
+import assert from "node:assert/strict"
+import { parseSemanticCatalogCsv as parse } from "../src/lib/semantic-catalog-csv.ts"
+
+assert.deepEqual(parse('\uFEFFcanonical_term,aliases,note\r\n"现代,简约",北欧|北欧风,"第一行\n第二行"\r\n'),
+  [{canonical_term:"现代,简约",aliases:["北欧","北欧风"],note:"第一行\n第二行"}])
+assert.deepEqual(parse('id,expected_revision,canonical_term\n12,3,"含""引号"\n'), [{id:12,expected_revision:3,canonical_term:'含"引号'}])
+for (const id of ['bad','NaN','1.5','0','-1','9007199254740993']) {
+  assert.throws(() => parse(`id,canonical_term\n${id},风格`), /正整数/)
+}
+assert.throws(() => parse('canonical_term,\n词,'), /表头/)
+assert.throws(() => parse('canonical_term\n"不闭合'), /未闭合/)
+assert.throws(() => parse('canonical_term\n"合法"坏尾巴'), /多余字符/)
+assert.throws(() => parse('canonical_term\n坏"引号'), /引号位置/)
+console.log('semantic catalog CSV: identifiers, quoted fields, aliases and malformed rows passed')
