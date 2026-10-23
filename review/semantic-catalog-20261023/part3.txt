@@ -164,6 +164,7 @@ _allow("POST", ["/api/semantic-vocabularies", "/api/semantic-vocabularies/{vocab
     "/api/semantic-vocabularies/{vocabulary_id}/mappings", "/api/semantic-vocabularies/{vocabulary_id}/imports/preview",
     "/api/semantic-vocabulary-imports/{batch_id}/confirm", "/api/semantic-vocabulary-history/{history_id}/restore"], "drafts:write", "read")
 _allow("POST", ["/api/semantic-vocabularies/{vocabulary_id}/snapshot"], "results:export", "read")
+_allow("POST", ["/api/semantic-vocabulary-collection/{run_id}/retry"], "drafts:write", "read")
 _allow("DELETE", ["/api/me/mcp"], "preferences:write", "self")
 _allow("POST", ["/api/auth/password"], "preferences:write", "self")
 _allow("POST", ["/api/published-labels/export", "/api/sample-sets/{sample_set_id}/export",
@@ -496,7 +497,11 @@ def recheck_employee_objects(db: Session, user: m.User) -> None:
 
 管理员与产研可维护，员工只读。写入必须携带当前修订号；历史为追加记录，恢复须先看差异，再确认生成新修订。冻结导出携带词表修订和内容摘要，供后续工作流显式引用；修改词表不改变旧运行。
 
-自动收录与运营整理分开：新词不设收录前审核，记录未整理及真实来源；已有人工标准词和停用状态不会被模型覆盖。自动收录的执行接线单列验证，未接线时不得宣称已自动运行。
+自动收录与运营整理分开：新词不设收录前审核，记录未整理及真实来源；已有人工标准词和停用状态不会被模型覆盖。原生收尾只登记待收录任务，独立后台事务写词表；收录失败不回滚评测结果，有限重试三次后显示需处理，可单独重试。四路流程按实际成功的提示词节点确定语言，跳过节点不能作为来源。`python -m app.semantic_catalog_worker` 为独立进程入口，先核对schema；`SEMANTIC_CATALOG_COLLECTION_ENABLED` 默认0，生产未启用，后续增量接入时须同时接线worker。
+
+导入引用的词条、映射和目标词编号必须在批次前已经存在，不能猜测预览中新分配的临时编号；MySQL预览回滚后的自增号允许有空档，不作为连续编号承诺。历史恢复包含整理状态差异，恢复原修订状态，不把“待整理”悄悄变成“已整理”。
+
+修改已有对象时，导入中未提供的列保留原值；显式空数组才清空别名，映射字段的显式null按可空定义清除。词条行不能混入映射列。只改名称不应意外清空别名、重新启用停用词或改变整理状态。
 
 ## 实施顺序和检查
 
@@ -579,19 +584,19 @@ index 7c94a1d..091f929 100644
  
  
 diff --git a/backend/app/workflow_result_finalizer.py b/backend/app/workflow_result_finalizer.py
-index b9884ef..90b5804 100644
+index b9884ef..4750d9f 100644
 --- a/backend/app/workflow_result_finalizer.py
 +++ b/backend/app/workflow_result_finalizer.py
 @@ -1315,6 +1315,12 @@ def finalize_native_run(
      result_hash = hash_manifest(normalized_result)
      now = datetime.now(timezone.utc)
      _record_dictionary_misses(db, run, normalized_result, now=now)
-+    # Opt-in after schema139; never rewrites the result, existing vocabulary or
-+    # frozen dictionary rule. One receipt makes repeat finalization idempotent.
++    # Only enqueue under the run transaction. Catalog locks and retries belong
++    # to the independent worker, never the evaluation finalization transaction.
 +    import os
 +    if os.getenv("SEMANTIC_CATALOG_COLLECTION_ENABLED", "0") == "1":
-+        from .semantic_catalog import collect_run_terms
-+        collect_run_terms(db, run, manifest, normalized_result)
++        from .semantic_catalog import enqueue_run_terms
++        enqueue_run_terms(db, run, manifest, normalized_result, executed_outputs=node_outputs)
  
      job = db.scalar(
          select(EvaluationJob).where(EvaluationJob.production_run_id == run.id)

@@ -1,5 +1,5 @@
 {
-  "candidate": "c1e9da7e03d3b3ee4ba31b5efa9a50c63904d51d",
+  "candidate": "cddf4d02c94935935b17ddaba0e0ca2e4d8c651e",
   "task_base": "536beedf2b744fa38f22134a091222e284beeaa5",
   "context_base": "bf5d192ffb4032218d20f725f908bb5b1f1cb416",
   "schema": 139,
@@ -9,29 +9,32 @@
   "parts": [
     {
       "name": "part1.txt",
-      "bytes": 35486,
-      "sha256": "97e288987ea27a78f6ae20436fa4b4ff2dfadfc6b6652fd73d5f391cb1b0c0e8"
+      "bytes": 44393,
+      "sha256": "b9163e3b08458351123992bf51445b18b00fb82f7c1c5d2639ee79b6c402e260"
     },
     {
       "name": "part2.txt",
-      "bytes": 34944,
-      "sha256": "68991a19c136611f7cc8361d7d2c41d31f47dca60bbcc0b6650c8d054a56860c"
+      "bytes": 42440,
+      "sha256": "c5c99b61ed0cf88597e7902d342b7c538e4a0b59b7cbfe6f5c624b6062cf6390"
     },
     {
       "name": "part3.txt",
-      "bytes": 40271,
-      "sha256": "77d5a65f4adf244f08d0957df4eef55b290a6cf72549f752b4defeb81bf28c83"
+      "bytes": 41349,
+      "sha256": "1d478a283e7983a27e3fcd7d7700e9ec650b38196c82fd7ddd3a472f98c7e21c"
     }
   ],
-  "patch_sha256": "ab13e0bceb116439d0e9350e018254deed302e722e635796d85a958d697fc393",
+  "patch_sha256": "e6c69c42ccbb8a5e76b8cb161724f257669022f6c07911ad2cc2339752748784",
   "verification": {
-    "local_specific_and_migration": 10,
-    "unchanged_finalizer": 28,
+    "local_affected_b": 41,
+    "local_catalog_c": 12,
+    "sqlite_repeated_upgrade": 1,
+    "finalizer_included": 28,
     "csv": true,
     "frontend": true,
     "chrome_synthetic": true,
     "production": false,
     "real_mysql": false
   },
+  "previous_review": "Gemini reviewed c1e9da7 once; controller verified and fixed. No second Gemini review; Poe quota blocked final review.",
   "review_request": "One consolidated P0/P1 review: reachable data loss, stale RR reads, concurrent identities, import/restore atomicity, actor revocation, frozen versions, collector impact on runtime; cite code and counterexample, no speculative scope. No incremental configuration or downstream business writes authorized."
 }

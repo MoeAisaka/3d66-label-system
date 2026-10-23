@@ -120,11 +120,15 @@ class VocabularyImport(Base):
 
 
 class VocabularyObservation(Base):
-    """One receipt per successful run; retries cannot re-collect or re-count it."""
+    """Durable collection outbox and receipt, isolated from evaluation finalization."""
     __tablename__ = "semantic_vocabulary_observations"
     run_id: Mapped[int] = mapped_column(ForeignKey("production_runs.id", ondelete="RESTRICT"), primary_key=True)
     result_hash: Mapped[str] = mapped_column(String(64))
-    term_ids_json: Mapped[str] = mapped_column(Text)
+    term_ids_json: Mapped[str] = mapped_column(Text, default="[]")
+    payload_json: Mapped[str] = mapped_column(Text, default="{}")
+    state: Mapped[str] = mapped_column(String(20), default="pending", index=True)
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0)
+    error_code: Mapped[str] = mapped_column(String(100), default="")
     created_at: Mapped[str] = mapped_column(String(40), default=now)
 
 
@@ -244,7 +248,10 @@ def save_term(db, vocabulary_id, payload, *, actor, action="edit", source=None):
     else:
         row.revision += 1
     row.canonical_term = name; row.aliases_json = canonical(aliases); row.status = status
-    row.curation_status = "unreviewed" if source else "confirmed"
+    curation = "unreviewed" if source else (payload.get("curation_status") or "confirmed")
+    if curation not in {"unreviewed", "confirmed"}:
+        raise CatalogError("curation_invalid", "整理状态无效")
+    row.curation_status = curation
     row.note = note; row.updated_by = actor; row.updated_at = now()
     db.flush()
     old_keys = db.scalars(select(VocabularyKey).where(VocabularyKey.term_id == row.id)).all()
@@ -341,9 +348,11 @@ def history_preview(db, history_id):
     vocabulary(db, history.vocabulary_id, lock=True)
     model = VocabularyTerm if history.object_kind == "term" else LegacyTagMapping
     row = db.scalar(select(model).where(model.id == history.object_id).with_for_update().execution_options(populate_existing=True))
+    if row is None:
+        raise CatalogError("not_found", "历史对应的对象不存在")
     current = term_payload(row) if history.object_kind == "term" else mapping_payload(row)
     previous = json.loads(history.snapshot_json)
-    keys = set(current) - {"id", "vocabulary_id", "revision", "updated_by", "updated_at", "source", "curation_status"}
+    keys = set(current) - {"id", "vocabulary_id", "revision", "updated_by", "updated_at", "source"}
     changes = {k: {"before": current[k], "after": previous[k]} for k in sorted(keys) if current[k] != previous[k]}
     return {"history_id": history.id, "vocabulary_id": history.vocabulary_id, "object_kind": history.object_kind,
             "object_id": history.object_id, "expected_revision": row.revision, "changes": changes,
@@ -362,6 +371,15 @@ def restore_history(db, history_id, *, preview_hash, actor):
 
 def _import_rows(db, catalog, rows, *, actor, changes=None):
     errors = []
+    # Preview INSERT ids are not durable (MySQL AUTO_INCREMENT is not rolled
+    # back). All edit/target references must exist before this batch starts.
+    term_ids = {r.get("id") for r in rows if isinstance(r, dict) and r.get("kind", "term") == "term" and r.get("id")}
+    term_ids |= {r.get("target_term_id") for r in rows if isinstance(r, dict) and r.get("target_term_id")}
+    persistent_terms = set(db.scalars(select(VocabularyTerm.id).where(VocabularyTerm.vocabulary_id == catalog.id,
+        VocabularyTerm.id.in_(term_ids)).order_by(VocabularyTerm.id).with_for_update()))
+    mapping_ids = {r.get("id") for r in rows if isinstance(r, dict) and r.get("kind") == "mapping" and r.get("id")}
+    persistent_mappings = set(db.scalars(select(LegacyTagMapping.id).where(LegacyTagMapping.vocabulary_id == catalog.id,
+        LegacyTagMapping.id.in_(mapping_ids)).order_by(LegacyTagMapping.id).with_for_update()))
     for index, row in enumerate(rows, 1):
         try:
             with db.begin_nested():
@@ -370,13 +388,24 @@ def _import_rows(db, catalog, rows, *, actor, changes=None):
                 kind = row.get("kind", "term")
                 if kind not in {"term", "mapping"}:
                     raise CatalogError("kind_invalid", "类型只能为词条或映射")
+                allowed = ({"canonical_term", "aliases", "curation_status"} if kind == "term" else
+                    {"source_system", "source_field", "source_value", "target_term_id"}) | {"kind", "id", "expected_revision", "status", "note"}
+                if set(row) - allowed:
+                    raise CatalogError("row_fields_invalid", "行中含其他类型的字段，请核对词条／映射类型和表头")
+                if row.get("id") and row["id"] not in (persistent_terms if kind == "term" else persistent_mappings):
+                    raise CatalogError("import_reference_invalid", "只能修改导入前已存在的编号")
+                if kind == "mapping" and row.get("target_term_id") and row["target_term_id"] not in persistent_terms:
+                    raise CatalogError("import_reference_invalid", "目标必须是导入前已存在的标准词编号；先导入词条，再建立映射")
                 operation = save_term if kind == "term" else save_mapping
                 model = VocabularyTerm if kind == "term" else LegacyTagMapping
                 serializer = term_payload if kind == "term" else mapping_payload
                 previous = db.scalar(select(model).where(model.id == row.get("id")).with_for_update()
                     .execution_options(populate_existing=True)) if row.get("id") else None
                 before = serializer(previous) if previous and previous.vocabulary_id == catalog.id else None
-                saved = operation(db, catalog.id, row, actor=actor, action="import")
+                supplied = {key: value for key, value in row.items() if key != "curation_status" or value is not None}
+                # Omitted columns preserve the current field. An explicit [] or
+                # nullable mapping value still means the operator chose to clear.
+                saved = operation(db, catalog.id, (before or {}) | supplied, actor=actor, action="import")
                 if changes is not None:
                     after = serializer(saved)
                     if not row.get("id"):
@@ -429,40 +458,61 @@ def confirm_import(db, batch_id, *, payload_hash, actor):
     return batch
 
 
-def collect_run_terms(db, run, manifest, output):
-    """Collect already validated labels, never change existing terms or a rule.
-
-    Called under the native run's existing lock. Catalog locks are acquired in
-    field order; management never locks a production run after a catalog.
-    """
+def enqueue_run_terms(db, run, manifest, output, *, executed_outputs=None):
+    """Only append an outbox row under the existing run lock; no catalog locks."""
     from .knowledge_graph_contracts import KNOWLEDGE_GRAPH_SEMANTIC_FIELDS
     if run.category_key != "knowledge_graph" or run.model_execution_mode != "real":
         return None
-    existing = db.scalar(select(VocabularyObservation).where(VocabularyObservation.run_id == run.id).with_for_update())
+    existing = db.get(VocabularyObservation, run.id)
     if existing:
         return existing
-    site = None
+    executed_nodes = {key for key, result in executed_outputs.items() if result.get("status") == "succeeded"} if executed_outputs is not None else None
+    sites = set()
     for node in manifest.get("nodes", []):
         if node.get("kind") == "prompt":
+            if executed_nodes is not None and node.get("node_instance_id") not in executed_nodes:
+                continue
             snapshot = node.get("config", {}).get("output_contract_snapshot", {})
             if snapshot.get("site_scope") in {"domestic", "overseas"}:
-                site = snapshot["site_scope"]; break
-    if site is None:
+                sites.add(snapshot["site_scope"])
+    if len(sites) != 1:
         return None  # Never infer locale from a filename, free text or output.
+    site = next(iter(sites))
     fields = set(KNOWLEDGE_GRAPH_SEMANTIC_FIELDS) | {"view_angle", "ceiling", "spatial_structure", "physical_structural_features"}
+    payload = {"site": site, "category_key": run.category_key, "workflow_version_id": run.workflow_version_id,
+               "fields": {key: output[key] for key in sorted(fields) if isinstance(output.get(key), str)}}
+    receipt = VocabularyObservation(run_id=run.id, result_hash=digest(output), payload_json=canonical(payload),
+        term_ids_json="[]", state="pending", attempt_count=0, error_code="")
+    try:
+        with db.begin_nested():
+            db.add(receipt); db.flush()
+        return receipt
+    except IntegrityError:
+        receipt = db.scalar(select(VocabularyObservation).where(VocabularyObservation.run_id == run.id).with_for_update())
+        if receipt is None:
+            raise
+        return receipt
+
+
+def process_collection(db, receipt):
+    """Worker-only SQL transaction; failures cannot roll back the source fact."""
+    if receipt.state == "completed":
+        return receipt
+    payload = json.loads(receipt.payload_json)
     identifiers = []
-    for field in sorted(fields):
-        raw = output.get(field)
+    for field, raw in sorted(payload["fields"].items()):
         if not isinstance(raw, str) or not raw:
             continue
         values = []
         for part in re.split(r"[,，、;；]+", raw):
             value = re.sub(r"_0\.[0-9]+$", "", part.strip()) if field in {"object", "material"} else part.strip()
-            if value and len(value) <= 200 and not any(unicodedata.category(c).startswith("C") for c in value):
+            empty = {"none", "null", "unknown", "not_applicable", "not_detected", "n/a", "无", "不适用", "无法判断", "未识别"}
+            if value and match_key(value) not in empty and len(value) <= 200 and not any(unicodedata.category(c).startswith("C") for c in value):
                 values.append(value)
         if not values:
             continue
-        catalog = create_vocabulary(db, category_key=run.category_key, field_path=field, locale="zh" if site == "domestic" else "en", name=field)
+        catalog = create_vocabulary(db, category_key=payload["category_key"], field_path=field,
+            locale="zh" if payload["site"] == "domestic" else "en", name=field)
         catalog = vocabulary(db, catalog.id, lock=True)
         for value in dict.fromkeys(values):
             key = db.scalar(select(VocabularyKey).where(VocabularyKey.vocabulary_id == catalog.id,
@@ -471,17 +521,24 @@ def collect_run_terms(db, run, manifest, output):
                 identifiers.append(key.term_id)
                 continue
             row = save_term(db, catalog.id, {"canonical_term": value}, actor="system:collection", action="collect",
-                source={"kind": "workflow_output", "run_id": run.id, "workflow_version_id": run.workflow_version_id})
+                source={"kind": "workflow_output", "run_id": receipt.run_id, "workflow_version_id": payload["workflow_version_id"]})
             identifiers.append(row.id)
-    receipt = VocabularyObservation(run_id=run.id, result_hash=digest(output), term_ids_json=canonical(sorted(set(identifiers))))
-    db.add(receipt); db.flush()
+    receipt.term_ids_json = canonical(sorted(set(identifiers)))
+    receipt.state = "completed"; receipt.error_code = ""; db.flush()
     return receipt
+
+
+def collect_run_terms(db, run, manifest, output):
+    """Internal deterministic test/worker helper; runtime uses enqueue only."""
+    receipt = enqueue_run_terms(db, run, manifest, output)
+    return process_collection(db, receipt) if receipt is not None else None
 
 ===== backend/app/semantic_catalog_api.py =====
 """Employee vocabulary maintenance. Not a publication or credential endpoint."""
 from __future__ import annotations
 
 import json
+import os
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -513,6 +570,7 @@ class SaveTerm(Strict):
     aliases: list[str] = Field(default_factory=list, max_length=100)
     status: Literal["active", "inactive"] = "active"
     note: str = Field(default="", max_length=4000)
+    curation_status: Literal["unreviewed", "confirmed"] = "confirmed"
 
 
 class SaveMapping(Strict):
@@ -538,6 +596,7 @@ class ImportRow(Strict):
     target_term_id: int | None = Field(default=None, gt=0)
     status: Literal["active", "inactive"] = "active"
     note: str = Field(default="", max_length=4000)
+    curation_status: Literal["unreviewed", "confirmed"] | None = None
 
 
 class PreviewImport(Strict):
@@ -582,6 +641,31 @@ def build_semantic_catalog_router(current_user):
                 "row_count": len(json.loads(row.payload_json)), "errors": json.loads(row.errors_json),
                 "changes": json.loads(row.changes_json),
                 "expires_at": row.expires_at, "completed_at": row.completed_at}
+
+    @router.get("/api/semantic-vocabulary-collection")
+    def collection(user=Depends(current_user), db: Session = Depends(get_db)):
+        counts = dict(db.execute(select(s.VocabularyObservation.state, func.count())
+            .group_by(s.VocabularyObservation.state)).all())
+        failed = db.scalars(select(s.VocabularyObservation).where(s.VocabularyObservation.state == "failed")
+            .order_by(s.VocabularyObservation.run_id.desc()).limit(24)).all()
+        return {"enabled": os.getenv("SEMANTIC_CATALOG_COLLECTION_ENABLED", "0") == "1", "counts": counts,
+                "failed": [{"run_id": row.run_id, "attempt_count": row.attempt_count, "error_code": row.error_code} for row in failed]}
+
+    @router.post("/api/semantic-vocabulary-collection/{run_id}/retry")
+    def retry_collection(run_id: int, user=Depends(current_user), db: Session = Depends(get_db)):
+        writer(user)
+        def operation():
+            from .database import reserve_sqlite_immediate_transaction
+            reserve_sqlite_immediate_transaction(db)
+            row = db.scalar(select(s.VocabularyObservation).where(s.VocabularyObservation.run_id == run_id)
+                .with_for_update().execution_options(populate_existing=True))
+            if row is None:
+                raise s.CatalogError("not_found", "收录任务不存在")
+            if row.state != "failed":
+                raise s.CatalogError("state_conflict", "只对收录失败的任务重试")
+            row.state = "pending"; row.attempt_count = 0; row.error_code = ""
+            return {"run_id": row.run_id, "state": row.state}
+        return execute(db, operation)
 
     @router.get("/api/semantic-vocabularies")
     def catalogs(category_key: str = "", user=Depends(current_user), db: Session = Depends(get_db)):
@@ -634,7 +718,7 @@ def build_semantic_catalog_router(current_user):
     @router.post("/api/semantic-vocabularies/{vocabulary_id}/imports/preview")
     def preview(vocabulary_id: int, body: PreviewImport, user=Depends(current_user), db: Session = Depends(get_db)):
         actor = writer(user)
-        return execute(db, lambda: batch_summary(s.preview_import(db, vocabulary_id, [r.model_dump() for r in body.rows], actor=actor)))
+        return execute(db, lambda: batch_summary(s.preview_import(db, vocabulary_id, [r.model_dump(exclude_unset=True) for r in body.rows], actor=actor)))
 
     @router.post("/api/semantic-vocabulary-imports/{batch_id}/confirm")
     def confirm(batch_id: str, body: Confirmation, user=Depends(current_user), db: Session = Depends(get_db)):
@@ -658,6 +742,80 @@ def build_semantic_catalog_router(current_user):
         return execute(db, lambda: s.frozen_catalog(db, vocabulary_id))
 
     return router
+
+===== backend/app/semantic_catalog_worker.py =====
+"""Independent label collection. No model calls or production result changes."""
+from __future__ import annotations
+
+import argparse
+import logging
+import os
+import time
+
+from sqlalchemy import select
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.orm import Session
+
+from .database import reserve_sqlite_immediate_transaction
+from .semantic_catalog import CatalogError, VocabularyObservation, process_collection
+
+logger = logging.getLogger(__name__)
+
+
+def tick(engine):
+    if os.getenv("SEMANTIC_CATALOG_COLLECTION_ENABLED", "0") != "1":
+        return False
+    identity = None
+    try:
+        with Session(engine) as db, db.begin():
+            reserve_sqlite_immediate_transaction(db)
+            task = db.scalar(select(VocabularyObservation).where(VocabularyObservation.state == "pending",
+                VocabularyObservation.attempt_count < 3).order_by(VocabularyObservation.run_id).limit(1)
+                .with_for_update(skip_locked=engine.dialect.name == "mysql"))
+            if task is None:
+                return False
+            identity = task.run_id
+            process_collection(db, task)
+        return True
+    except (CatalogError, SQLAlchemyError) as exc:
+        # A MySQL deadlock can roll back the whole transaction. Use a fresh
+        # transaction for retry bookkeeping, never continue a failed savepoint.
+        code = exc.code if isinstance(exc, CatalogError) else "database_error"
+        logger.warning("semantic catalog collection failed run=%s code=%s", identity, code)
+        if identity is None:
+            return False
+        with Session(engine) as db, db.begin():
+            reserve_sqlite_immediate_transaction(db)
+            task = db.scalar(select(VocabularyObservation).where(VocabularyObservation.run_id == identity)
+                .with_for_update().execution_options(populate_existing=True))
+            if task and task.state == "pending":
+                task.attempt_count += 1; task.error_code = code
+                if task.attempt_count >= 3:
+                    task.state = "failed"
+        return True
+
+
+def main():
+    parser = argparse.ArgumentParser(); parser.add_argument("--once", action="store_true")
+    args = parser.parse_args()
+    from .database import engine
+    if os.getenv("SEMANTIC_CATALOG_COLLECTION_ENABLED", "0") != "1":
+        return
+    from .migrations.runner import MIGRATIONS
+    from sqlalchemy import text
+    with engine.connect() as connection:
+        if connection.scalar(text("SELECT MAX(version) FROM schema_migrations")) != max(m.version for m in MIGRATIONS):
+            raise RuntimeError("semantic catalog worker schema is not ready")
+    while True:
+        worked = tick(engine)
+        if args.once:
+            break
+        if not worked:
+            time.sleep(2)
+
+
+if __name__ == "__main__":
+    main()
 
 ===== backend/app/migrations/semantic_catalog_139.py =====
 """Add vocabulary management without modifying any frozen result or workflow."""

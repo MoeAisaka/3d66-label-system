@@ -1,15 +1,16 @@
 diff --git a/PROJECT_STATUS.md b/PROJECT_STATUS.md
-index 083b016..41a75f9 100644
+index 083b016..1f38c73 100644
 --- a/PROJECT_STATUS.md
 +++ b/PROJECT_STATUS.md
-@@ -1,4 +1,40 @@
+@@ -1,4 +1,41 @@
 -# 2026-10-22 · 生图134隔离验证通过，通用导出135实施中
 +# 2026-10-23 · 标准词表与旧字段映射候选139（未部署）
 +
 +- 新增按类目／字段／语言隔离的标准词表、稳定词条编号、别名冲突检查、停用恢复及旧字段／旧值映射；词表内容按修订冻结，修改不影响旧机制。管理员和产研维护，其他员工只读。
-+- CSV／JSON整批导入先验证、逐行查看旧值与新值，再明确确认；失败不部分写入。历史恢复先看差异并追加修订。自动收录已接成功知识图谱结果，幂等回执避免重复，不覆盖人工词和停用状态；开关默认关闭，未在生产启用。
++- CSV／JSON整批导入先验证、逐行查看旧值与新值，再明确确认；失败不部分写入。历史恢复包括整理状态差异并追加修订。原生收尾仅登记幂等收录任务，独立后台写词表；失败三次后可单独重试，不覆盖人工词和停用状态，也不回滚原结果；开关默认关闭，未在生产启用。
 +- 当前专项及MySQL迁移入口门禁9项、SQLite全量迁移重复执行1项、CSV输入检查通过；受影响原生收尾28项通过。前端构建通过，真实Chrome合成资料完成分页、修改、恢复和整批导入；2560／1280／390无横向溢出，控制台错误为空。尚待固定候选复审、真实MySQL与Linux隔离验证，不宣称上线。
 +- 已重新读取嘉欣确认稿和杨韬TPWL21395所引0817／0818文档。知识图谱85没有正式增量绑定与专属接入登记，实际接口资料待补；最新实验504的400条中26条存在输出与冻结路线约束不符，未放宽校验、改动提示词或付费重跑。搜索纠错示例方向有矛盾，已向用户异步确认；三模型仍搁置。
++- 首候选c1e9da7已Codeup及85 prepare，821文件、同归档137的52项Linux通过；Gemini一轮集中复审后主控修正临时编号引用、整理状态恢复及收录事务隔离，41项与最后两项路由／隔离检查通过，CSV／构建和实际Chrome状态恢复通过。Poe需15159点，现有10893点，未执行。修正版真实MySQL及同归档验证待补；首探针误将根词表也要求外键，已修探针，未当作应用缺陷。
 +
 +# 2026-10-22 · 贴图存量审核实施中（未部署）
 +
@@ -44,7 +45,7 @@ index 083b016..41a75f9 100644
  
  - 生图固定候选1ca1beeb已推Codeup，85仅prepare、同归档137隔离Linux184项通过。MySQL133→134、重复迁移、原账号保留、worker互斥、暂停/继续及人工图优先通过。未覆盖137主实例，未启动生产生图，纯文字仍待205现有运维入口恢复；400张真实大图容量尚未验。
  - 通用结果导出已接普通回归及生图页面，固定结果快照，支持Excel/JSON/图片ZIP、全分页筛选、30天文件与原版本重建、后台恢复及磁盘保护；本地核心/真实Cookie/前端检查通过，135真实MySQL、页面及Poe/Gemini复审待补。当前生产仍为下述MCP9ad/schema133，不能把135代码称为已上线。
-@@ -23,7 +59,7 @@
+@@ -23,7 +60,7 @@
  # 2026-10-22 · 分析模型已切换为 6.1sol（配置热更新）
  
  - 137、85 分析配置及关联注册项已同步切换；85 现有网关真实结构化调用成功，optimization 容器独立读回一致。137 未配置分析凭据，未复制凭据。未改增量开关、主评测模型或历史结果。
@@ -75,10 +76,10 @@ index 4b75565..6eaffa0 100644
          return _normalize_design_case_workflow_input(value)
      if truth_contract_key == DESIGN_CASE_DIMENSION_TRUTH_CONTRACT:
 diff --git a/backend/app/employee_access.py b/backend/app/employee_access.py
-index 3a79289..6dbfa79 100644
+index 3a79289..27fb53a 100644
 --- a/backend/app/employee_access.py
 +++ b/backend/app/employee_access.py
-@@ -27,12 +27,19 @@ def _allow(method: str, paths: list[str], permission: str, resolver: str) -> Non
+@@ -27,12 +27,20 @@ def _allow(method: str, paths: list[str], permission: str, resolver: str) -> Non
  
  _allow("PUT", ["/api/me/preferences"], "preferences:write", "self")
  _allow("POST", ["/api/me/mcp/rotate"], "preferences:write", "self")
@@ -86,6 +87,7 @@ index 3a79289..6dbfa79 100644
 +    "/api/semantic-vocabularies/{vocabulary_id}/mappings", "/api/semantic-vocabularies/{vocabulary_id}/imports/preview",
 +    "/api/semantic-vocabulary-imports/{batch_id}/confirm", "/api/semantic-vocabulary-history/{history_id}/restore"], "drafts:write", "read")
 +_allow("POST", ["/api/semantic-vocabularies/{vocabulary_id}/snapshot"], "results:export", "read")
++_allow("POST", ["/api/semantic-vocabulary-collection/{run_id}/retry"], "drafts:write", "read")
  _allow("DELETE", ["/api/me/mcp"], "preferences:write", "self")
  _allow("POST", ["/api/auth/password"], "preferences:write", "self")
  _allow("POST", ["/api/published-labels/export", "/api/sample-sets/{sample_set_id}/export",
@@ -98,7 +100,7 @@ index 3a79289..6dbfa79 100644
  _allow("PUT", ["/api/incremental-corrections/batch/level"], "reviews:write", "evaluation_batch")
  _allow("POST", ["/api/evaluation-results/{evaluation_id}/correct-node", "/api/evaluations/{evaluation_id}/review",
      "/api/evaluations/{evaluation_id}/review-panel/open", "/api/evaluations/{evaluation_id}/review-panel/reopen",
-@@ -40,6 +47,17 @@ _allow("POST", ["/api/evaluation-results/{evaluation_id}/correct-node", "/api/ev
+@@ -40,6 +48,17 @@ _allow("POST", ["/api/evaluation-results/{evaluation_id}/correct-node", "/api/ev
  _allow("POST", ["/api/baseline-sets/{baseline_set_id}/items/{item_id}/truth"], "reviews:write", "baseline_set_item")
  _allow("POST", ["/api/baseline-sets/{baseline_set_id}/runs"], "regressions:run", "baseline_set")
  _allow("POST", ["/api/baseline-sets/{baseline_set_id}/cover-regressions"], "reviews:write", "baseline_set")
@@ -116,7 +118,7 @@ index 3a79289..6dbfa79 100644
  _allow("POST", ["/api/cover-regressions/{run_id}/control/{action}"], "reviews:write", "cover_run")
  _allow("POST", ["/api/cover-regressions/{run_id}/items/{item_id}/review",
      "/api/cover-regressions/{run_id}/items/{item_id}/regenerate",
-@@ -128,6 +146,14 @@ def _asset_categories(db: Session, ids: list[int]) -> set[str | None]:
+@@ -128,6 +147,14 @@ def _asset_categories(db: Session, ids: list[int]) -> set[str | None]:
      return {r.category_key for r in rows}
  
  
@@ -131,7 +133,7 @@ index 3a79289..6dbfa79 100644
  def _evaluation(db: Session, identity) -> set[str | None]:
      row = _row(db, m.EvaluationResult, identity)
      categories = {_row(db, m.Asset, row.asset_id).category_key}
-@@ -137,7 +163,79 @@ def _evaluation(db: Session, identity) -> set[str | None]:
+@@ -137,7 +164,79 @@ def _evaluation(db: Session, identity) -> set[str | None]:
  
  
  def object_categories(db: Session, resolver: str, params: dict, body: dict) -> set[str | None]:
@@ -1614,10 +1616,10 @@ index 0000000..dfbebac
 +        time.sleep(.1 if busy else 2)
 diff --git a/backend/app/semantic_catalog.py b/backend/app/semantic_catalog.py
 new file mode 100644
-index 0000000..0115780
+index 0000000..59241bf
 --- /dev/null
 +++ b/backend/app/semantic_catalog.py
-@@ -0,0 +1,477 @@
+@@ -0,0 +1,533 @@
 +"""Versioned label vocabulary. No model, runtime publication or downstream IO."""
 +from __future__ import annotations
 +
@@ -1739,11 +1741,15 @@ index 0000000..0115780
 +
 +
 +class VocabularyObservation(Base):
-+    """One receipt per successful run; retries cannot re-collect or re-count it."""
++    """Durable collection outbox and receipt, isolated from evaluation finalization."""
 +    __tablename__ = "semantic_vocabulary_observations"
 +    run_id: Mapped[int] = mapped_column(ForeignKey("production_runs.id", ondelete="RESTRICT"), primary_key=True)
 +    result_hash: Mapped[str] = mapped_column(String(64))
-+    term_ids_json: Mapped[str] = mapped_column(Text)
++    term_ids_json: Mapped[str] = mapped_column(Text, default="[]")
++    payload_json: Mapped[str] = mapped_column(Text, default="{}")
++    state: Mapped[str] = mapped_column(String(20), default="pending", index=True)
++    attempt_count: Mapped[int] = mapped_column(Integer, default=0)
++    error_code: Mapped[str] = mapped_column(String(100), default="")
 +    created_at: Mapped[str] = mapped_column(String(40), default=now)
 +
 +
@@ -1863,7 +1869,10 @@ index 0000000..0115780
 +    else:
 +        row.revision += 1
 +    row.canonical_term = name; row.aliases_json = canonical(aliases); row.status = status
-+    row.curation_status = "unreviewed" if source else "confirmed"
++    curation = "unreviewed" if source else (payload.get("curation_status") or "confirmed")
++    if curation not in {"unreviewed", "confirmed"}:
++        raise CatalogError("curation_invalid", "整理状态无效")
++    row.curation_status = curation
 +    row.note = note; row.updated_by = actor; row.updated_at = now()
 +    db.flush()
 +    old_keys = db.scalars(select(VocabularyKey).where(VocabularyKey.term_id == row.id)).all()
@@ -1960,9 +1969,11 @@ index 0000000..0115780
 +    vocabulary(db, history.vocabulary_id, lock=True)
 +    model = VocabularyTerm if history.object_kind == "term" else LegacyTagMapping
 +    row = db.scalar(select(model).where(model.id == history.object_id).with_for_update().execution_options(populate_existing=True))
++    if row is None:
++        raise CatalogError("not_found", "历史对应的对象不存在")
 +    current = term_payload(row) if history.object_kind == "term" else mapping_payload(row)
 +    previous = json.loads(history.snapshot_json)
-+    keys = set(current) - {"id", "vocabulary_id", "revision", "updated_by", "updated_at", "source", "curation_status"}
++    keys = set(current) - {"id", "vocabulary_id", "revision", "updated_by", "updated_at", "source"}
 +    changes = {k: {"before": current[k], "after": previous[k]} for k in sorted(keys) if current[k] != previous[k]}
 +    return {"history_id": history.id, "vocabulary_id": history.vocabulary_id, "object_kind": history.object_kind,
 +            "object_id": history.object_id, "expected_revision": row.revision, "changes": changes,
@@ -1981,6 +1992,15 @@ index 0000000..0115780
 +
 +def _import_rows(db, catalog, rows, *, actor, changes=None):
 +    errors = []
++    # Preview INSERT ids are not durable (MySQL AUTO_INCREMENT is not rolled
++    # back). All edit/target references must exist before this batch starts.
++    term_ids = {r.get("id") for r in rows if isinstance(r, dict) and r.get("kind", "term") == "term" and r.get("id")}
++    term_ids |= {r.get("target_term_id") for r in rows if isinstance(r, dict) and r.get("target_term_id")}
++    persistent_terms = set(db.scalars(select(VocabularyTerm.id).where(VocabularyTerm.vocabulary_id == catalog.id,
++        VocabularyTerm.id.in_(term_ids)).order_by(VocabularyTerm.id).with_for_update()))
++    mapping_ids = {r.get("id") for r in rows if isinstance(r, dict) and r.get("kind") == "mapping" and r.get("id")}
++    persistent_mappings = set(db.scalars(select(LegacyTagMapping.id).where(LegacyTagMapping.vocabulary_id == catalog.id,
++        LegacyTagMapping.id.in_(mapping_ids)).order_by(LegacyTagMapping.id).with_for_update()))
 +    for index, row in enumerate(rows, 1):
 +        try:
 +            with db.begin_nested():
@@ -1989,13 +2009,24 @@ index 0000000..0115780
 +                kind = row.get("kind", "term")
 +                if kind not in {"term", "mapping"}:
 +                    raise CatalogError("kind_invalid", "类型只能为词条或映射")
++                allowed = ({"canonical_term", "aliases", "curation_status"} if kind == "term" else
++                    {"source_system", "source_field", "source_value", "target_term_id"}) | {"kind", "id", "expected_revision", "status", "note"}
++                if set(row) - allowed:
++                    raise CatalogError("row_fields_invalid", "行中含其他类型的字段，请核对词条／映射类型和表头")
++                if row.get("id") and row["id"] not in (persistent_terms if kind == "term" else persistent_mappings):
++                    raise CatalogError("import_reference_invalid", "只能修改导入前已存在的编号")
++                if kind == "mapping" and row.get("target_term_id") and row["target_term_id"] not in persistent_terms:
++                    raise CatalogError("import_reference_invalid", "目标必须是导入前已存在的标准词编号；先导入词条，再建立映射")
 +                operation = save_term if kind == "term" else save_mapping
 +                model = VocabularyTerm if kind == "term" else LegacyTagMapping
 +                serializer = term_payload if kind == "term" else mapping_payload
 +                previous = db.scalar(select(model).where(model.id == row.get("id")).with_for_update()
 +                    .execution_options(populate_existing=True)) if row.get("id") else None
 +                before = serializer(previous) if previous and previous.vocabulary_id == catalog.id else None
-+                saved = operation(db, catalog.id, row, actor=actor, action="import")
++                supplied = {key: value for key, value in row.items() if key != "curation_status" or value is not None}
++                # Omitted columns preserve the current field. An explicit [] or
++                # nullable mapping value still means the operator chose to clear.
++                saved = operation(db, catalog.id, (before or {}) | supplied, actor=actor, action="import")
 +                if changes is not None:
 +                    after = serializer(saved)
 +                    if not row.get("id"):
@@ -2048,40 +2079,61 @@ index 0000000..0115780
 +    return batch
 +
 +
-+def collect_run_terms(db, run, manifest, output):
-+    """Collect already validated labels, never change existing terms or a rule.
-+
-+    Called under the native run's existing lock. Catalog locks are acquired in
-+    field order; management never locks a production run after a catalog.
-+    """
++def enqueue_run_terms(db, run, manifest, output, *, executed_outputs=None):
++    """Only append an outbox row under the existing run lock; no catalog locks."""
 +    from .knowledge_graph_contracts import KNOWLEDGE_GRAPH_SEMANTIC_FIELDS
 +    if run.category_key != "knowledge_graph" or run.model_execution_mode != "real":
 +        return None
-+    existing = db.scalar(select(VocabularyObservation).where(VocabularyObservation.run_id == run.id).with_for_update())
++    existing = db.get(VocabularyObservation, run.id)
 +    if existing:
 +        return existing
-+    site = None
++    executed_nodes = {key for key, result in executed_outputs.items() if result.get("status") == "succeeded"} if executed_outputs is not None else None
++    sites = set()
 +    for node in manifest.get("nodes", []):
 +        if node.get("kind") == "prompt":
++            if executed_nodes is not None and node.get("node_instance_id") not in executed_nodes:
++                continue
 +            snapshot = node.get("config", {}).get("output_contract_snapshot", {})
 +            if snapshot.get("site_scope") in {"domestic", "overseas"}:
-+                site = snapshot["site_scope"]; break
-+    if site is None:
++                sites.add(snapshot["site_scope"])
++    if len(sites) != 1:
 +        return None  # Never infer locale from a filename, free text or output.
++    site = next(iter(sites))
 +    fields = set(KNOWLEDGE_GRAPH_SEMANTIC_FIELDS) | {"view_angle", "ceiling", "spatial_structure", "physical_structural_features"}
++    payload = {"site": site, "category_key": run.category_key, "workflow_version_id": run.workflow_version_id,
++               "fields": {key: output[key] for key in sorted(fields) if isinstance(output.get(key), str)}}
++    receipt = VocabularyObservation(run_id=run.id, result_hash=digest(output), payload_json=canonical(payload),
++        term_ids_json="[]", state="pending", attempt_count=0, error_code="")
++    try:
++        with db.begin_nested():
++            db.add(receipt); db.flush()
++        return receipt
++    except IntegrityError:
++        receipt = db.scalar(select(VocabularyObservation).where(VocabularyObservation.run_id == run.id).with_for_update())
++        if receipt is None:
++            raise
++        return receipt
++
++
++def process_collection(db, receipt):
++    """Worker-only SQL transaction; failures cannot roll back the source fact."""
++    if receipt.state == "completed":
++        return receipt
++    payload = json.loads(receipt.payload_json)
 +    identifiers = []
-+    for field in sorted(fields):
-+        raw = output.get(field)
++    for field, raw in sorted(payload["fields"].items()):
 +        if not isinstance(raw, str) or not raw:
 +            continue
 +        values = []
 +        for part in re.split(r"[,，、;；]+", raw):
 +            value = re.sub(r"_0\.[0-9]+$", "", part.strip()) if field in {"object", "material"} else part.strip()
-+            if value and len(value) <= 200 and not any(unicodedata.category(c).startswith("C") for c in value):
++            empty = {"none", "null", "unknown", "not_applicable", "not_detected", "n/a", "无", "不适用", "无法判断", "未识别"}
++            if value and match_key(value) not in empty and len(value) <= 200 and not any(unicodedata.category(c).startswith("C") for c in value):
 +                values.append(value)
 +        if not values:
 +            continue
-+        catalog = create_vocabulary(db, category_key=run.category_key, field_path=field, locale="zh" if site == "domestic" else "en", name=field)
++        catalog = create_vocabulary(db, category_key=payload["category_key"], field_path=field,
++            locale="zh" if payload["site"] == "domestic" else "en", name=field)
 +        catalog = vocabulary(db, catalog.id, lock=True)
 +        for value in dict.fromkeys(values):
 +            key = db.scalar(select(VocabularyKey).where(VocabularyKey.vocabulary_id == catalog.id,
@@ -2090,21 +2142,28 @@ index 0000000..0115780
 +                identifiers.append(key.term_id)
 +                continue
 +            row = save_term(db, catalog.id, {"canonical_term": value}, actor="system:collection", action="collect",
-+                source={"kind": "workflow_output", "run_id": run.id, "workflow_version_id": run.workflow_version_id})
++                source={"kind": "workflow_output", "run_id": receipt.run_id, "workflow_version_id": payload["workflow_version_id"]})
 +            identifiers.append(row.id)
-+    receipt = VocabularyObservation(run_id=run.id, result_hash=digest(output), term_ids_json=canonical(sorted(set(identifiers))))
-+    db.add(receipt); db.flush()
++    receipt.term_ids_json = canonical(sorted(set(identifiers)))
++    receipt.state = "completed"; receipt.error_code = ""; db.flush()
 +    return receipt
++
++
++def collect_run_terms(db, run, manifest, output):
++    """Internal deterministic test/worker helper; runtime uses enqueue only."""
++    receipt = enqueue_run_terms(db, run, manifest, output)
++    return process_collection(db, receipt) if receipt is not None else None
 diff --git a/backend/app/semantic_catalog_api.py b/backend/app/semantic_catalog_api.py
 new file mode 100644
-index 0000000..029c204
+index 0000000..c517a77
 --- /dev/null
 +++ b/backend/app/semantic_catalog_api.py
-@@ -0,0 +1,180 @@
+@@ -0,0 +1,208 @@
 +"""Employee vocabulary maintenance. Not a publication or credential endpoint."""
 +from __future__ import annotations
 +
 +import json
++import os
 +from typing import Literal
 +
 +from fastapi import APIRouter, Depends, HTTPException, Query
@@ -2136,6 +2195,7 @@ index 0000000..029c204
 +    aliases: list[str] = Field(default_factory=list, max_length=100)
 +    status: Literal["active", "inactive"] = "active"
 +    note: str = Field(default="", max_length=4000)
++    curation_status: Literal["unreviewed", "confirmed"] = "confirmed"
 +
 +
 +class SaveMapping(Strict):
@@ -2161,6 +2221,7 @@ index 0000000..029c204
 +    target_term_id: int | None = Field(default=None, gt=0)
 +    status: Literal["active", "inactive"] = "active"
 +    note: str = Field(default="", max_length=4000)
++    curation_status: Literal["unreviewed", "confirmed"] | None = None
 +
 +
 +class PreviewImport(Strict):
@@ -2205,6 +2266,31 @@ index 0000000..029c204
 +                "row_count": len(json.loads(row.payload_json)), "errors": json.loads(row.errors_json),
 +                "changes": json.loads(row.changes_json),
 +                "expires_at": row.expires_at, "completed_at": row.completed_at}
++
++    @router.get("/api/semantic-vocabulary-collection")
++    def collection(user=Depends(current_user), db: Session = Depends(get_db)):
++        counts = dict(db.execute(select(s.VocabularyObservation.state, func.count())
++            .group_by(s.VocabularyObservation.state)).all())
++        failed = db.scalars(select(s.VocabularyObservation).where(s.VocabularyObservation.state == "failed")
++            .order_by(s.VocabularyObservation.run_id.desc()).limit(24)).all()
++        return {"enabled": os.getenv("SEMANTIC_CATALOG_COLLECTION_ENABLED", "0") == "1", "counts": counts,
++                "failed": [{"run_id": row.run_id, "attempt_count": row.attempt_count, "error_code": row.error_code} for row in failed]}
++
++    @router.post("/api/semantic-vocabulary-collection/{run_id}/retry")
++    def retry_collection(run_id: int, user=Depends(current_user), db: Session = Depends(get_db)):
++        writer(user)
++        def operation():
++            from .database import reserve_sqlite_immediate_transaction
++            reserve_sqlite_immediate_transaction(db)
++            row = db.scalar(select(s.VocabularyObservation).where(s.VocabularyObservation.run_id == run_id)
++                .with_for_update().execution_options(populate_existing=True))
++            if row is None:
++                raise s.CatalogError("not_found", "收录任务不存在")
++            if row.state != "failed":
++                raise s.CatalogError("state_conflict", "只对收录失败的任务重试")
++            row.state = "pending"; row.attempt_count = 0; row.error_code = ""
++            return {"run_id": row.run_id, "state": row.state}
++        return execute(db, operation)
 +
 +    @router.get("/api/semantic-vocabularies")
 +    def catalogs(category_key: str = "", user=Depends(current_user), db: Session = Depends(get_db)):
@@ -2257,7 +2343,7 @@ index 0000000..029c204
 +    @router.post("/api/semantic-vocabularies/{vocabulary_id}/imports/preview")
 +    def preview(vocabulary_id: int, body: PreviewImport, user=Depends(current_user), db: Session = Depends(get_db)):
 +        actor = writer(user)
-+        return execute(db, lambda: batch_summary(s.preview_import(db, vocabulary_id, [r.model_dump() for r in body.rows], actor=actor)))
++        return execute(db, lambda: batch_summary(s.preview_import(db, vocabulary_id, [r.model_dump(exclude_unset=True) for r in body.rows], actor=actor)))
 +
 +    @router.post("/api/semantic-vocabulary-imports/{batch_id}/confirm")
 +    def confirm(batch_id: str, body: Confirmation, user=Depends(current_user), db: Session = Depends(get_db)):
@@ -2281,6 +2367,84 @@ index 0000000..029c204
 +        return execute(db, lambda: s.frozen_catalog(db, vocabulary_id))
 +
 +    return router
+diff --git a/backend/app/semantic_catalog_worker.py b/backend/app/semantic_catalog_worker.py
+new file mode 100644
+index 0000000..2b82873
+--- /dev/null
++++ b/backend/app/semantic_catalog_worker.py
+@@ -0,0 +1,72 @@
++"""Independent label collection. No model calls or production result changes."""
++from __future__ import annotations
++
++import argparse
++import logging
++import os
++import time
++
++from sqlalchemy import select
++from sqlalchemy.exc import SQLAlchemyError
++from sqlalchemy.orm import Session
++
++from .database import reserve_sqlite_immediate_transaction
++from .semantic_catalog import CatalogError, VocabularyObservation, process_collection
++
++logger = logging.getLogger(__name__)
++
++
++def tick(engine):
++    if os.getenv("SEMANTIC_CATALOG_COLLECTION_ENABLED", "0") != "1":
++        return False
++    identity = None
++    try:
++        with Session(engine) as db, db.begin():
++            reserve_sqlite_immediate_transaction(db)
++            task = db.scalar(select(VocabularyObservation).where(VocabularyObservation.state == "pending",
++                VocabularyObservation.attempt_count < 3).order_by(VocabularyObservation.run_id).limit(1)
++                .with_for_update(skip_locked=engine.dialect.name == "mysql"))
++            if task is None:
++                return False
++            identity = task.run_id
++            process_collection(db, task)
++        return True
++    except (CatalogError, SQLAlchemyError) as exc:
++        # A MySQL deadlock can roll back the whole transaction. Use a fresh
++        # transaction for retry bookkeeping, never continue a failed savepoint.
++        code = exc.code if isinstance(exc, CatalogError) else "database_error"
++        logger.warning("semantic catalog collection failed run=%s code=%s", identity, code)
++        if identity is None:
++            return False
++        with Session(engine) as db, db.begin():
++            reserve_sqlite_immediate_transaction(db)
++            task = db.scalar(select(VocabularyObservation).where(VocabularyObservation.run_id == identity)
++                .with_for_update().execution_options(populate_existing=True))
++            if task and task.state == "pending":
++                task.attempt_count += 1; task.error_code = code
++                if task.attempt_count >= 3:
++                    task.state = "failed"
++        return True
++
++
++def main():
++    parser = argparse.ArgumentParser(); parser.add_argument("--once", action="store_true")
++    args = parser.parse_args()
++    from .database import engine
++    if os.getenv("SEMANTIC_CATALOG_COLLECTION_ENABLED", "0") != "1":
++        return
++    from .migrations.runner import MIGRATIONS
++    from sqlalchemy import text
++    with engine.connect() as connection:
++        if connection.scalar(text("SELECT MAX(version) FROM schema_migrations")) != max(m.version for m in MIGRATIONS):
++            raise RuntimeError("semantic catalog worker schema is not ready")
++    while True:
++        worked = tick(engine)
++        if args.once:
++            break
++        if not worked:
++            time.sleep(2)
++
++
++if __name__ == "__main__":
++    main()
 diff --git a/backend/app/stock_export_api.py b/backend/app/stock_export_api.py
 index d5d83de..0ad0e7e 100644
 --- a/backend/app/stock_export_api.py
@@ -5331,19 +5495,19 @@ index 8767cc2..ee03c7d 100644
          return _factory_result_projection(context, mapping)
      if isinstance(mapping, Mapping) and mapping.get("schema_version") == "inspiration-factory-result-v1":
 diff --git a/backend/app/workflow_result_finalizer.py b/backend/app/workflow_result_finalizer.py
-index b9884ef..90b5804 100644
+index b9884ef..4750d9f 100644
 --- a/backend/app/workflow_result_finalizer.py
 +++ b/backend/app/workflow_result_finalizer.py
 @@ -1315,6 +1315,12 @@ def finalize_native_run(
      result_hash = hash_manifest(normalized_result)
      now = datetime.now(timezone.utc)
      _record_dictionary_misses(db, run, normalized_result, now=now)
-+    # Opt-in after schema139; never rewrites the result, existing vocabulary or
-+    # frozen dictionary rule. One receipt makes repeat finalization idempotent.
++    # Only enqueue under the run transaction. Catalog locks and retries belong
++    # to the independent worker, never the evaluation finalization transaction.
 +    import os
 +    if os.getenv("SEMANTIC_CATALOG_COLLECTION_ENABLED", "0") == "1":
-+        from .semantic_catalog import collect_run_terms
-+        collect_run_terms(db, run, manifest, normalized_result)
++        from .semantic_catalog import enqueue_run_terms
++        enqueue_run_terms(db, run, manifest, normalized_result, executed_outputs=node_outputs)
  
      job = db.scalar(
          select(EvaluationJob).where(EvaluationJob.production_run_id == run.id)
@@ -7814,10 +7978,10 @@ index 0000000..e1f3613
 +    with pytest.raises(SafetyError, match='provider_error_unknown'): interpret({'Code': []}, DEFAULT_RULES)
 diff --git a/backend/tests/test_semantic_catalog.py b/backend/tests/test_semantic_catalog.py
 new file mode 100644
-index 0000000..b76de39
+index 0000000..5d7bcb4
 --- /dev/null
 +++ b/backend/tests/test_semantic_catalog.py
-@@ -0,0 +1,181 @@
+@@ -0,0 +1,260 @@
 +import json
 +
 +import pytest
@@ -7999,6 +8163,85 @@ index 0000000..b76de39
 +        "expected_revision": current["revision"], "canonical_term": "整批改名"}]}).json()
 +    assert edited["changes"][0]["before"]["canonical_term"] == current["canonical_term"]
 +    assert edited["changes"][0]["after"]["canonical_term"] == "整批改名"
++
++
++def test_import_rejects_transient_ids_for_edits_and_mapping_targets(database):
++    db = database; vocab = catalog(db)
++    batch = s.preview_import(db, vocab.id, [{"canonical_term": "临时新词"},
++        {"kind": "mapping", "source_system": "old", "source_field": "style", "source_value": "旧值", "target_term_id": 1},
++        {"id": 1, "expected_revision": 1, "canonical_term": "不能猜测临时编号"}], actor="user:1")
++    assert batch.state == "invalid"
++    assert [r["row"] for r in json.loads(batch.errors_json)] == [2, 3]
++    assert db.scalar(select(func.count(s.VocabularyTerm.id))) == 0
++
++
++def test_restoration_preserves_original_curation_state_in_diff_and_new_revision(database):
++    db = database; vocab = catalog(db)
++    row = s.save_term(db, vocab.id, {"canonical_term": "待整理新词"}, actor="system:collection", source={"kind": "workflow_output"})
++    original = db.scalar(select(s.VocabularyHistory.id))
++    s.save_term(db, vocab.id, {"id": row.id, "expected_revision": 1, "canonical_term": "待整理新词"}, actor="user:1")
++    preview = s.history_preview(db, original)
++    assert preview["changes"]["curation_status"] == {"before": "confirmed", "after": "unreviewed"}
++    restored = s.restore_history(db, original, preview_hash=preview["preview_hash"], actor="user:1")
++    assert restored.curation_status == "unreviewed" and restored.revision == 3
++
++
++def test_collection_outbox_failure_cannot_rollback_source_and_has_finite_retries(database, monkeypatch):
++    from tests.test_workflow_result_finalizer import _seed_succeeded_native_run
++    from app.models import ProductionRun, ProductionStepAttempt
++    from app.semantic_catalog_worker import tick
++    db = database; _, _, run, _ = _seed_succeeded_native_run(db)
++    run.category_key = "knowledge_graph"; run.model_execution_mode = "real"
++    manifest = {"nodes": [{"kind": "prompt", "config": {"output_contract_snapshot": {"site_scope": "domestic"}}}]}
++    task = s.enqueue_run_terms(db, run, manifest, {"style": "新风格"}); identity = run.id
++    db.commit(); count = db.scalar(select(func.count(ProductionStepAttempt.id))); db.commit()
++    assert task.state == "pending" and db.scalar(select(func.count(s.VocabularyTerm.id))) == 0
++    db.commit()
++    monkeypatch.setenv("SEMANTIC_CATALOG_COLLECTION_ENABLED", "1")
++    original = s.save_term
++    def fail(*a, **kw): raise s.CatalogError("fixture_lock_failure", "合成收录错误")
++    monkeypatch.setattr(s, "save_term", fail)
++    for _ in range(3): assert tick(db.get_bind())
++    assert not tick(db.get_bind())
++    db.expire_all()
++    assert db.get(ProductionRun, identity).status == "succeeded"
++    assert db.scalar(select(func.count(ProductionStepAttempt.id))) == count
++    assert db.get(s.VocabularyObservation, identity).state == "failed"
++    assert db.scalar(select(func.count(s.VocabularyTerm.id))) == 0
++    task = db.get(s.VocabularyObservation, identity); task.state = "pending"; task.attempt_count = 0; db.commit()
++    monkeypatch.setattr(s, "save_term", original)
++    assert tick(db.get_bind())
++    db.expire_all(); assert db.get(s.VocabularyObservation, identity).state == "completed"
++    assert db.scalar(select(func.count(s.VocabularyTerm.id))) == 1
++
++
++def test_collection_uses_executed_route_in_four_route_workflow(database):
++    from tests.test_workflow_result_finalizer import _seed_succeeded_native_run
++    db = database; _, _, run, _ = _seed_succeeded_native_run(db)
++    run.category_key = "knowledge_graph"; run.model_execution_mode = "real"
++    manifest = {"nodes": [{"node_instance_id": site, "kind": "prompt", "config": {"output_contract_snapshot": {"site_scope": site}}}
++        for site in ("domestic", "overseas")]}
++    output = {"style": "Modern", "color": "not_applicable"}
++    assert s.enqueue_run_terms(db, run, manifest, output) is None
++    task = s.enqueue_run_terms(db, run, manifest, output, executed_outputs={"domestic": {"status": "skipped"}, "overseas": {"status": "succeeded"}})
++    assert json.loads(task.payload_json)["site"] == "overseas"
++    s.process_collection(db, task)
++    vocab = db.scalar(select(s.Vocabulary))
++    assert vocab.locale == "en" and vocab.field_path == "style"
++    assert db.scalar(select(func.count(s.VocabularyTerm.id))) == 1
++
++
++def test_partial_import_does_not_erase_aliases_reenable_or_confirm_unreviewed_terms(database):
++    db = database; vocab = catalog(db)
++    row = s.save_term(db, vocab.id, {"canonical_term": "原词", "aliases": ["原别名"], "status": "inactive", "note": "原说明"},
++        actor="system:collection", source={"kind": "workflow_output"})
++    batch = s.preview_import(db, vocab.id, [{"id": row.id, "expected_revision": 1, "canonical_term": "只改名称"}], actor="user:1")
++    assert batch.state == "preview"
++    s.confirm_import(db, batch.id, payload_hash=batch.payload_hash, actor="user:1")
++    assert row.canonical_term == "只改名称" and json.loads(row.aliases_json) == ["原别名"]
++    assert row.status == "inactive" and row.curation_status == "unreviewed" and row.note == "原说明"
++    wrong = s.preview_import(db, vocab.id, [{"id": row.id, "expected_revision": 2, "source_system": "wrong-kind"}], actor="user:1")
++    assert wrong.state == "invalid" and json.loads(wrong.errors_json)[0]["code"] == "row_fields_invalid"
 diff --git a/backend/tests/test_stock_exports.py b/backend/tests/test_stock_exports.py
 index 7853201..fea8ff4 100644
 --- a/backend/tests/test_stock_exports.py
@@ -9451,10 +9694,10 @@ index 0000000..61ae9e7
 +安全审核锁文件 pip-audit 报告 52 条已知问题，位于 certifi 2026.7.22、Pillow 12.3.0、pypdf 6.16.2。逐项与 Ali SDK 之前的 8eb72fb 固定 Git 对象对比，这三项已存在；新增 SDK 依赖没有被本次扫描报告问题。该结果不代表全库无漏洞，旧依赖风险需单独处置和兼容性验证。原始证据 .diagnostics/safety-dependency-audit.json。
 diff --git a/docs/decisions/2026-10-23-semantic-catalog.md b/docs/decisions/2026-10-23-semantic-catalog.md
 new file mode 100644
-index 0000000..65ea2dd
+index 0000000..0e35793
 --- /dev/null
 +++ b/docs/decisions/2026-10-23-semantic-catalog.md
-@@ -0,0 +1,25 @@
+@@ -0,0 +1,29 @@
 +# 标准词表、别名与旧字段映射
 +
 +状态：按已确认 Q4 范围实施；未部署。
@@ -9467,7 +9710,11 @@ index 0000000..65ea2dd
 +
 +管理员与产研可维护，员工只读。写入必须携带当前修订号；历史为追加记录，恢复须先看差异，再确认生成新修订。冻结导出携带词表修订和内容摘要，供后续工作流显式引用；修改词表不改变旧运行。
 +
-+自动收录与运营整理分开：新词不设收录前审核，记录未整理及真实来源；已有人工标准词和停用状态不会被模型覆盖。自动收录的执行接线单列验证，未接线时不得宣称已自动运行。
++自动收录与运营整理分开：新词不设收录前审核，记录未整理及真实来源；已有人工标准词和停用状态不会被模型覆盖。原生收尾只登记待收录任务，独立后台事务写词表；收录失败不回滚评测结果，有限重试三次后显示需处理，可单独重试。四路流程按实际成功的提示词节点确定语言，跳过节点不能作为来源。`python -m app.semantic_catalog_worker` 为独立进程入口，先核对schema；`SEMANTIC_CATALOG_COLLECTION_ENABLED` 默认0，生产未启用，后续增量接入时须同时接线worker。
++
++导入引用的词条、映射和目标词编号必须在批次前已经存在，不能猜测预览中新分配的临时编号；MySQL预览回滚后的自增号允许有空档，不作为连续编号承诺。历史恢复包含整理状态差异，恢复原修订状态，不把“待整理”悄悄变成“已整理”。
++
++修改已有对象时，导入中未提供的列保留原值；显式空数组才清空别名，映射字段的显式null按可空定义清除。词条行不能混入映射列。只改名称不应意外清空别名、重新启用停用词或改变整理状态。
 +
 +## 实施顺序和检查
 +
@@ -9569,13 +9816,32 @@ index 0000000..f70bffb
 +- 真实MySQL135→136、同归档Linux、最终固定候选浏览器及发布接线仍待完成。Poe复审受账户额度阻塞。旧评分接口不宣称可接任意生图JSON；首个通用可执行适配为明确的stock-result-v1接收协议。
 diff --git a/docs/verification/2026-10-23-semantic-catalog-review.md b/docs/verification/2026-10-23-semantic-catalog-review.md
 new file mode 100644
-index 0000000..49a4a88
+index 0000000..95f9907
 --- /dev/null
 +++ b/docs/verification/2026-10-23-semantic-catalog-review.md
-@@ -0,0 +1,19 @@
+@@ -0,0 +1,38 @@
 +# 标准词表与映射139验证记录
 +
 +当前：本地候选，未部署，生产收录开关未启用；真实MySQL／Linux和第三方复审待补。
++
++## 首候选及集中复审
++
++首候选c1e9da7e03d3b3ee4ba31b5efa9a50c63904d51d已推Codeup。85先prepare镜像490de9a3，821文件；镜像归档SHA256为2998baf5edd4d4ff9d09df04ce74187c1be0195c62f31837aeb744c441412c39，同归档在137加载4439face，52项Linux隔离检查通过。没有切换生产服务或开收录开关。
++
++Gemini Argon一次集中复审：https://gemini.google.com/app/14f70483540dad57 。实际收到3段约110KB完整新模块／前端／测试及权限、集成上下文，明确不能访问GitHub，不冒称全库逐行复审。GitHub全库基线与累计补丁快照67b879939fb4cc7b151af82fba3333ca39475c5e。主控按反例处理如下：
++
++- 采纳：预览中新建词条的临时自增号不能作为同批次编辑或映射目标。导入前锁定实际存在的引用编号，未持久化编号逐行报错；MySQL自增空档本身不是身份错误，不承诺连续编号。
++- 采纳：历史恢复纳入整理状态差异，恢复原修订的待整理／已整理状态。原来源保持模型来源是溯源行为；人工修改人和历史已经单独记录，不采纳“来源丢失人工审计”的推断。
++- 采纳原生收尾不应被词表锁等待阻塞的风险。改为持久任务＋独立worker，失败事务不会回滚源运行，三次失败后列表提示并可重试。没有采用捕获所有SQL错误后继续原事务的建议：MySQL死锁可能回滚整个事务，不能靠保存点吞掉。新增四路成功节点语言选择，跳过节点不能决定词表语言。
++- 不采纳“真MySQL迁移必然KeyError”：migrate先导入7个模型，mysql_metadata动态复制Base.metadata，已包含新表；SQL门禁及实际建表取证与该推断相反。也不改用原始model.__table__绕过MySQL LONGTEXT转换。
++- 不采纳“完成批次过期后必定报错”：代码先判断completed再检查过期；要求原预览人确认是既定约束，不开放他人代确认。预览保存点回滚后状态未恢复的猜测已由现有修订和零行写入检查排除。
++- 防御性补充历史目标缺失的404；CSV别名类型逐行校验、类目初始选项与实际值一致。只读快照锁策略保持当前一致性实现，不盲目用既有RR旧快照替代；大规模冻结与收录吞吐另按真实规模验收。
++
++Poe Opus5.5最终复审未执行：本候选原始源码报价15159点，可用10893点，弹出升级提示已关闭，没有购买或改变订阅。会话https://poe.com/chat/aeg8x83bezxyjdyaq1 。后续只补该模型待执行的一轮，不再要求Gemini二次独立复审。
++
++复审修正本地41项通过，随后最后路由／收录失败隔离两项再验通过；CSV与构建通过。真实Chrome确认只改变整理状态也能显示差异并恢复为V3待整理，控制台错误为空。修正版固定提交及真实MySQL／Linux隔离证据待追加。
++
++主控另补导入未提供列的保留语义，避免局部改名清空别名、恢复启用或改变整理状态，并拒绝行类型与字段不符。此后12项词表专项通过；前端未改，复用上述浏览器和构建证据。SQLite全量迁移重复执行已在修正版再次通过。
 +
 +## 已核验范围
 +
@@ -9594,10 +9860,10 @@ index 0000000..49a4a88
 +嘉欣文档最新版服务未返回修订号，按本轮读取日期记录。杨韬0817文档的错别词示例与文字定义方向相反，等待确认；后续用户决定“停用可恢复”优先于旧0818文档中的删除设计。安全凭据、205纯文生图运维入口与Poe额度仍有待补项，不冒称整季交付完成。
 diff --git a/frontend/scripts/check-semantic-catalog-csv.ts b/frontend/scripts/check-semantic-catalog-csv.ts
 new file mode 100644
-index 0000000..afcffde
+index 0000000..5c7752c
 --- /dev/null
 +++ b/frontend/scripts/check-semantic-catalog-csv.ts
-@@ -0,0 +1,14 @@
+@@ -0,0 +1,15 @@
 +import assert from "node:assert/strict"
 +import { parseSemanticCatalogCsv as parse } from "../src/lib/semantic-catalog-csv.ts"
 +
@@ -9611,6 +9877,7 @@ index 0000000..afcffde
 +assert.throws(() => parse('canonical_term\n"不闭合'), /未闭合/)
 +assert.throws(() => parse('canonical_term\n"合法"坏尾巴'), /多余字符/)
 +assert.throws(() => parse('canonical_term\n坏"引号'), /引号位置/)
++assert.throws(() => parse('canonical_term,aliases\n风格,[123]'), /第2行别名/)
 +console.log('semantic catalog CSV: identifiers, quoted fields, aliases and malformed rows passed')
 diff --git a/frontend/src/App.tsx b/frontend/src/App.tsx
 index 32c9dbf..1c94779 100644
@@ -9906,10 +10173,10 @@ index 1f24144..093394b 100644
  const thinkingLabels: Record<string, string> = {
 diff --git a/frontend/src/lib/semantic-catalog-csv.ts b/frontend/src/lib/semantic-catalog-csv.ts
 new file mode 100644
-index 0000000..c412c43
+index 0000000..9bc2b6e
 --- /dev/null
 +++ b/frontend/src/lib/semantic-catalog-csv.ts
-@@ -0,0 +1,37 @@
+@@ -0,0 +1,41 @@
 +/** Excel UTF-8 CSV; numeric identifiers must never silently become a new row. */
 +export function parseSemanticCatalogCsv(value: string): Record<string, unknown>[] {
 +  const rows: string[][] = []; let row: string[] = [], field = "", quoted = false, closed = false
@@ -9942,7 +10209,11 @@ index 0000000..c412c43
 +        if (!/^\d+$/.test(r[n]) || !Number.isSafeInteger(number) || number <= 0) throw new Error(`第${i + 2}行的${h}必须是正整数`)
 +        return [h, number]
 +      }
-+      if (h === "aliases") return [h, r[n].trim().startsWith("[") ? JSON.parse(r[n]) : r[n].split("|").filter(Boolean)]
++      if (h === "aliases") {
++        const parsed: unknown = r[n].trim().startsWith("[") ? JSON.parse(r[n]) : r[n].split("|").filter(Boolean)
++        if (!Array.isArray(parsed) || parsed.some(item => typeof item !== "string")) throw new Error(`第${i + 2}行别名必须是文字数组`)
++        return [h, parsed]
++      }
 +      return [h, h === "source_value" && r[n] === "" ? null : r[n]]
 +    }))
 +  })
@@ -10142,10 +10413,10 @@ index 0000000..99ea60c
 +}
 diff --git a/frontend/src/pages/semantic-catalog-page.tsx b/frontend/src/pages/semantic-catalog-page.tsx
 new file mode 100644
-index 0000000..b958529
+index 0000000..4f036e6
 --- /dev/null
 +++ b/frontend/src/pages/semantic-catalog-page.tsx
-@@ -0,0 +1,130 @@
+@@ -0,0 +1,137 @@
 +import { useState } from "react"
 +import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 +import { toast } from "sonner"
@@ -10165,11 +10436,11 @@ index 0000000..b958529
 +type Kind = "terms" | "mappings" | "history"
 +const inputClass = "h-10 w-full min-w-0 rounded-xl border border-input bg-background px-3 text-sm"
 +const labels: Record<string, string> = { canonical_term: "标准词", aliases: "别名", status: "状态", note: "说明", source_system: "来源系统",
-+  source_field: "旧字段", source_value: "旧值", target_term_id: "标准词编号", active: "启用", inactive: "停用", edit: "修改", import: "导入", restore: "恢复" }
++  source_field: "旧字段", source_value: "旧值", target_term_id: "标准词编号", curation_status: "整理状态", unreviewed: "待整理", confirmed: "已整理", active: "启用", inactive: "停用", edit: "修改", import: "导入", restore: "恢复" }
 +const show = (v: unknown) => v == null ? "未指定" : typeof v === "string" ? (labels[v] || v) : JSON.stringify(v)
 +
 +function ImportChanges({ batch }: { batch: SemanticVocabularyImport }) {
-+  const hidden = new Set(["id", "vocabulary_id", "revision", "source", "curation_status", "updated_at", "updated_by"])
++  const hidden = new Set(["id", "vocabulary_id", "revision", "source", "updated_at", "updated_by"])
 +  return <div className="divide-y rounded-xl border px-4">{batch.changes.map(change => <details key={change.row} className="py-3">
 +    <summary className="cursor-pointer font-bold">第{change.row}行 · {change.before ? "修改" : "新增"} · {String(change.after.canonical_term || change.after.source_field)}</summary>
 +    <div className="mt-3 space-y-3 text-xs [overflow-wrap:anywhere]">{Object.entries(change.after).filter(([key, value]) => !hidden.has(key) && JSON.stringify(change.before?.[key]) !== JSON.stringify(value)).map(([key, value]) => <div key={key}><p className="font-bold">{labels[key] || key}</p>{change.before && <p className="mt-1 text-muted-foreground">原值：{show(change.before[key])}</p>}<p className="mt-1">新值：{show(value)}</p></div>)}</div>
@@ -10184,6 +10455,7 @@ index 0000000..b958529
 +  const [editing, setEditing] = useState<SemanticVocabularyTerm | SemanticLegacyMapping | null>(null)
 +  const [category, setCategory] = useState("knowledge_graph"); const [field, setField] = useState("style"); const [locale, setLocale] = useState("zh")
 +  const [name, setName] = useState(""); const [aliases, setAliases] = useState(""); const [note, setNote] = useState(""); const [enabled, setEnabled] = useState(true)
++  const [curation, setCuration] = useState("confirmed")
 +  const [system, setSystem] = useState(""); const [oldField, setOldField] = useState(""); const [oldValue, setOldValue] = useState(""); const [target, setTarget] = useState("")
 +  const [importText, setImportText] = useState(""); const [batch, setBatch] = useState<SemanticVocabularyImport | null>(null)
 +  const [restore, setRestore] = useState<SemanticRestorePreview | null>(null); const [confirmed, setConfirmed] = useState(false)
@@ -10198,15 +10470,17 @@ index 0000000..b958529
 +    onSuccess: () => refresh(), onError: (error: Error) => toast.error(error.message) })
 +  const post = <T,>(url: string, body?: unknown) => api<T>(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) })
 +  const writable = !!catalogs.data?.can_edit
++  const collection = useQuery({ queryKey: ["semantic-collection"], refetchInterval: 10000,
++    queryFn: () => api<{ enabled: boolean; counts: Record<string, number>; failed: { run_id: number; attempt_count: number; error_code: string }[] }>("/api/semantic-vocabulary-collection") })
 +  const open = (type: "term" | "mapping", item?: SemanticVocabularyTerm | SemanticLegacyMapping) => {
 +    setEditing(item || null); setDrawer(type); setNote(item?.note || ""); setEnabled(item?.status !== "inactive")
-+    if (type === "term") { const v = item as SemanticVocabularyTerm | undefined; setName(v?.canonical_term || ""); setAliases(v?.aliases.join("\n") || "") }
++    if (type === "term") { const v = item as SemanticVocabularyTerm | undefined; setName(v?.canonical_term || ""); setAliases(v?.aliases.join("\n") || ""); setCuration(v?.curation_status || "confirmed") }
 +    else { const v = item as SemanticLegacyMapping | undefined; setSystem(v?.source_system || ""); setOldField(v?.source_field || ""); setOldValue(v?.source_value || ""); setTarget(v?.target_term_id?.toString() || "") }
 +  }
 +  const save = () => action.mutate(async () => {
 +    const body = { ...(editing ? { id: editing.id, expected_revision: editing.revision } : {}), status: enabled ? "active" : "inactive", note }
 +    await post(drawer === "term" ? prefix + "/terms" : prefix + "/mappings", drawer === "term"
-+      ? { ...body, canonical_term: name, aliases: aliases.split("\n").map(v => v.trim()).filter(Boolean) }
++      ? { ...body, canonical_term: name, aliases: aliases.split("\n").map(v => v.trim()).filter(Boolean), curation_status: curation }
 +      : { ...body, source_system: system, source_field: oldField, source_value: oldValue || null, target_term_id: target ? Number(target) : null })
 +    setDrawer(null); toast.success("已保存新修订")
 +  })
@@ -10217,9 +10491,13 @@ index 0000000..b958529
 +  })
 +  return <>
 +    <PageHeader index="A" title="标准词与映射" description="维护标准词、别名和旧字段对应关系。已冻结的工作流与历史结果保持各自版本。"
-+      actions={writable && <Button onClick={() => { setDrawer("catalog"); setName("") }}>新建词表</Button>} />
++      actions={writable && <Button onClick={() => { setDrawer("catalog"); setName(""); setCategory(categories.data?.items.find(v => v.category_key === category && v.status === "active")?.category_key || categories.data?.items.find(v => v.status === "active")?.category_key || "") }}>新建词表</Button>} />
 +    <div className="shell-content mx-auto min-w-0 space-y-6 px-page py-7">
 +      {catalogs.error && <p role="alert">{catalogs.error.message}</p>}
++      <Card className="space-y-3 p-5"><p className="font-bold">新词自动收录 · {collection.data?.enabled ? "已开通" : "尚未启用"}</p><p className="text-sm text-muted-foreground">待收录 {collection.data?.counts.pending || 0} · 已收录 {collection.data?.counts.completed || 0} · 需处理 {collection.data?.counts.failed || 0}。收录失败可单独重试，原评测结果保留。</p>
++        {collection.error && <p role="alert">{collection.error.message}</p>}
++        {collection.data?.failed.map(row => <div key={row.run_id} className="flex flex-wrap items-center justify-between gap-2 border-t pt-3 text-sm"><span>运行 #{row.run_id} · 收录失败 {row.attempt_count} 次</span>{writable && <Button size="sm" variant="secondary" disabled={action.isPending} onClick={() => action.mutate(async () => { await post(`/api/semantic-vocabulary-collection/${row.run_id}/retry`); void client.invalidateQueries({ queryKey: ["semantic-collection"] }) })}>重试收录</Button>}</div>)}
++      </Card>
 +      <Card className="min-w-0 overflow-hidden p-5">
 +        <div className="flex flex-wrap items-end justify-between gap-4">
 +          <label className="min-w-0 flex-1 space-y-2 text-sm font-bold">词表<select aria-label="选择词表" className={inputClass} value={id} onChange={e => { setId(Number(e.target.value)); setOffset(0); setQ(""); setStatus("") }}>
@@ -10252,9 +10530,9 @@ index 0000000..b958529
 +          <label className="block space-y-2">字段路径<input className={inputClass} value={field} onChange={e => setField(e.target.value)} placeholder="例如 style" /></label>
 +          <label className="block space-y-2">语言<select className={inputClass} value={locale} onChange={e => setLocale(e.target.value)}><option value="zh">中文</option><option value="en">英文</option></select></label>
 +          <label className="block space-y-2">词表名称<input className={inputClass} value={name} onChange={e => setName(e.target.value)} /></label>
-+          <Button disabled={!name.trim() || action.isPending} onClick={() => action.mutate(async () => { const v = await post<SemanticVocabulary>("/api/semantic-vocabularies", { category_key: category, field_path: field, locale, name }); setId(v.id); setOffset(0); setDrawer(null) })}>创建词表</Button>
++          <Button disabled={!category || !name.trim() || action.isPending} onClick={() => action.mutate(async () => { const v = await post<SemanticVocabulary>("/api/semantic-vocabularies", { category_key: category, field_path: field, locale, name }); setId(v.id); setOffset(0); setDrawer(null) })}>创建词表</Button>
 +        </> : drawer === "term" || drawer === "mapping" ? <>
-+          {drawer === "term" ? <><label className="block space-y-2">标准词<input className={inputClass} value={name} onChange={e => setName(e.target.value)} /></label><label className="block space-y-2">别名（每行一个）<textarea className="visual-native-textarea min-h-36 w-full" value={aliases} onChange={e => setAliases(e.target.value)} /></label></> : <>
++          {drawer === "term" ? <><label className="block space-y-2">标准词<input className={inputClass} value={name} onChange={e => setName(e.target.value)} /></label><label className="block space-y-2">别名（每行一个）<textarea className="visual-native-textarea min-h-36 w-full" value={aliases} onChange={e => setAliases(e.target.value)} /></label><label className="block space-y-2">整理状态<select className={inputClass} value={curation} onChange={e => setCuration(e.target.value)}><option value="unreviewed">待整理</option><option value="confirmed">已整理</option></select></label></> : <>
 +            <label className="block space-y-2">来源系统<input className={inputClass} value={system} onChange={e => setSystem(e.target.value)} /></label><label className="block space-y-2">旧字段<input className={inputClass} value={oldField} onChange={e => setOldField(e.target.value)} /></label><label className="block space-y-2">旧值（留空表示整个字段）<input className={inputClass} value={oldValue} onChange={e => setOldValue(e.target.value)} /></label><label className="block space-y-2">标准词编号（仅字段映射可留空）<input className={inputClass} value={target} inputMode="numeric" onChange={e => setTarget(e.target.value)} /></label><p className="text-xs text-muted-foreground">目标字段固定为当前词表：{selected?.field_path}。先在标准词列表查到对应编号。</p>
 +          </>}
 +          <label className="block space-y-2">说明<textarea className="visual-native-textarea min-h-24 w-full" value={note} onChange={e => setNote(e.target.value)} /></label><label className="flex items-center gap-2"><input type="checkbox" checked={enabled} onChange={e => setEnabled(e.target.checked)} />启用</label>
