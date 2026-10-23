@@ -1,0 +1,942 @@
+===== backend/app/workflow_alerts.py =====
+"""Task-scoped observation journal. No production state changes or network IO.
+
+Lock order is observer state -> issue -> notification. Sending claims only a
+notification and never takes the observer/issue lock after that claim.
+"""
+from __future__ import annotations
+
+import json
+from datetime import datetime, timedelta, timezone
+
+from sqlalchemy import ForeignKey, Index, Integer, String, Text, UniqueConstraint, func, select
+from sqlalchemy.orm import Mapped, mapped_column
+
+from .database import Base, reserve_sqlite_immediate_transaction
+from .models import AuditEvent, EmployeeIdentity, ProductionRun, User, WorkflowDefinition
+from .workflow_inventory import InventoryObject, encoded
+
+
+def stamp(value=None):
+    value = value or datetime.now(timezone.utc)
+    if value.tzinfo is None: value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc).isoformat()
+
+
+class AlertCursor(Base):
+    __tablename__ = "workflow_alert_cursors"
+    key: Mapped[str] = mapped_column(String(30), primary_key=True)
+    workflow_id: Mapped[int] = mapped_column(Integer, default=0)
+    run_after: Mapped[int] = mapped_column(Integer, default=0)
+    run_ceiling: Mapped[int] = mapped_column(Integer, default=0)
+    issue_after: Mapped[int] = mapped_column(Integer, default=0)
+    observed_at: Mapped[str] = mapped_column(String(40), default="")
+
+
+class WorkflowAlert(Base):
+    __tablename__ = "workflow_alerts"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    run_id: Mapped[int] = mapped_column(ForeignKey("production_runs.id", ondelete="RESTRICT"), unique=True)
+    inventory_key: Mapped[str] = mapped_column(String(120), index=True)
+    workflow_name: Mapped[str] = mapped_column(String(200))
+    state: Mapped[str] = mapped_column(String(20), default="open", index=True)
+    episode: Mapped[int] = mapped_column(Integer, default=1)
+    owner: Mapped[str] = mapped_column(String(120), default="")
+    recipient_user_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    recipient_corp: Mapped[str] = mapped_column(String(100), default="")
+    recipient_employee: Mapped[str] = mapped_column(String(100), default="")
+    reminder_seconds: Mapped[int] = mapped_column(Integer, default=0)
+    notification_reason: Mapped[str] = mapped_column(String(80), default="")
+    error_code: Mapped[str] = mapped_column(String(80), default="")
+    run_status: Mapped[str] = mapped_column(String(30))
+    opened_at: Mapped[str] = mapped_column(String(40), default=stamp)
+    observed_at: Mapped[str] = mapped_column(String(40), default=stamp)
+    closed_at: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    close_reason: Mapped[str] = mapped_column(String(80), default="")
+
+
+class AlertEvent(Base):
+    __tablename__ = "workflow_alert_events"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    alert_id: Mapped[int] = mapped_column(ForeignKey("workflow_alerts.id", ondelete="RESTRICT"), index=True)
+    episode: Mapped[int] = mapped_column(Integer)
+    event: Mapped[str] = mapped_column(String(40))
+    evidence: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[str] = mapped_column(String(40), default=stamp)
+
+
+class AlertNotification(Base):
+    __tablename__ = "workflow_alert_notifications"
+    __table_args__ = (UniqueConstraint("alert_id", "episode", "ordinal", name="uq_alert_notification_intent"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    alert_id: Mapped[int] = mapped_column(ForeignKey("workflow_alerts.id", ondelete="RESTRICT"), index=True)
+    episode: Mapped[int] = mapped_column(Integer)
+    ordinal: Mapped[int] = mapped_column(Integer)
+    state: Mapped[str] = mapped_column(String(20), default="pending", index=True)
+    task_id: Mapped[str] = mapped_column(String(100), default="")
+    error_code: Mapped[str] = mapped_column(String(80), default="")
+    created_at: Mapped[str] = mapped_column(String(40), default=stamp)
+    updated_at: Mapped[str] = mapped_column(String(40), default=stamp)
+    claim_token: Mapped[str] = mapped_column(String(36), default="")
+
+
+DISCOVERY_INDEX = Index("ix_production_runs_alert_discovery", ProductionRun.workflow_definition_id,
+    ProductionRun.run_mode, ProductionRun.model_execution_mode, ProductionRun.status, ProductionRun.id)
+FAILURES = ("failed", "retryable")
+MODELS = (AlertCursor, WorkflowAlert, AlertEvent, AlertNotification)
+RUN_COLUMNS = (ProductionRun.id, ProductionRun.status, ProductionRun.error_code, ProductionRun.updated_at,
+               ProductionRun.run_mode, ProductionRun.model_execution_mode)
+
+
+def event(db, alert, name, evidence="", now=None):
+    db.add(AlertEvent(alert_id=alert.id, episode=alert.episode, event=name, evidence=evidence, created_at=stamp(now)))
+
+
+def _identity(db, user_id):
+    return db.execute(select(User.id, User.username, EmployeeIdentity.corp_id, EmployeeIdentity.employee_id)
+        .join(EmployeeIdentity, EmployeeIdentity.user_id == User.id)
+        .where(User.id == user_id, User.is_active.is_(True), EmployeeIdentity.status == "active",
+               EmployeeIdentity.verified_at.is_not(None))).first()
+
+
+def validate_policy(db, details):
+    user_id = details.get("notification_user_id", "")
+    if user_id and (not user_id.isascii() or not user_id.isdecimal() or len(user_id) > 18 or not _identity(db, int(user_id))):
+        return "提醒负责人须为已绑定有效钉钉身份的现有员工"
+    if details.get("reminder_seconds", "") not in ("", "0", "3600", "86400"):
+        return "提醒频率请选择仅一次、每小时或每天"
+    return None
+
+
+def _new(db, run, inventory, now):
+    payload = json.loads(inventory.payload_json); details = payload["details"]
+    user_id = details.get("notification_user_id", "")
+    identity = _identity(db, int(user_id)) if user_id.isascii() and user_id.isdecimal() and len(user_id) <= 18 else None
+    alert = WorkflowAlert(run_id=run.id, inventory_key=inventory.key, workflow_name=inventory.name,
+        owner=identity.username if identity else payload.get("owner", ""), run_status=run.status,
+        recipient_user_id=identity.id if identity else None, recipient_corp=identity.corp_id if identity else "",
+        recipient_employee=identity.employee_id if identity else "", notification_reason="" if identity else "owner_not_bound",
+        reminder_seconds=int(details.get("reminder_seconds") or 0), opened_at=stamp(now), observed_at=stamp(now),
+        error_code=run.error_code or "")
+    db.add(alert); db.flush(); event(db, alert, "opened", f"run:{run.id}", now)
+    return alert
+
+
+def _closed_reason(db, run):
+    if run.status == "succeeded": return "run_succeeded"
+    if run.status == "canceled": return "run_canceled"
+    from .failure_resolution_models import ManualFailureResolution
+    if db.scalar(select(ManualFailureResolution.id).where(ManualFailureResolution.production_run_id == run.id,
+                  ManualFailureResolution.status == "published").limit(1)):
+        return "manual_resolution_published"
+    if db.scalar(select(AuditEvent.id).where(AuditEvent.event_key == f"incremental-reassessment-settled:{run.id}").limit(1)):
+        return "reassessment_settled"
+    return ""
+
+
+def reconcile_one(db, alert, run, now=None):
+    alert.observed_at = stamp(now)
+    if run is None or run.run_mode != "incremental" or run.model_execution_mode != "real":
+        state, reason = "unknown", "runtime_unavailable"
+    else:
+        reason = _closed_reason(db, run)
+        state = "closed" if reason else "open" if run.status in FAILURES else "recovering"
+        alert.run_status = run.status; alert.error_code = run.error_code or ""
+    if alert.state != state:
+        if alert.state == "closed" and state == "open": alert.episode += 1
+        alert.state = state; alert.close_reason = reason
+        alert.closed_at = stamp(now) if state == "closed" else None
+        event(db, alert, state, reason or f"run:{alert.run_id}:{alert.run_status}", now)
+    if state != "open":
+        # A submitted message cannot be unsent here. Preserve its eventual receipt.
+        for notice in db.scalars(select(AlertNotification).where(AlertNotification.alert_id == alert.id,
+                AlertNotification.state == "pending").with_for_update()):
+            notice.state = "canceled"; notice.error_code = "issue_not_open"; notice.updated_at = stamp(now)
+    else:
+        _enqueue(db, alert, now)
+
+
+def _enqueue(db, alert, now=None):
+    if not alert.recipient_user_id: return
+    previous = db.scalar(select(AlertNotification).where(AlertNotification.alert_id == alert.id,
+        AlertNotification.episode == alert.episode).order_by(AlertNotification.ordinal.desc()).limit(1))
+    if previous:
+        # Unknown or rejected delivery needs explicit diagnosis, never automatic resend.
+        if previous.state == "canceled" and previous.error_code == "issue_not_open":
+            db.add(AlertNotification(alert_id=alert.id, episode=alert.episode, ordinal=previous.ordinal + 1,
+                created_at=stamp(now), updated_at=stamp(now)))
+            return
+        if previous.state != "accepted" or not alert.reminder_seconds: return
+        due = datetime.fromisoformat(previous.created_at) + timedelta(seconds=alert.reminder_seconds)
+        if stamp(now) < stamp(due): return
+    db.add(AlertNotification(alert_id=alert.id, episode=alert.episode, ordinal=previous.ordinal + 1 if previous else 1,
+        created_at=stamp(now), updated_at=stamp(now)))
+
+
+def observe(db, *, batch=100, now=None):
+    """One bounded discovery page and one bounded open-issue page; caller commits."""
+    batch = max(1, min(int(batch), 200)); reserve_sqlite_immediate_transaction(db)
+    cursor = db.scalar(select(AlertCursor).where(AlertCursor.key == "observer").with_for_update()
+                       .execution_options(populate_existing=True))
+    if cursor is None: raise RuntimeError("workflow alert migration is required")
+    # Freeze a high-water mark per flow. New arrivals cannot starve older runs
+    # whose terminal state changes after an earlier cursor passed them.
+    if not cursor.run_ceiling:
+        next_flow = db.execute(select(WorkflowDefinition.id, InventoryObject.key)
+            .join(InventoryObject, InventoryObject.platform_workflow_key == WorkflowDefinition.workflow_key)
+            .where(InventoryObject.status == "active", WorkflowDefinition.id > cursor.workflow_id)
+            .order_by(WorkflowDefinition.id).limit(1)).first()
+        if next_flow is None:
+            cursor.workflow_id = 0
+        else:
+            cursor.workflow_id = next_flow.id; cursor.run_after = 0
+            cursor.run_ceiling = db.scalar(select(func.max(ProductionRun.id)).where(
+                ProductionRun.workflow_definition_id == next_flow.id)) or 0
+    discovered = 0
+    if cursor.run_ceiling:
+        inventory = db.scalar(select(InventoryObject).join(WorkflowDefinition,
+            InventoryObject.platform_workflow_key == WorkflowDefinition.workflow_key)
+            .where(WorkflowDefinition.id == cursor.workflow_id, InventoryObject.status == "active"))
+        if inventory:
+            candidates = []
+            for status in FAILURES:
+                candidates.extend(db.execute(select(*RUN_COLUMNS).where(
+                    ProductionRun.workflow_definition_id == cursor.workflow_id, ProductionRun.run_mode == "incremental",
+                    ProductionRun.model_execution_mode == "real", ProductionRun.status == status,
+                    ProductionRun.id > cursor.run_after, ProductionRun.id <= cursor.run_ceiling)
+                    .order_by(ProductionRun.id).limit(batch)).all())
+            runs = sorted(candidates, key=lambda r: r.id)[:batch]
+            existing = {a.run_id: a for a in db.scalars(select(WorkflowAlert).where(
+                WorkflowAlert.run_id.in_([r.id for r in runs])).with_for_update())} if runs else {}
+            for run in runs:
+                alert = existing.get(run.id) or _new(db, run, inventory, now)
+                reconcile_one(db, alert, run, now); discovered += 1
+            if len(runs) == batch: cursor.run_after = runs[-1].id
+            else: cursor.run_ceiling = 0
+        else: cursor.run_ceiling = 0
+    # SessionLocal disables autoflush. Persist discovery intents before an issue
+    # can be revisited below, otherwise its first notification is queued twice.
+    db.flush()
+    alerts = list(db.scalars(select(WorkflowAlert).where(WorkflowAlert.state != "closed", WorkflowAlert.id > cursor.issue_after)
+        .order_by(WorkflowAlert.id).limit(batch).with_for_update()))
+    records = {r.id: r for r in db.execute(select(*RUN_COLUMNS).where(ProductionRun.id.in_([a.run_id for a in alerts])))} if alerts else {}
+    for alert in alerts: reconcile_one(db, alert, records.get(alert.run_id), now)
+    cursor.issue_after = alerts[-1].id if len(alerts) == batch else 0
+    cursor.observed_at = stamp(now); db.flush()
+    return {"discovered": discovered, "reconciled": len(alerts), "observed_at": cursor.observed_at}
+
+
+def public_alert(row):
+    return {k: getattr(row, k) for k in ("id", "run_id", "inventory_key", "workflow_name", "state", "episode", "owner",
+        "notification_reason", "error_code", "run_status", "opened_at", "observed_at", "closed_at", "close_reason")}
+
+===== backend/app/workflow_alert_notifications.py =====
+"""Durable single-recipient DingTalk submission; no network inside DB locks."""
+from __future__ import annotations
+
+import uuid
+from datetime import datetime, timedelta, timezone
+
+import httpx
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from .database import reserve_sqlite_immediate_transaction
+from .dingtalk_identity import DingTalkClient
+from .workflow_alerts import (AlertNotification, WorkflowAlert, ProductionRun, RUN_COLUMNS, FAILURES,
+                              _identity, _closed_reason, stamp)
+
+
+class RejectedNotice(Exception):
+    pass
+
+
+class UnknownNotice(Exception):
+    pass
+
+
+class DingTalkNotifier:
+    def __init__(self, settings, agent_id, *, transport=None):
+        if type(agent_id) is not int or agent_id <= 0: raise ValueError("DINGTALK_AGENT_ID is required")
+        self.identity = DingTalkClient(settings, transport=transport)
+        self.corp_id = settings.corp_id
+        self.agent_id = agent_id
+        self.transport = transport
+
+    def send(self, employee_id, text):
+        if not employee_id or len(employee_id) > 100 or any(c.isspace() or c == ',' for c in employee_id):
+            raise RejectedNotice("invalid_recipient")
+        # Access-token failure occurs before any message is submitted.
+        try: token = self.identity.app_token()
+        except Exception: raise RejectedNotice("dingtalk_auth_unavailable") from None
+        try:
+            with httpx.Client(transport=self.transport, timeout=8, follow_redirects=False) as client:
+                response = client.post("https://oapi.dingtalk.com/topapi/message/corpconversation/asyncsend_v2",
+                    params={"access_token": token}, json={"agent_id": self.agent_id, "userid_list": employee_id,
+                        "to_all_user": False, "msg": {"msgtype": "text", "text": {"content": text}}})
+            if response.status_code != 200: raise UnknownNotice("dingtalk_http_unknown")
+            data = response.json()
+            if not isinstance(data, dict) or type(data.get("errcode")) is not int:
+                raise UnknownNotice("dingtalk_response_unknown")
+            if data["errcode"] != 0: raise RejectedNotice("dingtalk_rejected")
+            task = data.get("task_id")
+            if isinstance(task, bool) or not isinstance(task, (int, str)) or not str(task).isdigit() or len(str(task)) > 100:
+                raise UnknownNotice("dingtalk_task_missing")
+            return str(task)
+        except (httpx.HTTPError, ValueError):
+            raise UnknownNotice("dingtalk_submission_unknown") from None
+
+
+def submit_one(engine, notifier, *, enabled=False, notify_since=None, now=None):
+    """Caller must explicitly enable sending and choose its historical cutoff.
+
+    Unknown sends remain blocked even after restart. Accepted means provider
+    task queued, not read or delivered. The sender preserves late receipts when
+    an observer closes an issue during the external request.
+    """
+    if not enabled or notify_since is None: return False
+    current = stamp(now); expired = stamp(datetime.fromisoformat(current) - timedelta(minutes=5))
+    with Session(engine) as db, db.begin():
+        reserve_sqlite_immediate_transaction(db)
+        # Discover without locks, then lock by primary key. A locking scan of
+        # the state index can deadlock with a receipt holding the primary row
+        # while updating that index, even at READ COMMITTED.
+        stale_id = db.scalar(select(AlertNotification.id).where(AlertNotification.state == "sending",
+            AlertNotification.updated_at <= expired).order_by(AlertNotification.id).limit(1))
+        stale = db.scalar(select(AlertNotification).where(AlertNotification.id == stale_id)
+            .with_for_update(skip_locked=engine.dialect.name == "mysql")) if stale_id is not None else None
+        if stale and (stale.state != "sending" or stale.updated_at > expired): stale = None
+        if stale:
+            stale.state = "unknown"; stale.error_code = "sender_interrupted"; stale.updated_at = current
+        notice = db.scalar(select(AlertNotification).where(AlertNotification.state == "pending")
+            .order_by(AlertNotification.id).limit(1).with_for_update(skip_locked=engine.dialect.name == "mysql"))
+        if notice is None: return bool(stale)
+        alert = db.get(WorkflowAlert, notice.alert_id)
+        run = db.execute(select(*RUN_COLUMNS).where(ProductionRun.id == alert.run_id)).first()
+        reason = ""
+        if (alert.state != "open" or alert.episode != notice.episode or run is None or run.status not in FAILURES
+                or run.run_mode != "incremental" or run.model_execution_mode != "real" or _closed_reason(db, run)):
+            reason = "issue_not_open"
+        elif stamp(run.updated_at) < stamp(notify_since): reason = "before_notification_cutoff"
+        identity = _identity(db, alert.recipient_user_id)
+        if not reason and (identity is None or identity.corp_id != alert.recipient_corp
+                or identity.employee_id != alert.recipient_employee or notifier.corp_id != alert.recipient_corp):
+            reason = "original_owner_unavailable"
+        if reason:
+            notice.state = "canceled" if reason in ("issue_not_open", "before_notification_cutoff") else "blocked"
+            notice.error_code = reason; notice.updated_at = current
+            return True
+        token = str(uuid.uuid4()); identity_id, recipient = notice.id, alert.recipient_employee
+        message = f"内容中台运行异常：{alert.workflow_name[:120]}，任务 #{alert.run_id}。请在流程登记与关系页的异常列表核查。"
+        notice.state = "sending"; notice.claim_token = token; notice.updated_at = current
+    try:
+        task_id, state, error = notifier.send(recipient, message), "accepted", ""
+    except RejectedNotice as exc:
+        task_id, state, error = "", "failed", str(exc)[:80]
+    except Exception:
+        # Never include provider text, URLs, credentials or stack traces.
+        task_id, state, error = "", "unknown", "submission_unknown"
+    with Session(engine) as db, db.begin():
+        reserve_sqlite_immediate_transaction(db)
+        row = db.scalar(select(AlertNotification).where(AlertNotification.id == identity_id).with_for_update())
+        if row.claim_token == token and row.state in ("sending", "unknown"):
+            row.task_id = task_id; row.state = state; row.error_code = error; row.updated_at = stamp(now)
+    return True
+
+===== backend/app/workflow_alert_worker.py =====
+"""Opt-in observer and sender. Disabled unless an operator configures deployment."""
+import argparse
+import logging
+import os
+import time
+from datetime import datetime
+
+from sqlalchemy import text
+from sqlalchemy.orm import Session
+
+from .workflow_alerts import observe
+from .workflow_alert_notifications import DingTalkNotifier, submit_one
+
+logger = logging.getLogger(__name__)
+
+
+def main():
+    parser = argparse.ArgumentParser(); parser.add_argument("--once", action="store_true")
+    args = parser.parse_args()
+    if os.getenv("WORKFLOW_ALERTS_OBSERVE_ENABLED") != "1": return
+    from .database import engine
+    from .migrations.runner import MIGRATIONS
+    with engine.connect() as connection:
+        if connection.scalar(text("SELECT MAX(version) FROM schema_migrations")) != max(m.version for m in MIGRATIONS):
+            raise RuntimeError("workflow alert schema is not ready")
+    notifier, since = None, None
+    if os.getenv("WORKFLOW_ALERTS_SEND_ENABLED") == "1":
+        from .dingtalk_identity import identity_settings
+        settings = identity_settings()
+        if not settings.enabled: raise RuntimeError("DingTalk application is not enabled")
+        since = datetime.fromisoformat(os.environ["WORKFLOW_ALERTS_NOTIFY_SINCE"])
+        if since.tzinfo is None: raise RuntimeError("notification cutoff requires timezone")
+        notifier = DingTalkNotifier(settings, int(os.environ["DINGTALK_AGENT_ID"]))
+    while True:
+        try:
+            with Session(engine) as db, db.begin(): observe(db)
+            if notifier: submit_one(engine, notifier, enabled=True, notify_since=since)
+        except Exception:
+            # Do not leak database URLs or notification credentials.
+            logger.error("workflow alert iteration failed; inspect platform records")
+            if args.once: raise RuntimeError("workflow alert iteration failed") from None
+        if args.once: break
+        time.sleep(5)
+
+
+if __name__ == "__main__": main()
+
+===== backend/app/migrations/workflow_alerts_142.py =====
+"""Add an independent observation journal; no business-run rewrites."""
+
+
+def migrate(connection):
+    from ..workflow_alerts import MODELS, AlertCursor, DISCOVERY_INDEX
+    metadata = MODELS[0].metadata
+    if connection.dialect.name == "mysql":
+        from .mysql_baseline import mysql_metadata
+        metadata = mysql_metadata()
+    for model in MODELS: metadata.tables[model.__tablename__].create(connection, checkfirst=True)
+    DISCOVERY_INDEX.create(connection, checkfirst=True)
+    table = metadata.tables[AlertCursor.__tablename__]
+    if not connection.execute(table.select().where(table.c.key == "observer")).first():
+        connection.execute(table.insert().values(key="observer", workflow_id=0, run_after=0, run_ceiling=0, issue_after=0))
+
+===== backend/tests/test_workflow_alerts.py =====
+import json
+from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
+
+import httpx
+import pytest
+from sqlalchemy import create_engine, func, select
+from sqlalchemy.orm import Session
+
+from app.database import Base
+from app.models import EmployeeIdentity, ProductionRun, User
+from app import workflow_alerts as a
+from app import workflow_inventory as w
+from app.workflow_alert_notifications import DingTalkNotifier, RejectedNotice, UnknownNotice, submit_one
+from tests.test_workflow_inventory import apply, obj, seed_runtime
+from tests.test_employee_access import context
+
+
+@pytest.fixture
+def fixture(tmp_path):
+    engine = create_engine("sqlite:///" + str(tmp_path / "alerts.db"))
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        db.add(w.InventoryState(key="catalog", revision=0)); db.add(a.AlertCursor(key="observer"))
+        for i in (1, 2):
+            db.add(User(id=i, username=f"owner-{i}", is_active=True))
+            db.add(EmployeeIdentity(user_id=i, corp_id="synthetic-corp", employee_id=f"synthetic-{i}",
+                union_id=f"synthetic-union-{i}", display_name=f"合成员工{i}", status="active", verified_at=datetime.now(timezone.utc)))
+        key, runs = seed_runtime(db); db.commit()
+    apply(engine, {"objects": [obj("flow", details={"platform_workflow_key": key, "notification_user_id": "1"})]})
+    yield engine, runs
+    engine.dispose()
+
+
+def observe(engine, **kw):
+    # Match application SessionLocal: queued intents are not auto-flushed by reads.
+    with Session(engine, autoflush=False) as db, db.begin(): return a.observe(db, **kw)
+
+
+def change(engine, run_id, status):
+    with Session(engine) as db, db.begin(): db.get(ProductionRun, run_id).status = status
+
+
+class FakeNotifier:
+    corp_id = "synthetic-corp"
+    def __init__(self, fn=None): self.calls = []; self.fn = fn
+    def send(self, recipient, message):
+        self.calls.append((recipient, message))
+        return self.fn() if self.fn else "123"
+
+
+SINCE = datetime(2000, 1, 1, tzinfo=timezone.utc)
+
+
+def test_repeat_observation_other_success_retry_recovery_and_reopen(fixture):
+    engine, runs = fixture
+    for _ in range(4): observe(engine)
+    with Session(engine) as db:
+        assert db.scalar(select(func.count()).select_from(a.WorkflowAlert)) == 1
+        assert db.scalar(select(func.count()).select_from(a.AlertNotification)) == 1
+        assert db.scalar(select(a.WorkflowAlert.state)) == "open"
+        assert db.scalar(select(a.WorkflowAlert.run_id)) == runs[0]
+    change(engine, runs[0], "queued"); observe(engine)
+    with Session(engine) as db:
+        assert db.scalar(select(a.WorkflowAlert.state)) == "recovering"
+        assert db.scalar(select(a.AlertNotification.state)) == "canceled"
+    change(engine, runs[0], "failed"); observe(engine)
+    with Session(engine) as db:
+        assert db.scalar(select(a.WorkflowAlert.state)) == "open"
+        assert db.scalar(select(func.count()).select_from(a.AlertNotification).where(a.AlertNotification.state == "pending")) == 1
+    change(engine, runs[0], "succeeded"); observe(engine)
+    with Session(engine) as db:
+        row = db.scalar(select(a.WorkflowAlert))
+        assert row.state == "closed" and row.close_reason == "run_succeeded" and row.closed_at
+        assert not db.scalar(select(a.AlertNotification.id).where(a.AlertNotification.state == "pending"))
+    change(engine, runs[0], "failed")
+    for _ in range(4): observe(engine)
+    with Session(engine) as db:
+        assert db.scalar(select(a.WorkflowAlert.episode)) == 2
+        assert db.scalar(select(func.count()).select_from(a.AlertEvent)) == 5
+
+
+def test_original_owner_frozen_and_delivery_outside_transaction(fixture):
+    engine, runs = fixture; observe(engine)
+    with Session(engine) as db, db.begin():
+        row = db.get(w.InventoryObject, "flow"); value = json.loads(row.payload_json)
+        value["details"]["notification_user_id"] = "2"; row.payload_json = w.encoded(value)
+    def close_during_send():
+        change(engine, runs[0], "succeeded"); observe(engine)
+        return "77"
+    notifier = FakeNotifier(close_during_send)
+    assert submit_one(engine, notifier, enabled=True, notify_since=SINCE)
+    assert notifier.calls[0][0] == "synthetic-1"
+    with Session(engine) as db:
+        assert db.scalar(select(a.WorkflowAlert.state)) == "closed"
+        notice = db.scalar(select(a.AlertNotification))
+        assert notice.state == "accepted" and notice.task_id == "77"
+    assert not submit_one(engine, notifier, enabled=True, notify_since=SINCE)
+
+
+def test_unknown_submission_never_automatically_retried(fixture):
+    engine, _ = fixture; observe(engine)
+    def lost(): raise TimeoutError("private provider detail must not leak")
+    notifier = FakeNotifier(lost)
+    assert not submit_one(engine, notifier)
+    assert not notifier.calls
+    submit_one(engine, notifier, enabled=True, notify_since=SINCE)
+    observe(engine)
+    assert not submit_one(engine, notifier, enabled=True, notify_since=SINCE)
+    assert len(notifier.calls) == 1
+    with Session(engine) as db:
+        notice = db.scalar(select(a.AlertNotification))
+        assert notice.state == "unknown" and notice.error_code == "submission_unknown"
+
+
+def test_original_identity_disabled_or_changed_is_not_redirected(fixture):
+    engine, _ = fixture; observe(engine)
+    with Session(engine) as db, db.begin():
+        db.scalar(select(EmployeeIdentity).where(EmployeeIdentity.user_id == 1)).employee_id = "another-person"
+    notifier = FakeNotifier(); submit_one(engine, notifier, enabled=True, notify_since=SINCE)
+    assert notifier.calls == []
+    with Session(engine) as db:
+        notice = db.scalar(select(a.AlertNotification))
+        assert notice.state == "blocked" and notice.error_code == "original_owner_unavailable"
+
+
+def test_reminder_frozen_interval_and_closed_stops_future_intents(fixture):
+    engine, runs = fixture; now = datetime.now(timezone.utc)
+    with Session(engine) as db, db.begin():
+        row = db.get(w.InventoryObject, "flow"); data = json.loads(row.payload_json)
+        data["details"]["reminder_seconds"] = "3600"; row.payload_json = w.encoded(data)
+    observe(engine, now=now)
+    notifier = FakeNotifier(); submit_one(engine, notifier, enabled=True, notify_since=SINCE, now=now)
+    observe(engine, now=now + timedelta(minutes=59))
+    with Session(engine) as db: assert db.scalar(select(func.count()).select_from(a.AlertNotification)) == 1
+    observe(engine, now=now + timedelta(hours=1))
+    with Session(engine) as db: assert db.scalar(select(func.count()).select_from(a.AlertNotification)) == 2
+    change(engine, runs[0], "succeeded"); observe(engine, now=now + timedelta(hours=2))
+    assert not submit_one(engine, notifier, enabled=True, notify_since=SINCE, now=now + timedelta(hours=2))
+
+
+def test_late_failure_below_cursor_is_discovered_next_cycle(fixture):
+    engine, runs = fixture
+    change(engine, runs[0], "running")
+    for _ in range(3): observe(engine, batch=1)
+    change(engine, runs[0], "failed")
+    for _ in range(4): observe(engine, batch=1)
+    with Session(engine) as db: assert db.scalar(select(a.WorkflowAlert.run_id)) == runs[0]
+
+
+@pytest.mark.parametrize("method,reason", [("manual", "manual_resolution_published"), ("reassessed", "reassessment_settled")])
+def test_explicit_material_resolution_closes_only_its_original_run(fixture, method, reason):
+    engine, runs = fixture; observe(engine)
+    with Session(engine) as db, db.begin():
+        if method == "manual":
+            from app.failure_resolution_models import ManualFailureResolution
+            db.add(ManualFailureResolution(idempotency_key="synthetic-resolution", production_run_id=runs[0], level="L1", score=90))
+        else:
+            from app.models import AuditEvent
+            db.add(AuditEvent(event_key=f"incremental-reassessment-settled:{runs[0]}", category="synthetic",
+                action="incremental_reassessment_settled", subject_type="production_run", subject_id=str(runs[0])))
+    observe(engine)
+    with Session(engine) as db:
+        alert = db.scalar(select(a.WorkflowAlert)); assert alert.state == "closed" and alert.close_reason == reason
+        # The observer must not rewrite the failed model execution as success.
+        assert db.get(ProductionRun, runs[0]).status == "failed"
+
+
+def test_cutoff_and_abandoned_sender_do_not_resend(fixture):
+    engine, _ = fixture; observe(engine)
+    notifier = FakeNotifier()
+    submit_one(engine, notifier, enabled=True, notify_since=datetime.now(timezone.utc) + timedelta(days=1))
+    assert notifier.calls == []
+    with Session(engine) as db, db.begin():
+        row = db.scalar(select(a.AlertNotification)); row.state = "sending"
+        row.updated_at = a.stamp(datetime.now(timezone.utc) - timedelta(hours=1))
+    submit_one(engine, notifier, enabled=True, notify_since=SINCE)
+    with Session(engine) as db: assert db.scalar(select(a.AlertNotification.state)) == "unknown"
+    assert notifier.calls == []
+
+
+def test_notification_transport_single_recipient_and_sanitized_failures():
+    settings = SimpleNamespace(corp_id="synthetic-corp")
+    seen = []
+    def send(req):
+        body = json.loads(req.content); seen.append(body)
+        assert req.url.path == "/topapi/message/corpconversation/asyncsend_v2"
+        return httpx.Response(200, json={"errcode": 0, "task_id": 44})
+    notifier = DingTalkNotifier(settings, 123, transport=httpx.MockTransport(send))
+    notifier.identity.app_token = lambda: "synthetic-noncredential"
+    assert notifier.send("synthetic-1", "合成内容") == "44"
+    assert seen[0]["to_all_user"] is False and "dept_id_list" not in seen[0]
+    with pytest.raises(RejectedNotice): notifier.send("one,two", "合成")
+    notifier.transport = httpx.MockTransport(lambda _r: httpx.Response(500, text="secret-provider-error"))
+    with pytest.raises(UnknownNotice, match="dingtalk_http_unknown"): notifier.send("synthetic-1", "合成")
+
+
+def test_fresh_maintenance_metadata_registers_management_tables_without_web_import():
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+    code = '''
+from app.migrations.mysql_baseline import mysql_metadata
+m = mysql_metadata()
+expected = ('semantic_vocabularies', 'search_candidate_master_brand_dictionary',
+            'workflow_inventory_objects', 'workflow_alerts', 'workflow_alert_notifications')
+assert all(name in m.tables for name in expected), sorted(set(expected) - set(m.tables))
+assert 'ix_production_runs_alert_discovery' in {i.name for i in m.tables['production_runs'].indexes}
+assert 'ix_production_runs_inventory_latest' in {i.name for i in m.tables['production_runs'].indexes}
+print('fresh maintenance metadata valid')
+'''
+    env = {**os.environ, "DATABASE_URL": "sqlite://", "DOTENV_DISABLE": "1", "PYTHONPATH": str(Path(__file__).resolve().parents[1])}
+    result = subprocess.run([sys.executable, "-X", "utf8", "-c", code], env=env, capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
+
+
+def test_alert_read_only_cookie_and_policy_permission(context):
+    sessions, login, _ = context
+    with sessions() as db:
+        db.add(a.AlertCursor(key="observer")); db.add(w.InventoryState(key="catalog", revision=0)); db.commit()
+    reader, _ = login("viewer", [])
+    assert reader.get("/api/workflow-inventory/alerts").status_code == 200
+    assert reader.get("/api/workflow-inventory/notification-owners").status_code == 403
+    with sessions() as db:
+        _, runs = seed_runtime(db)
+        for n in range(26):
+            # Synthetic extra runs retain a valid workflow/version reference.
+            original = db.get(ProductionRun, runs[0])
+            run = ProductionRun(run_key=f"pagination-alert-{n}", idempotency_key=f"pagination-alert-{n}",
+                workflow_definition_id=original.workflow_definition_id, workflow_version_id=original.workflow_version_id,
+                snapshot_hash="a" * 64, requested_by="test", owner="test", run_mode="incremental", model_execution_mode="real", status="failed")
+            db.add(run); db.flush()
+            alert = a.WorkflowAlert(run_id=run.id, inventory_key="synthetic", workflow_name="合成异常分页", run_status="failed")
+            db.add(alert); db.flush(); a.event(db, alert, "opened")
+            db.add(a.AlertNotification(alert_id=alert.id, episode=1, ordinal=1, state="accepted", task_id=str(100 + n)))
+        db.commit()
+    first = reader.get("/api/workflow-inventory/alerts").json()
+    assert first["total"] == 26 and len(first["items"]) == 24
+    assert first["items"][0]["notification"]["state"] == "accepted"
+    assert "recipient_employee" not in first["items"][0]
+    assert len(reader.get("/api/workflow-inventory/alerts?offset=24").json()["items"]) == 2
+    assert reader.get(f"/api/workflow-inventory/alerts/{first['items'][0]['id']}/history").json()["total"] == 1
+    editor, _ = login("product_rd", [])
+    assert editor.get("/api/workflow-inventory/notification-owners").status_code == 200
+    result = editor.post("/api/workflow-inventory/drafts", json={"title": "合成", "payload": {"objects": [obj("f", details={"notification_user_id": "99999"})]}})
+    assert result.status_code == 200
+    preview = editor.post(f"/api/workflow-inventory/drafts/{result.json()['id']}/preview", json={"expected_revision": 1})
+    assert "已绑定" in preview.json()["preview"]["errors"][0]["message"]
+    editor.cookies.clear()
+    assert editor.get("/api/workflow-inventory/alerts").status_code == 401
+
+===== frontend/src/components/workflow-alerts-panel.tsx =====
+import { useState } from "react"
+import { useQuery } from "@tanstack/react-query"
+import { api } from "@/lib/api"
+import { Button } from "@/components/ui/button"
+import { Card } from "@/components/ui/card"
+import { Pager } from "@/components/ui/pager"
+import { SecondaryDrawer } from "@/components/workspace-page"
+import type { InventoryObject } from "@/lib/types"
+
+const path = "/api/workflow-inventory"
+const input = "h-10 w-full min-w-0 rounded-xl border border-input bg-background px-3 text-sm"
+const labels: Record<string, string> = { open: "待处理", recovering: "处理中，等待恢复", unknown: "运行信息不可用", closed: "已关闭",
+  opened: "发现异常", pending: "待发送", sending: "正在提交", accepted: "钉钉已受理", failed: "提醒提交失败", blocked: "提醒受阻", canceled: "已停止提醒",
+  run_succeeded: "原任务执行成功", run_canceled: "原任务已取消", manual_resolution_published: "人工结论已发布", reassessment_settled: "重评替代结果已落地",
+  runtime_unavailable: "原任务暂不可核实", owner_not_bound: "未绑定通知负责人", original_owner_unavailable: "原负责人身份不可用",
+  issue_not_open: "异常已恢复或进入处理", before_notification_cutoff: "历史异常，仅在平台记录", sender_interrupted: "发送曾中断，需核查", submission_unknown: "提交结果未知，未自动重发" }
+const time = (v?: string | null) => v ? new Date(v).toLocaleString() : "—"
+type Page = { total: number; offset: number; limit: number; has_more: boolean }
+type Alert = { id: number; run_id: number; inventory_key: string; workflow_name: string; state: string; owner: string; error_code: string;
+  opened_at: string; observed_at: string; closed_at: string | null; close_reason: string; notification_reason: string;
+  notification: null | { state: string; error_code: string; updated_at: string } }
+
+export function WorkflowAlertsPanel() {
+  const [state, setState] = useState("open"), [offset, setOffset] = useState(0), [selected, setSelected] = useState<number | null>(null), [historyOffset, setHistoryOffset] = useState(0)
+  const result = useQuery({ queryKey: ["workflow-alerts", state, offset], refetchInterval: 30000,
+    queryFn: () => api<Page & { items: Alert[]; observed_at: string | null }>(`${path}/alerts?state=${state}&offset=${offset}`) })
+  const history = useQuery({ queryKey: ["workflow-alert-history", selected, historyOffset], enabled: selected !== null,
+    queryFn: () => api<Page & { items: { id: number; episode: number; event: string; evidence: string; created_at: string }[] }>(`${path}/alerts/${selected}/history?offset=${historyOffset}`) })
+  return <Card className="space-y-4 p-5">
+    <div className="flex flex-wrap items-center justify-between gap-3"><h2 className="font-editorial text-2xl font-bold">运行异常</h2><div className="flex gap-2">
+      <select aria-label="异常状态" className={`${input} w-48`} value={state} onChange={e => { setState(e.target.value); setOffset(0) }}>
+        <option value="">全部记录</option>{["open", "recovering", "unknown", "closed"].map(s => <option key={s} value={s}>{labels[s]}</option>)}
+      </select><Button variant="secondary" disabled={result.isFetching} onClick={() => void result.refetch()}>刷新异常</Button></div></div>
+    <p className="text-sm text-muted-foreground">仅核对已登记流程的真实增量任务失败及重试状态。未知部署不报为运行失败；其他任务成功不会关闭这条异常。观察器最近活动：{time(result.data?.observed_at)}。</p>
+    {result.isError && <p role="alert">{result.error.message}</p>}
+    <div className="overflow-x-auto rounded-xl border"><table className="w-full min-w-[780px] table-fixed text-sm"><thead className="bg-muted"><tr>
+      <th className="w-[24%] p-3 text-left">流程与任务</th><th className="w-[20%] p-3 text-left">处理情况</th><th className="w-[14%] p-3 text-left">原负责人</th><th className="w-[22%] p-3 text-left">钉钉提醒</th><th className="p-3 text-left">记录</th>
+    </tr></thead><tbody>{result.data?.items.map(row => <tr key={row.id} className="border-t align-top [overflow-wrap:anywhere]">
+      <td className="p-3"><p className="font-bold">{row.workflow_name}</p><p className="mt-1 text-xs text-muted-foreground">任务 #{row.run_id} · 异常 #{row.id}</p>{row.error_code && <p className="mt-1 text-xs">{row.error_code}</p>}</td>
+      <td className="p-3"><p>{labels[row.state] || row.state}</p>{row.close_reason && <p className="mt-1 text-xs">{labels[row.close_reason] || row.close_reason}</p>}</td>
+      <td className="p-3">{row.owner || "未登记"}</td><td className="p-3"><p>{row.notification ? (row.notification.state === "unknown" ? "提交结果未知" : labels[row.notification.state] || row.notification.state) : labels[row.notification_reason] || "尚无提醒"}</p>
+        {row.notification?.error_code && <p className="mt-1 text-xs text-muted-foreground">{labels[row.notification.error_code] || row.notification.error_code}</p>}
+        {row.notification?.state === "accepted" && <p className="mt-1 text-xs text-muted-foreground">仅表示已提交给钉钉，不代表员工已读。</p>}</td>
+      <td className="p-3"><p className="text-xs text-muted-foreground">发现 {time(row.opened_at)}</p><p className="mt-1 text-xs text-muted-foreground">核对 {time(row.observed_at)}</p>{row.closed_at && <p className="mt-1 text-xs text-muted-foreground">关闭 {time(row.closed_at)}</p>}
+        <Button size="sm" variant="ghost" className="mt-2" onClick={() => { setSelected(row.id); setHistoryOffset(0) }}>处理历史</Button></td>
+    </tr>)}</tbody></table>{result.data?.total === 0 && <p className="p-6 text-center text-muted-foreground">当前筛选下没有异常记录。</p>}</div>
+    <Pager page={result.data} fallbackLimit={24} onChange={setOffset} />
+    <SecondaryDrawer open={selected !== null} onOpenChange={v => !v && setSelected(null)} title="异常处理历史" description="保留发现、处理和关闭依据；更换资料负责人不会转发旧异常。">
+      {history.isError && <p role="alert">{history.error.message}</p>}<div className="divide-y">{history.data?.items.map(item => <div key={item.id} className="space-y-2 py-4 text-sm">
+        <p className="font-bold">{labels[item.event] || item.event} · 第 {item.episode} 次</p><p>{labels[item.evidence] || item.evidence}</p><p className="text-xs text-muted-foreground">{time(item.created_at)}</p></div>)}</div>
+      <Pager page={history.data} fallbackLimit={24} onChange={setHistoryOffset} />
+    </SecondaryDrawer>
+  </Card>
+}
+
+export function InventoryNoticeSettings({ object, disabled, onChange }: { object: InventoryObject; disabled: boolean; onChange: (o: InventoryObject) => void }) {
+  const [q, setQ] = useState("")
+  const owners = useQuery({ queryKey: ["inventory-notification-owners", q], enabled: !disabled && object.kind === "workflow",
+    queryFn: () => api<{ items: { id: number; username: string; display_name: string }[]; has_more: boolean }>(`${path}/notification-owners?q=${encodeURIComponent(q)}`) })
+  if (object.kind !== "workflow") return null
+  const chosen = object.details.notification_user_id || ""
+  return <div className="space-y-3 rounded-xl border bg-muted/30 p-4">
+    <h3 className="font-bold">异常提醒负责人</h3><p className="text-xs text-muted-foreground">仅通知所选员工。已有异常保留原负责人；不升级、不抄送。未绑定时只在平台记录异常。</p>
+    {!disabled && <><input aria-label="搜索提醒负责人" className={input} placeholder="按员工姓名或账号搜索" value={q} onChange={e => setQ(e.target.value)} />
+      <select aria-label="提醒负责人" className={input} value={chosen} onChange={e => {
+        const owner = owners.data?.items.find(o => String(o.id) === e.target.value)
+        onChange({ ...object, owner: owner ? owner.display_name || owner.username : object.owner, details: { ...object.details, notification_user_id: e.target.value } })
+      }}><option value="">暂不绑定通知负责人</option>{chosen && !owners.data?.items.some(o => String(o.id) === chosen) && <option value={chosen}>保留现有绑定</option>}
+        {owners.data?.items.map(o => <option key={o.id} value={String(o.id)}>{o.display_name}（{o.username}）</option>)}</select>
+      {owners.data?.has_more && <p className="text-xs">结果较多，请输入更具体的姓名或账号。</p>}{owners.isError && <p role="alert">{owners.error.message}</p>}</>}
+    {disabled && <p className="text-sm">{chosen ? "已绑定通知负责人" : "尚未绑定通知负责人"}</p>}
+    <label className="block space-y-1 text-sm">未恢复时的提醒频率<select aria-label="重复提醒频率" className={input} disabled={disabled} value={object.details.reminder_seconds || "0"} onChange={e => onChange({ ...object, details: { ...object.details, reminder_seconds: e.target.value } })}>
+      <option value="0">仅提醒一次</option><option value="3600">每小时</option><option value="86400">每天</option></select></label>
+  </div>
+}
+
+===== Integration against inventory141 =====
+diff --git a/backend/app/migrations/mysql_baseline.py b/backend/app/migrations/mysql_baseline.py
+index c66b8f3..155c776 100644
+--- a/backend/app/migrations/mysql_baseline.py
++++ b/backend/app/migrations/mysql_baseline.py
+@@ -162,6 +162,10 @@ def _quote_reserved_check_columns(
+ 
+ def mysql_metadata() -> MetaData:
+     from .. import models as _models  # noqa: F401
++    # Fresh maintenance processes do not import FastAPI routers. Register the
++    # additive modules explicitly before copying metadata, just as upgrades do.
++    from .. import semantic_catalog, search_dictionary, workflow_inventory  # noqa: F401
++    from .. import workflow_inventory_runtime, workflow_alerts  # noqa: F401
+ 
+     copied = MetaData()
+     for source_table in Base.metadata.tables.values():
+@@ -356,6 +360,15 @@ def create_mysql_baseline(
+             f"MySQL 基线只能创建到空 schema；已发现：{rendered}"
+         )
+     mysql_metadata().create_all(connection, checkfirst=False)
++    # Fresh databases skip the incremental migrations. Reuse their idempotent
++    # initializers so catalog locks and the alert observer cursor exist as well.
++    from .search_dictionary_140 import migrate as initialize_search_dictionary
++    from .workflow_inventory_141 import migrate as initialize_workflow_inventory
++    from .workflow_alerts_142 import migrate as initialize_workflow_alerts
++
++    initialize_search_dictionary(connection)
++    initialize_workflow_inventory(connection)
++    initialize_workflow_alerts(connection)
+     _install_trigger_backed_checks(connection)
+     if install_invariants:
+         from .mysql_invariants import install_mysql_invariants
+@@ -373,8 +386,8 @@ def create_mysql_baseline(
+ # 漏了任何一条，发布会在迁移那一步被拒（迁移前失败，线上无影响，但白跑一轮）。
+ # test_mysql_upgrade_path_reaches_latest_migration 会在本地就拦住这种遗漏——
+ # 真 MySQL 的用例在没有 MySQL 的机器上全部跳过，指望不上。
+-UPGRADE_SOURCE_VERSIONS = frozenset(range(87, 141))
+-UPGRADE_TARGET_VERSIONS = frozenset(range(88, 142))
++UPGRADE_SOURCE_VERSIONS = frozenset(range(87, 142))
++UPGRADE_TARGET_VERSIONS = frozenset(range(88, 143))
+ 
+ 
+ def upgrade_mysql_schema(connection: Connection, *, expected: int) -> None:
+@@ -1634,6 +1647,14 @@ def upgrade_mysql_schema(connection: Connection, *, expected: int) -> None:
+             (141, 'workflow_inventory'),
+         )
+         actual = 141
++    if actual == 141 and expected >= 142:
++        from .workflow_alerts_142 import migrate
++        migrate(connection)
++        connection.exec_driver_sql(
++            'INSERT INTO schema_migrations (version, name) VALUES (%s, %s)',
++            (142, 'workflow_alerts'),
++        )
++        actual = 142
+ 
+ 
+ 
+diff --git a/backend/app/migrations/runner.py b/backend/app/migrations/runner.py
+index 6d2c9c4..080e3e5 100644
+--- a/backend/app/migrations/runner.py
++++ b/backend/app/migrations/runner.py
+@@ -12139,6 +12139,11 @@ def _migration_139_semantic_catalog(connection: Connection) -> None:
+     migrate(connection)
+ 
+ 
++def _migration_142_workflow_alerts(connection: Connection) -> None:
++    from .workflow_alerts_142 import migrate
++    migrate(connection)
++
++
+ def _migration_141_workflow_inventory(connection: Connection) -> None:
+     from .workflow_inventory_141 import migrate
+     migrate(connection)
+@@ -12678,6 +12683,7 @@ MIGRATIONS = [
+     Migration(139, 'semantic_catalog', _migration_139_semantic_catalog),
+     Migration(140, 'search_dictionary', _migration_140_search_dictionary),
+     Migration(141, 'workflow_inventory', _migration_141_workflow_inventory),
++    Migration(142, 'workflow_alerts', _migration_142_workflow_alerts),
+ ]
+ 
+ 
+diff --git a/backend/app/workflow_inventory.py b/backend/app/workflow_inventory.py
+index cafbc56..1e4340d 100644
+--- a/backend/app/workflow_inventory.py
++++ b/backend/app/workflow_inventory.py
+@@ -103,7 +103,7 @@ KEY_PATTERN = r"^[a-z0-9][a-z0-9._:-]{0,119}$"
+ KINDS = ("workflow", "lifecycle", "rule", "script", "machine", "table", "field", "interface", "business", "deployment")
+ STAGES = ("接入", "治理加工", "评测审核", "发布交付", "业务使用", "反馈纠偏", "更新与退役")
+ DETAIL_KEYS = {
+-    "workflow": {"platform_workflow_key", "trigger", "completion", "limitations", "version"},
++    "workflow": {"platform_workflow_key", "trigger", "completion", "limitations", "version", "notification_user_id", "reminder_seconds"},
+     "lifecycle": {"stage", "scope", "node_code", "applicability", "completion", "limitations", "gaps", "raw_row"},
+     "rule": {"version", "code_reference", "logic", "limitations"},
+     "script": {"repository", "path", "version", "entrypoint", "limitations"},
+@@ -231,6 +231,10 @@ def _validate(db, payload):
+                 if item.verification == "confirmed" and not item.evidence.strip(): error("已核实对象需要填写依据")
+                 if item.verification == "not_applicable" and not item.description.strip(): error("不适用对象需要说明原因")
+                 if item.kind == "lifecycle" and item.details.get("stage", "") not in STAGES: error("请选择统一生命周期阶段")
++                if item.kind == "workflow":
++                    from .workflow_alerts import validate_policy
++                    problem = validate_policy(db, item.details)
++                    if problem: error(problem)
+                 pending[item.key] = value
+             else:
+                 if not item.label.strip(): error("关系名称不能为空")
+diff --git a/backend/app/workflow_inventory_api.py b/backend/app/workflow_inventory_api.py
+index 4825805..bcb86bd 100644
+--- a/backend/app/workflow_inventory_api.py
++++ b/backend/app/workflow_inventory_api.py
+@@ -17,6 +17,7 @@ from .authz import has_permission
+ from .database import get_db
+ from . import workflow_inventory as w
+ from .workflow_inventory_runtime import observations, platform_draft
++from . import workflow_alerts as alerts
+ 
+ 
+ class DraftInput(BaseModel):
+@@ -97,6 +98,43 @@ def build_workflow_inventory_router(current_user):
+         items = [w.record(r) for r in db.scalars(query.order_by(w.InventoryObject.key).offset(offset).limit(limit))]
+         return {"items": items, "runtime": observations(db, items), "total": total, "offset": offset, "limit": limit, "has_more": offset + limit < total}
+ 
++    @router.get("/api/workflow-inventory/notification-owners")
++    def notification_owners(q: str = Query(default="", max_length=80), user=Depends(current_user), db: Session = Depends(get_db)):
++        writer(user)
++        from .models import EmployeeIdentity, User
++        query = select(User.id, User.username, User.display_name).join(EmployeeIdentity, EmployeeIdentity.user_id == User.id).where(
++            User.is_active.is_(True), EmployeeIdentity.status == "active", EmployeeIdentity.verified_at.is_not(None))
++        if q: query = query.where(or_(User.username.contains(q, autoescape=True), User.display_name.contains(q, autoescape=True)))
++        rows = db.execute(query.order_by(User.username, User.id).limit(101)).all()
++        return {"items": [dict(r._mapping) for r in rows[:100]], "has_more": len(rows) > 100}
++
++    @router.get("/api/workflow-inventory/alerts")
++    def alert_list(state: Literal["", "open", "recovering", "unknown", "closed"] = "open",
++                   workflow_key: str = Query(default="", max_length=120), offset: int = Query(default=0, ge=0),
++                   user=Depends(current_user), db: Session = Depends(get_db)):
++        query = select(alerts.WorkflowAlert)
++        if state: query = query.where(alerts.WorkflowAlert.state == state)
++        if workflow_key: query = query.where(alerts.WorkflowAlert.inventory_key == workflow_key)
++        total = db.scalar(select(func.count()).select_from(query.subquery())) or 0
++        rows = list(db.scalars(query.order_by(alerts.WorkflowAlert.id.desc()).offset(offset).limit(24)))
++        # Correlated narrow ID lookup, then batch fields; no per-row queries.
++        latest = select(func.max(alerts.AlertNotification.id)).where(alerts.AlertNotification.alert_id == alerts.WorkflowAlert.id).correlate(alerts.WorkflowAlert).scalar_subquery()
++        ids = list(db.scalars(select(latest).where(alerts.WorkflowAlert.id.in_([r.id for r in rows])))) if rows else []
++        notices = {n.alert_id: {"state": n.state, "error_code": n.error_code, "updated_at": n.updated_at}
++            for n in db.scalars(select(alerts.AlertNotification).where(alerts.AlertNotification.id.in_([i for i in ids if i is not None])))} if ids else {}
++        cursor = db.get(alerts.AlertCursor, "observer")
++        return {"items": [{**alerts.public_alert(r), "notification": notices.get(r.id)} for r in rows], "total": total,
++            "offset": offset, "limit": 24, "has_more": offset + 24 < total, "observed_at": (cursor.observed_at or None) if cursor else None}
++
++    @router.get("/api/workflow-inventory/alerts/{alert_id}/history")
++    def alert_history(alert_id: int, offset: int = Query(default=0, ge=0), user=Depends(current_user), db: Session = Depends(get_db)):
++        if not db.get(alerts.WorkflowAlert, alert_id): raise HTTPException(404, "异常记录不存在")
++        query = select(alerts.AlertEvent).where(alerts.AlertEvent.alert_id == alert_id)
++        total = db.scalar(select(func.count()).select_from(query.subquery())) or 0
++        return {"items": [{"id": r.id, "episode": r.episode, "event": r.event, "evidence": r.evidence, "created_at": r.created_at}
++            for r in db.scalars(query.order_by(alerts.AlertEvent.id.desc()).offset(offset).limit(24))],
++            "total": total, "offset": offset, "limit": 24, "has_more": offset + 24 < total}
++
+     @router.get("/api/workflow-inventory/platform-workflows")
+     def platform_workflows(q: str = Query(default="", max_length=200), offset: int = Query(default=0, ge=0),
+                            user=Depends(current_user), db: Session = Depends(get_db)):
+diff --git a/frontend/src/lib/workflow-inventory.ts b/frontend/src/lib/workflow-inventory.ts
+index 909ac1b..4de4724 100644
+--- a/frontend/src/lib/workflow-inventory.ts
++++ b/frontend/src/lib/workflow-inventory.ts
+@@ -1,6 +1,7 @@
+ import type { InventoryChangeSet, InventoryObject, InventoryRelation } from "./types"
+ 
+ export const inventoryLabels: Record<string, string> = {
++  notification_user_id: "提醒负责人", reminder_seconds: "重复提醒间隔（秒）",
+   runtime_source: "运行观测来源", local_platform: "当前平台", planned: "待规划", queued: "排队中", running: "运行中", waiting_external: "等待外部结果", paused: "已暂停", succeeded: "已成功", failed: "失败", retryable: "等待重试", blocked: "受阻", canceled: "已取消",
+   name: "名称", key: "编号", kind: "对象类型", description: "用途与说明", owner: "负责人", status: "资料状态", verification: "核实情况", source: "来源／关系起点", target: "关系终点", evidence: "核实依据", label: "关系名称", path_type: "路径类型", condition: "触发条件", position: "图上位置", node_code: "原表节点编号",
+   workflow: "工作流", lifecycle: "生命周期节点", rule: "规则", script: "脚本", machine: "机器", table: "数据表", field: "字段", interface: "接口", business: "业务", deployment: "部署",
+diff --git a/frontend/src/pages/workflow-inventory-page.tsx b/frontend/src/pages/workflow-inventory-page.tsx
+index de1a912..e481b9d 100644
+--- a/frontend/src/pages/workflow-inventory-page.tsx
++++ b/frontend/src/pages/workflow-inventory-page.tsx
+@@ -4,6 +4,7 @@ import { toast } from "sonner"
+ import { PageHeader } from "@/components/app-shell"
+ import { SecondaryDrawer } from "@/components/workspace-page"
+ import { InventoryGraph } from "@/components/workflow-inventory-graph"
++import { WorkflowAlertsPanel, InventoryNoticeSettings } from "@/components/workflow-alerts-panel"
+ import { Button } from "@/components/ui/button"
+ import { Card } from "@/components/ui/card"
+ import { Pager } from "@/components/ui/pager"
+@@ -143,7 +144,7 @@ export function WorkflowInventoryPage() {
+         <label className="block space-y-1 text-sm">用途与说明<textarea aria-label="用途与说明" className={area} disabled={!writable} value={object.description} onChange={e => modify({ ...object, description: e.target.value })} /></label>
+         <div className="grid grid-cols-2 gap-3"><label className="space-y-1 text-sm">资料状态<select aria-label="对象状态" className={input} disabled={!writable} value={object.status} onChange={e => modify({ ...object, status: e.target.value as InventoryObject["status"] })}><option value="active">在用</option><option value="inactive">停用</option></select></label><label className="space-y-1 text-sm">核实情况<select aria-label="对象核实情况" className={input} disabled={!writable} value={object.verification} onChange={e => modify({ ...object, verification: e.target.value as InventoryObject["verification"] })}>{["unverified", "confirmed", "not_applicable"].map(s => <option key={s} value={s}>{labels[s]}</option>)}</select></label></div>
+         <label className="block space-y-1 text-sm">核实依据<textarea aria-label="核实依据" className={area} disabled={!writable} value={object.evidence} onChange={e => modify({ ...object, evidence: e.target.value })} /></label>
+-      </div><div className="space-y-3"><h3 className="font-bold">补充资料</h3>{config.data?.detail_keys[object.kind]?.map(key => <label key={key} className="block space-y-1 text-sm">{labels[key] || key}{key === "runtime_source" ? <select aria-label="运行观测来源" className={input} disabled={!writable} value={object.details[key] || ""} onChange={e => modify({ ...object, details: { ...object.details, [key]: e.target.value } })}><option value="">未接入／其他部署</option><option value="local_platform">当前平台（仅本机增量任务）</option></select> : key === "stage" ? <select aria-label={labels[key]} className={input} disabled={!writable} value={object.details[key] || ""} onChange={e => modify({ ...object, details: { ...object.details, [key]: e.target.value } })}><option value="">请选择阶段</option>{config.data?.stages.map(s => <option key={s}>{s}</option>)}</select> : <textarea aria-label={labels[key] || key} className={area} disabled={!writable} value={object.details[key] || ""} onChange={e => modify({ ...object, details: { ...object.details, [key]: e.target.value } })} />}</label>)}</div></div>}
++      </div><div className="space-y-3"><InventoryNoticeSettings object={object} disabled={!writable} onChange={modify} /><h3 className="font-bold">补充资料</h3>{config.data?.detail_keys[object.kind]?.filter(key => !["notification_user_id", "reminder_seconds"].includes(key)).map(key => <label key={key} className="block space-y-1 text-sm">{labels[key] || key}{key === "runtime_source" ? <select aria-label="运行观测来源" className={input} disabled={!writable} value={object.details[key] || ""} onChange={e => modify({ ...object, details: { ...object.details, [key]: e.target.value } })}><option value="">未接入／其他部署</option><option value="local_platform">当前平台（仅本机增量任务）</option></select> : key === "stage" ? <select aria-label={labels[key]} className={input} disabled={!writable} value={object.details[key] || ""} onChange={e => modify({ ...object, details: { ...object.details, [key]: e.target.value } })}><option value="">请选择阶段</option>{config.data?.stages.map(s => <option key={s}>{s}</option>)}</select> : <textarea aria-label={labels[key] || key} className={area} disabled={!writable} value={object.details[key] || ""} onChange={e => modify({ ...object, details: { ...object.details, [key]: e.target.value } })} />}</label>)}</div></div>}
+       <div className="space-y-3 border-t pt-4"><h3 className="font-bold">关系与分支</h3>{writable && <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-[1fr_1fr_1fr_auto]"><select aria-label="连线起点" className={input} value={edgeFrom} onChange={e => setEdgeFrom(e.target.value)}><option value="">选择起点</option>{objects.map(o => <option key={o.key} value={o.key}>{o.name || o.key}</option>)}</select><select aria-label="连线终点" className={input} value={edgeTo} onChange={e => setEdgeTo(e.target.value)}><option value="">选择终点</option>{objects.map(o => <option key={o.key} value={o.key}>{o.name || o.key}</option>)}</select><input aria-label="新关系名称" className={input} value={edgeLabel} onChange={e => setEdgeLabel(e.target.value)} /><Button variant="secondary" onClick={() => connect(edgeFrom, edgeTo)}>添加关系</Button></div>}
+         <div className="divide-y">{relations.map(e => <details key={e.key} className="py-3"><summary className="cursor-pointer text-sm [overflow-wrap:anywhere]">{objects.find(o => o.key === e.source)?.name || e.source} → {objects.find(o => o.key === e.target)?.name || e.target} · {e.label} · {labels[e.path_type]} · {labels[e.status]}</summary><div className="mt-3 grid gap-3 sm:grid-cols-2">
+           <label className="text-sm">关系名称<input className={input} disabled={!writable} value={e.label} onChange={event => modifyEdge({ ...e, label: event.target.value })} /></label><label className="text-sm">路径类型<select className={input} disabled={!writable} value={e.path_type} onChange={event => modifyEdge({ ...e, path_type: event.target.value as InventoryRelation["path_type"] })}>{["normal", "exception", "rework"].map(s => <option key={s} value={s}>{labels[s]}</option>)}</select></label>
+@@ -152,6 +153,7 @@ export function WorkflowInventoryPage() {
+         </div></details>)}</div>
+       </div>
+     </Card>}
++    <WorkflowAlertsPanel />
+     <SecondaryDrawer open={drawer === "platform"} onOpenChange={v => !v && setDrawer(null)} title="纳入已迁移流程" description="引用现有平台流程并生成资料草稿，核对后整批生效。">
+       <div className="space-y-4"><input aria-label="搜索已迁移流程" className={input} placeholder="流程名称或平台编号" value={platformQuery} onChange={e => { setPlatformQuery(e.target.value); setPlatformOffset(0) }} />
+         {platform.isError && <p role="alert">{platform.error.message}</p>}

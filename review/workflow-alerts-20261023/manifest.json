@@ -1,0 +1,20 @@
+{
+  "candidate": "56fdd973c3dbfe13217ab90d0f46d8e88ced24a7",
+  "schema": 142,
+  "task_base": "42dc84b27f03c182412dfade8f1b53270276028f",
+  "context_base": "bf5d192ffb4032218d20f725f908bb5b1f1cb416",
+  "deployed": false,
+  "reviewed": false,
+  "base_context": "https://github.com/MoeAisaka/3d66-label-system/blob/8138d72caf83cd85dd772fbf43ce906f3780c59b/review/20261022/index.json",
+  "source_sha256": "acbde4e9ca28952d13e3ac6ec1a99f142e7709ec77f984e4b838bdce326349ca",
+  "patch_sha256": "14b9fd7af6fbcd5913acdb7bd085dc8475754f6a7bb53890235b3c8963a2b2b6",
+  "verification": {
+    "local_alerts": 12,
+    "previous_candidate_linux": 33,
+    "previous_fresh_mysql": true,
+    "current_concurrency_mysql": "pending",
+    "chrome_synthetic": true,
+    "real_notification_calls": 0
+  },
+  "review_request": "One consolidated P0/P1 review of task-scoped failures, frozen single recipient, durable outbox/unknown outcome barrier, indexed bounded scans, lock ordering, recovery and cookie permissions. Full indexed base + cumulative patch reconstruct candidate. Report actual files read; do not claim unread full-repository review. Stock, simulated and unknown remote workflows excluded. No production deployment or real sends."
+}
