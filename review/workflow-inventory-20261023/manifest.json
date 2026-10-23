@@ -1,0 +1,17 @@
+{
+  "candidate": "42dc84b27f03c182412dfade8f1b53270276028f",
+  "schema": 141,
+  "task_base": "fd3744c2961c2d1092c4c9dbecdc78daf6b38f51",
+  "context_base": "bf5d192ffb4032218d20f725f908bb5b1f1cb416",
+  "base_context": "https://github.com/MoeAisaka/3d66-label-system/blob/8138d72caf83cd85dd772fbf43ce906f3780c59b/review/20261022/index.json",
+  "verification": {
+    "local_tests": 12,
+    "migration_checks": 3,
+    "frontend_build": true,
+    "chrome_synthetic": true,
+    "production_changed": false,
+    "real_mysql": false
+  },
+  "source_sha256": "4daf714416f5f3109765c20068d6e206b12db9d32e74a9a040a27d4f4d709ace",
+  "scope": "One consolidated P0/P1 review of inventory shared objects, private recoverable drafts, atomic preview/publish, restore history, lifecycle imports, local runtime observations. Alerts/DingTalk are next separate change, not implemented by this candidate. Full indexed base and cumulative patch reconstruct candidate; exact read scope required."
+}
